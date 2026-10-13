@@ -25,7 +25,7 @@ Each item is scored from 1 to 5 on three axes:
 | 5 | No dependency audit (`cargo deny`) in CI for licences and advisories | Infrastructure | 2 | 4 | 1 | 30 |
 | 6 | `Sample` has almost no maths (`sin`, `exp`, `tanh`, `min`, `max`), so generic code round-trips through `f64`; the newer processors keep their state in `f64` outright, which halves SIMD width for `f32` buffers | Code | 3 | 2 | 2 | 20 |
 | 7 | WAV is read whole into memory; there is no streaming reader or writer | Architecture | 4 | 2 | 3 | 18 |
-| 8 | Duplex streams correct clock drift by dropping or padding, which is audible on long runs with two devices | Code | 2 | 3 | 4 | 10 |
+| 8 | Duplex streams correct clock drift by dropping or padding, which is audible on long runs with two devices. `Resampler` now exists; what is missing is varying its ratio from the queue fill | Code | 2 | 3 | 3 | 15 |
 | 9 | `core` needs `std` (`Arc`, `Vec`), which blocks embedded targets | Architecture | 2 | 2 | 2 | 16 |
 | 10 | FFT is scalar radix-2; no split-radix, no SIMD | Code | 3 | 1 | 3 | 12 |
 | 11 | Device callbacks receive no timing information (stream time, latency) | Architecture | 3 | 2 | 2 | 20 |
@@ -37,6 +37,7 @@ Each item is scored from 1 to 5 on three axes:
 | 18 | The macOS bundle layout written by `bundle-clap.sh` has never been loaded by a host | Test | 2 | 3 | 2 | 20 |
 | 19 | The graph gives every node its own buffer and runs nodes that reach no output. Buffer reuse and pruning would cut memory and CPU for large graphs | Code | 2 | 1 | 3 | 9 |
 | 20 | A graph swap is instantaneous, so rewiring a sounding path can click. A short crossfade between plans would hide it | Code | 3 | 2 | 4 | 10 |
+| 21 | `Resampler` and `Oversampled` run a plain loop per tap. Polyphase tables for fixed ratios and SIMD would make them several times faster | Code | 3 | 1 | 3 | 12 |
 | 15 | The duplex error handler is behind a `Mutex`. It is never taken on the audio path, but it is the one lock in the crate | Code | 1 | 2 | 2 | 12 |
 
 ## Paid back in this audit

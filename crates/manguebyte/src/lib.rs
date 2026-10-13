@@ -57,9 +57,11 @@ pub use manguebyte_plugin as plugin;
 pub mod prelude {
     pub use crate::dsp::event::{Event, EventBuffer, EventKind, Expression, NoteRef};
     pub use crate::dsp::{
-        Adsr, AdsrParams, Biquad, BiquadCoefficients, Compressor, Delay, DelayLine, Filter,
-        FilterShape, Gain, NoiseGate, Oscillator, ProcessContext, ProcessSpec, Processor, Reverb,
-        StateVariableFilter, SvfMode, Synth, Transport, Voice, Waveform, split_at_events,
+        Adsr, AdsrParams, Biquad, BiquadCoefficients, Compressor, DcBlocker, Delay, DelayLine,
+        Filter, FilterShape, Gain, Lfo, LfoShape, Limiter, Noise, NoiseColor, NoiseGate,
+        Oscillator, Oversampled, ProcessContext, ProcessSpec, Processor, Resampler, Reverb,
+        ShaperCurve, StateVariableFilter, SvfMode, Synth, Transport, Voice, Waveform, Waveshaper,
+        resample, split_at_events,
     };
     pub use crate::formats::wav::{self, WavFormat};
     pub use crate::graph::{Graph, GraphEngine, GraphError, NodeId};

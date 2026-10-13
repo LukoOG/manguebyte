@@ -151,7 +151,7 @@ impl Window {
 
 /// The zeroth-order modified Bessel function of the first kind, from its
 /// power series. Converges quickly for the arguments a Kaiser window uses.
-fn bessel_i0(x: f64) -> f64 {
+pub(crate) fn bessel_i0(x: f64) -> f64 {
     let quarter_square = x * x / 4.0;
     let mut term = 1.0;
     let mut sum = 1.0;

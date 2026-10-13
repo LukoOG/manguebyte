@@ -51,6 +51,13 @@ Nothing has been published to crates.io yet. Everything below is on `main`.
 - `fft::Fft` and `fft::RealFft` for any length; `window::Window` with nine
   shapes.
 - `Adsr::silence`.
+- `Oversampled`: runs any processor at 2, 4, 8 or 16 times the sample rate
+  through linear-phase half-band filters, with its delay reported.
+- `Resampler` and `resample`: band-limited conversion between any two
+  sample rates, in a stream or for a whole buffer.
+- `Limiter`: look-ahead peak limiter whose ceiling holds for every sample.
+- `Waveshaper` (hard clip, tanh, soft clip, fold), `DcBlocker`, `Noise`
+  (white, pink, brown), `Lfo` with tempo sync, and `fir` design functions.
 
 ### Parameters
 

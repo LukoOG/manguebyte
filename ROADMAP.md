@@ -32,6 +32,7 @@ Everything a standalone audio application needs, short of a user interface.
 - ✅ Device enumeration and selection; choosing sample rate and buffer size
 - ⬜ Hot-plug and default-device change notifications
 - ⬜ Clock-drift compensation between duplex devices by adaptive resampling
+  (the resampler it needs now exists)
 - ⬜ Choosing the audio host (ASIO, JACK, PipeWire)
 - ⬜ MIDI input and output ports
 
@@ -44,14 +45,17 @@ Everything a standalone audio application needs, short of a user interface.
 **DSP**
 - ✅ FFT of any length, real FFT and window functions
 - ⬜ Short-time Fourier transform with overlap-add; spectrum analysis helpers
-- ⬜ Resampling and oversampling
+- ✅ Resampling at any ratio, and oversampling by 2, 4, 8 or 16
 - ✅ State-variable filter, stable under audio-rate modulation
-- ⬜ Ladder and FIR filters; higher-order filter design
+- ✅ FIR low-pass design (Kaiser-windowed sinc)
+- ⬜ Ladder filter; FIR filter processor; higher-order IIR design
 - ✅ Dynamics: compressor with soft knee, noise gate
-- ⬜ Look-ahead limiter, expander, sidechain input
+- ✅ Look-ahead limiter whose ceiling holds for every sample
+- ⬜ Expander, sidechain input
 - ✅ Reverb (feedback delay network)
 - ⬜ Chorus, phaser, convolution
-- ⬜ Wavetable oscillator, noise generators, LFO
+- ✅ Noise (white, pink, brown), LFO with tempo sync, waveshaper, DC blocker
+- ⬜ Wavetable oscillator
 - ✅ Polyphonic voice allocation with per-note expression and modulation
 - ✅ Sample-accurate events, transport and sidechain in the process call
 - ⬜ SIMD-accelerated buffer operations

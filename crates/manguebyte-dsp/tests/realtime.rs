@@ -14,9 +14,10 @@ use manguebyte_core::AudioBuffer;
 use manguebyte_dsp::event::{Event, EventBuffer, EventKind, Expression, NoteRef};
 use manguebyte_dsp::fft::{Complex, Fft, RealFft};
 use manguebyte_dsp::{
-    Adsr, AdsrParams, Biquad, BiquadCoefficients, Compressor, Delay, Filter, FilterShape, Gain,
-    NoiseGate, Oscillator, ProcessContext, ProcessSpec, Processor, Reverb, StateVariableFilter,
-    SvfMode, Synth, Transport, Voice, Waveform,
+    Adsr, AdsrParams, Biquad, BiquadCoefficients, Compressor, DcBlocker, Delay, Filter,
+    FilterShape, Gain, Limiter, Noise, NoiseColor, NoiseGate, Oscillator, Oversampled,
+    ProcessContext, ProcessSpec, Processor, Resampler, Reverb, ShaperCurve, StateVariableFilter,
+    SvfMode, Synth, Transport, Voice, Waveform, Waveshaper,
 };
 
 thread_local! {
@@ -185,6 +186,36 @@ fn a_chain_does_not_use_the_heap_and_can_change_settings_while_running() {
             chain.process(&mut buffer);
         }
     });
+}
+
+#[test]
+fn the_second_batch_of_processors_does_not_use_the_heap() {
+    check("Limiter", Limiter::<f32>::new().with_ceiling_db(-12.0));
+    check(
+        "Waveshaper",
+        Waveshaper::<f32>::new(ShaperCurve::Fold).with_drive_db(24.0),
+    );
+    check("DcBlocker", DcBlocker::<f32>::new());
+    check("Noise", Noise::new(NoiseColor::Pink));
+    check(
+        "Oversampled",
+        Oversampled::<_, f32>::new(Waveshaper::<f32>::new(ShaperCurve::Tanh), 8),
+    );
+}
+
+#[test]
+fn resampling_does_not_use_the_heap() {
+    for (from, to) in [(44_100.0, 48_000.0), (48_000.0, 16_000.0)] {
+        let mut resampler = Resampler::<f32>::new(from, to, 2, 256);
+        let mut input = AudioBuffer::<f32>::new(2, 256);
+        let mut output = AudioBuffer::<f32>::new(2, resampler.max_output_frames(256));
+        assert_no_heap_use("Resampler", || {
+            for frames in [256, 1, 100, 256] {
+                input.set_num_frames(frames);
+                resampler.process(&input, &mut output);
+            }
+        });
+    }
 }
 
 /// A voice made of the library's own parts.
