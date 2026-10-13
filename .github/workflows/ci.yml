@@ -139,9 +139,10 @@ jobs:
           git -C "$sdk" checkout -q FETCH_HEAD
           git -C "$sdk" submodule update -q --init --depth 1 base cmake pluginterfaces public.sdk
           # The other hosting examples need a windowing toolkit and a sound
-          # server. Only the validator is wanted.
-          rm -rf "$sdk/public.sdk/samples/vst-hosting/editorhost" \
-                 "$sdk/public.sdk/samples/vst-hosting/audiohost"
+          # server. Only the validator is wanted, and it borrows some of
+          # their sources, so they are left out of the build but not removed.
+          rm "$sdk/public.sdk/samples/vst-hosting/editorhost/CMakeLists.txt" \
+             "$sdk/public.sdk/samples/vst-hosting/audiohost/CMakeLists.txt"
           cmake -S "$sdk" -B "$sdk/build" -DCMAKE_BUILD_TYPE=Release \
             -DSMTG_ENABLE_VSTGUI_SUPPORT=OFF -DSMTG_ENABLE_VST3_PLUGIN_EXAMPLES=OFF \
             -DSMTG_CREATE_PLUGIN_LINK=OFF -DSMTG_RUN_VST_VALIDATOR=OFF
