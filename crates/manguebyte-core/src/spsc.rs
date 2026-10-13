@@ -118,6 +118,32 @@ impl<T> Producer<T> {
     }
 }
 
+impl<T: Copy> Producer<T> {
+    /// Appends as many of `values` as fit, in order, and returns how many
+    /// were taken. Cheaper than pushing one at a time: the indices are
+    /// published once for the whole slice.
+    pub fn push_slice(&mut self, values: &[T]) -> usize {
+        let shared = &*self.shared;
+        let tail = shared.tail.0.load(Ordering::Relaxed);
+        let head = shared.head.0.load(Ordering::Acquire);
+        let free = shared.mask + 1 - tail.wrapping_sub(head);
+        let count = values.len().min(free);
+        for (offset, &value) in values[..count].iter().enumerate() {
+            let slot = &shared.slots[tail.wrapping_add(offset) & shared.mask];
+            // SAFETY: `count` is at most the number of free slots, so every
+            // slot written here is outside `head..tail` and invisible to the
+            // consumer until `tail` is published below. `&mut self` rules out
+            // a second producer.
+            unsafe { (*slot.get()).write(value) };
+        }
+        shared
+            .tail
+            .0
+            .store(tail.wrapping_add(count), Ordering::Release);
+        count
+    }
+}
+
 impl<T> Consumer<T> {
     /// Removes and returns the oldest item, if any.
     pub fn pop(&mut self) -> Option<T> {
@@ -145,6 +171,44 @@ impl<T> Consumer<T> {
     /// Whether the queue is currently empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+impl<T: Copy> Consumer<T> {
+    /// Moves the oldest items into the front of `out`, in order, and returns
+    /// how many were written.
+    pub fn pop_slice(&mut self, out: &mut [T]) -> usize {
+        let shared = &*self.shared;
+        let head = shared.head.0.load(Ordering::Relaxed);
+        let tail = shared.tail.0.load(Ordering::Acquire);
+        let count = out.len().min(tail.wrapping_sub(head));
+        for (offset, value) in out[..count].iter_mut().enumerate() {
+            let slot = &shared.slots[head.wrapping_add(offset) & shared.mask];
+            // SAFETY: `count` is at most the number of published items, so
+            // every slot read here lies in `head..tail` and was initialised by
+            // the producer. `T: Copy`, so reading does not move anything out.
+            // `&mut self` rules out a second consumer.
+            *value = unsafe { (*slot.get()).assume_init_read() };
+        }
+        shared
+            .head
+            .0
+            .store(head.wrapping_add(count), Ordering::Release);
+        count
+    }
+
+    /// Throws away up to `count` of the oldest items and returns how many
+    /// were dropped.
+    pub fn skip(&mut self, count: usize) -> usize {
+        let shared = &*self.shared;
+        let head = shared.head.0.load(Ordering::Relaxed);
+        let tail = shared.tail.0.load(Ordering::Acquire);
+        let count = count.min(tail.wrapping_sub(head));
+        shared
+            .head
+            .0
+            .store(head.wrapping_add(count), Ordering::Release);
+        count
     }
 }
 
@@ -222,5 +286,22 @@ mod tests {
         }
         producer.join().unwrap();
         assert!(rx.is_empty());
+    }
+
+    #[test]
+    fn slices_wrap_around_and_respect_capacity() {
+        let (mut tx, mut rx) = channel::<u16>(8);
+        assert_eq!(tx.push_slice(&[1, 2, 3, 4, 5, 6]), 6);
+        let mut out = [0; 4];
+        assert_eq!(rx.pop_slice(&mut out), 4);
+        assert_eq!(out, [1, 2, 3, 4]);
+
+        // Six free slots, and the write crosses the end of the storage.
+        assert_eq!(tx.push_slice(&[7, 8, 9, 10, 11, 12, 13, 14]), 6);
+        assert_eq!(rx.skip(1), 1);
+        let mut rest = [0; 16];
+        assert_eq!(rx.pop_slice(&mut rest), 7);
+        assert_eq!(&rest[..7], &[6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(rx.skip(5), 0);
     }
 }

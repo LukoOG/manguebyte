@@ -28,5 +28,13 @@ manguebyte-devices = { workspace = true, optional = true }
 name = "play_riff"
 required-features = ["devices"]
 
+[[example]]
+name = "list_devices"
+required-features = ["devices"]
+
+[[example]]
+name = "input_meter"
+required-features = ["devices"]
+
 [lints]
 workspace = true

@@ -1,0 +1,77 @@
+use std::fmt;
+
+/// What went wrong while talking to an audio device.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum DeviceError {
+    /// The system has no default output device.
+    NoOutputDevice,
+    /// The system has no default input device.
+    NoInputDevice,
+    /// No device with this identifier is connected.
+    DeviceNotFound(String),
+    /// The device wants a sample format this crate cannot convert.
+    UnsupportedSampleFormat(String),
+    /// The device cannot run with the requested [`StreamSettings`].
+    ///
+    /// [`StreamSettings`]: crate::StreamSettings
+    UnsupportedSettings(String),
+    /// A duplex stream was asked to join two devices running at different
+    /// sample rates.
+    SampleRateMismatch {
+        /// Sample rate of the input device, in hertz.
+        input: u32,
+        /// Sample rate of the output device, in hertz.
+        output: u32,
+    },
+    /// The platform audio backend reported an error.
+    Backend(cpal::Error),
+}
+
+impl DeviceError {
+    /// Whether the device went away, for example because it was unplugged.
+    ///
+    /// A stream that reports this will not produce audio again; open a device
+    /// and start a new one.
+    pub fn is_device_lost(&self) -> bool {
+        matches!(
+            self,
+            Self::Backend(error) if error.kind() == cpal::ErrorKind::DeviceNotAvailable
+        )
+    }
+}
+
+impl fmt::Display for DeviceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoOutputDevice => f.write_str("no default audio output device"),
+            Self::NoInputDevice => f.write_str("no default audio input device"),
+            Self::DeviceNotFound(id) => write!(f, "no audio device with id \"{id}\""),
+            Self::UnsupportedSampleFormat(format) => {
+                write!(f, "unsupported device sample format: {format}")
+            }
+            Self::UnsupportedSettings(reason) => {
+                write!(f, "unsupported stream settings: {reason}")
+            }
+            Self::SampleRateMismatch { input, output } => {
+                write!(f, "input runs at {input} Hz but output runs at {output} Hz")
+            }
+            Self::Backend(error) => write!(f, "audio backend error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for DeviceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Backend(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<cpal::Error> for DeviceError {
+    fn from(error: cpal::Error) -> Self {
+        Self::Backend(error)
+    }
+}

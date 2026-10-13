@@ -9,7 +9,7 @@
 //! | [`dsp`] | `manguebyte-dsp` | oscillators, filters, envelopes, delays, processor chains |
 //! | [`midi`] | `manguebyte-midi` | MIDI messages and sample-accurate event buffers |
 //! | [`formats`] | `manguebyte-formats` | audio file reading and writing |
-//! | [`devices`] | `manguebyte-devices` | audio device output (feature `devices`, on by default) |
+//! | [`devices`] | `manguebyte-devices` | audio device input, output and duplex streams (feature `devices`, on by default) |
 //!
 //! # Example
 //!
@@ -53,7 +53,10 @@ pub mod prelude {
     pub use crate::{AtomicF32, AtomicF64, AudioBuffer, Sample, Smoothed, decibels, spsc};
 
     #[cfg(feature = "devices")]
-    pub use crate::devices::{DeviceError, OutputDevice, OutputStream};
+    pub use crate::devices::{
+        DeviceError, DeviceInfo, DuplexStream, InputDevice, InputStream, OutputDevice,
+        OutputStream, StreamSettings, input_devices, output_devices,
+    };
 }
 
 /// Compiles the code blocks of the README as tests, so they cannot go stale.

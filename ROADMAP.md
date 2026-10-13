@@ -28,9 +28,11 @@ The types everything else is built on, and enough around them to make sound.
 Everything a standalone audio application needs, short of a user interface.
 
 **Devices**
-- ⬜ Audio input and full-duplex streams
-- ⬜ Device enumeration and selection; choosing sample rate and buffer size
+- ✅ Audio input and full-duplex streams
+- ✅ Device enumeration and selection; choosing sample rate and buffer size
 - ⬜ Hot-plug and default-device change notifications
+- ⬜ Clock-drift compensation between duplex devices by adaptive resampling
+- ⬜ Choosing the audio host (ASIO, JACK, PipeWire)
 - ⬜ MIDI input and output ports
 
 **MIDI**

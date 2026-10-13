@@ -55,7 +55,7 @@ before 1.0. See [ROADMAP.md](ROADMAP.md) for what exists and what is planned.
 | [`manguebyte-dsp`](crates/manguebyte-dsp) | The `Processor` trait and tuple chains, band-limited oscillator, biquad filters (8 shapes), ADSR envelope, delay line and echo, smoothed gain |
 | [`manguebyte-midi`](crates/manguebyte-midi) | MIDI message parsing and encoding, sample-accurate `MidiBuffer`, pitch conversions |
 | [`manguebyte-formats`](crates/manguebyte-formats) | WAV reading (8/16/24/32-bit PCM, 32/64-bit float) and writing (16/24-bit PCM, 32-bit float) |
-| [`manguebyte-devices`](crates/manguebyte-devices) | Playback on the default output device, in any hardware sample format |
+| [`manguebyte-devices`](crates/manguebyte-devices) | Device listing and selection, playback, recording and full-duplex streams, in any hardware sample format |
 
 Not there yet: audio input, device selection, MIDI device I/O, compressed
 formats, FFT, parameters, plugin formats, plugin hosting and GUI.
