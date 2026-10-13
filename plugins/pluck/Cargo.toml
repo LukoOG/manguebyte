@@ -1,0 +1,19 @@
+[package]
+name = "mangue-pluck"
+description = "An example CLAP instrument built with Manguebyte: a polyphonic plucked synth."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+manguebyte = { path = "../../crates/manguebyte", default-features = false, features = ["clap"] }
+
+[lints]
+workspace = true

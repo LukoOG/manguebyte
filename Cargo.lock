@@ -64,6 +64,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
+name = "clap-sys"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a76abbdb2907f6fd97fb6bc0b7be96b77d328f2dd9669d1075cc03369ed22154"
+
+[[package]]
 name = "combine"
 version = "4.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -267,13 +273,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
+name = "mangue-pluck"
+version = "0.1.0"
+dependencies = [
+ "manguebyte",
+]
+
+[[package]]
 name = "manguebyte"
 version = "0.1.0"
 dependencies = [
+ "manguebyte-clap",
  "manguebyte-core",
  "manguebyte-devices",
  "manguebyte-dsp",
  "manguebyte-formats",
+ "manguebyte-midi",
+ "manguebyte-params",
+ "manguebyte-plugin",
+]
+
+[[package]]
+name = "manguebyte-clap"
+version = "0.1.0"
+dependencies = [
+ "clap-sys",
+ "manguebyte-core",
+ "manguebyte-dsp",
  "manguebyte-midi",
  "manguebyte-params",
  "manguebyte-plugin",

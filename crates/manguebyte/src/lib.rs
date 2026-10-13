@@ -11,6 +11,7 @@
 //! | [`plugin`] | `manguebyte-plugin` | the format-independent plugin API and a test harness |
 //! | [`midi`] | `manguebyte-midi` | MIDI messages, stream parsing, MIDI files, sample-accurate event buffers |
 //! | [`formats`] | `manguebyte-formats` | audio file reading and writing |
+//! | `clap` | `manguebyte-clap` | builds CLAP plugins (feature `clap`) |
 //! | [`devices`] | `manguebyte-devices` | audio device input, output and duplex streams (feature `devices`, on by default) |
 //!
 //! # Example
@@ -40,6 +41,8 @@ pub use manguebyte_core::{
     AtomicF32, AtomicF64, AudioBuffer, ParamId, Sample, Smoothed, decibels, spsc,
 };
 
+#[cfg(feature = "clap")]
+pub use manguebyte_clap as clap;
 #[cfg(feature = "devices")]
 pub use manguebyte_devices as devices;
 pub use manguebyte_dsp as dsp;

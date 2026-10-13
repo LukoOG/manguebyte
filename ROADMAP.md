@@ -76,12 +76,17 @@ Write a processor once and ship it in every format.
 
 - ✅ `manguebyte-plugin`: the format-independent plugin API, plugin state,
   and a harness that runs a plugin in a unit test with no host
-- ⬜ CLAP
+- ✅ CLAP: audio and note ports, sample-accurate events in, parameters,
+  state, latency, reporting of parameter changes to the host. Checked in CI
+  by the CLAP project's validator
+- ⬜ CLAP extensions still to come: GUI, per-note automation, note-end and
+  voice info, 64-bit audio, tail, presets, remote controls
 - ⬜ VST3
 - ⬜ Audio Unit (AUv2 and AUv3)
 - ⬜ LV2
 - ⬜ Standalone application wrapper
-- ⬜ `cargo` tooling to bundle, sign and validate plugins
+- 🚧 Tooling to bundle, sign and validate plugins: `scripts/bundle-clap.sh`
+  builds a `.clap` on Windows, Linux and macOS; signing is not started
 - ⬜ Project templates
 
 AAX depends on a proprietary SDK and will be considered once the other formats

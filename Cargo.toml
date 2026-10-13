@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "plugins/*"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,6 +17,7 @@ categories = ["multimedia::audio"]
 manguebyte-core = { path = "crates/manguebyte-core", version = "0.1.0" }
 manguebyte-params = { path = "crates/manguebyte-params", version = "0.1.0" }
 manguebyte-plugin = { path = "crates/manguebyte-plugin", version = "0.1.0" }
+manguebyte-clap = { path = "crates/manguebyte-clap", version = "0.1.0" }
 manguebyte-midi = { path = "crates/manguebyte-midi", version = "0.1.0" }
 manguebyte-dsp = { path = "crates/manguebyte-dsp", version = "0.1.0" }
 manguebyte-formats = { path = "crates/manguebyte-formats", version = "0.1.0" }

@@ -16,6 +16,8 @@ readme = "../../README.md"
 default = ["devices"]
 ## Audio device I/O. Pulls in the platform audio backend.
 devices = ["dep:manguebyte-devices"]
+## Building CLAP plugins.
+clap = ["dep:manguebyte-clap"]
 
 [dependencies]
 manguebyte-core.workspace = true
@@ -25,6 +27,7 @@ manguebyte-midi.workspace = true
 manguebyte-dsp.workspace = true
 manguebyte-formats.workspace = true
 manguebyte-devices = { workspace = true, optional = true }
+manguebyte-clap = { workspace = true, optional = true }
 
 [[example]]
 name = "play_riff"

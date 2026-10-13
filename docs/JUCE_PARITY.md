@@ -26,7 +26,7 @@ Manguebyte
 | `juce_audio_formats` | Readers and writers for WAV, AIFF, FLAC, Ogg Vorbis, MP3 and platform codecs; streaming sources; thumbnails cache; sampler | `formats` | 🚧 WAV read and write. Missing: streaming, every other format, metadata |
 | `juce_audio_processors` | The plugin and processor model, parameters and their state tree, plugin hosting for VST3, AU, LV2 and others, processor graph, plugin scanning | `params`, later `plugin`, `host`, `graph` | 🚧 Parameters, state and the plugin model are done, with a different design ([ADR 0003](adr/0003-parameters-without-listeners.md), [ADR 0005](adr/0005-one-timestamped-event-stream.md)). Hosting and the graph are not started |
 | `juce_audio_processors_headless` | The same, without GUI dependencies (added in JUCE 8.0.11) | the same crates | ✅ by construction: no processing crate depends on a GUI |
-| `juce_audio_plugin_client` | Wrappers that turn a processor into a VST3, AU, AUv3, LV2, AAX, Unity or standalone plugin | later one crate per format | ⬜ Planned order: CLAP, VST3, standalone, AU, LV2. JUCE has no native CLAP |
+| `juce_audio_plugin_client` | Wrappers that turn a processor into a VST3, AU, AUv3, LV2, AAX, Unity or standalone plugin | `clap`, later one crate per format | 🚧 CLAP is done and validated. Next: VST3, standalone, AU, LV2. JUCE has no native CLAP |
 | `juce_audio_utils` | Ready-made audio widgets and helpers: device selector, keyboard, thumbnail, transport-style player | later `gui` | ⬜ |
 | `juce_dsp` | FFT, windows, IIR and FIR filters with design methods, state-variable and ladder filters, oversampling, convolution, delay lines, dynamics, reverb, chorus, phaser, waveshaping, oscillator, panner, SIMD wrappers, lookup tables | `dsp` | 🚧 Processor chains, oscillator, biquad designs, state-variable filter, delay, gain, compressor, noise gate, reverb, FFT of any length and windows are done. Missing: FIR and ladder filters, high-order IIR design, oversampling, convolution, limiter, chorus, phaser, waveshaper, panner, SIMD, lookup tables |
 | `juce_midi_ci` | MIDI Capability Inquiry: discovery, profiles, property exchange | later, in `midi` | ⬜ |
@@ -72,7 +72,7 @@ to. Each one is tied to something observable.
 | State and processing | Host may call state functions concurrently with processing; each plugin synchronises | Parameter state is safe from any thread with no lock ✅ |
 | Old sessions after a range change | Position-based automation and state can shift meaning | State stores real values by id; loading is tolerant and reports ✅ |
 | Headless use | Split out in 8.0.11, still needs the event module | No GUI or event loop below the GUI crate ✅ |
-| CLAP | Not available natively; promised for JUCE 9, not in 9.0.x | First plugin format to be implemented ⬜ |
+| CLAP | Not available natively; promised for JUCE 9, not in 9.0.x | Native. The example plugin passes all 34 applicable tests of `clap-validator`, which runs in CI ✅ |
 | Sample-accurate automation | Not in `AudioProcessor` | Timestamped events in the process call, applied on their exact frame ✅ |
 | Note expression, per-voice and non-destructive modulation | Not in the processor model | Part of the event model; the synth routes each to the right voice ✅ (MIDI 2.0 UMP transport ⬜) |
 | Arbitrary FFT length | Powers of two | Any length ✅ |

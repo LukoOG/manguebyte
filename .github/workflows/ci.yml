@@ -58,12 +58,46 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri
-      # The wait-free queue is the only unsafe code in the framework. Miri
-      # runs its tests under an interpreter that detects undefined behaviour
-      # and data races.
+      # The framework has unsafe code in two places: the wait-free queue and
+      # the CLAP wrapper, which talks to hosts through C. Miri runs their
+      # tests under an interpreter that detects undefined behaviour and data
+      # races. The CLAP tests drive the wrapper through its C interface, so
+      # every pointer it handles is checked.
       - run: cargo miri test -p manguebyte-core
         env:
           RUSTFLAGS: ""
+      - run: cargo miri test -p manguebyte-clap
+        env:
+          RUSTFLAGS: ""
+
+  clap:
+    name: CLAP validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # clap-validator is the CLAP project's own conformance tool. It loads
+      # the example plugin the way a host does and checks its descriptor,
+      # ports, parameters, state and processing, with fuzzing.
+      - name: Get clap-validator
+        run: |
+          git clone https://github.com/free-audio/clap-validator "$RUNNER_TEMP/clap-validator"
+          git -C "$RUNNER_TEMP/clap-validator" checkout b2f1d9b79b1d264a5747f46707d72b1aa40a02ef
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/clap-validator/target
+          key: clap-validator-b2f1d9b-${{ runner.os }}
+      - name: Build clap-validator
+        run: cargo build --release --manifest-path "$RUNNER_TEMP/clap-validator/Cargo.toml"
+        env:
+          RUSTFLAGS: ""
+      - run: ./scripts/bundle-clap.sh mangue-pluck "Mangue Pluck"
+      - name: Validate
+        run: |
+          "$RUNNER_TEMP/clap-validator/target/release/clap-validator" validate \
+            "target/bundled/Mangue Pluck.clap" | tee validation.txt
+          # The tool reports failures in its summary; make them fail the job.
+          grep -Eq "tests run, [0-9]+ passed, 0 failed" <(sed 's/\x1b\[[0-9;]*m//g' validation.txt)
 
   msrv:
     name: Minimum supported Rust version

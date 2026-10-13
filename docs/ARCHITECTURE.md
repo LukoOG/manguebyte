@@ -49,10 +49,11 @@ nothing beside or above it.
 | `manguebyte-formats` | Audio file reading and writing | core |
 | `manguebyte-devices` | Sound card input, output and duplex | core, `cpal` |
 | `manguebyte-plugin` | `Plugin` trait, state, `Harness` for testing without a host | core, midi, dsp, params |
+| `manguebyte-clap` | Turns a `Plugin` into a CLAP plugin | core, midi, dsp, params, plugin, `clap-sys` |
 | `manguebyte` | Everything under one name | all of the above |
 
-Planned crates slot into the same picture: one crate per plugin format
-sits on `manguebyte-plugin`; `manguebyte-gui` sits beside them and is never a
+Planned crates slot into the same picture: each further plugin format
+gets a crate beside `manguebyte-clap`, on top of `manguebyte-plugin`; `manguebyte-gui` sits beside them and is never a
 dependency of anything that processes audio; `manguebyte-graph` and
 `manguebyte-host` sit on the plugin API.
 
@@ -113,7 +114,8 @@ its own timer. See [ADR 0003](adr/0003-parameters-without-listeners.md).
 This is checked, not hoped for. `crates/manguebyte-dsp/tests/realtime.rs`
 installs a counting allocator and fails if any processor touches the heap
 while processing. Every new processor is added to that test. The only
-`unsafe` code in the framework, the wait-free queue, runs under Miri in CI.
+`unsafe` code in the framework is in two places, the wait-free queue and the
+CLAP wrapper's C boundary, and both run under Miri in CI.
 
 ### State
 
@@ -170,7 +172,7 @@ that the plugin API must honour when it is written.
 | Saved state can drift from parameter values | State is derived from the values on demand, never cached | Done |
 | Audio thread reads parameters through a string lookup | Typed struct fields; ids are for hosts and interfaces only | Done |
 | Processing and hosting depended on GUI modules | The GUI crate sits above the plugin API | By construction |
-| No native CLAP | CLAP is the first plugin format, not an add-on | Planned |
+| No native CLAP | CLAP is the first plugin format, and passes the CLAP project's own validator | Done |
 | No sample-accurate automation in `AudioProcessor` | The process call carries timestamped events; `split_at_events` applies each on its frame | Done |
 | No MIDI 2.0, note expression or per-voice modulation in the processor model | Notes carry ids and float velocity; expression and modulation are per note; modulation never alters the stored value | Done in the model; UMP transport planned |
 | Real-time safety rests on convention | A counting-allocator test and Miri in CI | Done, grows with the code |

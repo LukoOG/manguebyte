@@ -88,6 +88,6 @@ enforcement in tests is the strongest available tool.
 
 1. [x] `spsc` queue with slice operations
 2. [x] Allocation guard test for `manguebyte-dsp`
-3. [x] Miri job in CI for `manguebyte-core`
+3. [x] Miri job in CI for `manguebyte-core` and for the CLAP wrapper
 4. [ ] Extend the allocation guard to device block adapters and parameters
 5. [ ] Debug-build panic when a processor allocates in a user's own code

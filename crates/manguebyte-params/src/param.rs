@@ -366,7 +366,9 @@ impl Param for FloatParam {
     fn plain_to_text(&self, plain: f64) -> String {
         match &self.formatter {
             Some(formatter) => formatter(plain as f32),
-            None => format!("{plain:.precision$}", precision = self.precision),
+            None => {
+                without_negative_zero(format!("{plain:.precision$}", precision = self.precision))
+            }
         }
     }
     fn text_to_plain(&self, text: &str) -> Option<f64> {
@@ -686,6 +688,17 @@ impl Param for ChoiceParam {
     }
 }
 
+/// Drops the sign from a number that rounded to zero.
+///
+/// A small negative value formats as `-0.0`, which reads back as zero and
+/// then formats as `0.0`: the same value would show two different texts.
+fn without_negative_zero(text: String) -> String {
+    match text.strip_prefix('-') {
+        Some(digits) if digits.chars().all(|c| c == '0' || c == '.') => digits.to_owned(),
+        _ => text,
+    }
+}
+
 fn position_ignoring_case(labels: &[String], text: &str) -> Option<usize> {
     labels
         .iter()
@@ -796,6 +809,22 @@ mod tests {
         .with_unit("Hz");
         assert_eq!(cutoff.text_to_plain("2.5k"), Some(2_500.0));
         assert_eq!(cutoff.text_to_plain("2.5 kHz"), Some(2_500.0));
+    }
+
+    #[test]
+    fn text_round_trips_to_the_same_text() {
+        // Found by clap-validator: a value just below zero printed as
+        // "-0.0", read back as zero, and then printed as "0.0".
+        let gain = gain();
+        assert_eq!(gain.plain_to_text(-0.04), "0.0");
+        assert_eq!(gain.plain_to_text(-0.06), "-0.1");
+        assert_eq!(gain.plain_to_text(0.0), "0.0");
+        for step in 0..=720 {
+            let plain = -60.0 + 0.1 * f64::from(step) + 0.037;
+            let first = gain.plain_to_text(plain);
+            let again = gain.plain_to_text(gain.text_to_plain(&first).unwrap());
+            assert_eq!(first, again, "from {plain}");
+        }
     }
 
     #[test]
