@@ -20,6 +20,7 @@ devices = ["dep:manguebyte-devices"]
 [dependencies]
 manguebyte-core.workspace = true
 manguebyte-params.workspace = true
+manguebyte-plugin.workspace = true
 manguebyte-midi.workspace = true
 manguebyte-dsp.workspace = true
 manguebyte-formats.workspace = true

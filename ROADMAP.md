@@ -74,7 +74,8 @@ Everything a standalone audio application needs, short of a user interface.
 
 Write a processor once and ship it in every format.
 
-- ⬜ `manguebyte-plugin`: the format-independent plugin API
+- ✅ `manguebyte-plugin`: the format-independent plugin API, plugin state,
+  and a harness that runs a plugin in a unit test with no host
 - ⬜ CLAP
 - ⬜ VST3
 - ⬜ Audio Unit (AUv2 and AUv3)

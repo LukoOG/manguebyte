@@ -29,13 +29,15 @@ nothing beside or above it.
                          manguebyte            facade: re-exports + prelude
                               |
       +-----------+-----------+-----------+
-      |           |           |           |
-   devices     formats       dsp        params
-   (cpal)         |          /  \          |
-      |           |       midi   \         |
-      +-----------+---------------+--------+
-                              |
-                            core                no dependencies
+      |           |           |
+      |           |         plugin          plugin API + test harness
+      |           |          /   \
+   devices     formats     dsp   params
+   (cpal)         |        /  \     |
+      |           |     midi   \    |
+      +-----------+-------------+---+
+                        |
+                      core                  no dependencies
 ```
 
 | Crate | Role | Depends on |
@@ -46,11 +48,11 @@ nothing beside or above it.
 | `manguebyte-dsp` | `Processor`, events, transport, synth, filters, effects, FFT | core, midi |
 | `manguebyte-formats` | Audio file reading and writing | core |
 | `manguebyte-devices` | Sound card input, output and duplex | core, `cpal` |
+| `manguebyte-plugin` | `Plugin` trait, state, `Harness` for testing without a host | core, midi, dsp, params |
 | `manguebyte` | Everything under one name | all of the above |
 
-Planned crates slot into the same picture: `manguebyte-plugin` (the
-format-independent plugin API) sits on dsp, params and midi; one crate per
-plugin format sits on that; `manguebyte-gui` sits beside them and is never a
+Planned crates slot into the same picture: one crate per plugin format
+sits on `manguebyte-plugin`; `manguebyte-gui` sits beside them and is never a
 dependency of anything that processes audio; `manguebyte-graph` and
 `manguebyte-host` sit on the plugin API.
 
@@ -164,7 +166,7 @@ that the plugin API must honour when it is written.
 |---|---|---|
 | Parameter listeners run on the audio thread during automation | No listeners; both sides poll atomics | Done |
 | Attachments post to the OS message queue from the audio thread | The only bridges are atomics and a wait-free queue | Done |
-| State callbacks race with processing; each plugin must synchronise | Parameters are atomic and are the source of truth | Done for parameters |
+| State callbacks race with processing; each plugin must synchronise | Parameters are atomic and are the source of truth; a restored state reaches the audio thread as ordinary events | Done for parameters |
 | Saved state can drift from parameter values | State is derived from the values on demand, never cached | Done |
 | Audio thread reads parameters through a string lookup | Typed struct fields; ids are for hosts and interfaces only | Done |
 | Processing and hosting depended on GUI modules | The GUI crate sits above the plugin API | By construction |

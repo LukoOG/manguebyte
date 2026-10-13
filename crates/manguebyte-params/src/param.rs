@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
-use manguebyte_core::AtomicF32;
+use manguebyte_core::{AtomicF32, ParamId};
 
 use crate::FloatRange;
 
@@ -30,6 +30,7 @@ impl Default for ParamFlags {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParamInfo {
     id: String,
+    param_id: ParamId,
     name: String,
     unit: String,
     flags: ParamFlags,
@@ -43,6 +44,7 @@ impl ParamInfo {
         );
         Self {
             id: id.to_owned(),
+            param_id: ParamId::from_name(id),
             name: name.to_owned(),
             unit: String::new(),
             flags: ParamFlags::default(),
@@ -53,6 +55,13 @@ impl ParamInfo {
     /// a version of the software has shipped.
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// The compact number that stands for [`id`](Self::id) in events and in
+    /// plugin formats. It is a hash of the identifier, so it is just as
+    /// stable.
+    pub fn param_id(&self) -> ParamId {
+        self.param_id
     }
 
     /// The name shown to people. Free to change between versions.
@@ -124,6 +133,11 @@ pub trait Param: Send + Sync {
     /// The identifier saved in state and sessions.
     fn id(&self) -> &str {
         self.info().id()
+    }
+
+    /// The compact number that stands for the identifier in events.
+    fn param_id(&self) -> ParamId {
+        self.info().param_id()
     }
 
     /// The name shown to people.

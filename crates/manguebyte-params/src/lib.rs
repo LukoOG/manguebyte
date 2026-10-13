@@ -27,7 +27,8 @@ mod range;
 mod set;
 mod smoother;
 
+pub use manguebyte_core::ParamId;
 pub use param::{BoolParam, ChoiceParam, FloatParam, IntParam, Param, ParamFlags, ParamInfo};
 pub use range::FloatRange;
-pub use set::{DuplicateId, LoadReport, ParamSet, ParamState, ParseStateError};
+pub use set::{LoadReport, ParamSet, ParamSetError, ParamState, ParseStateError};
 pub use smoother::{Changed, ParamSmoother, Smoothing};

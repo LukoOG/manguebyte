@@ -1,6 +1,8 @@
 use std::fmt;
 use std::str::FromStr;
 
+use manguebyte_core::ParamId;
+
 use crate::Param;
 use crate::param::is_valid_id;
 
@@ -69,16 +71,38 @@ pub trait ParamSet: Send + Sync {
         found
     }
 
-    /// Checks that no two parameters share an identifier.
+    /// Finds a parameter by its compact id, as carried in events.
     ///
-    /// Call it once at start-up, or in a test: a duplicate would make saved
+    /// Real-time safe: it walks the set comparing numbers and allocates
+    /// nothing.
+    fn find_param(&self, id: ParamId) -> Option<&dyn Param> {
+        let mut found = None;
+        self.visit(&mut |param| {
+            if found.is_none() && param.param_id() == id {
+                found = Some(param);
+            }
+        });
+        found
+    }
+
+    /// Checks that every parameter can be told apart from the others: no
+    /// two share an identifier, and no two identifiers hash to the same
+    /// [`ParamId`].
+    ///
+    /// Call it once at start-up, or in a test. A clash would make saved
     /// state and automation ambiguous.
-    fn validate(&self) -> Result<(), DuplicateId> {
-        let mut ids: Vec<&str> = Vec::new();
-        self.visit(&mut |param| ids.push(param.id()));
+    fn validate(&self) -> Result<(), ParamSetError> {
+        let mut ids: Vec<(ParamId, &str)> = Vec::new();
+        self.visit(&mut |param| ids.push((param.param_id(), param.id())));
         ids.sort_unstable();
-        match ids.windows(2).find(|pair| pair[0] == pair[1]) {
-            Some(pair) => Err(DuplicateId(pair[0].to_owned())),
+        match ids.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+            Some(pair) if pair[0].1 == pair[1].1 => {
+                Err(ParamSetError::DuplicateId(pair[0].1.to_owned()))
+            }
+            Some(pair) => Err(ParamSetError::HashCollision(
+                pair[0].1.to_owned(),
+                pair[1].1.to_owned(),
+            )),
             None => Ok(()),
         }
     }
@@ -160,17 +184,31 @@ macro_rules! param_set {
     };
 }
 
-/// Two parameters in a set share this identifier.
+/// Why the parameters of a set cannot be told apart.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DuplicateId(pub String);
+pub enum ParamSetError {
+    /// Two parameters share this identifier.
+    DuplicateId(String),
+    /// These two identifiers hash to the same [`ParamId`]. Rename one of
+    /// them. With 32-bit hashes this is rare but possible.
+    HashCollision(String, String),
+}
 
-impl fmt::Display for DuplicateId {
+impl fmt::Display for ParamSetError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "more than one parameter has the id \"{}\"", self.0)
+        match self {
+            Self::DuplicateId(id) => {
+                write!(f, "more than one parameter has the id \"{id}\"")
+            }
+            Self::HashCollision(first, second) => write!(
+                f,
+                "parameter ids \"{first}\" and \"{second}\" hash to the same number"
+            ),
+        }
     }
 }
 
-impl std::error::Error for DuplicateId {}
+impl std::error::Error for ParamSetError {}
 
 /// What [`ParamSet::load`] did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -399,6 +437,31 @@ mod tests {
         let synth = synth();
         assert_eq!(synth.find("env.release").unwrap().name(), "Release");
         assert!(synth.find("nope").is_none());
+
+        const RELEASE: ParamId = ParamId::from_name("env.release");
+        assert_eq!(synth.envelope.release.param_id(), RELEASE);
+        assert_eq!(synth.find_param(RELEASE).unwrap().name(), "Release");
+        assert!(synth.find_param(ParamId::from_name("nope")).is_none());
+    }
+
+    #[test]
+    fn detects_ids_that_hash_to_the_same_number() {
+        // A known 32-bit FNV-1a collision.
+        assert_eq!(
+            ParamId::from_name("costarring"),
+            ParamId::from_name("liquid")
+        );
+        let broken = Envelope {
+            attack: seconds("costarring", "Attack", 0.1),
+            release: seconds("liquid", "Release", 0.1),
+        };
+        assert_eq!(
+            broken.validate(),
+            Err(ParamSetError::HashCollision(
+                String::from("costarring"),
+                String::from("liquid")
+            ))
+        );
     }
 
     #[test]
@@ -407,7 +470,10 @@ mod tests {
             attack: seconds("time", "Attack", 0.1),
             release: seconds("time", "Release", 0.1),
         };
-        assert_eq!(broken.validate(), Err(DuplicateId(String::from("time"))));
+        assert_eq!(
+            broken.validate(),
+            Err(ParamSetError::DuplicateId(String::from("time")))
+        );
     }
 
     #[test]

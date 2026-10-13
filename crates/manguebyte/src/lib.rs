@@ -8,6 +8,7 @@
 //! | (root) | `manguebyte-core` | [`AudioBuffer`], [`Sample`], [`Smoothed`], atomics, [`spsc`] queue |
 //! | [`dsp`] | `manguebyte-dsp` | processor chains, sample-accurate events, polyphonic synth, filters, effects, FFT |
 //! | [`params`] | `manguebyte-params` | thread-safe parameters, ranges, smoothing, saved state |
+//! | [`plugin`] | `manguebyte-plugin` | the format-independent plugin API and a test harness |
 //! | [`midi`] | `manguebyte-midi` | MIDI messages, stream parsing, MIDI files, sample-accurate event buffers |
 //! | [`formats`] | `manguebyte-formats` | audio file reading and writing |
 //! | [`devices`] | `manguebyte-devices` | audio device input, output and duplex streams (feature `devices`, on by default) |
@@ -45,6 +46,7 @@ pub use manguebyte_dsp as dsp;
 pub use manguebyte_formats as formats;
 pub use manguebyte_midi as midi;
 pub use manguebyte_params as params;
+pub use manguebyte_plugin as plugin;
 
 /// The names most programs need, in one import.
 pub mod prelude {
@@ -64,6 +66,7 @@ pub mod prelude {
         BoolParam, Changed, ChoiceParam, FloatParam, FloatRange, IntParam, Param, ParamSet,
         ParamSmoother, ParamState, Smoothing, param_set,
     };
+    pub use crate::plugin::{AudioLayout, Harness, Plugin, PluginInfo, PluginKind};
     pub use crate::{AtomicF32, AtomicF64, AudioBuffer, ParamId, Sample, Smoothed, decibels, spsc};
 
     #[cfg(feature = "devices")]
