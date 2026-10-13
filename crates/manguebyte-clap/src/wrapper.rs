@@ -879,9 +879,14 @@ unsafe fn send_param_value(list: *const clap_output_events, param_id: clap_id, v
         key: -1,
         value,
     };
+    // The pointer is taken to the whole event and then viewed as its header,
+    // which is its first field. A pointer taken to the header field alone
+    // would only be allowed to reach the header, and the host reads the
+    // rest of the event through it. Miri caught exactly that.
+    let header = (&raw const event).cast::<clap_event_header>();
     // SAFETY: the host's own function with the host's own list; the event
     // is valid for the call and the host copies it.
-    unsafe { push(list, &raw const event.header) };
+    unsafe { push(list, header) };
 }
 
 // --- Parameters extension -----------------------------------------------

@@ -10,6 +10,8 @@
 //! the blocks are not commented one by one.
 #![allow(clippy::undocumented_unsafe_blocks)]
 
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr;
 use std::sync::{Arc, Mutex};
@@ -38,6 +40,47 @@ use manguebyte_dsp::event::{EventKind, Expression, NoteRef};
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Processor, Synth, Voice, split_at_events};
 use manguebyte_params::{BoolParam, ChoiceParam, FloatParam, FloatRange, param_set};
 use manguebyte_plugin::{AudioLayout, Plugin, PluginInfo, PluginKind};
+
+// --- Watching the heap ---------------------------------------------------
+//
+// The wrapper's `process` runs on the host's audio thread, so it must not
+// allocate or free. The allocator below counts heap calls made while a
+// thread is inside `process`, and the tests require that count to be zero.
+
+thread_local! {
+    static IN_PROCESS: Cell<bool> = const { Cell::new(false) };
+    static HEAP_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+struct CountingAllocator;
+
+impl CountingAllocator {
+    fn record() {
+        let _ = IN_PROCESS.try_with(|watching| {
+            if watching.get() {
+                let _ = HEAP_CALLS.try_with(|calls| calls.set(calls.get() + 1));
+            }
+        });
+    }
+}
+
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        Self::record();
+        unsafe { System.alloc(layout) }
+    }
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        Self::record();
+        unsafe { System.dealloc(pointer, layout) }
+    }
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        Self::record();
+        unsafe { System.realloc(pointer, layout, new_size) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 // --- The plugins under test ---------------------------------------------
 
@@ -279,13 +322,16 @@ enum Sent {
 }
 
 impl Sent {
+    /// A pointer to the whole event, viewed as its header, which is how a
+    /// host hands events over. It must be derived from the whole struct:
+    /// the plugin reads past the header through it.
     fn header(&self) -> *const clap_event_header {
         match self {
-            Self::Note(event) => &raw const event.header,
-            Self::Expression(event) => &raw const event.header,
-            Self::Value(event) => &raw const event.header,
-            Self::Modulation(event) => &raw const event.header,
-            Self::Midi(event) => &raw const event.header,
+            Self::Note(event) => ptr::from_ref(event).cast(),
+            Self::Expression(event) => ptr::from_ref(event).cast(),
+            Self::Value(event) => ptr::from_ref(event).cast(),
+            Self::Modulation(event) => ptr::from_ref(event).cast(),
+            Self::Midi(event) => ptr::from_ref(event).cast(),
         }
     }
 }
@@ -389,6 +435,8 @@ struct Processed {
     output: Vec<Vec<f32>>,
     /// Parameter values the plugin reported, as `(id, value)`.
     reported: Vec<(u32, f64)>,
+    /// How many times the plugin used the heap during the call.
+    heap_calls: usize,
 }
 
 struct Host {
@@ -577,7 +625,9 @@ impl Host {
             size: Some(events_size),
             get: Some(events_get),
         };
-        let mut reported: Vec<(u32, f64)> = Vec::new();
+        // Room for what the plugin reports, so that collecting it is not
+        // itself counted as heap use.
+        let mut reported: Vec<(u32, f64)> = Vec::with_capacity(64);
         let output_events = clap_output_events {
             ctx: (&raw mut reported).cast(),
             try_push: Some(events_push),
@@ -612,11 +662,15 @@ impl Host {
             in_events: &raw const input_events,
             out_events: &raw const output_events,
         };
+        HEAP_CALLS.with(|calls| calls.set(0));
+        IN_PROCESS.with(|watching| watching.set(true));
         let status = unsafe { (*self.plugin).process.unwrap()(self.plugin, &raw const process) };
+        IN_PROCESS.with(|watching| watching.set(false));
         Processed {
             status,
             output: main.to_vec(),
             reported,
+            heap_calls: HEAP_CALLS.with(Cell::get),
         }
     }
 
@@ -671,6 +725,18 @@ fn stereo(value: f32, frames: usize) -> Vec<Vec<f32>> {
 }
 
 // --- The tests -----------------------------------------------------------
+
+#[test]
+fn the_heap_watcher_itself_works() {
+    HEAP_CALLS.with(|calls| calls.set(0));
+    IN_PROCESS.with(|watching| watching.set(true));
+    drop(std::hint::black_box(vec![0u8; 64]));
+    IN_PROCESS.with(|watching| watching.set(false));
+    assert!(
+        HEAP_CALLS.with(Cell::get) >= 2,
+        "an allocation went unnoticed"
+    );
+}
 
 #[test]
 fn the_factory_describes_and_creates_the_plugin() {
@@ -773,6 +839,7 @@ fn automation_lands_on_its_frame_when_processing_in_place() {
     let processed = host.process(&mut audio, None, events, Some(97.0));
 
     assert_eq!(processed.status, CLAP_PROCESS_CONTINUE);
+    assert_eq!(processed.heap_calls, 0, "process used the heap");
     for channel in &processed.output {
         assert_eq!(&channel[..10], &[1.0; 10]);
         assert_eq!(&channel[10..40], &[2.0; 30]);
@@ -796,6 +863,7 @@ fn a_change_from_outside_reaches_the_plugin_and_is_reported_to_the_host_once() {
     let processed = host.process(&mut stereo(1.0, 16), None, vec![], None);
     assert_eq!(processed.output[0], vec![3.0; 16]);
     assert_eq!(processed.reported, vec![(LEVEL.0, 0.75)]);
+    assert_eq!(processed.heap_calls, 0, "reporting a change used the heap");
 
     let processed = host.process(&mut stereo(1.0, 16), None, vec![], None);
     assert_eq!(processed.output[0], vec![3.0; 16]);
@@ -834,6 +902,10 @@ fn state_survives_a_round_trip_through_host_streams() {
     assert_eq!(processed.output[0], vec![2.5; 8]);
     // ...and the host, which did the restoring, was not told what it knows.
     assert!(processed.reported.is_empty());
+    assert_eq!(
+        processed.heap_calls, 0,
+        "the block after a restore used the heap"
+    );
 
     RESCANS.lock().unwrap().clear();
     assert!(!host.load(b"not a state"));
@@ -871,6 +943,7 @@ fn a_block_larger_than_promised_and_a_panic_are_errors_not_crashes() {
     let (_guard, host) = level_host();
     let processed = host.process(&mut stereo(1.0, 65), None, vec![], None);
     assert_eq!(processed.status, CLAP_PROCESS_ERROR);
+    assert_eq!(processed.heap_calls, 0, "refusing a block used the heap");
 
     level_params().explode.set(true);
     let processed = host.process(&mut stereo(1.0, 8), None, vec![], None);
@@ -940,6 +1013,7 @@ fn an_instrument_takes_notes_expression_modulation_and_a_sidechain() {
     ];
     let mut audio = vec![vec![9.0f32; 32]];
     let processed = host.process(&mut audio, None, events, None);
+    assert_eq!(processed.heap_calls, 0, "playing notes used the heap");
     let out = &processed.output[0];
     assert_eq!(&out[..4], &[0.0; 4]);
     assert_eq!(&out[4..8], &[60.0; 4]);
