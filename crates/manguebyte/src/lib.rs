@@ -66,7 +66,9 @@ pub mod prelude {
         ShaperCurve, StateVariableFilter, SvfMode, Synth, Transport, Voice, Waveform, Waveshaper,
         resample, split_at_events,
     };
+    pub use crate::formats::aiff::{self, AiffFormat};
     pub use crate::formats::wav::{self, WavFormat};
+    pub use crate::formats::{AudioFile, FileFormat, FormatError, flac};
     pub use crate::graph::{Graph, GraphEngine, GraphError, NodeId};
     pub use crate::midi::file::{MetaEvent, MidiFile, Track};
     pub use crate::midi::{

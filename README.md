@@ -91,12 +91,12 @@ the road ahead and the API will change before 1.0. See
 | [`manguebyte-plugin`](crates/manguebyte-plugin) | The `Plugin` trait that every format will wrap, plugin state, and a `Harness` that plays notes and automation into a plugin inside a unit test |
 | [`manguebyte-clap`](crates/manguebyte-clap) | Exports a `Plugin` as a CLAP plugin with one line. Notes, expression, automation and modulation arrive on their exact frame. Passes the CLAP project's validator |
 | [`manguebyte-midi`](crates/manguebyte-midi) | Channel and system messages, a byte-stream parser (running status, real-time, SysEx), standard MIDI file reading and writing, sample-accurate `MidiBuffer`, pitch conversions |
-| [`manguebyte-formats`](crates/manguebyte-formats) | WAV reading (8/16/24/32-bit PCM, 32/64-bit float) and writing (16/24-bit PCM, 32-bit float) |
+| [`manguebyte-formats`](crates/manguebyte-formats) | WAV and AIFF reading and writing; FLAC decoding written from the specification and checked bit for bit against files from FFmpeg; the format is recognised from a file's contents |
 | [`manguebyte-devices`](crates/manguebyte-devices) | Device listing and selection, playback, recording and full-duplex streams, in any hardware sample format; MIDI input and output ports, with arrival times mapped to frames so a player's timing survives the audio buffer |
 | [`manguebyte-standalone`](crates/manguebyte-standalone) | Runs a `Plugin` as an application: sound card out, MIDI keyboards in, microphone in for effects |
 
-Not there yet: compressed formats, plugin formats other than CLAP, plugin
-user interfaces, plugin hosting and GUI.
+Not there yet: lossy formats (MP3, Ogg Vorbis, Opus), FLAC encoding, plugin
+formats other than CLAP, plugin user interfaces, plugin hosting and GUI.
 
 ## Quick start
 

@@ -1,6 +1,8 @@
 /target
 Cargo.lock.bak
 *.wav
+# ...except the small files the decoders are tested against.
+!crates/**/tests/data/*.wav
 .DS_Store
 .idea/
 .vscode/

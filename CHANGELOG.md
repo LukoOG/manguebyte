@@ -71,6 +71,17 @@ Nothing has been published to crates.io yet. Everything below is on `main`.
 - System common and real-time messages; `StreamParser` for raw byte streams
   with running status and SysEx; reading and writing standard MIDI files.
 
+### File formats
+
+- `flac`: a FLAC decoder written from RFC 9639, covering every subframe
+  type, both Rice codings, wasted bits, the three stereo decorrelations and
+  4 to 32 bits per sample, with frame checksums verified.
+- `aiff`: AIFF and AIFF-C reading (big and little-endian PCM, float) and
+  writing (16 and 24-bit PCM, 32-bit float).
+- `decode` and `read_file` recognise WAV, AIFF and FLAC from the contents.
+- The decoders are tested against files encoded by FFmpeg and must match
+  their source sample for sample.
+
 ### Devices
 
 - Device listing with stable identifiers; choice of sample rate, channel

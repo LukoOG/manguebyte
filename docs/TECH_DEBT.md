@@ -19,12 +19,12 @@ Each item is scored from 1 to 5 on three axes:
 
 | # | Item | Type | Impact | Risk | Effort | Priority |
 |---|---|---|---|---|---|---|
-| 2 | File parsers (WAV, parameter state, MIDI bytes) are not fuzzed | Test | 2 | 4 | 2 | 24 |
+| 2 | File parsers are tested with systematic truncation and byte corruption, which found nothing, but not with a coverage-guided fuzzer | Test | 2 | 3 | 2 | 20 |
 | 3 | The allocation guard covers `dsp` only, not the device block adapters or `ParamSmoother` | Test | 2 | 4 | 2 | 24 |
 | 4 | No benchmarks, so a performance regression is invisible | Test | 3 | 3 | 2 | 24 |
 | 5 | No dependency audit (`cargo deny`) in CI for licences and advisories | Infrastructure | 2 | 4 | 1 | 30 |
 | 6 | `Sample` has almost no maths (`sin`, `exp`, `tanh`, `min`, `max`), so generic code round-trips through `f64`; the newer processors keep their state in `f64` outright, which halves SIMD width for `f32` buffers | Code | 3 | 2 | 2 | 20 |
-| 7 | WAV is read whole into memory; there is no streaming reader or writer | Architecture | 4 | 2 | 3 | 18 |
+| 7 | WAV, AIFF and FLAC are read whole into memory; there is no streaming reader or writer | Architecture | 4 | 2 | 3 | 18 |
 | 8 | Duplex streams correct clock drift by dropping or padding, which is audible on long runs with two devices. `Resampler` now exists; what is missing is varying its ratio from the queue fill | Code | 2 | 3 | 3 | 15 |
 | 9 | `core` needs `std` (`Arc`, `Vec`), which blocks embedded targets | Architecture | 2 | 2 | 2 | 16 |
 | 10 | FFT is scalar radix-2; no split-radix, no SIMD | Code | 3 | 1 | 3 | 12 |
