@@ -15,6 +15,8 @@ pub struct AudioBuffer<S: Sample = f32> {
     // Stride between channels in `data`. Kept at 1 or more so that chunking
     // `data` always yields exactly `channels` slices, even for empty buffers.
     capacity: usize,
+    // First visible frame of each channel. Non-zero only inside `windowed`.
+    offset: usize,
 }
 
 impl<S: Sample> AudioBuffer<S> {
@@ -28,6 +30,7 @@ impl<S: Sample> AudioBuffer<S> {
             channels,
             frames,
             capacity,
+            offset: 0,
         }
     }
 
@@ -63,7 +66,7 @@ impl<S: Sample> AudioBuffer<S> {
     /// Largest frame count [`set_num_frames`](Self::set_num_frames) accepts.
     #[inline]
     pub fn capacity(&self) -> usize {
-        self.capacity
+        self.capacity - self.offset
     }
 
     /// Changes the active frame count without allocating.
@@ -76,9 +79,9 @@ impl<S: Sample> AudioBuffer<S> {
     #[inline]
     pub fn set_num_frames(&mut self, frames: usize) {
         assert!(
-            frames <= self.capacity,
+            frames <= self.capacity(),
             "frame count {frames} exceeds buffer capacity {}",
-            self.capacity
+            self.capacity()
         );
         self.frames = frames;
     }
@@ -90,6 +93,7 @@ impl<S: Sample> AudioBuffer<S> {
         self.capacity = frames.max(1);
         self.channels = channels;
         self.frames = frames;
+        self.offset = 0;
         self.data.clear();
         self.data.resize(channels * self.capacity, S::ZERO);
     }
@@ -102,7 +106,7 @@ impl<S: Sample> AudioBuffer<S> {
     #[inline]
     pub fn channel(&self, index: usize) -> &[S] {
         assert!(index < self.channels, "channel index out of range");
-        let start = index * self.capacity;
+        let start = index * self.capacity + self.offset;
         &self.data[start..start + self.frames]
     }
 
@@ -114,7 +118,7 @@ impl<S: Sample> AudioBuffer<S> {
     #[inline]
     pub fn channel_mut(&mut self, index: usize) -> &mut [S] {
         assert!(index < self.channels, "channel index out of range");
-        let start = index * self.capacity;
+        let start = index * self.capacity + self.offset;
         &mut self.data[start..start + self.frames]
     }
 
@@ -129,11 +133,11 @@ impl<S: Sample> AudioBuffer<S> {
             a < self.channels && b < self.channels,
             "channel index out of range"
         );
-        let (frames, capacity) = (self.frames, self.capacity);
+        let (frames, capacity, offset) = (self.frames, self.capacity, self.offset);
         let (low, high) = (a.min(b), a.max(b));
         let (head, tail) = self.data.split_at_mut(high * capacity);
-        let low_slice = &mut head[low * capacity..low * capacity + frames];
-        let high_slice = &mut tail[..frames];
+        let low_slice = &mut head[low * capacity + offset..low * capacity + offset + frames];
+        let high_slice = &mut tail[offset..offset + frames];
         if a < b {
             (low_slice, high_slice)
         } else {
@@ -143,18 +147,64 @@ impl<S: Sample> AudioBuffer<S> {
 
     /// Iterates over the channels.
     pub fn iter_channels(&self) -> impl ExactSizeIterator<Item = &[S]> {
-        let frames = self.frames;
+        let (start, end) = (self.offset, self.offset + self.frames);
         self.data
             .chunks_exact(self.capacity)
-            .map(move |channel| &channel[..frames])
+            .map(move |channel| &channel[start..end])
     }
 
     /// Iterates mutably over the channels.
     pub fn iter_channels_mut(&mut self) -> impl ExactSizeIterator<Item = &mut [S]> {
-        let frames = self.frames;
+        let (start, end) = (self.offset, self.offset + self.frames);
         self.data
             .chunks_exact_mut(self.capacity)
-            .map(move |channel| &mut channel[..frames])
+            .map(move |channel| &mut channel[start..end])
+    }
+
+    /// Runs `work` with the buffer narrowed to the frames in `range`, then
+    /// widens it again.
+    ///
+    /// Inside `work` the buffer looks like a shorter one that starts at
+    /// `range.start`: every method sees only those frames. Nothing is copied
+    /// or allocated, so this is how a block is processed in pieces on the
+    /// audio thread, for example to apply an event on the exact frame it
+    /// belongs to.
+    ///
+    /// ```
+    /// use manguebyte_core::AudioBuffer;
+    ///
+    /// let mut buffer = AudioBuffer::<f32>::new(1, 8);
+    /// buffer.windowed(2..5, |window| {
+    ///     assert_eq!(window.num_frames(), 3);
+    ///     window.channel_mut(0).fill(1.0);
+    /// });
+    /// assert_eq!(buffer.channel(0), &[0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
+    /// ```
+    ///
+    /// Do not [`resize`](Self::resize) the buffer inside `work`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `range` does not lie within the active frames.
+    pub fn windowed<R>(
+        &mut self,
+        range: core::ops::Range<usize>,
+        work: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        assert!(
+            range.start <= range.end && range.end <= self.frames,
+            "window {}..{} is outside the buffer's {} frames",
+            range.start,
+            range.end,
+            self.frames
+        );
+        let (offset, frames) = (self.offset, self.frames);
+        self.offset = offset + range.start;
+        self.frames = range.end - range.start;
+        let result = work(self);
+        self.offset = offset;
+        self.frames = frames;
+        result
     }
 
     /// Sets every active sample to silence.
@@ -391,5 +441,49 @@ mod tests {
         a.mix_from(&b, 0.5);
         assert_eq!(a.peak(), 0.5);
         assert!((a.rms(0) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn windows_narrow_every_view_and_nest() {
+        let mut buffer = AudioBuffer::<f32>::new(2, 8);
+        for (index, channel) in buffer.iter_channels_mut().enumerate() {
+            for (frame, sample) in channel.iter_mut().enumerate() {
+                *sample = (index * 10 + frame) as f32;
+            }
+        }
+
+        let peak = buffer.windowed(2..6, |window| {
+            assert_eq!(window.num_frames(), 4);
+            assert_eq!(window.capacity(), 6);
+            assert_eq!(window.channel(0), &[2.0, 3.0, 4.0, 5.0]);
+            assert_eq!(window.channel(1), &[12.0, 13.0, 14.0, 15.0]);
+            assert_eq!(window.iter_channels().nth(1).unwrap()[0], 12.0);
+            let (left, right) = window.channel_pair_mut(1, 0);
+            assert_eq!((left[3], right[3]), (15.0, 5.0));
+
+            window.windowed(1..3, |inner| {
+                assert_eq!(inner.channel(0), &[3.0, 4.0]);
+                inner.apply_gain(-1.0);
+            });
+            assert_eq!(window.channel(0), &[2.0, -3.0, -4.0, 5.0]);
+            window.peak()
+        });
+
+        assert_eq!(peak, 15.0);
+        assert_eq!(buffer.num_frames(), 8);
+        assert_eq!(buffer.capacity(), 8);
+        assert_eq!(
+            buffer.channel(0),
+            &[0.0, 1.0, 2.0, -3.0, -4.0, 5.0, 6.0, 7.0]
+        );
+        assert_eq!(buffer.channel(1)[3], -13.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "outside the buffer")]
+    fn a_window_cannot_reach_past_the_active_frames() {
+        let mut buffer = AudioBuffer::<f32>::new(1, 8);
+        buffer.set_num_frames(4);
+        buffer.windowed(2..6, |_| {});
     }
 }

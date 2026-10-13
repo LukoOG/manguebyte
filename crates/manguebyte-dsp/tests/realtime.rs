@@ -11,10 +11,12 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use manguebyte_core::AudioBuffer;
+use manguebyte_dsp::event::{Event, EventBuffer, EventKind, Expression, NoteRef};
 use manguebyte_dsp::fft::{Complex, Fft, RealFft};
 use manguebyte_dsp::{
     Adsr, AdsrParams, Biquad, BiquadCoefficients, Compressor, Delay, Filter, FilterShape, Gain,
-    NoiseGate, Oscillator, ProcessSpec, Processor, Reverb, StateVariableFilter, SvfMode, Waveform,
+    NoiseGate, Oscillator, ProcessContext, ProcessSpec, Processor, Reverb, StateVariableFilter,
+    SvfMode, Synth, Transport, Voice, Waveform,
 };
 
 thread_local! {
@@ -183,6 +185,84 @@ fn a_chain_does_not_use_the_heap_and_can_change_settings_while_running() {
             chain.process(&mut buffer);
         }
     });
+}
+
+/// A voice made of the library's own parts.
+struct ToneVoice {
+    oscillator: Oscillator,
+    envelope: Adsr,
+}
+
+impl Voice for ToneVoice {
+    fn prepare(&mut self, spec: &ProcessSpec) {
+        self.oscillator.set_sample_rate(spec.sample_rate);
+        self.envelope.set_sample_rate(spec.sample_rate);
+    }
+    fn note_on(&mut self, note: NoteRef, _: f32) {
+        self.oscillator
+            .set_frequency(110.0 * f64::from(note.key) / 45.0);
+        self.envelope.note_on();
+    }
+    fn note_off(&mut self, _: f32) {
+        self.envelope.note_off();
+    }
+    fn choke(&mut self) {
+        self.envelope.silence();
+        self.oscillator.reset_phase();
+    }
+    fn is_active(&self) -> bool {
+        self.envelope.is_active()
+    }
+    fn render(&mut self, buffer: &mut AudioBuffer<f32>) {
+        for frame in 0..buffer.num_frames() {
+            let sample = (self.oscillator.next_sample() * self.envelope.next_sample()) as f32;
+            for channel in buffer.iter_channels_mut() {
+                channel[frame] += sample;
+            }
+        }
+    }
+}
+
+#[test]
+fn a_synth_handles_a_flood_of_events_without_using_the_heap() {
+    let mut synth = Synth::with_voices(4, || ToneVoice {
+        oscillator: Oscillator::new(Waveform::Saw, 220.0),
+        envelope: Adsr::new(AdsrParams::default()),
+    });
+    synth.prepare(&SPEC);
+
+    let mut events = EventBuffer::with_capacity(64);
+    let mut buffer = AudioBuffer::<f32>::new(2, 256);
+    let transport = Transport::playing_at(120.0);
+    assert_no_heap_use("Synth", || {
+        for round in 0..16u8 {
+            events.clear();
+            // More notes than voices, so voices are taken over as well.
+            for step in 0..6u8 {
+                let note = NoteRef::new(0, 40 + (round + step) % 12);
+                let velocity = 0.7;
+                let offset = u32::from(step) * 40;
+                let _ = events.push(Event {
+                    offset,
+                    kind: EventKind::NoteOn { note, velocity },
+                });
+                let _ = events.push(Event {
+                    offset: offset + 20,
+                    kind: EventKind::NoteExpression {
+                        note,
+                        expression: Expression::Tuning,
+                        value: 0.1,
+                    },
+                });
+                let _ = events.push(Event {
+                    offset: offset + 30,
+                    kind: EventKind::NoteOff { note, velocity },
+                });
+            }
+            synth.process_with(&mut buffer, &ProcessContext::new(&events, &transport));
+        }
+    });
+    assert!(buffer.peak() > 0.0);
 }
 
 #[test]

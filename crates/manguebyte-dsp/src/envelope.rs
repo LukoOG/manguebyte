@@ -89,6 +89,13 @@ impl Adsr {
         }
     }
 
+    /// Drops to silence at once, skipping the release. For a voice that is
+    /// being cut off or taken over for another note.
+    pub fn silence(&mut self) {
+        self.stage = Stage::Idle;
+        self.level = 0.0;
+    }
+
     /// Whether the envelope is producing anything other than silence.
     pub fn is_active(&self) -> bool {
         self.stage != Stage::Idle
@@ -163,8 +170,7 @@ impl<S: Sample> Processor<S> for Adsr {
     }
 
     fn reset(&mut self) {
-        self.stage = Stage::Idle;
-        self.level = 0.0;
+        self.silence();
     }
 }
 

@@ -19,7 +19,6 @@ Each item is scored from 1 to 5 on three axes:
 
 | # | Item | Type | Impact | Risk | Effort | Priority |
 |---|---|---|---|---|---|---|
-| 1 | `Processor::process` takes only a buffer: no MIDI, no timestamped parameter events, no transport, no separate input and output | Architecture | 5 | 5 | 3 | 30 |
 | 2 | File parsers (WAV, parameter state, MIDI bytes) are not fuzzed | Test | 2 | 4 | 2 | 24 |
 | 3 | The allocation guard covers `dsp` only, not the device block adapters or `ParamSmoother` | Test | 2 | 4 | 2 | 24 |
 | 4 | No benchmarks, so a performance regression is invisible | Test | 3 | 3 | 2 | 24 |
@@ -35,33 +34,12 @@ Each item is scored from 1 to 5 on three axes:
 | 14 | `ChoiceParam` saves an index, so reordering options silently changes old sessions | Code | 2 | 3 | 2 | 20 |
 | 15 | The duplex error handler is behind a `Mutex`. It is never taken on the audio path, but it is the one lock in the crate | Code | 1 | 2 | 2 | 12 |
 
-### Why item 1 leads
-
-Everything in Phase 2 (plugins) is built on the process call. JUCE's
-`AudioProcessor` cannot express sample-accurate automation, MIDI 2.0, note
-expression or per-voice modulation, and retrofitting them is what its
-"AudioProcessor v2" effort is about. Adding a context to `Processor` now, while
-there are ten processors, is a day of work. Adding it after the plugin
-wrappers exist would mean changing every wrapper and every user's plugin.
-
-The intended shape:
-
-```rust
-pub struct ProcessContext<'a, S: Sample> {
-    pub input: &'a AudioBuffer<S>,       // may be empty for generators
-    pub output: &'a mut AudioBuffer<S>,
-    pub events: &'a EventBuffer,          // notes, parameters, expression: all timestamped
-    pub transport: &'a Transport,
-}
-```
-
-with the current in-place `process(&mut AudioBuffer)` kept as the simple form
-for pure effects.
-
 ## Paid back in this audit
 
 | Item | What was done |
 |---|---|
+| `Processor::process` took only a buffer, with no way to express events, automation or transport | `process_with` takes a `ProcessContext` carrying one timestamped `EventBuffer`, the `Transport` and a sidechain. `AudioBuffer::windowed` and `split_at_events` apply each event on its frame with no copying. See ADR 0005 |
+| Nothing checked that output is independent of block size | `crates/manguebyte/tests/offline.rs` renders a song with six different block patterns and requires bit-identical results. It caught a real defect on its first run: finished voices kept advancing until the end of their block |
 | Real-time safety rested on doc comments alone | `crates/manguebyte-dsp/tests/realtime.rs` installs a counting allocator and fails if any processor or transform allocates, reallocates or frees while processing |
 | The wait-free queue's `unsafe` code was only tested natively | CI runs `manguebyte-core` under Miri, which detects undefined behaviour and data races |
 | A build without the audio backend was never exercised | CI builds and tests the facade with `--no-default-features` |
@@ -75,8 +53,7 @@ order below is for the ones that need their own change.
 
 **Next (before any plugin work)**
 
-1. Item 1: `ProcessContext`, `EventBuffer` and `Transport`, with the existing
-   processors ported.
+1. Output events in `ProcessContext`, for processors that emit notes.
 2. Item 5: `cargo deny` in CI.
 3. Item 12: CHANGELOG and a first `0.1.0` release to crates.io.
 4. Item 3: extend the allocation guard to `devices` and `params`.

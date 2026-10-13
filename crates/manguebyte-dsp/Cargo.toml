@@ -13,6 +13,7 @@ homepage.workspace = true
 
 [dependencies]
 manguebyte-core.workspace = true
+manguebyte-midi.workspace = true
 
 [lints]
 workspace = true

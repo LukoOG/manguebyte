@@ -23,17 +23,21 @@
 //! ```
 
 mod biquad;
+mod context;
 mod delay;
 mod dynamics;
 mod envelope;
+pub mod event;
 pub mod fft;
 mod gain;
 mod oscillator;
 mod reverb;
 mod svf;
+mod synth;
 pub mod window;
 
 pub use biquad::{Biquad, BiquadCoefficients, Filter, FilterShape};
+pub use context::{ProcessContext, Transport, split_at_events};
 pub use delay::{Delay, DelayLine};
 pub use dynamics::{Compressor, NoiseGate};
 pub use envelope::{Adsr, AdsrParams};
@@ -41,6 +45,7 @@ pub use gain::Gain;
 pub use oscillator::{Oscillator, Waveform};
 pub use reverb::Reverb;
 pub use svf::{StateVariableFilter, SvfMode};
+pub use synth::{Synth, Voice};
 
 use manguebyte_core::{AudioBuffer, Sample};
 
@@ -70,9 +75,30 @@ pub trait Processor<S: Sample = f32> {
     /// Processes one block in place.
     fn process(&mut self, buffer: &mut AudioBuffer<S>);
 
+    /// Processes one block in place, knowing what happens during it: notes,
+    /// parameter changes and modulation with the frame each one falls on,
+    /// the transport position, and a sidechain input.
+    ///
+    /// The default ignores all of that and calls
+    /// [`process`](Self::process), which is right for a processor that only
+    /// transforms audio. Instruments and anything that follows tempo or
+    /// automation override it; [`split_at_events`] does the work of applying
+    /// each event on its exact frame.
+    fn process_with(&mut self, buffer: &mut AudioBuffer<S>, context: &ProcessContext<'_, S>) {
+        let _ = context;
+        self.process(buffer);
+    }
+
     /// Clears internal state such as filter memory and delay tails, without
     /// touching parameters.
     fn reset(&mut self) {}
+
+    /// How many frames late the output is compared with the input, for
+    /// example because of look-ahead. A host uses this to keep tracks
+    /// aligned. A chain reports the sum of its stages.
+    fn latency_samples(&self) -> usize {
+        0
+    }
 }
 
 impl<S: Sample, P: Processor<S> + ?Sized> Processor<S> for Box<P> {
@@ -82,8 +108,14 @@ impl<S: Sample, P: Processor<S> + ?Sized> Processor<S> for Box<P> {
     fn process(&mut self, buffer: &mut AudioBuffer<S>) {
         (**self).process(buffer);
     }
+    fn process_with(&mut self, buffer: &mut AudioBuffer<S>, context: &ProcessContext<'_, S>) {
+        (**self).process_with(buffer, context);
+    }
     fn reset(&mut self) {
         (**self).reset();
+    }
+    fn latency_samples(&self) -> usize {
+        (**self).latency_samples()
     }
 }
 
@@ -99,9 +131,21 @@ macro_rules! impl_processor_for_tuple {
                 let ($($member,)+) = self;
                 $($member.process(buffer);)+
             }
+            fn process_with(
+                &mut self,
+                buffer: &mut AudioBuffer<S>,
+                context: &ProcessContext<'_, S>,
+            ) {
+                let ($($member,)+) = self;
+                $($member.process_with(buffer, context);)+
+            }
             fn reset(&mut self) {
                 let ($($member,)+) = self;
                 $($member.reset();)+
+            }
+            fn latency_samples(&self) -> usize {
+                let ($($member,)+) = self;
+                0 $(+ $member.latency_samples())+
             }
         }
     };
@@ -165,5 +209,59 @@ mod tests {
         }
         let peak = buffer.peak();
         assert!(peak > 0.2 && peak <= 0.5, "peak was {peak}");
+    }
+
+    #[test]
+    fn context_and_latency_pass_through_chains_and_boxes() {
+        use crate::event::{Event, EventBuffer, EventKind, NoteRef};
+
+        /// Adds the number of events it was shown, and claims some latency.
+        struct CountEvents(usize);
+        impl Processor for CountEvents {
+            fn prepare(&mut self, _: &ProcessSpec) {}
+            fn process(&mut self, _: &mut AudioBuffer) {}
+            fn process_with(&mut self, buffer: &mut AudioBuffer, context: &ProcessContext<'_>) {
+                let count = context.events.len() as f32;
+                buffer.channel_mut(0).iter_mut().for_each(|s| *s += count);
+            }
+            fn latency_samples(&self) -> usize {
+                self.0
+            }
+        }
+        /// Doubles the signal.
+        struct Double;
+        impl Processor for Double {
+            fn prepare(&mut self, _: &ProcessSpec) {}
+            fn process(&mut self, buffer: &mut AudioBuffer) {
+                buffer.apply_gain(2.0);
+            }
+        }
+
+        let mut events = EventBuffer::with_capacity(4);
+        for offset in [0, 1] {
+            let note = NoteRef::new(0, 60);
+            let kind = EventKind::NoteOn {
+                note,
+                velocity: 1.0,
+            };
+            events.push(Event { offset, kind }).unwrap();
+        }
+        let transport = Transport::STOPPED;
+        let context = ProcessContext::new(&events, &transport);
+
+        let boxed: Box<dyn Processor> = Box::new(CountEvents(7));
+        let mut chain = (CountEvents(3), Double, boxed);
+        chain.prepare(&SPEC);
+        assert_eq!(chain.latency_samples(), 10);
+
+        // (0 + 2 events) doubled, then + 2 events again.
+        let mut buffer = AudioBuffer::new(1, 4);
+        chain.process_with(&mut buffer, &context);
+        assert_eq!(buffer.channel(0), &[6.0; 4]);
+
+        // Without a context, the same processors see no events.
+        buffer.clear();
+        chain.process(&mut buffer);
+        assert_eq!(buffer.peak(), 0.0);
     }
 }

@@ -21,7 +21,7 @@ Manguebyte
 
 | JUCE module | What it covers | Manguebyte | Status |
 |---|---|---|---|
-| `juce_audio_basics` | Audio buffers, sample conversion, MIDI messages and buffers, MIDI files, MPE, UMP, synthesiser voices, smoothed values, basic sources, ADSR | `core`, `midi`, `dsp` | 🚧 Buffers, smoothing, channel and system messages, SysEx, stream parsing, MIDI files, sample-accurate MIDI buffer and ADSR are done. Missing: MPE, UMP, voice allocation, audio sources |
+| `juce_audio_basics` | Audio buffers, sample conversion, MIDI messages and buffers, MIDI files, MPE, UMP, synthesiser voices, smoothed values, basic sources, ADSR | `core`, `midi`, `dsp` | 🚧 Buffers, smoothing, channel and system messages, SysEx, stream parsing, MIDI files, sample-accurate MIDI buffer and ADSR are done. Voice allocation is done too, with per-note expression. Missing: MPE zone handling, UMP, audio sources |
 | `juce_audio_devices` | Device enumeration and selection, input and output streams, per-platform backends (CoreAudio, WASAPI, ASIO, ALSA, JACK, Oboe, and others), MIDI ports, device manager with saved setup | `devices` | 🚧 Listing, selection by stable id, sample rate and buffer size, output, input and duplex are done. Missing: MIDI ports, host selection (ASIO, JACK), hot-plug notification, a device manager with saved setup |
 | `juce_audio_formats` | Readers and writers for WAV, AIFF, FLAC, Ogg Vorbis, MP3 and platform codecs; streaming sources; thumbnails cache; sampler | `formats` | 🚧 WAV read and write. Missing: streaming, every other format, metadata |
 | `juce_audio_processors` | The plugin and processor model, parameters and their state tree, plugin hosting for VST3, AU, LV2 and others, processor graph, plugin scanning | `params`, later `plugin`, `host`, `graph` | 🚧 Parameters and state are done, with a different design ([ADR 0003](adr/0003-parameters-without-listeners.md)). The processor model, hosting and graph are not started |
@@ -73,11 +73,11 @@ to. Each one is tied to something observable.
 | Old sessions after a range change | Position-based automation and state can shift meaning | State stores real values by id; loading is tolerant and reports ✅ |
 | Headless use | Split out in 8.0.11, still needs the event module | No GUI or event loop below the GUI crate ✅ |
 | CLAP | Not available natively; promised for JUCE 9, not in 9.0.x | First plugin format to be implemented ⬜ |
-| Sample-accurate automation | Not in `AudioProcessor` | Timestamped events in the process call from the first plugin API ⬜ |
-| MIDI 2.0, note expression, per-voice modulation | Not in the processor model | Designed into the event type before any wrapper is written ⬜ |
+| Sample-accurate automation | Not in `AudioProcessor` | Timestamped events in the process call, applied on their exact frame ✅ |
+| Note expression, per-voice and non-destructive modulation | Not in the processor model | Part of the event model; the synth routes each to the right voice ✅ (MIDI 2.0 UMP transport ⬜) |
 | Arbitrary FFT length | Powers of two | Any length ✅ |
 | Compile-time chains | Template chains exist; graph is dynamic | Tuples of processors inline end to end ✅ |
-| Deterministic offline rendering in CI | Possible with effort | A design goal: same processor, no device, bit-exact ⬜ |
+| Block-size independence | Left to each plugin; splitting a block is manual | Tested: a song rendered with six block patterns must match bit for bit ✅ |
 | Licence | AGPLv3 or commercial | MIT or Apache-2.0 ✅ |
 
 Sources for the JUCE column: the JUCE repository and changelog, the JUCE

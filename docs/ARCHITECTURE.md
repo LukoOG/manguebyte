@@ -28,12 +28,12 @@ nothing beside or above it.
 ```text
                          manguebyte            facade: re-exports + prelude
                               |
-      +-----------+-----------+-----------+-----------+
-      |           |           |           |           |
-   devices     formats       dsp        params       midi
-   (cpal)                     |           |
+      +-----------+-----------+-----------+
       |           |           |           |
-      +-----------+-----------+-----------+-----------+
+   devices     formats       dsp        params
+   (cpal)         |          /  \          |
+      |           |       midi   \         |
+      +-----------+---------------+--------+
                               |
                             core                no dependencies
 ```
@@ -43,7 +43,7 @@ nothing beside or above it.
 | `manguebyte-core` | `AudioBuffer`, `Sample`, smoothing, atomics, wait-free queue | nothing |
 | `manguebyte-midi` | MIDI messages and sample-accurate event buffers | nothing |
 | `manguebyte-params` | Parameters, ranges, smoothing, saved state | core |
-| `manguebyte-dsp` | `Processor`, filters, oscillators, FFT, windows | core |
+| `manguebyte-dsp` | `Processor`, events, transport, synth, filters, effects, FFT | core, midi |
 | `manguebyte-formats` | Audio file reading and writing | core |
 | `manguebyte-devices` | Sound card input, output and duplex | core, `cpal` |
 | `manguebyte` | Everything under one name | all of the above |
@@ -143,8 +143,15 @@ old value through a queue to be freed.
   processor, resolved at compile time, so a fixed chain costs the same as
   calling each stage by hand and the compiler can inline across stages.
   `Box<dyn Processor>` covers chains decided at run time.
-- **`MidiBuffer`** holds events with their position inside the block, so a
-  note can start on the exact sample it should.
+- **`EventBuffer`** carries everything that happens during a block, each
+  item with the frame it falls on: notes, per-note expression, parameter
+  values, modulation and raw MIDI, in one ordered stream.
+- **`ProcessContext`** hands a processor that stream together with the
+  transport and an optional sidechain. `split_at_events` cuts the block at
+  each event without copying, so every change lands on its exact frame and
+  the output does not depend on how the host sized its blocks.
+- **`Synth`** allocates voices from those events. Per-note expression and
+  modulation reach one voice; parameters reach all of them.
 
 ## What the design learns from JUCE
 
@@ -162,22 +169,22 @@ that the plugin API must honour when it is written.
 | Audio thread reads parameters through a string lookup | Typed struct fields; ids are for hosts and interfaces only | Done |
 | Processing and hosting depended on GUI modules | The GUI crate sits above the plugin API | By construction |
 | No native CLAP | CLAP is the first plugin format, not an add-on | Planned |
-| No sample-accurate automation in `AudioProcessor` | The process call carries timestamped events from day one | Planned |
-| No MIDI 2.0, note expression or per-voice modulation in the processor model | The event type is designed for them before any format wrapper exists | Planned |
+| No sample-accurate automation in `AudioProcessor` | The process call carries timestamped events; `split_at_events` applies each on its frame | Done |
+| No MIDI 2.0, note expression or per-voice modulation in the processor model | Notes carry ids and float velocity; expression and modulation are per note; modulation never alters the stored value | Done in the model; UMP transport planned |
 | Real-time safety rests on convention | A counting-allocator test and Miri in CI | Done, grows with the code |
 
 Sources for the left column are in
 [ADR 0002](adr/0002-real-time-thread-model.md) and
-[ADR 0003](adr/0003-parameters-without-listeners.md). JUCE is studied as a
+[ADR 0003](adr/0003-parameters-without-listeners.md); the event model is
+in [ADR 0005](adr/0005-one-timestamped-event-stream.md). JUCE is studied as a
 reference; its code is never copied. See
 [ADR 0004](adr/0004-juce-as-reference.md).
 
 ## What we would revisit as it grows
 
-- **`Processor::process` takes only a buffer.** It needs a context carrying
-  events, transport and separate inputs and outputs before the plugin API can
-  be built on it. This is the next architectural step; see
-  [TECH_DEBT.md](TECH_DEBT.md).
+- **`ProcessContext` has no output events yet.** An arpeggiator or a MIDI
+  effect needs to emit events as well as receive them. The struct is
+  non-exhaustive so the field can be added without breaking anyone.
 - **Duplex streams absorb clock drift by dropping or padding.** Once a
   resampler exists, they should correct drift by adaptive resampling.
 - **The FFT is scalar radix-2.** Split-radix and SIMD kernels are a

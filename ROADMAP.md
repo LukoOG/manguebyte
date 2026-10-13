@@ -52,7 +52,8 @@ Everything a standalone audio application needs, short of a user interface.
 - ✅ Reverb (feedback delay network)
 - ⬜ Chorus, phaser, convolution
 - ⬜ Wavetable oscillator, noise generators, LFO
-- ⬜ Polyphonic voice allocation
+- ✅ Polyphonic voice allocation with per-note expression and modulation
+- ✅ Sample-accurate events, transport and sidechain in the process call
 - ⬜ SIMD-accelerated buffer operations
 
 **Formats**
@@ -63,7 +64,8 @@ Everything a standalone audio application needs, short of a user interface.
 
 **Core**
 - ✅ Parameter system: ranges, skew, text conversion, smoothing
-- ⬜ Sample-accurate parameter automation events and change gestures
+- ✅ Sample-accurate parameter automation events
+- ⬜ Change gestures (begin and end of a user edit)
 - ✅ Parameter state save and restore, tolerant of version changes
 - ⬜ Audio thread helpers: denormal protection, allocation checking in debug
 - ⬜ `no_std` support for `manguebyte-core` and `manguebyte-dsp`

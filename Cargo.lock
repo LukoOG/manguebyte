@@ -295,6 +295,7 @@ name = "manguebyte-dsp"
 version = "0.1.0"
 dependencies = [
  "manguebyte-core",
+ "manguebyte-midi",
 ]
 
 [[package]]

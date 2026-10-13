@@ -6,7 +6,7 @@
 //! | Module | Crate | What it holds |
 //! |---|---|---|
 //! | (root) | `manguebyte-core` | [`AudioBuffer`], [`Sample`], [`Smoothed`], atomics, [`spsc`] queue |
-//! | [`dsp`] | `manguebyte-dsp` | oscillators, filters, envelopes, delays, dynamics, reverb, FFT, windows, processor chains |
+//! | [`dsp`] | `manguebyte-dsp` | processor chains, sample-accurate events, polyphonic synth, filters, effects, FFT |
 //! | [`params`] | `manguebyte-params` | thread-safe parameters, ranges, smoothing, saved state |
 //! | [`midi`] | `manguebyte-midi` | MIDI messages, stream parsing, MIDI files, sample-accurate event buffers |
 //! | [`formats`] | `manguebyte-formats` | audio file reading and writing |
@@ -35,7 +35,9 @@
 //! # Ok::<(), wav::WavError>(())
 //! ```
 
-pub use manguebyte_core::{AtomicF32, AtomicF64, AudioBuffer, Sample, Smoothed, decibels, spsc};
+pub use manguebyte_core::{
+    AtomicF32, AtomicF64, AudioBuffer, ParamId, Sample, Smoothed, decibels, spsc,
+};
 
 #[cfg(feature = "devices")]
 pub use manguebyte_devices as devices;
@@ -46,10 +48,11 @@ pub use manguebyte_params as params;
 
 /// The names most programs need, in one import.
 pub mod prelude {
+    pub use crate::dsp::event::{Event, EventBuffer, EventKind, Expression, NoteRef};
     pub use crate::dsp::{
         Adsr, AdsrParams, Biquad, BiquadCoefficients, Compressor, Delay, DelayLine, Filter,
-        FilterShape, Gain, NoiseGate, Oscillator, ProcessSpec, Processor, Reverb,
-        StateVariableFilter, SvfMode, Waveform,
+        FilterShape, Gain, NoiseGate, Oscillator, ProcessContext, ProcessSpec, Processor, Reverb,
+        StateVariableFilter, SvfMode, Synth, Transport, Voice, Waveform, split_at_events,
     };
     pub use crate::formats::wav::{self, WavFormat};
     pub use crate::midi::file::{MetaEvent, MidiFile, Track};
@@ -61,7 +64,7 @@ pub mod prelude {
         BoolParam, Changed, ChoiceParam, FloatParam, FloatRange, IntParam, Param, ParamSet,
         ParamSmoother, ParamState, Smoothing, param_set,
     };
-    pub use crate::{AtomicF32, AtomicF64, AudioBuffer, Sample, Smoothed, decibels, spsc};
+    pub use crate::{AtomicF32, AtomicF64, AudioBuffer, ParamId, Sample, Smoothed, decibels, spsc};
 
     #[cfg(feature = "devices")]
     pub use crate::devices::{
