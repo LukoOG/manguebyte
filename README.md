@@ -6,7 +6,8 @@
 
 <p align="center">
   <strong>A modern, real-time-safe audio framework for Rust.</strong><br>
-  Our goal is to be for Rust what JUCE is for C++, and then go further.
+  Our goal is to be for Rust what JUCE is for C++, and then go further.<br>
+  <a href="#where-it-already-goes-beyond-juce">See where it already does.</a>
 </p>
 
 <p align="center">
@@ -42,11 +43,43 @@ for Rust from the first line:
 - **Permissive licensing.** MIT or Apache-2.0, your choice. No copyleft, no
   per-seat fees, no splash screen.
 
+## Where it already goes beyond JUCE
+
+Matching JUCE is the baseline. These are the places where Manguebyte already
+does something JUCE 9 does not, each one backed by a test that runs on every
+commit. [docs/BEYOND_JUCE.md](docs/BEYOND_JUCE.md) explains every row, with
+sources for what is said about JUCE and the limits of each claim.
+
+| | JUCE 9 | Manguebyte | Proof |
+|---|---|---|---|
+| **Automation timing** | A processor reads each parameter once per block | Every change arrives with its frame and is applied on the exact sample | [test](crates/manguebyte-plugin/src/harness.rs) |
+| **Block size** | Whether the sound depends on the host's buffer size is up to each plugin | The same song rendered with six block patterns must match bit for bit | [test](crates/manguebyte/tests/offline.rs) |
+| **Changes from a UI or a restored state** | Found by polling, or by listeners that can run on the audio thread | Delivered as events in the same stream as automation; no listeners exist | [test](crates/manguebyte-plugin/src/harness.rs) |
+| **Real-time safety** | A rule in the documentation | A counting allocator fails CI if any processor, or the plugin wrapper, touches the heap while processing | [test](crates/manguebyte-dsp/tests/realtime.rs) |
+| **Per-note control** | Through MPE channels | Note expression and modulation events addressed to one note; modulation never alters the stored value | [test](crates/manguebyte-dsp/src/synth.rs) |
+| **CLAP** | Not supported natively | One line, `export_clap!`; the example plugin passes the CLAP project's validator in CI | [CI](.github/workflows/ci.yml) |
+| **Testing a plugin** | Needs a host or a hand-built rig | `Harness` plays notes and automation into a plugin inside a unit test | [example](plugins/pluck/src/lib.rs) |
+| **Parameters and state across threads** | Each plugin synchronises state access itself | Parameters are atomics; saving and loading need no lock and cannot race | [test](crates/manguebyte-params/src/set.rs) |
+| **Licence** | AGPLv3 or commercial | MIT or Apache-2.0 | [licence](LICENSE-MIT) |
+
+These checks find real problems. The block-size test failed the first time it
+ran and exposed a voice that kept running after it had finished. The
+allocation guard caught a mutex that allocates on macOS. The CLAP validator
+and Miri each found a defect that the project's own tests had missed. All of
+them are fixed, and the checks stay in CI.
+
+**Where JUCE is ahead.** JUCE has more than twenty years of production use
+behind it and far more breadth: a full GUI toolkit, VST3, AU, AAX and LV2,
+plugin hosting, many more DSP blocks and file formats, and mobile platforms.
+Manguebyte has none of those yet. [docs/JUCE_PARITY.md](docs/JUCE_PARITY.md)
+tracks the gap module by module.
+
 ## Status
 
-Manguebyte is **young**. Version 0.1 is the foundation: it is tested and
-usable, but it covers a small part of the road ahead, and the API will change
-before 1.0. See [ROADMAP.md](ROADMAP.md) for what exists and what is planned.
+Manguebyte is **young**. What exists is tested and usable, and it is enough
+to build and ship a CLAP instrument or effect, but it covers a small part of
+the road ahead and the API will change before 1.0. See
+[ROADMAP.md](ROADMAP.md) for what exists and what is planned.
 
 | Crate | What it gives you today |
 |---|---|
@@ -186,6 +219,8 @@ host's block size are checked on every commit.
 
 ## Design
 
+- [docs/BEYOND_JUCE.md](docs/BEYOND_JUCE.md): what Manguebyte does that JUCE
+  does not, how each claim is tested, and where JUCE is still ahead.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): how the crates fit together,
   which thread runs what, and what the design learns from JUCE's history.
 - [docs/JUCE_PARITY.md](docs/JUCE_PARITY.md): JUCE's 24 modules, one by one,

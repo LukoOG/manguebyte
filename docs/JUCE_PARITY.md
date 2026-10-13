@@ -64,6 +64,9 @@ it, so the plan here is mostly to not rebuild it.
 
 Things JUCE does not offer, or offers only in part, that Manguebyte commits
 to. Each one is tied to something observable.
+[BEYOND_JUCE.md](BEYOND_JUCE.md) explains the main ones in detail: the
+problem, what JUCE does, what Manguebyte does, the test that proves it and
+the limits of the claim.
 
 | Area | JUCE today | Manguebyte |
 |---|---|---|
