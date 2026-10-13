@@ -58,12 +58,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri
-      # The framework has unsafe code in three places: the wait-free queue
-      # and the CLAP and VST 3 wrappers, which talk to hosts through C and
-      # COM. Miri runs their tests under an interpreter that detects
-      # undefined behaviour and data races. The wrapper tests drive each
-      # plugin through its binary interface, so every pointer it handles is
-      # checked.
+      # The framework's unsafe code that handles memory is in three places:
+      # the wait-free queue and the CLAP and VST 3 wrappers, which talk to
+      # hosts through C and COM. Miri runs their tests under an interpreter
+      # that detects undefined behaviour and data races. The wrapper tests
+      # drive each plugin through its binary interface, so every pointer it
+      # handles is checked.
       - run: cargo miri test -p manguebyte-core
         env:
           RUSTFLAGS: ""

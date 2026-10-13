@@ -4,7 +4,7 @@
 //! Everything here runs on the audio thread and allocates only in `new`.
 
 use cpal::{FromSample, Sample};
-use manguebyte_core::AudioBuffer;
+use manguebyte_core::{AudioBuffer, NoDenormals};
 
 /// Feeds an output device from a planar `f32` callback, splitting oversized
 /// requests into blocks.
@@ -22,6 +22,8 @@ impl<F: FnMut(&mut AudioBuffer<f32>)> BlockRenderer<F> {
     }
 
     pub(crate) fn render<T: Sample + FromSample<f32>>(&mut self, data: &mut [T]) {
+        // A fading sound must not slow the audio thread down.
+        let _quiet = NoDenormals::new();
         let channels = self.scratch.num_channels();
         if channels == 0 {
             return;
@@ -54,6 +56,7 @@ impl<F: FnMut(&AudioBuffer<f32>)> BlockCapturer<F> {
     where
         f32: FromSample<T>,
     {
+        let _quiet = NoDenormals::new();
         let channels = self.scratch.num_channels();
         if channels == 0 {
             return;

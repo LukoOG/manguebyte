@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use manguebyte_core::AudioBuffer;
+use manguebyte_core::{AudioBuffer, NoDenormals};
 use manguebyte_dsp::event::{Event, EventBuffer, EventKind, NoteRef};
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Transport};
 use manguebyte_params::{LoadReport, ParamSet};
@@ -243,6 +243,8 @@ impl<P: Plugin> Harness<P> {
     }
 
     fn run(&mut self, buffer: &mut AudioBuffer<f32>, sidechain: Option<&AudioBuffer<f32>>) {
+        // The same arithmetic as inside a host, where the wrappers do this.
+        let _quiet = NoDenormals::new();
         let frames = buffer.num_frames();
         let mut done = 0;
         while done < frames {

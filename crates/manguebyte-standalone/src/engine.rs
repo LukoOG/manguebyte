@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use manguebyte_core::AudioBuffer;
 use manguebyte_core::spsc::Consumer;
+use manguebyte_core::{AudioBuffer, NoDenormals};
 use manguebyte_devices::midi::{MidiInputMessage, MidiReceiver};
 use manguebyte_dsp::event::EventBuffer;
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Transport};
@@ -78,6 +78,7 @@ impl<P: Plugin> Engine<P> {
     /// device's buffer, in the device's channel count; it must not be longer
     /// than the block size the engine was created with. Real-time safe.
     pub fn render(&mut self, input: Option<&AudioBuffer<f32>>, output: &mut AudioBuffer<f32>) {
+        let _quiet = NoDenormals::new();
         let frames = output.num_frames().min(self.work.capacity());
         let params: &dyn ParamSet = &*self.params;
 

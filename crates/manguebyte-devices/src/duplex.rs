@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{FromSample, Sample, SizedSample};
-use manguebyte_core::AudioBuffer;
 use manguebyte_core::spsc::{self, Consumer, Producer};
+use manguebyte_core::{AudioBuffer, NoDenormals};
 
 use crate::blocks::interleave;
 use crate::device::with_sample_type;
@@ -331,6 +331,8 @@ struct Renderer<F> {
 
 impl<F: FnMut(&AudioBuffer<f32>, &mut AudioBuffer<f32>)> Renderer<F> {
     fn render<T: Sample + FromSample<f32>>(&mut self, data: &mut [T]) {
+        // A fading sound must not slow the audio thread down.
+        let _quiet = NoDenormals::new();
         let channels = self.output.num_channels();
         if channels == 0 {
             return;

@@ -35,6 +35,13 @@ Nothing has been published to crates.io yet. Everything below is on `main`.
   does not click. Both examples are validated as CLAP and as VST 3 in CI.
 - `Harness::process_with_sidechain` feeds an effect's sidechain in a test.
 
+### Real-time safety
+
+- `NoDenormals`: a guard that makes the processor treat subnormal numbers
+  as zero on the current thread, so a fading sound cannot slow it down. The
+  CLAP and VST 3 wrappers, the standalone engine, the device streams and
+  `Harness` hold it around every block, so plugins need not. See ADR 0006.
+
 ### Processing model
 
 - `Processor::process_with` takes a `ProcessContext` carrying one

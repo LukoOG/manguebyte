@@ -14,7 +14,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use manguebyte_clap::clap_sys::audio_buffer::clap_audio_buffer;
@@ -36,7 +36,7 @@ use manguebyte_clap::clap_sys::process::*;
 use manguebyte_clap::clap_sys::stream::{clap_istream, clap_ostream};
 use manguebyte_clap::clap_sys::version::CLAP_VERSION;
 use manguebyte_clap::plugin_entry;
-use manguebyte_core::{AtomicF64, AudioBuffer, ParamId};
+use manguebyte_core::{AtomicF64, AudioBuffer, NoDenormals, ParamId};
 use manguebyte_dsp::event::{EventKind, Expression, NoteRef};
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Processor, Synth, Voice, split_at_events};
 use manguebyte_params::{BoolParam, ChoiceParam, FloatParam, FloatRange, param_set};
@@ -103,6 +103,16 @@ const SHAPE: ParamId = ParamId::from_name("shape");
 /// parameters of the most recently created `Level`.
 static LEVEL_PARAMS: Mutex<Option<Arc<LevelParams>>> = Mutex::new(None);
 
+/// Half of the smallest normal number, worked out by the processor and not
+/// by the compiler. It is subnormal, unless such numbers are being flushed.
+fn half_of_the_smallest() -> f32 {
+    use std::hint::black_box;
+    black_box(black_box(f32::MIN_POSITIVE) * black_box(0.5))
+}
+
+/// What `half_of_the_smallest` came to inside the last `Level::process`.
+static HALF_INSIDE_PROCESS: AtomicU32 = AtomicU32::new(u32::MAX);
+
 fn level_params() -> Arc<LevelParams> {
     LEVEL_PARAMS.lock().unwrap().clone().unwrap()
 }
@@ -160,6 +170,7 @@ impl Plugin for Level {
 
     fn process(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
         assert!(!self.params.explode.value(), "the plugin was told to fail");
+        HALF_INSIDE_PROCESS.store(half_of_the_smallest().to_bits(), Ordering::Relaxed);
         self.tempo_seen.store(
             context.transport.tempo_bpm.unwrap_or(-1.0),
             Ordering::Relaxed,
@@ -949,6 +960,32 @@ fn flush_updates_values_without_processing() {
     let processed = host.process(&mut stereo(1.0, 8), None, vec![], None);
     assert_eq!(processed.output[0], vec![3.0; 8]);
     assert!(processed.reported.is_empty());
+}
+
+#[test]
+fn numbers_too_small_to_hear_are_zero_while_the_plugin_runs_and_only_then() {
+    let (_guard, host) = level_host();
+    assert!(half_of_the_smallest() > 0.0, "the test thread flushes them");
+    let processed = host.process(&mut stereo(1.0, 8), None, vec![], None);
+    assert_eq!(processed.status, CLAP_PROCESS_CONTINUE);
+
+    let inside = f32::from_bits(HALF_INSIDE_PROCESS.load(Ordering::Relaxed));
+    if NoDenormals::SUPPORTED {
+        assert_eq!(inside, 0.0, "the plugin ran with subnormal numbers on");
+    }
+    // The host gets its own setting back.
+    assert!(
+        half_of_the_smallest() > 0.0,
+        "the setting leaked into the host"
+    );
+
+    // Also when the plugin fails half-way.
+    level_params().explode.set(true);
+    host.process(&mut stereo(1.0, 8), None, vec![], None);
+    assert!(
+        half_of_the_smallest() > 0.0,
+        "the setting leaked after a panic"
+    );
 }
 
 #[test]

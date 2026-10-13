@@ -9,11 +9,13 @@
 //! - [`AtomicF32`] / [`AtomicF64`]: lock-free values shared with the audio thread.
 //! - [`spsc`]: a wait-free single-producer single-consumer queue.
 //! - [`decibels`]: gain conversions.
+//! - [`NoDenormals`]: stops near-silence from slowing the processor down.
 //! - [`ParamId`]: a compact, stable number standing for a parameter.
 
 mod atomic;
 mod buffer;
 pub mod decibels;
+mod denormal;
 mod param_id;
 mod sample;
 mod smoothing;
@@ -21,6 +23,7 @@ pub mod spsc;
 
 pub use atomic::{AtomicF32, AtomicF64};
 pub use buffer::AudioBuffer;
+pub use denormal::NoDenormals;
 pub use param_id::ParamId;
 pub use sample::Sample;
 pub use smoothing::Smoothed;

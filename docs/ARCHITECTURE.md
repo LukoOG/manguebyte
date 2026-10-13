@@ -118,9 +118,12 @@ its own timer. See [ADR 0003](adr/0003-parameters-without-listeners.md).
 This is checked, not hoped for. `crates/manguebyte-dsp/tests/realtime.rs`
 installs a counting allocator and fails if any processor touches the heap
 while processing. Every new processor is added to that test. The only
-`unsafe` code in the framework is in three places, the wait-free queue and
-the boundaries where the CLAP and VST 3 wrappers meet a host, and all three
-run under Miri in CI.
+`unsafe` code in the framework is in four places: the wait-free queue, the
+boundaries where the CLAP and VST 3 wrappers meet a host, and the two
+instructions that tell the processor to treat subnormal numbers as zero
+([ADR 0006](adr/0006-subnormal-numbers-are-flushed.md)). The first three run
+under Miri in CI; the last cannot, and is checked by what the processor then
+does.
 
 ### State
 
@@ -184,6 +187,7 @@ that the plugin API must honour when it is written.
 | No sample-accurate automation in `AudioProcessor` | The process call carries timestamped events; `split_at_events` applies each on its frame | Done |
 | No MIDI 2.0, note expression or per-voice modulation in the processor model | Notes carry ids and float velocity; expression and modulation are per note; modulation never alters the stored value | Done in the model; UMP transport planned |
 | Real-time safety rests on convention | A counting-allocator test and Miri in CI | Done, grows with the code |
+| Each plugin has to remember `ScopedNoDenormals` in its callback | The wrappers and the device streams hold the guard around every block | Done |
 
 Sources for the left column are in
 [ADR 0002](adr/0002-real-time-thread-model.md) and

@@ -31,6 +31,7 @@ says where. Nothing here contains JUCE code: see
 | [Testing a plugin](#7-a-plugin-can-be-tested-without-a-host) | Needs a host or a hand-built rig | In a unit test, with `Harness` | [`plugins/pluck`](../plugins/pluck/src/lib.rs) |
 | [Thread safety of parameters and state](#8-parameters-and-state-cannot-race) | Synchronised by each plugin | Atomics; nothing to lock | [`set.rs`](../crates/manguebyte-params/src/set.rs) |
 | [Licence](#9-licence) | AGPLv3 or commercial | MIT or Apache-2.0 | [`LICENSE-MIT`](../LICENSE-MIT) |
+| [Slow-downs in silence](#10-a-fading-sound-cannot-slow-the-audio-thread-down) | A guard each plugin places in its own callback | Set by the framework around every plugin and every device callback | [`denormal.rs`](../crates/manguebyte-core/src/denormal.rs), both `abi.rs` |
 
 ## 1. Automation on the exact sample
 
@@ -261,6 +262,40 @@ ready-made type yet.
 JUCE is offered under the AGPLv3 or a commercial licence. Manguebyte is under
 MIT or Apache-2.0, at your option: no copyleft, no per-seat fee and no splash
 screen, for open and closed products alike.
+
+## 10. A fading sound cannot slow the audio thread down
+
+**The problem.** A fading sound does not reach zero. Filter memory and reverb
+tails shrink until their values are *subnormal*: still not zero, and tens of
+times slower for a processor to compute with. The plugin then costs the most
+in the silence after a note. Processors have a per-thread setting that rounds
+such numbers to zero, and using it is standard practice.
+
+**In JUCE.** The setting is available as
+[`ScopedNoDenormals`](https://docs.juce.com/master/classScopedNoDenormals.html),
+a guard that the author of each plugin places at the top of `processBlock`.
+The plugin template includes it. Code that did not start from the template,
+or a callback written later, is unprotected until someone notices.
+
+**In Manguebyte.** The framework holds the guard itself: the CLAP and VST 3
+wrappers and the standalone engine around `Plugin::process`, and the device
+streams around every callback. There is nothing for a plugin author to
+remember. The setting is put back on the way out, so the host's own code
+runs as it expects.
+
+**Check it.** `numbers_too_small_to_hear_are_zero_while_the_plugin_runs_and_only_then`,
+in the tests of both wrappers, has a plugin report what the processor does
+with a subnormal number from inside `process`, then checks that the host's
+thread is back to its own setting afterwards, including after the plugin
+panics. Measured on the example effect, 4,000 blocks of subnormal input took
+442 ms without the guard and 31 ms with it.
+
+**Limit.** `x86_64` and `aarch64` only; elsewhere the guard does nothing.
+Rust does not define floating-point behaviour under a changed setting, and
+[ADR 0006](adr/0006-subnormal-numbers-are-flushed.md) says what that means
+in practice and why the trade is taken. A program that calls a processor in
+its own loop, outside the wrappers, streams and test harness, creates the
+guard itself.
 
 ## Where JUCE is ahead
 

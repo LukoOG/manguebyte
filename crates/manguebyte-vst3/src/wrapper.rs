@@ -54,7 +54,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
-use manguebyte_core::{AtomicF64, AudioBuffer, ParamId};
+use manguebyte_core::{AtomicF64, AudioBuffer, NoDenormals, ParamId};
 use manguebyte_dsp::event::{Event, EventBuffer, EventKind, Expression, NoteRef};
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Transport};
 use manguebyte_midi::MidiMessage;
@@ -906,6 +906,9 @@ impl<P: Plugin> vst::IAudioProcessorTrait for Component<P> {
 
     unsafe fn process(&self, data: *mut vst::ProcessData) -> tresult {
         guard(kResultFalse, || {
+            // Numbers too small to hear are zero for as long as the plugin
+            // runs, and the host's own setting is back when this returns.
+            let _quiet = NoDenormals::new();
             // SAFETY: the host passes a `ProcessData` that is valid for
             // the duration of this call, or null.
             let Some(data) = (unsafe { data.as_mut() }) else {

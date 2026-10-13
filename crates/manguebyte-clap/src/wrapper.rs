@@ -44,7 +44,7 @@ use clap_sys::plugin_features::*;
 use clap_sys::process::*;
 use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::version::{CLAP_VERSION, clap_version_is_compatible};
-use manguebyte_core::{AudioBuffer, ParamId};
+use manguebyte_core::{AudioBuffer, NoDenormals, ParamId};
 use manguebyte_dsp::event::{Event, EventBuffer, EventKind, Expression, NoteRef};
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Transport};
 use manguebyte_midi::MidiMessage;
@@ -487,6 +487,9 @@ unsafe extern "C" fn plugin_process<P: Plugin>(
     process: *const clap_process,
 ) -> clap_process_status {
     guard(CLAP_PROCESS_ERROR, || {
+        // Numbers too small to hear are zero for as long as the plugin
+        // runs, and the host's own setting is back when this returns.
+        let _quiet = NoDenormals::new();
         // SAFETY: the host passes a plugin it created through our factory.
         let Some(instance) = (unsafe { instance::<P>(plugin) }) else {
             return CLAP_PROCESS_ERROR;

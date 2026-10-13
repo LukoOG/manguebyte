@@ -60,6 +60,7 @@ sources for what is said about JUCE and the limits of each claim.
 | **CLAP** | Not supported natively | One line, `export_clap!`; the example plugin passes the CLAP project's validator in CI | [CI](.github/workflows/ci.yml) |
 | **Testing a plugin** | Needs a host or a hand-built rig | `Harness` plays notes and automation into a plugin inside a unit test | [example](plugins/pluck/src/lib.rs) |
 | **Parameters and state across threads** | Each plugin synchronises state access itself | Parameters are atomics; saving and loading need no lock and cannot race | [test](crates/manguebyte-params/src/set.rs) |
+| **Slow-downs in silence** | A guard against subnormal numbers that each plugin places in its own callback | Set by the framework around every plugin and every device callback | [test](crates/manguebyte-vst3/tests/abi.rs) |
 | **Licence** | AGPLv3 or commercial | MIT or Apache-2.0 | [licence](LICENSE-MIT) |
 
 These checks find real problems. The block-size test failed the first time it
@@ -68,8 +69,10 @@ allocation guard caught a mutex that allocates on macOS. The CLAP validator
 and Miri each found a defect that the project's own tests had missed. The
 VST 3 wrapper's tests found a synth that forgot where the pitch wheel was
 between notes, and Steinberg's validator showed a class id that a session
-moved between Windows and macOS would not have recognised. All of them are
-fixed, and the checks stay in CI.
+moved between Windows and macOS would not have recognised. The CLAP
+validator's timing of the example effect led to the framework guarding every
+plugin against subnormal numbers. All of them are fixed, and the checks stay
+in CI.
 
 **Where JUCE is ahead.** JUCE has more than twenty years of production use
 behind it and far more breadth: a full GUI toolkit with plugin editors, AU,
@@ -88,7 +91,7 @@ small part of the road ahead and the API will change before 1.0. See
 | Crate | What it gives you today |
 |---|---|
 | [`manguebyte`](crates/manguebyte) | The whole framework under one name, plus a prelude |
-| [`manguebyte-core`](crates/manguebyte-core) | `AudioBuffer`, the `Sample` trait, `Smoothed` values, atomic floats, a wait-free SPSC queue, decibel maths |
+| [`manguebyte-core`](crates/manguebyte-core) | `AudioBuffer`, the `Sample` trait, `Smoothed` values, atomic floats, a wait-free SPSC queue, decibel maths, a guard against subnormal numbers |
 | [`manguebyte-dsp`](crates/manguebyte-dsp) | The `Processor` trait and tuple chains, sample-accurate events and transport, a polyphonic `Synth` with per-note expression, band-limited oscillator, biquad filters (8 shapes), state-variable filter, ADSR envelope, delay line and echo, compressor, noise gate, look-ahead limiter, reverb, waveshaper, oversampling, resampling at any ratio, noise, LFO, smoothed gain, FFT of any length, window functions, FIR design |
 | [`manguebyte-graph`](crates/manguebyte-graph) | A processing graph that is rewired while it plays: edits reach the audio thread through a wait-free queue, nodes keep their state, removed nodes are freed off the audio thread, and paths of different latency are lined up automatically |
 | [`manguebyte-params`](crates/manguebyte-params) | Lock-free float, integer, switch and choice parameters; linear, skewed and logarithmic ranges; text conversion; smoothing; saved state that survives version changes |

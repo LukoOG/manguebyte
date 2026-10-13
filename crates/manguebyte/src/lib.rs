@@ -5,7 +5,7 @@
 //!
 //! | Module | Crate | What it holds |
 //! |---|---|---|
-//! | (root) | `manguebyte-core` | [`AudioBuffer`], [`Sample`], [`Smoothed`], atomics, [`spsc`] queue |
+//! | (root) | `manguebyte-core` | [`AudioBuffer`], [`Sample`], [`Smoothed`], atomics, [`spsc`] queue, [`NoDenormals`] |
 //! | [`dsp`] | `manguebyte-dsp` | processor chains, sample-accurate events, polyphonic synth, filters, effects, FFT |
 //! | [`params`] | `manguebyte-params` | thread-safe parameters, ranges, smoothing, saved state |
 //! | [`graph`] | `manguebyte-graph` | a processing graph that can be rewired while it plays |
@@ -41,7 +41,7 @@
 //! ```
 
 pub use manguebyte_core::{
-    AtomicF32, AtomicF64, AudioBuffer, ParamId, Sample, Smoothed, decibels, spsc,
+    AtomicF32, AtomicF64, AudioBuffer, NoDenormals, ParamId, Sample, Smoothed, decibels, spsc,
 };
 
 #[cfg(feature = "clap")]
@@ -83,7 +83,9 @@ pub mod prelude {
         ParamSmoother, ParamState, Smoothing, param_set,
     };
     pub use crate::plugin::{AudioLayout, Harness, Plugin, PluginInfo, PluginKind};
-    pub use crate::{AtomicF32, AtomicF64, AudioBuffer, ParamId, Sample, Smoothed, decibels, spsc};
+    pub use crate::{
+        AtomicF32, AtomicF64, AudioBuffer, NoDenormals, ParamId, Sample, Smoothed, decibels, spsc,
+    };
 
     #[cfg(feature = "devices")]
     pub use crate::devices::{
