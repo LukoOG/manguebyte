@@ -40,6 +40,31 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo test --workspace
 
+  features:
+    name: Without default features
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # No audio backend and no system libraries: this is what an embedded
+      # or headless user builds.
+      - run: cargo test -p manguebyte --no-default-features
+
+  miri:
+    name: Miri (unsafe code)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      # The wait-free queue is the only unsafe code in the framework. Miri
+      # runs its tests under an interpreter that detects undefined behaviour
+      # and data races.
+      - run: cargo miri test -p manguebyte-core
+        env:
+          RUSTFLAGS: ""
+
   msrv:
     name: Minimum supported Rust version
     runs-on: ubuntu-latest

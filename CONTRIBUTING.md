@@ -17,21 +17,28 @@ issues and pull requests. Imperfect English is completely fine.
 - **Write code.** Pick an item from the roadmap or an open issue, comment that
   you are taking it, and send a pull request.
 
-## The clean-room rule
+## JUCE is a reference, not a source
 
-Manguebyte aims to offer what JUCE offers, but it is an independent
-implementation under a different license.
+Manguebyte aims to offer what JUCE offers and to fix what JUCE users
+struggle with, so we study JUCE closely. It is an independent implementation
+under a different licence, so we never take code from it.
 
-- **Never copy or translate code from JUCE**, and do not write code while
-  reading its source. JUCE is licensed under the AGPL or a commercial license,
-  both of which are incompatible with ours.
-- The same goes for any other project whose license is not compatible with
+- **Do** use JUCE's module list, public documentation, changelog, issue
+  tracker and forum to decide what to build and which designs to avoid.
+  [docs/JUCE_PARITY.md](docs/JUCE_PARITY.md) tracks this.
+- **Never copy, translate or paraphrase JUCE source code**, and do not write
+  an implementation with the corresponding JUCE implementation open. JUCE is
+  licensed under the AGPL or a commercial licence, both incompatible with
+  ours.
+- The same goes for any other project whose licence is not compatible with
   `MIT OR Apache-2.0`.
-- Working from public specifications, papers, textbooks and your own knowledge
-  is exactly right. When an algorithm comes from a published source, name it
-  in a comment.
+- Work from specifications, standards, papers, textbooks and your own
+  knowledge. When an algorithm comes from a published source, name it in a
+  comment.
 
-If you are not sure whether something is acceptable, ask in an issue first.
+The reasoning is in
+[ADR 0004](docs/adr/0004-juce-as-reference.md). If you are not sure whether
+something is acceptable, ask in an issue first.
 
 ## Getting set up
 
@@ -67,6 +74,13 @@ cargo test --workspace
 cargo doc --workspace --no-deps
 ```
 
+If you changed `manguebyte-devices` and have a sound card, also run the
+hardware tests, which play nothing audible:
+
+```bash
+cargo test -p manguebyte-devices --test hardware -- --ignored --test-threads 1
+```
+
 A pull request should:
 
 - do one thing, and say what and why in its description;
@@ -88,6 +102,13 @@ an audible glitch. In `Processor::process` and anything it calls:
 
 Say in the documentation whether a function is safe to call from the audio
 thread whenever it is not obvious.
+
+These rules are enforced. `crates/manguebyte-dsp/tests/realtime.rs` replaces
+the allocator with one that counts and fails if a processor touches the heap
+while processing. **When you add a processor, add it to that test.**
+
+Before changing a core trait or adding a crate, read
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Style
 

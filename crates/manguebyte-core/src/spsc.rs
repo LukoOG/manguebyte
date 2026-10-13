@@ -261,7 +261,8 @@ mod tests {
 
     #[test]
     fn transfers_across_threads() {
-        const COUNT: u64 = 100_000;
+        // Miri interprets every step, so it gets a shorter run.
+        const COUNT: u64 = if cfg!(miri) { 2_000 } else { 100_000 };
         let (mut tx, mut rx) = channel::<u64>(64);
 
         let producer = std::thread::spawn(move || {

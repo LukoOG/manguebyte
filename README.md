@@ -162,6 +162,16 @@ This project borrows that idea, and the name fits in more ways than one:
 So the logo is a crab with headphones and a guitar: a crab with brains, making
 noise.
 
+## Design
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): how the crates fit together,
+  which thread runs what, and what the design learns from JUCE's history.
+- [docs/JUCE_PARITY.md](docs/JUCE_PARITY.md): JUCE's 24 modules, one by one,
+  with what Manguebyte has for each and where it intends to go further.
+- [docs/TECH_DEBT.md](docs/TECH_DEBT.md): what the code owes, scored and in
+  the order it will be paid back.
+- [docs/adr/](docs/adr): the record of individual design decisions.
+
 ## Contributing
 
 Manguebyte is built in the open and contributions are welcome, from typo
