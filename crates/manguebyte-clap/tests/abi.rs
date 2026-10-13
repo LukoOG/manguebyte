@@ -14,6 +14,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use manguebyte_clap::clap_sys::audio_buffer::clap_audio_buffer;
@@ -35,7 +36,7 @@ use manguebyte_clap::clap_sys::process::*;
 use manguebyte_clap::clap_sys::stream::{clap_istream, clap_ostream};
 use manguebyte_clap::clap_sys::version::CLAP_VERSION;
 use manguebyte_clap::plugin_entry;
-use manguebyte_core::{AudioBuffer, ParamId};
+use manguebyte_core::{AtomicF64, AudioBuffer, ParamId};
 use manguebyte_dsp::event::{EventKind, Expression, NoteRef};
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Processor, Synth, Voice, split_at_events};
 use manguebyte_params::{BoolParam, ChoiceParam, FloatParam, FloatRange, param_set};
@@ -110,11 +111,17 @@ fn level_params() -> Arc<LevelParams> {
 struct Level {
     params: Arc<LevelParams>,
     current: f32,
-    /// The transport tempo seen in the last block, for the test to read.
-    tempo_seen: Arc<Mutex<Option<f64>>>,
+    /// The transport tempo seen in the last block, for the test to read, or
+    /// a negative number when there was none.
+    ///
+    /// This is an atomic and not a mutex on purpose. On macOS a standard
+    /// mutex allocates the first time it is locked, and the allocation guard
+    /// caught an earlier version of this plugin doing exactly that inside
+    /// `process`.
+    tempo_seen: Arc<AtomicF64>,
 }
 
-static TEMPO_SEEN: Mutex<Option<Arc<Mutex<Option<f64>>>>> = Mutex::new(None);
+static TEMPO_SEEN: Mutex<Option<Arc<AtomicF64>>> = Mutex::new(None);
 
 impl Plugin for Level {
     const INFO: PluginInfo = PluginInfo {
@@ -136,7 +143,7 @@ impl Plugin for Level {
             explode: BoolParam::new("explode", "Explode", false).hidden(),
         });
         *LEVEL_PARAMS.lock().unwrap() = Some(Arc::clone(&params));
-        let tempo_seen = Arc::new(Mutex::new(None));
+        let tempo_seen = Arc::new(AtomicF64::new(-1.0));
         *TEMPO_SEEN.lock().unwrap() = Some(Arc::clone(&tempo_seen));
         Self {
             current: params.level.value(),
@@ -153,7 +160,10 @@ impl Plugin for Level {
 
     fn process(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
         assert!(!self.params.explode.value(), "the plugin was told to fail");
-        *self.tempo_seen.lock().unwrap() = context.transport.tempo_bpm;
+        self.tempo_seen.store(
+            context.transport.tempo_bpm.unwrap_or(-1.0),
+            Ordering::Relaxed,
+        );
         split_at_events(
             &mut self.current,
             buffer,
@@ -443,13 +453,17 @@ struct Host {
     entry: clap_plugin_entry,
     factory: *const clap_plugin_factory,
     plugin: *const clap_plugin,
-    // Boxed so its address stays put; the plugin may hold on to it.
-    _host: Box<clap_host>,
+    /// The `clap_host` the plugin was given, owned through a raw pointer.
+    ///
+    /// The plugin keeps a pointer to it. Holding it in a `Box` instead would
+    /// be a mistake Miri catches: moving a `Box` asserts exclusive access to
+    /// what it points to, which invalidates the pointer the plugin holds.
+    host: *mut clap_host,
 }
 
 impl Host {
     fn new(entry: clap_plugin_entry, id: &str) -> Self {
-        let host = Box::new(clap_host {
+        let host = Box::into_raw(Box::new(clap_host {
             clap_version: CLAP_VERSION,
             host_data: ptr::null_mut(),
             name: c"test host".as_ptr(),
@@ -460,21 +474,21 @@ impl Host {
             request_restart: Some(host_request),
             request_process: Some(host_request),
             request_callback: Some(host_request),
-        });
+        }));
         let id = CString::new(id).unwrap();
         unsafe {
             assert!(entry.init.unwrap()(c"/plugins/test.clap".as_ptr()));
             let factory = entry.get_factory.unwrap()(CLAP_PLUGIN_FACTORY_ID.as_ptr())
                 .cast::<clap_plugin_factory>();
             assert!(!factory.is_null());
-            let plugin = (*factory).create_plugin.unwrap()(factory, &raw const *host, id.as_ptr());
+            let plugin = (*factory).create_plugin.unwrap()(factory, host, id.as_ptr());
             assert!(!plugin.is_null(), "the factory refused to create {id:?}");
             assert!((*plugin).init.unwrap()(plugin));
             Self {
                 entry,
                 factory,
                 plugin,
-                _host: host,
+                host,
             }
         }
     }
@@ -695,6 +709,8 @@ impl Drop for Host {
             (*self.plugin).deactivate.unwrap()(self.plugin);
             (*self.plugin).destroy.unwrap()(self.plugin);
             self.entry.deinit.unwrap()();
+            // The plugin is gone, so nothing points at the host any more.
+            drop(Box::from_raw(self.host));
         }
     }
 }
@@ -755,11 +771,8 @@ fn the_factory_describes_and_creates_the_plugin() {
         assert!(ptr::eq((*host.plugin).desc, descriptor));
 
         assert!((*factory).get_plugin_descriptor.unwrap()(factory, 1).is_null());
-        let other = (*factory).create_plugin.unwrap()(
-            factory,
-            &raw const *host._host,
-            c"org.example.other".as_ptr(),
-        );
+        let other =
+            (*factory).create_plugin.unwrap()(factory, host.host, c"org.example.other".as_ptr());
         assert!(other.is_null(), "created a plugin with the wrong id");
         assert!(host.entry.get_factory.unwrap()(c"clap.unknown-factory".as_ptr()).is_null());
     }
@@ -851,7 +864,7 @@ fn automation_lands_on_its_frame_when_processing_in_place() {
     assert_eq!(level_params().level.value(), 4.0);
 
     let tempo = TEMPO_SEEN.lock().unwrap().clone().unwrap();
-    assert_eq!(*tempo.lock().unwrap(), Some(97.0));
+    assert_eq!(tempo.load(Ordering::Relaxed), 97.0);
 }
 
 #[test]
