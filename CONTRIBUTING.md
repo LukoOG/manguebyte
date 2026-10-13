@@ -65,14 +65,15 @@ git checkout -b my-change
 
 ## Before you open a pull request
 
-Run the same checks the CI runs:
+Run the same checks the CI runs. One script does all of them and stops at the
+first failure:
 
 ```bash
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo doc --workspace --no-deps
+./scripts/check.sh
 ```
+
+It runs `cargo fmt --all --check`, `cargo clippy` and `cargo doc` with
+warnings as errors, and `cargo test` with and without default features.
 
 If you changed `manguebyte-devices` and have a sound card, also run the
 hardware tests, which play nothing audible:
