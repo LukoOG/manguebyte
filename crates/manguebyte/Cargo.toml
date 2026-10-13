@@ -1,0 +1,32 @@
+[package]
+name = "manguebyte"
+description = "A modern, real-time-safe audio framework for Rust: buffers, DSP, MIDI, audio files and device I/O in one place."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+
+[features]
+default = ["devices"]
+## Audio device I/O. Pulls in the platform audio backend.
+devices = ["dep:manguebyte-devices"]
+
+[dependencies]
+manguebyte-core.workspace = true
+manguebyte-midi.workspace = true
+manguebyte-dsp.workspace = true
+manguebyte-formats.workspace = true
+manguebyte-devices = { workspace = true, optional = true }
+
+[[example]]
+name = "play_riff"
+required-features = ["devices"]
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "manguebyte-devices"
+description = "Audio device input and output for the Manguebyte audio framework."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+manguebyte-core.workspace = true
+cpal = "0.18"
+
+[lints]
+workspace = true

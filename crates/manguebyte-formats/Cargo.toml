@@ -1,0 +1,18 @@
+[package]
+name = "manguebyte-formats"
+description = "Audio file reading and writing for the Manguebyte audio framework."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+manguebyte-core.workspace = true
+
+[lints]
+workspace = true

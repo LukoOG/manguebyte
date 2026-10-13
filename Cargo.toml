@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/alessonqueirozdev-hub/manguebyte"
+homepage = "https://github.com/alessonqueirozdev-hub/manguebyte"
+authors = ["Alesson Queiroz", "The Manguebyte contributors"]
+keywords = ["audio", "dsp", "midi", "music", "realtime"]
+categories = ["multimedia::audio"]
+
+[workspace.dependencies]
+manguebyte-core = { path = "crates/manguebyte-core", version = "0.1.0" }
+manguebyte-midi = { path = "crates/manguebyte-midi", version = "0.1.0" }
+manguebyte-dsp = { path = "crates/manguebyte-dsp", version = "0.1.0" }
+manguebyte-formats = { path = "crates/manguebyte-formats", version = "0.1.0" }
+manguebyte-devices = { path = "crates/manguebyte-devices", version = "0.1.0" }
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"

@@ -1,0 +1,15 @@
+[package]
+name = "manguebyte-core"
+description = "Core building blocks of the Manguebyte audio framework: buffers, samples, smoothing and real-time-safe primitives."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
