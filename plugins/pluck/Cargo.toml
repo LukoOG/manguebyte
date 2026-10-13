@@ -1,6 +1,6 @@
 [package]
 name = "mangue-pluck"
-description = "An example CLAP instrument built with Manguebyte: a polyphonic plucked synth."
+description = "An example CLAP and VST 3 instrument built with Manguebyte: a polyphonic plucked synth."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -21,7 +21,7 @@ name = "play"
 required-features = ["standalone"]
 
 [dependencies]
-manguebyte = { path = "../../crates/manguebyte", default-features = false, features = ["clap"] }
+manguebyte = { path = "../../crates/manguebyte", default-features = false, features = ["clap", "vst3"] }
 
 [lints]
 workspace = true

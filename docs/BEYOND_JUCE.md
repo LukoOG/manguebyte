@@ -55,7 +55,19 @@ narrow the buffer in place. Nothing is copied or allocated.
 **Check it.** `automation_lands_on_its_exact_frame_and_updates_the_parameter`
 schedules changes on frames 100, 101 and 250 and asserts the output sample by
 sample. `automation_lands_on_its_frame_when_processing_in_place` does the
-same through the CLAP C interface.
+same through the CLAP C interface, and a test of the same name in
+[`manguebyte-vst3`](../crates/manguebyte-vst3/tests/abi.rs) does it through
+VST 3, where a host sends a queue of points per parameter and every point
+is delivered. (JUCE's VST3 wrapper applies the last point of each queue:
+`processParameterChanges` in `juce_audio_plugin_client_VST3.cpp`.)
+
+VST 3 adds a trap of its own. A host reports each change twice: to the
+processor with a frame number, and to the controller on the main thread so
+that an editor can follow. If the controller's copy is stored into the
+parameter, the plugin jumps to a value that is slightly early or late until
+the next point corrects it. While blocks are running, Manguebyte's wrapper
+keeps the controller's copy for display only;
+`what_the_controller_is_told_does_not_disturb_running_automation` checks it.
 
 **Limit.** The framework delivers the timing; a processor chooses whether to
 use it. Reading a parameter once per block remains valid and is cheaper. The
@@ -200,9 +212,9 @@ on the way in.
 34 applicable tests pass. Ten are skipped because they concern features not
 implemented yet or another platform.
 
-**Limit.** No plugin GUI extension yet, no 64-bit audio, no presets. And CLAP
-is the only format so far: JUCE's VST3, AU, AAX and LV2 support has no
-counterpart here yet.
+**Limit.** No plugin GUI extension yet, no 64-bit audio, no presets. VST 3 is
+the only other format so far, also without an editor: JUCE's AU, AAX and LV2
+support has no counterpart here yet.
 
 ## 7. A plugin can be tested without a host
 
@@ -255,9 +267,9 @@ screen, for open and closed products alike.
 JUCE has been in production for more than twenty years, and it shows. Today
 it has, and Manguebyte does not:
 
-- a complete GUI toolkit, with plugin editor windows;
-- VST3, Audio Unit, AAX and LV2 plugin formats;
-- plugin hosting and an audio processing graph;
+- a complete GUI toolkit, with plugin editor windows in every format;
+- Audio Unit, AAX and LV2 plugin formats;
+- plugin hosting;
 - many more DSP building blocks, and readers for compressed audio formats;
 - iOS and Android;
 - documentation, tutorials and a large community.

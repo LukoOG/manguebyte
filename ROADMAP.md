@@ -89,13 +89,19 @@ Write a processor once and ship it in every format.
   by the CLAP project's validator
 - ⬜ CLAP extensions still to come: GUI, per-note automation, note-end and
   voice info, 64-bit audio, tail, presets, remote controls
-- ⬜ VST3
+- ✅ VST 3: audio and event buses, every automation point on its frame,
+  notes with ids, tuning and note expression, MIDI controllers through
+  hidden parameters, parameters, units, state, latency. Checked in CI by
+  Steinberg's validator on Windows, Linux and macOS
+- ⬜ VST 3 still to come: editor, 64-bit audio, changing the bus layout,
+  program lists, parameter changes sent back to the host
 - ⬜ Audio Unit (AUv2 and AUv3)
 - ⬜ LV2
 - ✅ Standalone application wrapper: sound card, MIDI ports, input for
   effects
 - 🚧 Tooling to bundle, sign and validate plugins: `scripts/bundle-clap.sh`
-  builds a `.clap` on Windows, Linux and macOS; signing is not started
+  and `scripts/bundle-vst3.sh` build a `.clap` and a `.vst3` on Windows,
+  Linux and macOS; signing is not started
 - ⬜ Project templates
 
 AAX depends on a proprietary SDK and will be considered once the other formats

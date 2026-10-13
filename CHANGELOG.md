@@ -15,6 +15,16 @@ Nothing has been published to crates.io yet. Everything below is on `main`.
   `Plugin` into a CLAP plugin with audio and note ports, sample-accurate
   events, parameters, state and latency. The example plugin passes the CLAP
   project's validator, which runs in CI.
+- `manguebyte-vst3`: native VST 3 support. `export_vst3!(MyPlugin)` turns
+  the same `Plugin` into a VST 3 plugin: audio, sidechain and event buses;
+  every point of every automation queue on its frame; notes with ids,
+  tuning, polyphonic pressure and note expression; MIDI controllers, channel
+  pressure and pitch bend through hidden parameters; units; state; latency.
+  The class id is derived from the plugin's text id and is the same on every
+  platform. The example plugin passes all 537 tests of Steinberg's validator
+  in its extensive mode, which runs in CI on Windows, Linux and macOS, and
+  the wrapper's own tests run under Miri.
+- `scripts/bundle-vst3.sh` builds a `.vst3` bundle.
 - `manguebyte-plugin`: the `Plugin` trait every format wraps; `Harness`,
   which runs a plugin in a unit test with scheduled notes and automation;
   `ParamWatcher`, which turns parameter changes made outside the host into

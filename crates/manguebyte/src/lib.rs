@@ -13,6 +13,7 @@
 //! | [`midi`] | `manguebyte-midi` | MIDI messages, stream parsing, MIDI files, sample-accurate event buffers |
 //! | [`formats`] | `manguebyte-formats` | audio file reading and writing |
 //! | `clap` | `manguebyte-clap` | builds CLAP plugins (feature `clap`) |
+//! | `vst3` | `manguebyte-vst3` | builds VST 3 plugins (feature `vst3`) |
 //! | `standalone` | `manguebyte-standalone` | runs a plugin on the sound card and MIDI ports (feature `standalone`) |
 //! | [`devices`] | `manguebyte-devices` | audio device input, output and duplex streams (feature `devices`, on by default) |
 //!
@@ -55,6 +56,8 @@ pub use manguebyte_params as params;
 pub use manguebyte_plugin as plugin;
 #[cfg(feature = "standalone")]
 pub use manguebyte_standalone as standalone;
+#[cfg(feature = "vst3")]
+pub use manguebyte_vst3 as vst3;
 
 /// The names most programs need, in one import.
 pub mod prelude {

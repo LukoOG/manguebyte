@@ -65,20 +65,24 @@ sources for what is said about JUCE and the limits of each claim.
 These checks find real problems. The block-size test failed the first time it
 ran and exposed a voice that kept running after it had finished. The
 allocation guard caught a mutex that allocates on macOS. The CLAP validator
-and Miri each found a defect that the project's own tests had missed. All of
-them are fixed, and the checks stay in CI.
+and Miri each found a defect that the project's own tests had missed. The
+VST 3 wrapper's tests found a synth that forgot where the pitch wheel was
+between notes, and Steinberg's validator showed a class id that a session
+moved between Windows and macOS would not have recognised. All of them are
+fixed, and the checks stay in CI.
 
 **Where JUCE is ahead.** JUCE has more than twenty years of production use
-behind it and far more breadth: a full GUI toolkit, VST3, AU, AAX and LV2,
-plugin hosting, many more DSP blocks and file formats, and mobile platforms.
+behind it and far more breadth: a full GUI toolkit with plugin editors, AU,
+AAX and LV2, plugin hosting, many more DSP blocks and file formats, and
+mobile platforms.
 Manguebyte has none of those yet. [docs/JUCE_PARITY.md](docs/JUCE_PARITY.md)
 tracks the gap module by module.
 
 ## Status
 
 Manguebyte is **young**. What exists is tested and usable, and it is enough
-to build and ship a CLAP instrument or effect, but it covers a small part of
-the road ahead and the API will change before 1.0. See
+to build and ship an instrument or effect as CLAP and VST 3, but it covers a
+small part of the road ahead and the API will change before 1.0. See
 [ROADMAP.md](ROADMAP.md) for what exists and what is planned.
 
 | Crate | What it gives you today |
@@ -90,13 +94,15 @@ the road ahead and the API will change before 1.0. See
 | [`manguebyte-params`](crates/manguebyte-params) | Lock-free float, integer, switch and choice parameters; linear, skewed and logarithmic ranges; text conversion; smoothing; saved state that survives version changes |
 | [`manguebyte-plugin`](crates/manguebyte-plugin) | The `Plugin` trait that every format will wrap, plugin state, and a `Harness` that plays notes and automation into a plugin inside a unit test |
 | [`manguebyte-clap`](crates/manguebyte-clap) | Exports a `Plugin` as a CLAP plugin with one line. Notes, expression, automation and modulation arrive on their exact frame. Passes the CLAP project's validator |
+| [`manguebyte-vst3`](crates/manguebyte-vst3) | Exports the same `Plugin` as a VST 3 plugin with one line. Every automation point lands on its frame; notes carry ids, tuning and per-note expression; MIDI controllers arrive as MIDI again. Passes Steinberg's validator on Windows, Linux and macOS |
 | [`manguebyte-midi`](crates/manguebyte-midi) | Channel and system messages, a byte-stream parser (running status, real-time, SysEx), standard MIDI file reading and writing, sample-accurate `MidiBuffer`, pitch conversions |
 | [`manguebyte-formats`](crates/manguebyte-formats) | WAV and AIFF reading and writing; FLAC decoding written from the specification and checked bit for bit against files from FFmpeg; the format is recognised from a file's contents |
 | [`manguebyte-devices`](crates/manguebyte-devices) | Device listing and selection, playback, recording and full-duplex streams, in any hardware sample format; MIDI input and output ports, with arrival times mapped to frames so a player's timing survives the audio buffer |
 | [`manguebyte-standalone`](crates/manguebyte-standalone) | Runs a `Plugin` as an application: sound card out, MIDI keyboards in, microphone in for effects |
 
-Not there yet: lossy formats (MP3, Ogg Vorbis, Opus), FLAC encoding, plugin
-formats other than CLAP, plugin user interfaces, plugin hosting and GUI.
+Not there yet: lossy formats (MP3, Ogg Vorbis, Opus), FLAC encoding, the
+Audio Unit, LV2 and AAX plugin formats, plugin user interfaces, plugin
+hosting and GUI.
 
 ## Quick start
 
@@ -203,16 +209,24 @@ noise.
 
 [`plugins/pluck`](plugins/pluck) is a complete instrument in one file: a
 16-voice plucked synth with per-note expression and modulation, automation
-on the exact sample, and a reverb. It becomes a CLAP plugin with one line:
+on the exact sample, and a reverb. It becomes a CLAP plugin and a VST 3
+plugin with one line each, from the same library:
 
 ```rust,ignore
 manguebyte::clap::export_clap!(Pluck);
+manguebyte::vst3::export_vst3!(Pluck);
 ```
 
 Build it and load the result in any CLAP host:
 
 ```bash
 ./scripts/bundle-clap.sh mangue-pluck "Mangue Pluck"
+```
+
+Or in any VST 3 host:
+
+```bash
+./scripts/bundle-vst3.sh mangue-pluck "Mangue Pluck"
 ```
 
 Or play it with no host, straight on the sound card, with any connected MIDI

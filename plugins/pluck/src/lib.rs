@@ -10,11 +10,12 @@
 //! - per-note expression (tuning, volume, pressure) and per-note modulation
 //!   of the filter;
 //! - sample-accurate automation;
-//! - one line to export it as a CLAP plugin.
+//! - one line each to export it as a CLAP plugin and as a VST 3 plugin,
+//!   from the same library.
 //!
-//! Build it with `cargo build --release -p mangue-pluck`, then run
-//! `scripts/bundle-clap.sh mangue-pluck "Mangue Pluck"` to get a `.clap`
-//! file a host can load.
+//! Run `scripts/bundle-clap.sh mangue-pluck "Mangue Pluck"` to get a `.clap`
+//! file a host can load, and `scripts/bundle-vst3.sh mangue-pluck
+//! "Mangue Pluck"` to get a `.vst3` bundle.
 
 use std::sync::Arc;
 
@@ -278,6 +279,7 @@ impl Plugin for Pluck {
 }
 
 manguebyte::clap::export_clap!(Pluck);
+manguebyte::vst3::export_vst3!(Pluck);
 
 #[cfg(test)]
 mod tests {

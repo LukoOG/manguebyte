@@ -52,10 +52,12 @@ nothing beside or above it.
 | `manguebyte-graph` | A processing graph that is rewired while it plays | core, dsp |
 | `manguebyte-standalone` | Runs a `Plugin` on the sound card and MIDI ports | core, midi, dsp, params, plugin, devices |
 | `manguebyte-clap` | Turns a `Plugin` into a CLAP plugin | core, midi, dsp, params, plugin, `clap-sys` |
+| `manguebyte-vst3` | Turns a `Plugin` into a VST 3 plugin | core, midi, dsp, params, plugin, `vst3` |
 | `manguebyte` | Everything under one name | all of the above |
 
 Planned crates slot into the same picture: each further plugin format
-gets a crate beside `manguebyte-clap`, on top of `manguebyte-plugin`; `manguebyte-gui` sits beside them and is never a
+gets a crate beside `manguebyte-clap` and `manguebyte-vst3`, on top of
+`manguebyte-plugin`; `manguebyte-gui` sits beside them and is never a
 dependency of anything that processes audio; `manguebyte-graph` and
 `manguebyte-host` sit on the plugin API.
 
@@ -116,8 +118,9 @@ its own timer. See [ADR 0003](adr/0003-parameters-without-listeners.md).
 This is checked, not hoped for. `crates/manguebyte-dsp/tests/realtime.rs`
 installs a counting allocator and fails if any processor touches the heap
 while processing. Every new processor is added to that test. The only
-`unsafe` code in the framework is in two places, the wait-free queue and the
-CLAP wrapper's C boundary, and both run under Miri in CI.
+`unsafe` code in the framework is in three places, the wait-free queue and
+the boundaries where the CLAP and VST 3 wrappers meet a host, and all three
+run under Miri in CI.
 
 ### State
 
@@ -177,6 +180,7 @@ that the plugin API must honour when it is written.
 | Audio thread reads parameters through a string lookup | Typed struct fields; ids are for hosts and interfaces only | Done |
 | Processing and hosting depended on GUI modules | The GUI crate sits above the plugin API | By construction |
 | No native CLAP | CLAP is the first plugin format, and passes the CLAP project's own validator | Done |
+| The VST3 wrapper applies only the last automation point of each block | Every point is an event on its frame; while blocks run, the value a host sets on the controller is kept for display and never competes with the points | Done |
 | No sample-accurate automation in `AudioProcessor` | The process call carries timestamped events; `split_at_events` applies each on its frame | Done |
 | No MIDI 2.0, note expression or per-voice modulation in the processor model | Notes carry ids and float velocity; expression and modulation are per note; modulation never alters the stored value | Done in the model; UMP transport planned |
 | Real-time safety rests on convention | A counting-allocator test and Miri in CI | Done, grows with the code |
