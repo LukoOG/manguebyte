@@ -5,7 +5,7 @@
 //! - [`StreamParser`]: decodes a raw byte stream, with running status,
 //!   interleaved real-time bytes and system exclusive data.
 //! - [`MidiBuffer`]: messages ordered by their position inside an audio block.
-//! - [`file`]: reading and writing standard MIDI files.
+//! - [`mod@file`]: reading and writing standard MIDI files.
 //! - [`note_to_hz`] / [`hz_to_note`]: equal-temperament pitch conversions.
 
 mod buffer;
