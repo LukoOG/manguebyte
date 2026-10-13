@@ -37,6 +37,8 @@ pub trait Sample:
     fn to_f32(self) -> f32;
     /// Absolute value.
     fn abs(self) -> Self;
+    /// Square root.
+    fn sqrt(self) -> Self;
 }
 
 impl Sample for f32 {
@@ -63,6 +65,10 @@ impl Sample for f32 {
     fn abs(self) -> Self {
         f32::abs(self)
     }
+    #[inline]
+    fn sqrt(self) -> Self {
+        f32::sqrt(self)
+    }
 }
 
 impl Sample for f64 {
@@ -88,5 +94,9 @@ impl Sample for f64 {
     #[inline]
     fn abs(self) -> Self {
         f64::abs(self)
+    }
+    #[inline]
+    fn sqrt(self) -> Self {
+        f64::sqrt(self)
     }
 }

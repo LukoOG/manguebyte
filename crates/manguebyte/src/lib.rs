@@ -6,7 +6,7 @@
 //! | Module | Crate | What it holds |
 //! |---|---|---|
 //! | (root) | `manguebyte-core` | [`AudioBuffer`], [`Sample`], [`Smoothed`], atomics, [`spsc`] queue |
-//! | [`dsp`] | `manguebyte-dsp` | oscillators, filters, envelopes, delays, processor chains |
+//! | [`dsp`] | `manguebyte-dsp` | oscillators, filters, envelopes, delays, FFT, windows, processor chains |
 //! | [`params`] | `manguebyte-params` | thread-safe parameters, ranges, smoothing, saved state |
 //! | [`midi`] | `manguebyte-midi` | MIDI messages and sample-accurate event buffers |
 //! | [`formats`] | `manguebyte-formats` | audio file reading and writing |

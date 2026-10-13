@@ -42,7 +42,8 @@ Everything a standalone audio application needs, short of a user interface.
 - ⬜ MPE and MIDI 2.0 / UMP
 
 **DSP**
-- ⬜ FFT and windowing
+- ✅ FFT of any length, real FFT and window functions
+- ⬜ Short-time Fourier transform with overlap-add; spectrum analysis helpers
 - ⬜ Resampling and oversampling
 - ⬜ State-variable, ladder and FIR filters; higher-order filter design
 - ⬜ Dynamics: compressor, limiter, gate

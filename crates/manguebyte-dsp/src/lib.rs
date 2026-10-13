@@ -25,8 +25,10 @@
 mod biquad;
 mod delay;
 mod envelope;
+pub mod fft;
 mod gain;
 mod oscillator;
+pub mod window;
 
 pub use biquad::{Biquad, BiquadCoefficients, Filter, FilterShape};
 pub use delay::{Delay, DelayLine};
