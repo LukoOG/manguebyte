@@ -102,7 +102,9 @@ Write a processor once and ship it in every format.
 - 🚧 Tooling to bundle, sign and validate plugins: `scripts/bundle-clap.sh`
   and `scripts/bundle-vst3.sh` build a `.clap` and a `.vst3` on Windows,
   Linux and macOS; signing is not started
-- ⬜ Project templates
+- 🚧 Project templates: `plugins/pluck` (an instrument) and `plugins/duck`
+  (an effect with a sidechain) are complete one-file examples to start
+  from; a generator is not started
 
 AAX depends on a proprietary SDK and will be considered once the other formats
 are solid.

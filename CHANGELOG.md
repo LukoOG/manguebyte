@@ -31,6 +31,9 @@ Nothing has been published to crates.io yet. Everything below is on `main`.
   events; plugin state as text.
 - `plugins/pluck`: an example 16-voice instrument, and
   `scripts/bundle-clap.sh` to build it into a `.clap`.
+- `plugins/duck`: an example effect, a sidechain ducker with a bypass that
+  does not click. Both examples are validated as CLAP and as VST 3 in CI.
+- `Harness::process_with_sidechain` feeds an effect's sidechain in a test.
 
 ### Processing model
 

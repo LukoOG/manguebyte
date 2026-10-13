@@ -33,6 +33,8 @@ pub struct Harness<P: Plugin> {
     /// Events not yet delivered, sorted by frame.
     scheduled: Vec<(u64, EventKind)>,
     events: EventBuffer,
+    /// The stretch of the sidechain that goes with the block being rendered.
+    sidechain: AudioBuffer<f32>,
     watcher: ParamWatcher,
     transport: Transport,
     position: u64,
@@ -75,6 +77,7 @@ impl<P: Plugin> Harness<P> {
             next_in_pattern: 0,
             scheduled: Vec::new(),
             events: EventBuffer::with_capacity(EVENTS_PER_BLOCK),
+            sidechain: AudioBuffer::new(P::LAYOUT.sidechain, max_block_size),
             watcher: ParamWatcher::new(&*params),
             params,
             transport: Transport::playing_at(120.0),
@@ -168,7 +171,7 @@ impl<P: Plugin> Harness<P> {
     /// instrument is played.
     pub fn render(&mut self, frames: usize) -> AudioBuffer<f32> {
         let mut output = AudioBuffer::new(P::LAYOUT.outputs, frames);
-        self.run(&mut output);
+        self.run(&mut output, None);
         output
     }
 
@@ -176,8 +179,39 @@ impl<P: Plugin> Harness<P> {
     /// an effect is used.
     ///
     /// Input channels beyond the plugin's own input count are ignored, and
-    /// missing ones are treated as silent.
+    /// missing ones are treated as silent. The plugin sees no sidechain, as
+    /// in a host where nothing is routed to it.
     pub fn process(&mut self, input: &AudioBuffer<f32>) -> AudioBuffer<f32> {
+        self.process_through(input, None)
+    }
+
+    /// Passes `input` through the plugin while `sidechain` plays on its
+    /// sidechain input, and returns the result.
+    ///
+    /// As with the input, extra sidechain channels are ignored and missing
+    /// ones are silent.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the two buffers differ in length.
+    pub fn process_with_sidechain(
+        &mut self,
+        input: &AudioBuffer<f32>,
+        sidechain: &AudioBuffer<f32>,
+    ) -> AudioBuffer<f32> {
+        assert_eq!(
+            input.num_frames(),
+            sidechain.num_frames(),
+            "the input and the sidechain must have the same length"
+        );
+        self.process_through(input, Some(sidechain))
+    }
+
+    fn process_through(
+        &mut self,
+        input: &AudioBuffer<f32>,
+        sidechain: Option<&AudioBuffer<f32>>,
+    ) -> AudioBuffer<f32> {
         let mut output = AudioBuffer::new(P::LAYOUT.outputs, input.num_frames());
         let shared = P::LAYOUT
             .inputs
@@ -188,7 +222,7 @@ impl<P: Plugin> Harness<P> {
                 .channel_mut(channel)
                 .copy_from_slice(input.channel(channel));
         }
-        self.run(&mut output);
+        self.run(&mut output, sidechain);
         output
     }
 
@@ -208,7 +242,7 @@ impl<P: Plugin> Harness<P> {
         self.plugin.reset();
     }
 
-    fn run(&mut self, buffer: &mut AudioBuffer<f32>) {
+    fn run(&mut self, buffer: &mut AudioBuffer<f32>, sidechain: Option<&AudioBuffer<f32>>) {
         let frames = buffer.num_frames();
         let mut done = 0;
         while done < frames {
@@ -223,7 +257,19 @@ impl<P: Plugin> Harness<P> {
             self.gather_events(length);
             apply_param_events(&*self.params, &self.events);
             self.watcher.remember(&*self.params);
-            let context = ProcessContext::new(&self.events, &self.transport);
+            let mut context = ProcessContext::new(&self.events, &self.transport);
+            if let Some(whole) = sidechain {
+                // The plugin gets the stretch that goes with this block.
+                self.sidechain.set_num_frames(length);
+                self.sidechain.clear();
+                let shared = whole.num_channels().min(self.sidechain.num_channels());
+                for channel in 0..shared {
+                    self.sidechain
+                        .channel_mut(channel)
+                        .copy_from_slice(&whole.channel(channel)[done..done + length]);
+                }
+                context = context.with_sidechain(&self.sidechain);
+            }
             let plugin = &mut self.plugin;
             buffer.windowed(done..done + length, |block| plugin.process(block, &context));
 
@@ -583,5 +629,88 @@ mod tests {
     #[should_panic(expected = "has no parameter \"cutoff\"")]
     fn automating_a_parameter_that_does_not_exist_is_a_mistake() {
         Harness::<Keys>::new(48_000.0, 16).automate(0, "cutoff", 1.0);
+    }
+
+    // --- An effect that adds its sidechain to its input. ---
+
+    struct Listener {
+        params: Arc<NoParams>,
+    }
+
+    impl Plugin for Listener {
+        const INFO: PluginInfo = PluginInfo {
+            id: "org.manguebyte.test.listener",
+            name: "Listener",
+            vendor: "Manguebyte tests",
+            version: "0.1.0",
+            description: "Adds the sidechain to the input",
+            kind: PluginKind::Effect,
+        };
+        const LAYOUT: AudioLayout = AudioLayout {
+            inputs: 1,
+            outputs: 1,
+            sidechain: 2,
+        };
+        type Params = NoParams;
+
+        fn new() -> Self {
+            Self {
+                params: Arc::new(NoParams {}),
+            }
+        }
+        fn params(&self) -> Arc<NoParams> {
+            Arc::clone(&self.params)
+        }
+        fn prepare(&mut self, _: &ProcessSpec) {}
+        fn process(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+            // With nothing routed to the sidechain, say so loudly.
+            let Some(sidechain) = context.sidechain else {
+                buffer.channel_mut(0).fill(-1.0);
+                return;
+            };
+            assert_eq!(sidechain.num_frames(), buffer.num_frames());
+            assert_eq!(sidechain.num_channels(), 2);
+            for (frame, sample) in buffer.channel_mut(0).iter_mut().enumerate() {
+                *sample += sidechain.channel(0)[frame] + sidechain.channel(1)[frame];
+            }
+        }
+    }
+
+    #[test]
+    fn the_sidechain_reaches_the_plugin_in_step_with_the_input() {
+        let ramp = |channels: usize, scale: f32| {
+            let mut buffer = AudioBuffer::new(channels, 40);
+            for channel in buffer.iter_channels_mut() {
+                for (frame, sample) in channel.iter_mut().enumerate() {
+                    *sample = frame as f32 * scale;
+                }
+            }
+            buffer
+        };
+        // Blocks of uneven length, so that the sidechain has to be cut in
+        // the same places as the input.
+        let mut harness = Harness::<Listener>::new(48_000.0, 16).with_block_pattern(&[7, 16, 3]);
+        let input = ramp(1, 1.0);
+
+        // Two sidechain channels, each a tenth of the frame number.
+        let output = harness.process_with_sidechain(&input, &ramp(2, 0.1));
+        for (frame, &sample) in output.channel(0).iter().enumerate() {
+            assert!((sample - frame as f32 * 1.2).abs() < 1e-4, "frame {frame}");
+        }
+        // A missing sidechain channel is silent, and an extra one ignored.
+        let output = harness.process_with_sidechain(&input, &ramp(1, 0.1));
+        assert!((output.channel(0)[30] - 33.0).abs() < 1e-4);
+        let output = harness.process_with_sidechain(&input, &ramp(3, 0.1));
+        assert!((output.channel(0)[30] - 36.0).abs() < 1e-4);
+
+        // Without one, the plugin is told there is none.
+        assert_eq!(harness.process(&input).channel(0), &[-1.0; 40]);
+    }
+
+    #[test]
+    #[should_panic(expected = "must have the same length")]
+    fn a_sidechain_of_another_length_is_a_mistake() {
+        let mut harness = Harness::<Listener>::new(48_000.0, 16);
+        harness.process_with_sidechain(&AudioBuffer::new(1, 8), &AudioBuffer::new(2, 9));
     }
 }

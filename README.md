@@ -229,8 +229,13 @@ Or in any VST 3 host:
 ./scripts/bundle-vst3.sh mangue-pluck "Mangue Pluck"
 ```
 
-Or play it with no host, straight on the sound card, with any connected MIDI
-keyboard (the argument is the level in decibels):
+[`plugins/duck`](plugins/duck) is the same for an effect: a sidechain ducker
+with a main input, a sidechain input and a bypass switch that does not
+click. Both examples go through the CLAP project's validator and Steinberg's
+on every commit.
+
+Or play the instrument with no host, straight on the sound card, with any
+connected MIDI keyboard (the argument is the level in decibels):
 
 ```bash
 cargo run -p mangue-pluck --features standalone --example play -- -12 hold

@@ -37,7 +37,6 @@ Each item is scored from 1 to 5 on three axes:
 | 18 | The macOS bundle layout written by `bundle-clap.sh` has never been loaded by a host. (The one written by `bundle-vst3.sh` is loaded by Steinberg's validator in CI.) | Test | 2 | 3 | 2 | 20 |
 | 22 | `Plugin` cannot say that its latency or its tail changed while it runs, so neither wrapper tells the host: latency is read at activation, and the VST 3 tail is reported as infinite | Architecture | 3 | 2 | 2 | 20 |
 | 23 | The VST 3 wrapper does not send parameter changes back to the host (`IComponentHandler`). Nothing can make one yet; the editor will | Architecture | 2 | 3 | 2 | 20 |
-| 24 | Both validators run against one example plugin, an instrument with no audio input. The effect path (main input, sidechain, bypass) is covered by the wrappers' own tests only | Test | 2 | 3 | 2 | 20 |
 | 25 | Every instrument exposes 2,080 hidden VST 3 parameters for MIDI controllers, wanted or not. Some hosts list hidden parameters slowly. `Plugin` needs a way to say which controllers it listens to | Architecture | 2 | 2 | 2 | 16 |
 | 19 | The graph gives every node its own buffer and runs nodes that reach no output. Buffer reuse and pruning would cut memory and CPU for large graphs | Code | 2 | 1 | 3 | 9 |
 | 20 | A graph swap is instantaneous, so rewiring a sounding path can click. A short crossfade between plans would hide it | Code | 3 | 2 | 4 | 10 |
@@ -48,6 +47,7 @@ Each item is scored from 1 to 5 on three axes:
 
 | Item | What was done |
 |---|---|
+| Both validators ran against one example plugin, an instrument with no audio input | `plugins/duck`, an effect with a main input, a sidechain and a bypass switch, goes through both validators in CI beside the instrument. `Harness::process_with_sidechain` lets its tests feed both inputs |
 | There was no VST 3 support | `manguebyte-vst3` wraps the same `Plugin`. It is checked three ways: a test host that drives it through COM under the allocation guard, Miri, and Steinberg's validator in CI on three systems. The test host found that a change delivered in a block with no audio never reached a plugin that follows events, and that `Synth` forgot the pitch wheel between notes; the validator's report showed that the class id had the same bytes on every system, where VST 3 needs the same numbers |
 | The CLAP wrapper's `process` was not under the allocation guard | `crates/manguebyte-clap/tests/abi.rs` counts heap calls made inside `process` across the C boundary and requires zero, for automation, notes, reported changes and the block after a state restore |
 | The CLAP wrapper was only checked by tests written by the same hand | CI builds the example plugin and runs the CLAP project's own `clap-validator` against it. Its first run found two defects the in-house tests had missed: a value just below zero displayed as `-0.0`, which read back as a different text, and restored state was not announced to the host with a rescan request. Both are fixed and have regression tests |

@@ -95,13 +95,18 @@ jobs:
         run: cargo build --release --manifest-path "$RUNNER_TEMP/clap-validator/Cargo.toml"
         env:
           RUSTFLAGS: ""
+      # An instrument and an effect with a sidechain, so that both kinds of
+      # plugin go through the validator.
       - run: ./scripts/bundle-clap.sh mangue-pluck "Mangue Pluck"
+      - run: ./scripts/bundle-clap.sh mangue-duck "Mangue Duck"
       - name: Validate
         run: |
-          "$RUNNER_TEMP/clap-validator/target/release/clap-validator" validate \
-            "target/bundled/Mangue Pluck.clap" | tee validation.txt
-          # The tool reports failures in its summary; make them fail the job.
-          grep -Eq "tests run, [0-9]+ passed, 0 failed" <(sed 's/\x1b\[[0-9;]*m//g' validation.txt)
+          for plugin in "Mangue Pluck" "Mangue Duck"; do
+            "$RUNNER_TEMP/clap-validator/target/release/clap-validator" validate \
+              "target/bundled/$plugin.clap" | tee validation.txt
+            # The tool reports failures in its summary; make them fail the job.
+            grep -Eq "tests run, [0-9]+ passed, 0 failed" <(sed 's/\x1b\[[0-9;]*m//g' validation.txt)
+          done
 
   vst3:
     name: VST 3 validation (${{ matrix.os }})
@@ -151,14 +156,19 @@ jobs:
           find "$sdk/build" -type f \( -name validator -o -name validator.exe \) \
             -exec cp {} "$RUNNER_TEMP/vst3-validator/" \;
           ls -l "$RUNNER_TEMP/vst3-validator"
+      # An instrument and an effect with a sidechain, so that both kinds of
+      # plugin go through the validator.
       - run: ./scripts/bundle-vst3.sh mangue-pluck "Mangue Pluck"
+      - run: ./scripts/bundle-vst3.sh mangue-duck "Mangue Duck"
       - name: Validate
         run: |
           validator="$(find "$RUNNER_TEMP/vst3-validator" -type f -name 'validator*' | head -n 1)"
-          "$validator" -e "target/bundled/Mangue Pluck.vst3" > validation.txt || true
-          # The full log lists two thousand hidden controller parameters.
-          grep -v "Parameter [0-9]* (id=" validation.txt | grep -v "^\[Succeeded\]$" | grep -v "^$" | tail -n 120
-          grep -Eq "Result: [1-9][0-9]* tests passed, 0 tests failed" validation.txt
+          for plugin in "Mangue Pluck" "Mangue Duck"; do
+            "$validator" -e "target/bundled/$plugin.vst3" > validation.txt || true
+            # The full log lists two thousand hidden controller parameters.
+            grep -v "Parameter [0-9]* (id=" validation.txt | grep -v "^\[Succeeded\]$" | grep -v "^$" | tail -n 60
+            grep -Eq "Result: [1-9][0-9]* tests passed, 0 tests failed" validation.txt
+          done
 
   msrv:
     name: Minimum supported Rust version
