@@ -15,6 +15,7 @@ categories = ["multimedia::audio"]
 
 [workspace.dependencies]
 manguebyte-core = { path = "crates/manguebyte-core", version = "0.1.0" }
+manguebyte-params = { path = "crates/manguebyte-params", version = "0.1.0" }
 manguebyte-midi = { path = "crates/manguebyte-midi", version = "0.1.0" }
 manguebyte-dsp = { path = "crates/manguebyte-dsp", version = "0.1.0" }
 manguebyte-formats = { path = "crates/manguebyte-formats", version = "0.1.0" }

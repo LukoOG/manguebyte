@@ -275,6 +275,7 @@ dependencies = [
  "manguebyte-dsp",
  "manguebyte-formats",
  "manguebyte-midi",
+ "manguebyte-params",
 ]
 
 [[package]]
@@ -306,6 +307,13 @@ dependencies = [
 [[package]]
 name = "manguebyte-midi"
 version = "0.1.0"
+
+[[package]]
+name = "manguebyte-params"
+version = "0.1.0"
+dependencies = [
+ "manguebyte-core",
+]
 
 [[package]]
 name = "memchr"

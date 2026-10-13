@@ -58,8 +58,9 @@ Everything a standalone audio application needs, short of a user interface.
 - ⬜ Metadata, cue points and loop markers
 
 **Core**
-- ⬜ Parameter system: ranges, skew, text conversion, smoothing, automation
-- ⬜ State save and restore
+- ✅ Parameter system: ranges, skew, text conversion, smoothing
+- ⬜ Sample-accurate parameter automation events and change gestures
+- ✅ Parameter state save and restore, tolerant of version changes
 - ⬜ Audio thread helpers: denormal protection, allocation checking in debug
 - ⬜ `no_std` support for `manguebyte-core` and `manguebyte-dsp`
 

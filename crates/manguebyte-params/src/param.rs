@@ -1,0 +1,865 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+
+use manguebyte_core::AtomicF32;
+
+use crate::FloatRange;
+
+/// What a host is allowed to do with a parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ParamFlags {
+    /// The host may record and play back automation for it.
+    pub automatable: bool,
+    /// It is kept out of generic parameter lists.
+    pub hidden: bool,
+    /// It is the processor's bypass switch.
+    pub bypass: bool,
+}
+
+impl Default for ParamFlags {
+    fn default() -> Self {
+        Self {
+            automatable: true,
+            hidden: false,
+            bypass: false,
+        }
+    }
+}
+
+/// The fixed facts about a parameter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParamInfo {
+    id: String,
+    name: String,
+    unit: String,
+    flags: ParamFlags,
+}
+
+impl ParamInfo {
+    fn new(id: &str, name: &str) -> Self {
+        assert!(
+            is_valid_id(id),
+            "parameter id {id:?} must be non-empty printable ASCII without spaces or '='"
+        );
+        Self {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            unit: String::new(),
+            flags: ParamFlags::default(),
+        }
+    }
+
+    /// The identifier saved in state and sessions. It must never change once
+    /// a version of the software has shipped.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The name shown to people. Free to change between versions.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The unit shown after the value, such as `"dB"`. Empty if there is none.
+    pub fn unit(&self) -> &str {
+        &self.unit
+    }
+
+    /// What a host may do with the parameter.
+    pub fn flags(&self) -> ParamFlags {
+        self.flags
+    }
+}
+
+/// Whether `id` can be used as a parameter identifier.
+pub(crate) fn is_valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && byte != b'=')
+}
+
+/// A value a host can read, automate, display and save, whatever its type.
+///
+/// Every method takes `&self` and is safe to call from any thread at any
+/// time: values live in atomics, so there is nothing to lock and no way to
+/// race. The methods that return or take text allocate and belong off the
+/// audio thread; everything else is real-time safe.
+///
+/// Two scales are used throughout:
+///
+/// - the *plain* value is the real one, in the parameter's own unit;
+/// - the *normalized* value is its position in `0..=1`, which is what
+///   automation and generic controls work with.
+pub trait Param: Send + Sync {
+    /// The fixed facts about the parameter.
+    fn info(&self) -> &ParamInfo;
+
+    /// The current value, in the parameter's own unit.
+    fn plain(&self) -> f64;
+
+    /// Sets the value from its own unit. It is clamped to the range and
+    /// snapped to the step; a value that is not a number is ignored.
+    fn set_plain(&self, value: f64);
+
+    /// The value the parameter starts at, in its own unit.
+    fn default_plain(&self) -> f64;
+
+    /// Converts a position in `0..=1` to a value, clamping and snapping.
+    fn normalized_to_plain(&self, normalized: f64) -> f64;
+
+    /// Converts a value to its position in `0..=1`.
+    fn plain_to_normalized(&self, plain: f64) -> f64;
+
+    /// How many steps separate the lowest and the highest value, or `None`
+    /// for a continuous parameter. A switch has one step.
+    fn step_count(&self) -> Option<u32>;
+
+    /// Renders a value as text, without its unit. Allocates.
+    fn plain_to_text(&self, plain: f64) -> String;
+
+    /// Reads a value from text a person typed. Allocates.
+    fn text_to_plain(&self, text: &str) -> Option<f64>;
+
+    /// The identifier saved in state and sessions.
+    fn id(&self) -> &str {
+        self.info().id()
+    }
+
+    /// The name shown to people.
+    fn name(&self) -> &str {
+        self.info().name()
+    }
+
+    /// The current position in `0..=1`.
+    fn normalized(&self) -> f64 {
+        self.plain_to_normalized(self.plain())
+    }
+
+    /// Sets the value from a position in `0..=1`.
+    fn set_normalized(&self, normalized: f64) {
+        if normalized.is_finite() {
+            self.set_plain(self.normalized_to_plain(normalized));
+        }
+    }
+
+    /// The position in `0..=1` the parameter starts at.
+    fn default_normalized(&self) -> f64 {
+        self.plain_to_normalized(self.default_plain())
+    }
+
+    /// Puts the parameter back to its default.
+    fn reset(&self) {
+        self.set_plain(self.default_plain());
+    }
+
+    /// The current value as text, followed by the unit if there is one.
+    /// Allocates.
+    fn display(&self) -> String {
+        let text = self.plain_to_text(self.plain());
+        match self.info().unit() {
+            "" => text,
+            unit => format!("{text} {unit}"),
+        }
+    }
+}
+
+type Formatter = Arc<dyn Fn(f32) -> String + Send + Sync>;
+type Parser = Arc<dyn Fn(&str) -> Option<f32> + Send + Sync>;
+
+/// Shared builder methods for every parameter type.
+macro_rules! common_builders {
+    () => {
+        /// Sets the unit shown after the value, such as `"dB"`.
+        #[must_use]
+        pub fn with_unit(mut self, unit: &str) -> Self {
+            self.info.unit = unit.to_owned();
+            self
+        }
+
+        /// Keeps hosts from automating the parameter.
+        #[must_use]
+        pub fn non_automatable(mut self) -> Self {
+            self.info.flags.automatable = false;
+            self
+        }
+
+        /// Keeps the parameter out of generic parameter lists.
+        #[must_use]
+        pub fn hidden(mut self) -> Self {
+            self.info.flags.hidden = true;
+            self
+        }
+    };
+}
+
+/// A continuous parameter.
+///
+/// ```
+/// use manguebyte_params::{FloatParam, FloatRange, Param};
+///
+/// let cutoff = FloatParam::new("cutoff", "Cutoff", FloatRange::logarithmic(20.0, 20_000.0), 1_000.0)
+///     .with_unit("Hz")
+///     .with_precision(0);
+///
+/// cutoff.set(440.0);
+/// assert_eq!(cutoff.value(), 440.0);
+/// assert_eq!(cutoff.display(), "440 Hz");
+///
+/// // What a person types into a text box.
+/// cutoff.set_plain(cutoff.text_to_plain("2.5 khz").unwrap());
+/// assert_eq!(cutoff.value(), 2_500.0);
+/// ```
+pub struct FloatParam {
+    info: ParamInfo,
+    range: FloatRange,
+    default: f32,
+    step: Option<f32>,
+    precision: usize,
+    value: AtomicF32,
+    formatter: Option<Formatter>,
+    parser: Option<Parser>,
+}
+
+impl FloatParam {
+    /// Creates a parameter. `default` is clamped to `range`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` is empty or contains spaces, `=` or anything other than
+    /// printable ASCII.
+    pub fn new(id: &str, name: &str, range: FloatRange, default: f32) -> Self {
+        let default = range.clamp(default);
+        Self {
+            info: ParamInfo::new(id, name),
+            range,
+            default,
+            step: None,
+            precision: 2,
+            value: AtomicF32::new(default),
+            formatter: None,
+            parser: None,
+        }
+    }
+
+    common_builders!();
+
+    /// Restricts the value to multiples of `step` above the range's minimum.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless `step` is positive and finite.
+    #[must_use]
+    pub fn with_step(mut self, step: f32) -> Self {
+        assert!(
+            step.is_finite() && step > 0.0,
+            "a step must be positive, got {step}"
+        );
+        self.step = Some(step);
+        self.default = self.snap(self.default);
+        self.value = AtomicF32::new(self.default);
+        self
+    }
+
+    /// Sets how many decimal places the default text conversion shows.
+    #[must_use]
+    pub fn with_precision(mut self, decimals: usize) -> Self {
+        self.precision = decimals;
+        self
+    }
+
+    /// Replaces how the value is turned into text.
+    #[must_use]
+    pub fn with_formatter(
+        mut self,
+        formatter: impl Fn(f32) -> String + Send + Sync + 'static,
+    ) -> Self {
+        self.formatter = Some(Arc::new(formatter));
+        self
+    }
+
+    /// Replaces how typed text is turned into a value.
+    #[must_use]
+    pub fn with_parser(
+        mut self,
+        parser: impl Fn(&str) -> Option<f32> + Send + Sync + 'static,
+    ) -> Self {
+        self.parser = Some(Arc::new(parser));
+        self
+    }
+
+    /// The current value. Real-time safe.
+    #[inline]
+    pub fn value(&self) -> f32 {
+        self.value.load(Ordering::Relaxed)
+    }
+
+    /// Sets the value, clamped to the range and snapped to the step. A value
+    /// that is not a number is ignored. Real-time safe.
+    #[inline]
+    pub fn set(&self, value: f32) {
+        if !value.is_nan() {
+            self.value.store(self.snap(value), Ordering::Relaxed);
+        }
+    }
+
+    /// The value the parameter starts at.
+    pub fn default_value(&self) -> f32 {
+        self.default
+    }
+
+    /// The mapping between value and position.
+    pub fn range(&self) -> &FloatRange {
+        &self.range
+    }
+
+    fn snap(&self, value: f32) -> f32 {
+        let value = self.range.clamp(value);
+        match self.step {
+            Some(step) => {
+                let min = self.range.min();
+                self.range
+                    .clamp(min + ((value - min) / step).round() * step)
+            }
+            None => value,
+        }
+    }
+}
+
+impl Param for FloatParam {
+    fn info(&self) -> &ParamInfo {
+        &self.info
+    }
+    fn plain(&self) -> f64 {
+        f64::from(self.value())
+    }
+    fn set_plain(&self, value: f64) {
+        self.set(value as f32);
+    }
+    fn default_plain(&self) -> f64 {
+        f64::from(self.default)
+    }
+    fn normalized_to_plain(&self, normalized: f64) -> f64 {
+        f64::from(self.snap(self.range.denormalize(normalized)))
+    }
+    fn plain_to_normalized(&self, plain: f64) -> f64 {
+        self.range.normalize(plain as f32)
+    }
+    fn step_count(&self) -> Option<u32> {
+        let step = self.step?;
+        Some(((self.range.max() - self.range.min()) / step).round() as u32)
+    }
+    fn plain_to_text(&self, plain: f64) -> String {
+        match &self.formatter {
+            Some(formatter) => formatter(plain as f32),
+            None => format!("{plain:.precision$}", precision = self.precision),
+        }
+    }
+    fn text_to_plain(&self, text: &str) -> Option<f64> {
+        let value = match &self.parser {
+            Some(parser) => parser(text)?,
+            None => parse_number(text, self.info.unit())? as f32,
+        };
+        (!value.is_nan()).then(|| f64::from(self.snap(value)))
+    }
+}
+
+/// A whole-number parameter.
+///
+/// ```
+/// use manguebyte_params::{IntParam, Param};
+///
+/// let voices = IntParam::new("voices", "Voices", 1, 16, 8);
+/// voices.set(40);
+/// assert_eq!(voices.value(), 16);
+/// assert_eq!(voices.step_count(), Some(15));
+/// ```
+pub struct IntParam {
+    info: ParamInfo,
+    min: i32,
+    max: i32,
+    default: i32,
+    value: AtomicI32,
+}
+
+impl IntParam {
+    /// Creates a parameter covering `min..=max`. `default` is clamped.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `min >= max`, or if `id` is not a valid identifier (see
+    /// [`FloatParam::new`]).
+    pub fn new(id: &str, name: &str, min: i32, max: i32, default: i32) -> Self {
+        assert!(min < max, "an integer range needs min < max");
+        let default = default.clamp(min, max);
+        Self {
+            info: ParamInfo::new(id, name),
+            min,
+            max,
+            default,
+            value: AtomicI32::new(default),
+        }
+    }
+
+    common_builders!();
+
+    /// The current value. Real-time safe.
+    #[inline]
+    pub fn value(&self) -> i32 {
+        self.value.load(Ordering::Relaxed)
+    }
+
+    /// Sets the value, clamped to the range. Real-time safe.
+    #[inline]
+    pub fn set(&self, value: i32) {
+        self.value
+            .store(value.clamp(self.min, self.max), Ordering::Relaxed);
+    }
+
+    /// The lowest value.
+    pub fn min(&self) -> i32 {
+        self.min
+    }
+
+    /// The highest value.
+    pub fn max(&self) -> i32 {
+        self.max
+    }
+
+    fn span(&self) -> f64 {
+        f64::from(self.max) - f64::from(self.min)
+    }
+
+    fn snap(&self, plain: f64) -> f64 {
+        plain
+            .round()
+            .clamp(f64::from(self.min), f64::from(self.max))
+    }
+}
+
+impl Param for IntParam {
+    fn info(&self) -> &ParamInfo {
+        &self.info
+    }
+    fn plain(&self) -> f64 {
+        f64::from(self.value())
+    }
+    fn set_plain(&self, value: f64) {
+        if !value.is_nan() {
+            self.set(self.snap(value) as i32);
+        }
+    }
+    fn default_plain(&self) -> f64 {
+        f64::from(self.default)
+    }
+    fn normalized_to_plain(&self, normalized: f64) -> f64 {
+        self.snap(f64::from(self.min) + normalized.clamp(0.0, 1.0) * self.span())
+    }
+    fn plain_to_normalized(&self, plain: f64) -> f64 {
+        (self.snap(plain) - f64::from(self.min)) / self.span()
+    }
+    fn step_count(&self) -> Option<u32> {
+        Some(self.span() as u32)
+    }
+    fn plain_to_text(&self, plain: f64) -> String {
+        format!("{}", self.snap(plain) as i64)
+    }
+    fn text_to_plain(&self, text: &str) -> Option<f64> {
+        parse_number(text, self.info.unit()).map(|value| self.snap(value))
+    }
+}
+
+/// An on/off parameter.
+///
+/// ```
+/// use manguebyte_params::{BoolParam, Param};
+///
+/// let bypass = BoolParam::new("bypass", "Bypass", false).as_bypass();
+/// bypass.set_normalized(0.8);
+/// assert!(bypass.value());
+/// assert_eq!(bypass.display(), "On");
+/// ```
+pub struct BoolParam {
+    info: ParamInfo,
+    default: bool,
+    value: AtomicBool,
+    labels: [String; 2],
+}
+
+impl BoolParam {
+    /// Creates a switch.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` is not a valid identifier (see [`FloatParam::new`]).
+    pub fn new(id: &str, name: &str, default: bool) -> Self {
+        Self {
+            info: ParamInfo::new(id, name),
+            default,
+            value: AtomicBool::new(default),
+            labels: [String::from("Off"), String::from("On")],
+        }
+    }
+
+    common_builders!();
+
+    /// Marks this as the processor's bypass switch, which hosts treat
+    /// specially.
+    #[must_use]
+    pub fn as_bypass(mut self) -> Self {
+        self.info.flags.bypass = true;
+        self
+    }
+
+    /// Replaces the text shown for the two states.
+    #[must_use]
+    pub fn with_labels(mut self, off: &str, on: &str) -> Self {
+        self.labels = [off.to_owned(), on.to_owned()];
+        self
+    }
+
+    /// The current state. Real-time safe.
+    #[inline]
+    pub fn value(&self) -> bool {
+        self.value.load(Ordering::Relaxed)
+    }
+
+    /// Sets the state. Real-time safe.
+    #[inline]
+    pub fn set(&self, value: bool) {
+        self.value.store(value, Ordering::Relaxed);
+    }
+}
+
+impl Param for BoolParam {
+    fn info(&self) -> &ParamInfo {
+        &self.info
+    }
+    fn plain(&self) -> f64 {
+        f64::from(u8::from(self.value()))
+    }
+    fn set_plain(&self, value: f64) {
+        if !value.is_nan() {
+            self.set(value >= 0.5);
+        }
+    }
+    fn default_plain(&self) -> f64 {
+        f64::from(u8::from(self.default))
+    }
+    fn normalized_to_plain(&self, normalized: f64) -> f64 {
+        f64::from(u8::from(normalized >= 0.5))
+    }
+    fn plain_to_normalized(&self, plain: f64) -> f64 {
+        f64::from(u8::from(plain >= 0.5))
+    }
+    fn step_count(&self) -> Option<u32> {
+        Some(1)
+    }
+    fn plain_to_text(&self, plain: f64) -> String {
+        self.labels[usize::from(plain >= 0.5)].clone()
+    }
+    fn text_to_plain(&self, text: &str) -> Option<f64> {
+        let text = text.trim();
+        if let Some(index) = position_ignoring_case(&self.labels, text) {
+            return Some(index as f64);
+        }
+        match text.to_ascii_lowercase().as_str() {
+            "on" | "true" | "yes" | "1" => Some(1.0),
+            "off" | "false" | "no" | "0" => Some(0.0),
+            _ => None,
+        }
+    }
+}
+
+/// A parameter that picks one of a list of named options.
+///
+/// ```
+/// use manguebyte_params::{ChoiceParam, Param};
+///
+/// let shape = ChoiceParam::new("shape", "Shape", &["Sine", "Saw", "Square"], 1);
+/// assert_eq!(shape.display(), "Saw");
+///
+/// shape.set_plain(shape.text_to_plain("square").unwrap());
+/// assert_eq!(shape.index(), 2);
+/// ```
+///
+/// The saved state holds the index, so only ever add new options at the end
+/// of the list; reordering or removing them changes what old sessions mean.
+pub struct ChoiceParam {
+    info: ParamInfo,
+    choices: Vec<String>,
+    default: u32,
+    value: AtomicU32,
+}
+
+impl ChoiceParam {
+    /// Creates a parameter. `default` is the index of the starting option and
+    /// is clamped to the list.
+    ///
+    /// # Panics
+    ///
+    /// Panics if fewer than two options are given, or if `id` is not a valid
+    /// identifier (see [`FloatParam::new`]).
+    pub fn new(id: &str, name: &str, choices: &[&str], default: usize) -> Self {
+        assert!(choices.len() >= 2, "a choice needs at least two options");
+        let default = default.min(choices.len() - 1) as u32;
+        Self {
+            info: ParamInfo::new(id, name),
+            choices: choices.iter().map(|&choice| choice.to_owned()).collect(),
+            default,
+            value: AtomicU32::new(default),
+        }
+    }
+
+    common_builders!();
+
+    /// Index of the selected option. Real-time safe.
+    #[inline]
+    pub fn index(&self) -> usize {
+        self.value.load(Ordering::Relaxed) as usize
+    }
+
+    /// Selects an option by index, clamped to the list. Real-time safe.
+    #[inline]
+    pub fn set_index(&self, index: usize) {
+        self.value
+            .store(index.min(self.choices.len() - 1) as u32, Ordering::Relaxed);
+    }
+
+    /// The names of the options.
+    pub fn choices(&self) -> &[String] {
+        &self.choices
+    }
+
+    fn last(&self) -> f64 {
+        (self.choices.len() - 1) as f64
+    }
+
+    fn snap(&self, plain: f64) -> f64 {
+        plain.round().clamp(0.0, self.last())
+    }
+}
+
+impl Param for ChoiceParam {
+    fn info(&self) -> &ParamInfo {
+        &self.info
+    }
+    fn plain(&self) -> f64 {
+        self.index() as f64
+    }
+    fn set_plain(&self, value: f64) {
+        if !value.is_nan() {
+            self.set_index(self.snap(value) as usize);
+        }
+    }
+    fn default_plain(&self) -> f64 {
+        f64::from(self.default)
+    }
+    fn normalized_to_plain(&self, normalized: f64) -> f64 {
+        self.snap(normalized.clamp(0.0, 1.0) * self.last())
+    }
+    fn plain_to_normalized(&self, plain: f64) -> f64 {
+        self.snap(plain) / self.last()
+    }
+    fn step_count(&self) -> Option<u32> {
+        Some(self.choices.len() as u32 - 1)
+    }
+    fn plain_to_text(&self, plain: f64) -> String {
+        self.choices[self.snap(plain) as usize].clone()
+    }
+    fn text_to_plain(&self, text: &str) -> Option<f64> {
+        position_ignoring_case(&self.choices, text.trim()).map(|index| index as f64)
+    }
+}
+
+fn position_ignoring_case(labels: &[String], text: &str) -> Option<usize> {
+    labels
+        .iter()
+        .position(|label| label.eq_ignore_ascii_case(text))
+}
+
+/// Reads a number a person typed: an optional unit after it is ignored, a
+/// decimal comma is accepted, and `k` or `m` scale by a thousand or a
+/// thousandth (`"2.5k"`, `"2,5 kHz"`, `"20 ms"` when the unit is `"s"`).
+fn parse_number(text: &str, unit: &str) -> Option<f64> {
+    let text = text.trim();
+    let split = text
+        .char_indices()
+        .find(|&(index, c)| {
+            let sign = (c == '-' || c == '+') && index == 0;
+            !(c.is_ascii_digit() || c == '.' || c == ',' || sign)
+        })
+        .map_or(text.len(), |(index, _)| index);
+    let (number, suffix) = text.split_at(split);
+    let value: f64 = number.replace(',', ".").parse().ok()?;
+    if !value.is_finite() {
+        return None;
+    }
+
+    let suffix = suffix.trim();
+    if suffix.is_empty() || suffix.eq_ignore_ascii_case(unit) {
+        return Some(value);
+    }
+    let mut chars = suffix.chars();
+    let scale = match chars.next() {
+        Some('k' | 'K') => 1e3,
+        Some('m') => 1e-3,
+        _ => return None,
+    };
+    let rest = chars.as_str().trim();
+    (rest.is_empty() || rest.eq_ignore_ascii_case(unit)).then_some(value * scale)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gain() -> FloatParam {
+        FloatParam::new("gain", "Gain", FloatRange::linear(-60.0, 12.0), 0.0)
+            .with_unit("dB")
+            .with_precision(1)
+    }
+
+    #[test]
+    fn float_clamps_and_ignores_nan() {
+        let gain = gain();
+        gain.set(100.0);
+        assert_eq!(gain.value(), 12.0);
+        gain.set(f32::NEG_INFINITY);
+        assert_eq!(gain.value(), -60.0);
+        gain.set(-6.0);
+        gain.set(f32::NAN);
+        gain.set_plain(f64::NAN);
+        gain.set_normalized(f64::NAN);
+        assert_eq!(gain.value(), -6.0);
+    }
+
+    #[test]
+    fn float_normalized_round_trip_and_reset() {
+        let gain = gain();
+        gain.set_normalized(0.5);
+        assert_eq!(gain.value(), -24.0);
+        assert!((gain.normalized() - 0.5).abs() < 1e-9);
+        assert!((gain.default_normalized() - 60.0 / 72.0).abs() < 1e-9);
+        gain.reset();
+        assert_eq!(gain.value(), 0.0);
+    }
+
+    #[test]
+    fn float_step_snaps_everywhere() {
+        let param = FloatParam::new("x", "X", FloatRange::linear(0.0, 1.0), 0.33).with_step(0.25);
+        assert_eq!(param.default_value(), 0.25);
+        assert_eq!(param.value(), 0.25);
+        assert_eq!(param.step_count(), Some(4));
+        param.set(0.7);
+        assert_eq!(param.value(), 0.75);
+        assert_eq!(param.normalized_to_plain(0.9), 1.0);
+        assert_eq!(param.text_to_plain("0.4"), Some(0.5));
+        assert_eq!(gain().step_count(), None);
+    }
+
+    #[test]
+    fn float_text_conversion() {
+        let gain = gain();
+        gain.set(-6.04);
+        assert_eq!(gain.display(), "-6.0 dB");
+        assert_eq!(gain.text_to_plain(" -12 dB "), Some(-12.0));
+        assert_eq!(gain.text_to_plain("3,5db"), Some(3.5));
+        assert_eq!(gain.text_to_plain("+3"), Some(3.0));
+        assert_eq!(gain.text_to_plain("999"), Some(12.0));
+        assert_eq!(gain.text_to_plain("loud"), None);
+        assert_eq!(gain.text_to_plain("3 Hz"), None);
+        assert_eq!(gain.text_to_plain(""), None);
+
+        let time = FloatParam::new("t", "Time", FloatRange::linear(0.0, 10.0), 1.0).with_unit("s");
+        assert!((time.text_to_plain("20 ms").unwrap() - 0.02).abs() < 1e-7);
+        let cutoff = FloatParam::new(
+            "f",
+            "Cutoff",
+            FloatRange::logarithmic(20.0, 20_000.0),
+            1_000.0,
+        )
+        .with_unit("Hz");
+        assert_eq!(cutoff.text_to_plain("2.5k"), Some(2_500.0));
+        assert_eq!(cutoff.text_to_plain("2.5 kHz"), Some(2_500.0));
+    }
+
+    #[test]
+    fn custom_formatter_and_parser() {
+        let pan = FloatParam::new("pan", "Pan", FloatRange::linear(-1.0, 1.0), 0.0)
+            .with_formatter(|value| match value {
+                v if v < 0.0 => format!("{:.0}L", -v * 100.0),
+                v if v > 0.0 => format!("{:.0}R", v * 100.0),
+                _ => String::from("C"),
+            })
+            .with_parser(|text| match text.trim() {
+                "C" | "c" => Some(0.0),
+                _ => None,
+            });
+        assert_eq!(pan.display(), "C");
+        pan.set(-0.5);
+        assert_eq!(pan.display(), "50L");
+        assert_eq!(pan.text_to_plain("c"), Some(0.0));
+        assert_eq!(pan.text_to_plain("12"), None);
+    }
+
+    #[test]
+    fn int_param() {
+        let voices = IntParam::new("voices", "Voices", 1, 16, 8);
+        assert_eq!(voices.normalized_to_plain(0.0), 1.0);
+        assert_eq!(voices.normalized_to_plain(1.0), 16.0);
+        voices.set_normalized(0.5);
+        assert_eq!(voices.value(), 9);
+        voices.set_plain(3.4);
+        assert_eq!(voices.value(), 3);
+        voices.set(-5);
+        assert_eq!(voices.value(), 1);
+        assert_eq!(voices.text_to_plain("12"), Some(12.0));
+        assert_eq!(voices.plain_to_text(7.0), "7");
+    }
+
+    #[test]
+    fn bool_param() {
+        let bypass = BoolParam::new("bypass", "Bypass", false).as_bypass();
+        assert!(bypass.info().flags().bypass);
+        assert!(!bypass.value());
+        bypass.set_normalized(1.0);
+        assert!(bypass.value());
+        assert_eq!(bypass.text_to_plain("OFF"), Some(0.0));
+        assert_eq!(bypass.text_to_plain("yes"), Some(1.0));
+        assert_eq!(bypass.text_to_plain("maybe"), None);
+
+        let mode = BoolParam::new("mode", "Mode", true).with_labels("Mono", "Stereo");
+        assert_eq!(mode.display(), "Stereo");
+        assert_eq!(mode.text_to_plain("mono"), Some(0.0));
+    }
+
+    #[test]
+    fn choice_param() {
+        let shape = ChoiceParam::new("shape", "Shape", &["Sine", "Saw", "Square"], 9);
+        assert_eq!(shape.index(), 2);
+        assert_eq!(shape.step_count(), Some(2));
+        shape.set_normalized(0.5);
+        assert_eq!(shape.index(), 1);
+        assert_eq!(shape.normalized(), 0.5);
+        shape.set_index(99);
+        assert_eq!(shape.index(), 2);
+        assert_eq!(shape.text_to_plain("sine"), Some(0.0));
+        assert_eq!(shape.text_to_plain("noise"), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "parameter id")]
+    fn refuses_an_id_that_could_corrupt_saved_state() {
+        let _ = BoolParam::new("a=b", "Broken", false);
+    }
+
+    #[test]
+    fn params_are_shareable_across_threads() {
+        fn assert_shareable<T: Send + Sync>() {}
+        assert_shareable::<FloatParam>();
+        assert_shareable::<IntParam>();
+        assert_shareable::<BoolParam>();
+        assert_shareable::<ChoiceParam>();
+    }
+}
