@@ -75,6 +75,12 @@ Nothing has been published to crates.io yet. Everything below is on `main`.
 
 - Device listing with stable identifiers; choice of sample rate, channel
   count and buffer size; `InputDevice`; `DuplexStream`.
+- `devices::midi`: MIDI input and output ports. `MidiReceiver` stamps each
+  message with its arrival time and places it inside the next block at the
+  matching frame, so a player's timing is not quantised to the buffer size.
+- `manguebyte-standalone`: `Standalone::<P>::start` runs a plugin on the
+  default output device, listens to every MIDI input, gives an effect the
+  default input, and accepts notes from the program itself.
 
 ### Quality
 

@@ -11,7 +11,8 @@ echo "==> format"
 cargo fmt --all --check
 
 echo "==> lint"
-cargo clippy --workspace --all-targets
+# All features, so that code behind a feature flag is linted too.
+cargo clippy --workspace --all-targets --all-features
 
 echo "==> test"
 cargo test --workspace --quiet

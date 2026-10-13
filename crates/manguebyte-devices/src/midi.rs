@@ -1,0 +1,449 @@
+//! MIDI input and output ports.
+//!
+//! ```no_run
+//! use manguebyte_devices::midi::{MidiInput, MidiInputMessage, midi_input_ports};
+//!
+//! let ports = midi_input_ports()?;
+//! let Some(port) = ports.first() else {
+//!     println!("no MIDI inputs");
+//!     return Ok(());
+//! };
+//! let (_connection, mut receiver) = MidiInput::open(&port.id)?;
+//!
+//! // In the audio callback, once per block:
+//! let (frames, sample_rate) = (512, 48_000.0);
+//! receiver.read(frames, sample_rate, |offset, message| {
+//!     if let MidiInputMessage::Channel(message) = message {
+//!         println!("frame {offset}: {message:?}");
+//!     }
+//! });
+//! # Ok::<(), manguebyte_devices::midi::MidiError>(())
+//! ```
+//!
+//! # Timing
+//!
+//! MIDI arrives on a system thread, at any moment. The audio callback runs
+//! in bursts, one block at a time. Handing a note to the audio thread "as
+//! soon as possible" would snap every note to the start of a block, which at
+//! a buffer of 1024 frames is more than 20 ms of jitter: enough to make a
+//! good player sound sloppy.
+//!
+//! Instead each message is stamped with the time it arrived, and
+//! [`MidiReceiver::read`] places it inside the block at the offset that
+//! matches how long after the previous block it came. Every note is late by
+//! one block, and by the same amount, so the player's timing is kept.
+
+use std::fmt;
+use std::time::{Duration, Instant};
+
+use manguebyte_core::spsc::{self, Consumer, Producer};
+use manguebyte_midi::{MidiMessage, StreamEvent, StreamParser, SystemMessage};
+
+/// How many messages can wait for the audio thread. A dense performance
+/// with controllers produces a few hundred a second.
+const QUEUE_CAPACITY: usize = 4_096;
+
+const CLIENT_NAME: &str = "Manguebyte";
+
+/// What went wrong with a MIDI port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MidiError {
+    /// The system's MIDI service could not be reached.
+    Unavailable,
+    /// No port with this identifier is connected.
+    PortNotFound(String),
+    /// The port exists but could not be opened.
+    Connect(String),
+    /// A message could not be sent.
+    Send(String),
+}
+
+impl fmt::Display for MidiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str("the system's MIDI service is not available"),
+            Self::PortNotFound(id) => write!(f, "no MIDI port with id \"{id}\""),
+            Self::Connect(reason) => write!(f, "could not open the MIDI port: {reason}"),
+            Self::Send(reason) => write!(f, "could not send the MIDI message: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for MidiError {}
+
+/// A MIDI port that can be opened.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MidiPortInfo {
+    /// Stable identifier, for reopening the same port in a later run.
+    pub id: String,
+    /// Human-readable name.
+    pub name: String,
+}
+
+/// The identifier this crate gives a port.
+///
+/// The system's own identifier is used when there is one. Some ports have
+/// none: on Windows the built-in software synthesiser reports an empty
+/// string. Those are identified by their name instead, so that every port
+/// can be stored and reopened.
+fn port_id(system_id: &str, name: &str) -> String {
+    if system_id.is_empty() {
+        format!("name:{name}")
+    } else {
+        system_id.to_owned()
+    }
+}
+
+fn port_name(name: Result<String, midir::PortInfoError>) -> String {
+    name.unwrap_or_else(|_| String::from("unknown port"))
+}
+
+/// Lists the MIDI ports that can be received from.
+pub fn midi_input_ports() -> Result<Vec<MidiPortInfo>, MidiError> {
+    let input = midir::MidiInput::new(CLIENT_NAME).map_err(|_| MidiError::Unavailable)?;
+    Ok(input
+        .ports()
+        .iter()
+        .map(|port| {
+            let name = port_name(input.port_name(port));
+            MidiPortInfo {
+                id: port_id(&port.id(), &name),
+                name,
+            }
+        })
+        .collect())
+}
+
+/// Lists the MIDI ports that can be sent to.
+pub fn midi_output_ports() -> Result<Vec<MidiPortInfo>, MidiError> {
+    let output = midir::MidiOutput::new(CLIENT_NAME).map_err(|_| MidiError::Unavailable)?;
+    Ok(output
+        .ports()
+        .iter()
+        .map(|port| {
+            let name = port_name(output.port_name(port));
+            MidiPortInfo {
+                id: port_id(&port.id(), &name),
+                name,
+            }
+        })
+        .collect())
+}
+
+/// A message received from a port.
+///
+/// System exclusive messages are not delivered here: they have no fixed
+/// size, and carrying them to the audio thread would mean freeing memory
+/// there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MidiInputMessage {
+    /// A note, controller, pitch bend or other channel message.
+    Channel(MidiMessage),
+    /// Clock, transport and the other system messages.
+    System(SystemMessage),
+}
+
+/// A message and the moment it arrived.
+#[derive(Debug, Clone, Copy)]
+struct Timed {
+    at: Instant,
+    message: MidiInputMessage,
+}
+
+/// An open MIDI input port. Receiving stops when it is dropped.
+pub struct MidiInput {
+    name: String,
+    _connection: midir::MidiInputConnection<StreamParser>,
+}
+
+impl MidiInput {
+    /// Opens the input port with this identifier, as found in
+    /// [`MidiPortInfo::id`].
+    ///
+    /// Returns the connection, which must be kept alive, and the receiver,
+    /// which goes to the audio thread.
+    pub fn open(id: &str) -> Result<(Self, MidiReceiver), MidiError> {
+        let mut input = midir::MidiInput::new(CLIENT_NAME).map_err(|_| MidiError::Unavailable)?;
+        input.ignore(midir::Ignore::SysexAndActiveSense);
+        let (port, name) = input
+            .ports()
+            .into_iter()
+            .map(|port| {
+                let name = port_name(input.port_name(&port));
+                (port, name)
+            })
+            .find(|(port, name)| port_id(&port.id(), name) == id)
+            .ok_or_else(|| MidiError::PortNotFound(id.to_owned()))?;
+
+        let (mut sender, receiver) = receiver_pair(QUEUE_CAPACITY);
+        let connection = input
+            .connect(
+                &port,
+                "manguebyte-in",
+                move |_timestamp, bytes, parser: &mut StreamParser| {
+                    let at = Instant::now();
+                    parser.feed_slice(bytes, |event| {
+                        let message = match event {
+                            StreamEvent::Channel(message) => MidiInputMessage::Channel(message),
+                            StreamEvent::System(message) => MidiInputMessage::System(message),
+                            StreamEvent::SysEx(_) => return,
+                        };
+                        // A full queue means the audio thread has stopped
+                        // reading. Dropping is all that can be done.
+                        let _ = sender.push(Timed { at, message });
+                    });
+                },
+                StreamParser::new(0),
+            )
+            .map_err(|error| MidiError::Connect(error.to_string()))?;
+        Ok((
+            Self {
+                name,
+                _connection: connection,
+            },
+            receiver,
+        ))
+    }
+
+    /// Human-readable name of the port.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+fn receiver_pair(capacity: usize) -> (Producer<Timed>, MidiReceiver) {
+    let (sender, queue) = spsc::channel(capacity);
+    (
+        sender,
+        MidiReceiver {
+            queue,
+            previous: None,
+        },
+    )
+}
+
+/// The audio thread's end of a MIDI input.
+///
+/// See the [module documentation](self) for how it keeps a player's timing.
+pub struct MidiReceiver {
+    queue: Consumer<Timed>,
+    /// When the previous block was read.
+    previous: Option<Instant>,
+}
+
+impl MidiReceiver {
+    /// Hands over every message that has arrived, each with its frame
+    /// inside the coming block of `frames` frames. Call it once per block.
+    ///
+    /// Real-time safe: it reads a wait-free queue and the clock.
+    pub fn read(
+        &mut self,
+        frames: usize,
+        sample_rate: f64,
+        handle: impl FnMut(u32, MidiInputMessage),
+    ) {
+        self.read_at(Instant::now(), frames, sample_rate, handle);
+    }
+
+    /// [`read`](Self::read), with the current time passed in.
+    fn read_at(
+        &mut self,
+        now: Instant,
+        frames: usize,
+        sample_rate: f64,
+        mut handle: impl FnMut(u32, MidiInputMessage),
+    ) {
+        let block = Duration::from_secs_f64(frames as f64 / sample_rate.max(1.0));
+        // On the first block, pretend the previous one was exactly one
+        // block ago.
+        let previous = self
+            .previous
+            .unwrap_or_else(|| now.checked_sub(block).unwrap_or(now));
+        let last_frame = frames.saturating_sub(1) as f64;
+        while let Some(timed) = self.queue.pop() {
+            let late = timed.at.saturating_duration_since(previous).as_secs_f64();
+            let offset = (late * sample_rate).round().clamp(0.0, last_frame);
+            handle(offset as u32, timed.message);
+        }
+        self.previous = Some(now);
+    }
+}
+
+/// An open MIDI output port.
+///
+/// Sending talks to the operating system and may block, so it does not
+/// belong on the audio thread. Send from another thread, fed by a queue.
+pub struct MidiOutput {
+    name: String,
+    connection: midir::MidiOutputConnection,
+}
+
+impl MidiOutput {
+    /// Opens the output port with this identifier, as found in
+    /// [`MidiPortInfo::id`].
+    pub fn open(id: &str) -> Result<Self, MidiError> {
+        let output = midir::MidiOutput::new(CLIENT_NAME).map_err(|_| MidiError::Unavailable)?;
+        let (port, name) = output
+            .ports()
+            .into_iter()
+            .map(|port| {
+                let name = port_name(output.port_name(&port));
+                (port, name)
+            })
+            .find(|(port, name)| port_id(&port.id(), name) == id)
+            .ok_or_else(|| MidiError::PortNotFound(id.to_owned()))?;
+        let connection = output
+            .connect(&port, "manguebyte-out")
+            .map_err(|error| MidiError::Connect(error.to_string()))?;
+        Ok(Self { name, connection })
+    }
+
+    /// Human-readable name of the port.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Sends a channel message.
+    pub fn send(&mut self, message: MidiMessage) -> Result<(), MidiError> {
+        self.send_raw(message.to_bytes().as_slice())
+    }
+
+    /// Sends a system message.
+    pub fn send_system(&mut self, message: SystemMessage) -> Result<(), MidiError> {
+        let mut bytes = [0; 3];
+        let len = message.write(&mut bytes);
+        self.send_raw(&bytes[..len])
+    }
+
+    /// Sends raw bytes: one complete message, which may be system
+    /// exclusive.
+    pub fn send_raw(&mut self, bytes: &[u8]) -> Result<(), MidiError> {
+        self.connection
+            .send(bytes)
+            .map_err(|error| MidiError::Send(error.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RATE: f64 = 48_000.0;
+    const FRAMES: usize = 480; // 10 ms
+
+    fn note(key: u8) -> MidiInputMessage {
+        MidiInputMessage::Channel(MidiMessage::NoteOn {
+            channel: 0,
+            note: key,
+            velocity: 100,
+        })
+    }
+
+    fn read(receiver: &mut MidiReceiver, now: Instant) -> Vec<(u32, MidiInputMessage)> {
+        let mut seen = Vec::new();
+        receiver.read_at(now, FRAMES, RATE, |offset, message| {
+            seen.push((offset, message))
+        });
+        seen
+    }
+
+    fn ms(milliseconds: f64) -> Duration {
+        Duration::from_secs_f64(milliseconds / 1_000.0)
+    }
+
+    #[test]
+    fn a_message_lands_where_it_fell_in_the_previous_block() {
+        let (mut sender, mut receiver) = receiver_pair(16);
+        let start = Instant::now();
+        assert!(read(&mut receiver, start).is_empty());
+
+        let push = |sender: &mut Producer<Timed>, at: f64, key: u8| {
+            sender
+                .push(Timed {
+                    at: start + ms(at),
+                    message: note(key),
+                })
+                .unwrap();
+        };
+        push(&mut sender, 2.5, 60);
+        push(&mut sender, 7.5, 64);
+        assert_eq!(
+            read(&mut receiver, start + ms(10.0)),
+            [(120, note(60)), (360, note(64))]
+        );
+
+        // The distance between two notes is kept across a block boundary:
+        // 7.5 ms and 12.5 ms are 5 ms apart, which is 240 frames.
+        push(&mut sender, 12.5, 67);
+        assert_eq!(read(&mut receiver, start + ms(20.0)), [(120, note(67))]);
+    }
+
+    #[test]
+    fn late_callbacks_and_the_first_block_are_handled() {
+        let (mut sender, mut receiver) = receiver_pair(16);
+        let start = Instant::now();
+
+        // Before any block has been read, a message is placed as if the
+        // previous block had just ended.
+        sender
+            .push(Timed {
+                at: start + ms(5.0),
+                message: note(1),
+            })
+            .unwrap();
+        assert_eq!(read(&mut receiver, start + ms(10.0)), [(240, note(1))]);
+
+        // The audio callback came 30 ms later instead of 10. Messages from
+        // the first 10 ms keep their place; later ones are held at the last
+        // frame rather than spilling out of the block.
+        for (at, key) in [(12.0, 2), (25.0, 3), (39.0, 4)] {
+            sender
+                .push(Timed {
+                    at: start + ms(at),
+                    message: note(key),
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            read(&mut receiver, start + ms(40.0)),
+            [(96, note(2)), (479, note(3)), (479, note(4))]
+        );
+
+        // A message stamped before the previous block was read (it was
+        // pushed while that read was under way) goes at the start.
+        sender
+            .push(Timed {
+                at: start + ms(39.5),
+                message: note(5),
+            })
+            .unwrap();
+        assert_eq!(read(&mut receiver, start + ms(50.0)), [(0, note(5))]);
+    }
+
+    #[test]
+    fn a_port_without_a_system_id_is_identified_by_its_name() {
+        assert_eq!(port_id("usb-1234", "Keystation"), "usb-1234");
+        assert_eq!(
+            port_id("", "Microsoft GS Wavetable Synth"),
+            "name:Microsoft GS Wavetable Synth"
+        );
+    }
+
+    #[test]
+    fn offsets_never_run_backwards() {
+        let (mut sender, mut receiver) = receiver_pair(64);
+        let start = Instant::now();
+        read(&mut receiver, start);
+        for step in 0..40u32 {
+            sender
+                .push(Timed {
+                    at: start + ms(f64::from(step) * 0.3),
+                    message: MidiInputMessage::System(SystemMessage::TimingClock),
+                })
+                .unwrap();
+        }
+        let seen = read(&mut receiver, start + ms(10.0));
+        assert_eq!(seen.len(), 40);
+        assert!(seen.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+    }
+}

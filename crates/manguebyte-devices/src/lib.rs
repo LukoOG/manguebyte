@@ -9,6 +9,8 @@
 //! - [`OutputDevice`] plays audio.
 //! - [`InputDevice`] records it.
 //! - [`DuplexStream`] does both at once, for effects and monitoring.
+//! - [`midi`] opens MIDI ports and keeps a player's timing on the way to
+//!   the audio thread (feature `midi`, on by default).
 //!
 //! ```no_run
 //! use manguebyte_devices::OutputDevice;
@@ -42,6 +44,8 @@ mod blocks;
 mod device;
 mod duplex;
 mod error;
+#[cfg(feature = "midi")]
+pub mod midi;
 mod settings;
 
 pub use device::{

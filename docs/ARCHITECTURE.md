@@ -47,9 +47,10 @@ nothing beside or above it.
 | `manguebyte-params` | Parameters, ranges, smoothing, saved state | core |
 | `manguebyte-dsp` | `Processor`, events, transport, synth, filters, effects, FFT | core, midi |
 | `manguebyte-formats` | Audio file reading and writing | core |
-| `manguebyte-devices` | Sound card input, output and duplex | core, `cpal` |
+| `manguebyte-devices` | Sound card input, output and duplex; MIDI ports | core, midi, `cpal`, `midir` |
 | `manguebyte-plugin` | `Plugin` trait, state, `Harness` for testing without a host | core, midi, dsp, params |
 | `manguebyte-graph` | A processing graph that is rewired while it plays | core, dsp |
+| `manguebyte-standalone` | Runs a `Plugin` on the sound card and MIDI ports | core, midi, dsp, params, plugin, devices |
 | `manguebyte-clap` | Turns a `Plugin` into a CLAP plugin | core, midi, dsp, params, plugin, `clap-sys` |
 | `manguebyte` | Everything under one name | all of the above |
 

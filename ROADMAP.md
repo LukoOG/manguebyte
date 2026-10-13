@@ -34,7 +34,8 @@ Everything a standalone audio application needs, short of a user interface.
 - ⬜ Clock-drift compensation between duplex devices by adaptive resampling
   (the resampler it needs now exists)
 - ⬜ Choosing the audio host (ASIO, JACK, PipeWire)
-- ⬜ MIDI input and output ports
+- ✅ MIDI input and output ports, with jitter-free timing into the audio
+  thread
 
 **MIDI**
 - ✅ System common, system real-time and SysEx messages
@@ -88,7 +89,8 @@ Write a processor once and ship it in every format.
 - ⬜ VST3
 - ⬜ Audio Unit (AUv2 and AUv3)
 - ⬜ LV2
-- ⬜ Standalone application wrapper
+- ✅ Standalone application wrapper: sound card, MIDI ports, input for
+  effects
 - 🚧 Tooling to bundle, sign and validate plugins: `scripts/bundle-clap.sh`
   builds a `.clap` on Windows, Linux and macOS; signing is not started
 - ⬜ Project templates

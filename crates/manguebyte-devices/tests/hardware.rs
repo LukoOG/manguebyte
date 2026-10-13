@@ -18,6 +18,47 @@ use manguebyte_devices::{
     DuplexStream, InputDevice, OutputDevice, StreamSettings, input_devices, output_devices,
 };
 
+#[cfg(feature = "midi")]
+#[test]
+#[ignore = "needs the system MIDI service"]
+fn lists_midi_ports_and_reports_a_missing_one() {
+    use manguebyte_devices::midi::{
+        MidiError, MidiInput, MidiOutput, midi_input_ports, midi_output_ports,
+    };
+
+    let inputs = midi_input_ports().unwrap();
+    let outputs = midi_output_ports().unwrap();
+    println!("MIDI inputs: {inputs:?}");
+    println!("MIDI outputs: {outputs:?}");
+    assert!(
+        inputs
+            .iter()
+            .chain(&outputs)
+            .all(|port| !port.id.is_empty())
+    );
+
+    assert!(matches!(
+        MidiInput::open("no-such-port"),
+        Err(MidiError::PortNotFound(_))
+    ));
+    assert!(matches!(
+        MidiOutput::open("no-such-port"),
+        Err(MidiError::PortNotFound(_))
+    ));
+
+    // Opening is enough to check the connection; nothing is sent, so no
+    // synthesiser makes a sound.
+    if let Some(port) = outputs.first() {
+        let output = MidiOutput::open(&port.id).unwrap();
+        assert_eq!(output.name(), port.name);
+    }
+    if let Some(port) = inputs.first() {
+        let (input, mut receiver) = MidiInput::open(&port.id).unwrap();
+        assert_eq!(input.name(), port.name);
+        receiver.read(256, 48_000.0, |_, _| {});
+    }
+}
+
 #[test]
 #[ignore = "needs an audio output device"]
 fn lists_output_devices_and_marks_one_as_default() {

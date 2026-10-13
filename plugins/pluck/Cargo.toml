@@ -12,6 +12,14 @@ publish = false
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+## Builds the example that plays the plugin on the sound card.
+standalone = ["manguebyte/standalone"]
+
+[[example]]
+name = "play"
+required-features = ["standalone"]
+
 [dependencies]
 manguebyte = { path = "../../crates/manguebyte", default-features = false, features = ["clap"] }
 

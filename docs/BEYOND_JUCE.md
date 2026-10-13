@@ -256,10 +256,10 @@ JUCE has been in production for more than twenty years, and it shows. Today
 it has, and Manguebyte does not:
 
 - a complete GUI toolkit, with plugin editor windows;
-- VST3, Audio Unit, AAX and LV2 plugin formats, and a standalone wrapper;
+- VST3, Audio Unit, AAX and LV2 plugin formats;
 - plugin hosting and an audio processing graph;
 - many more DSP building blocks, and readers for compressed audio formats;
-- MIDI device I/O, iOS and Android;
+- iOS and Android;
 - documentation, tutorials and a large community.
 
 [JUCE_PARITY.md](JUCE_PARITY.md) tracks that gap module by module, and

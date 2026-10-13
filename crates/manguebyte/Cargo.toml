@@ -18,6 +18,8 @@ default = ["devices"]
 devices = ["dep:manguebyte-devices"]
 ## Building CLAP plugins.
 clap = ["dep:manguebyte-clap"]
+## Running a plugin as a standalone application.
+standalone = ["dep:manguebyte-standalone", "devices"]
 
 [dependencies]
 manguebyte-core.workspace = true
@@ -29,6 +31,7 @@ manguebyte-formats.workspace = true
 manguebyte-graph.workspace = true
 manguebyte-devices = { workspace = true, optional = true }
 manguebyte-clap = { workspace = true, optional = true }
+manguebyte-standalone = { workspace = true, optional = true }
 
 [[example]]
 name = "play_riff"

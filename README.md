@@ -92,10 +92,11 @@ the road ahead and the API will change before 1.0. See
 | [`manguebyte-clap`](crates/manguebyte-clap) | Exports a `Plugin` as a CLAP plugin with one line. Notes, expression, automation and modulation arrive on their exact frame. Passes the CLAP project's validator |
 | [`manguebyte-midi`](crates/manguebyte-midi) | Channel and system messages, a byte-stream parser (running status, real-time, SysEx), standard MIDI file reading and writing, sample-accurate `MidiBuffer`, pitch conversions |
 | [`manguebyte-formats`](crates/manguebyte-formats) | WAV reading (8/16/24/32-bit PCM, 32/64-bit float) and writing (16/24-bit PCM, 32-bit float) |
-| [`manguebyte-devices`](crates/manguebyte-devices) | Device listing and selection, playback, recording and full-duplex streams, in any hardware sample format |
+| [`manguebyte-devices`](crates/manguebyte-devices) | Device listing and selection, playback, recording and full-duplex streams, in any hardware sample format; MIDI input and output ports, with arrival times mapped to frames so a player's timing survives the audio buffer |
+| [`manguebyte-standalone`](crates/manguebyte-standalone) | Runs a `Plugin` as an application: sound card out, MIDI keyboards in, microphone in for effects |
 
-Not there yet: MIDI device I/O, compressed formats, plugin formats other
-than CLAP, plugin user interfaces, plugin hosting and GUI.
+Not there yet: compressed formats, plugin formats other than CLAP, plugin
+user interfaces, plugin hosting and GUI.
 
 ## Quick start
 
@@ -212,6 +213,13 @@ Build it and load the result in any CLAP host:
 
 ```bash
 ./scripts/bundle-clap.sh mangue-pluck "Mangue Pluck"
+```
+
+Or play it with no host, straight on the sound card, with any connected MIDI
+keyboard (the argument is the level in decibels):
+
+```bash
+cargo run -p mangue-pluck --features standalone --example play -- -12 hold
 ```
 
 The same plugin runs inside a unit test with no host at all, through
