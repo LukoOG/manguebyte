@@ -1,14 +1,21 @@
 //! MIDI messages and sample-accurate event buffers.
 //!
 //! - [`MidiMessage`]: a parsed channel voice message.
+//! - [`SystemMessage`]: clock, transport and the other system messages.
+//! - [`StreamParser`]: decodes a raw byte stream, with running status,
+//!   interleaved real-time bytes and system exclusive data.
 //! - [`MidiBuffer`]: messages ordered by their position inside an audio block.
+//! - [`file`]: reading and writing standard MIDI files.
 //! - [`note_to_hz`] / [`hz_to_note`]: equal-temperament pitch conversions.
 
 mod buffer;
+pub mod file;
 mod message;
+mod stream;
 
 pub use buffer::{MidiBuffer, MidiEvent};
 pub use message::{MidiMessage, RawMidi};
+pub use stream::{StreamEvent, StreamParser, SystemMessage};
 
 /// Frequency in hertz of a MIDI note number, in equal temperament with
 /// A4 (note 69) at 440 Hz. Fractional notes are allowed.

@@ -8,7 +8,7 @@
 //! | (root) | `manguebyte-core` | [`AudioBuffer`], [`Sample`], [`Smoothed`], atomics, [`spsc`] queue |
 //! | [`dsp`] | `manguebyte-dsp` | oscillators, filters, envelopes, delays, dynamics, reverb, FFT, windows, processor chains |
 //! | [`params`] | `manguebyte-params` | thread-safe parameters, ranges, smoothing, saved state |
-//! | [`midi`] | `manguebyte-midi` | MIDI messages and sample-accurate event buffers |
+//! | [`midi`] | `manguebyte-midi` | MIDI messages, stream parsing, MIDI files, sample-accurate event buffers |
 //! | [`formats`] | `manguebyte-formats` | audio file reading and writing |
 //! | [`devices`] | `manguebyte-devices` | audio device input, output and duplex streams (feature `devices`, on by default) |
 //!
@@ -52,7 +52,11 @@ pub mod prelude {
         StateVariableFilter, SvfMode, Waveform,
     };
     pub use crate::formats::wav::{self, WavFormat};
-    pub use crate::midi::{MidiBuffer, MidiEvent, MidiMessage, hz_to_note, note_to_hz};
+    pub use crate::midi::file::{MetaEvent, MidiFile, Track};
+    pub use crate::midi::{
+        MidiBuffer, MidiEvent, MidiMessage, StreamEvent, StreamParser, SystemMessage, hz_to_note,
+        note_to_hz,
+    };
     pub use crate::params::{
         BoolParam, Changed, ChoiceParam, FloatParam, FloatRange, IntParam, Param, ParamSet,
         ParamSmoother, ParamState, Smoothing, param_set,

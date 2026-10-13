@@ -54,7 +54,7 @@ before 1.0. See [ROADMAP.md](ROADMAP.md) for what exists and what is planned.
 | [`manguebyte-core`](crates/manguebyte-core) | `AudioBuffer`, the `Sample` trait, `Smoothed` values, atomic floats, a wait-free SPSC queue, decibel maths |
 | [`manguebyte-dsp`](crates/manguebyte-dsp) | The `Processor` trait and tuple chains, band-limited oscillator, biquad filters (8 shapes), state-variable filter, ADSR envelope, delay line and echo, compressor, noise gate, reverb, smoothed gain, FFT of any length, window functions |
 | [`manguebyte-params`](crates/manguebyte-params) | Lock-free float, integer, switch and choice parameters; linear, skewed and logarithmic ranges; text conversion; smoothing; saved state that survives version changes |
-| [`manguebyte-midi`](crates/manguebyte-midi) | MIDI message parsing and encoding, sample-accurate `MidiBuffer`, pitch conversions |
+| [`manguebyte-midi`](crates/manguebyte-midi) | Channel and system messages, a byte-stream parser (running status, real-time, SysEx), standard MIDI file reading and writing, sample-accurate `MidiBuffer`, pitch conversions |
 | [`manguebyte-formats`](crates/manguebyte-formats) | WAV reading (8/16/24/32-bit PCM, 32/64-bit float) and writing (16/24-bit PCM, 32-bit float) |
 | [`manguebyte-devices`](crates/manguebyte-devices) | Device listing and selection, playback, recording and full-duplex streams, in any hardware sample format |
 

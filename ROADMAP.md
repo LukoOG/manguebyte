@@ -36,9 +36,9 @@ Everything a standalone audio application needs, short of a user interface.
 - ⬜ MIDI input and output ports
 
 **MIDI**
-- ⬜ System common, system real-time and SysEx messages
-- ⬜ Running status and a byte-stream parser
-- ⬜ Standard MIDI File reading and writing
+- ✅ System common, system real-time and SysEx messages
+- ✅ Running status and a byte-stream parser
+- ✅ Standard MIDI File reading and writing, with tempo-aware timing
 - ⬜ MPE and MIDI 2.0 / UMP
 
 **DSP**
