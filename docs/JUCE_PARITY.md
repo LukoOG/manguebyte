@@ -28,7 +28,7 @@ Manguebyte
 | `juce_audio_processors_headless` | The same, without GUI dependencies (added in JUCE 8.0.11) | the same crates | ✅ by construction: no processing crate depends on a GUI |
 | `juce_audio_plugin_client` | Wrappers that turn a processor into a VST3, AU, AUv3, LV2, AAX, Unity or standalone plugin | later one crate per format | ⬜ Planned order: CLAP, VST3, standalone, AU, LV2. JUCE has no native CLAP |
 | `juce_audio_utils` | Ready-made audio widgets and helpers: device selector, keyboard, thumbnail, transport-style player | later `gui` | ⬜ |
-| `juce_dsp` | FFT, windows, IIR and FIR filters with design methods, state-variable and ladder filters, oversampling, convolution, delay lines, dynamics, reverb, chorus, phaser, waveshaping, oscillator, panner, SIMD wrappers, lookup tables | `dsp` | 🚧 Processor chains, oscillator, biquad designs, delay, gain, FFT of any length and windows are done. Missing: the rest of the list |
+| `juce_dsp` | FFT, windows, IIR and FIR filters with design methods, state-variable and ladder filters, oversampling, convolution, delay lines, dynamics, reverb, chorus, phaser, waveshaping, oscillator, panner, SIMD wrappers, lookup tables | `dsp` | 🚧 Processor chains, oscillator, biquad designs, state-variable filter, delay, gain, compressor, noise gate, reverb, FFT of any length and windows are done. Missing: FIR and ladder filters, high-order IIR design, oversampling, convolution, limiter, chorus, phaser, waveshaper, panner, SIMD, lookup tables |
 | `juce_midi_ci` | MIDI Capability Inquiry: discovery, profiles, property exchange | later, in `midi` | ⬜ |
 | `juce_osc` | Open Sound Control messages over UDP | later `osc` | ⬜ |
 

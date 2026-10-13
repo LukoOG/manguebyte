@@ -6,7 +6,7 @@
 //! | Module | Crate | What it holds |
 //! |---|---|---|
 //! | (root) | `manguebyte-core` | [`AudioBuffer`], [`Sample`], [`Smoothed`], atomics, [`spsc`] queue |
-//! | [`dsp`] | `manguebyte-dsp` | oscillators, filters, envelopes, delays, FFT, windows, processor chains |
+//! | [`dsp`] | `manguebyte-dsp` | oscillators, filters, envelopes, delays, dynamics, reverb, FFT, windows, processor chains |
 //! | [`params`] | `manguebyte-params` | thread-safe parameters, ranges, smoothing, saved state |
 //! | [`midi`] | `manguebyte-midi` | MIDI messages and sample-accurate event buffers |
 //! | [`formats`] | `manguebyte-formats` | audio file reading and writing |
@@ -47,8 +47,9 @@ pub use manguebyte_params as params;
 /// The names most programs need, in one import.
 pub mod prelude {
     pub use crate::dsp::{
-        Adsr, AdsrParams, Biquad, BiquadCoefficients, Delay, DelayLine, Filter, FilterShape, Gain,
-        Oscillator, ProcessSpec, Processor, Waveform,
+        Adsr, AdsrParams, Biquad, BiquadCoefficients, Compressor, Delay, DelayLine, Filter,
+        FilterShape, Gain, NoiseGate, Oscillator, ProcessSpec, Processor, Reverb,
+        StateVariableFilter, SvfMode, Waveform,
     };
     pub use crate::formats::wav::{self, WavFormat};
     pub use crate::midi::{MidiBuffer, MidiEvent, MidiMessage, hz_to_note, note_to_hz};

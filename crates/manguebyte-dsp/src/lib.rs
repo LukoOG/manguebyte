@@ -24,17 +24,23 @@
 
 mod biquad;
 mod delay;
+mod dynamics;
 mod envelope;
 pub mod fft;
 mod gain;
 mod oscillator;
+mod reverb;
+mod svf;
 pub mod window;
 
 pub use biquad::{Biquad, BiquadCoefficients, Filter, FilterShape};
 pub use delay::{Delay, DelayLine};
+pub use dynamics::{Compressor, NoiseGate};
 pub use envelope::{Adsr, AdsrParams};
 pub use gain::Gain;
 pub use oscillator::{Oscillator, Waveform};
+pub use reverb::Reverb;
+pub use svf::{StateVariableFilter, SvfMode};
 
 use manguebyte_core::{AudioBuffer, Sample};
 

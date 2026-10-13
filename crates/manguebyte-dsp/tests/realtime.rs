@@ -13,8 +13,8 @@ use std::cell::Cell;
 use manguebyte_core::AudioBuffer;
 use manguebyte_dsp::fft::{Complex, Fft, RealFft};
 use manguebyte_dsp::{
-    Adsr, AdsrParams, Biquad, BiquadCoefficients, Delay, Filter, FilterShape, Gain, Oscillator,
-    ProcessSpec, Processor, Waveform,
+    Adsr, AdsrParams, Biquad, BiquadCoefficients, Compressor, Delay, Filter, FilterShape, Gain,
+    NoiseGate, Oscillator, ProcessSpec, Processor, Reverb, StateVariableFilter, SvfMode, Waveform,
 };
 
 thread_local! {
@@ -137,6 +137,31 @@ fn processors_do_not_use_the_heap() {
             .with_feedback(0.4)
             .with_mix(0.5),
     );
+}
+
+#[test]
+fn newer_processors_do_not_use_the_heap() {
+    check(
+        "StateVariableFilter",
+        StateVariableFilter::<f32>::new(SvfMode::Bandpass, 1_000.0, 2.0),
+    );
+    check(
+        "Compressor",
+        Compressor::<f32>::new()
+            .with_threshold_db(-30.0)
+            .with_knee_db(6.0),
+    );
+    check(
+        "NoiseGate",
+        NoiseGate::<f32>::new().with_threshold_db(-20.0),
+    );
+    check("Reverb", {
+        let mut reverb = Reverb::<f32>::new();
+        // Settings may be changed from the audio thread too.
+        reverb.set_size(0.8);
+        reverb.set_decay_seconds(4.0);
+        reverb
+    });
 }
 
 #[test]

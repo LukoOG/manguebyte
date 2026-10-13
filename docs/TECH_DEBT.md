@@ -24,7 +24,7 @@ Each item is scored from 1 to 5 on three axes:
 | 3 | The allocation guard covers `dsp` only, not the device block adapters or `ParamSmoother` | Test | 2 | 4 | 2 | 24 |
 | 4 | No benchmarks, so a performance regression is invisible | Test | 3 | 3 | 2 | 24 |
 | 5 | No dependency audit (`cargo deny`) in CI for licences and advisories | Infrastructure | 2 | 4 | 1 | 30 |
-| 6 | `Sample` has almost no maths (`sin`, `exp`, `tanh`, `min`, `max`), so generic code round-trips through `f64` | Code | 3 | 2 | 2 | 20 |
+| 6 | `Sample` has almost no maths (`sin`, `exp`, `tanh`, `min`, `max`), so generic code round-trips through `f64`; the newer processors keep their state in `f64` outright, which halves SIMD width for `f32` buffers | Code | 3 | 2 | 2 | 20 |
 | 7 | WAV is read whole into memory; there is no streaming reader or writer | Architecture | 4 | 2 | 3 | 18 |
 | 8 | Duplex streams correct clock drift by dropping or padding, which is audible on long runs with two devices | Code | 2 | 3 | 4 | 10 |
 | 9 | `core` needs `std` (`Arc`, `Vec`), which blocks embedded targets | Architecture | 2 | 2 | 2 | 16 |
@@ -41,7 +41,7 @@ Everything in Phase 2 (plugins) is built on the process call. JUCE's
 `AudioProcessor` cannot express sample-accurate automation, MIDI 2.0, note
 expression or per-voice modulation, and retrofitting them is what its
 "AudioProcessor v2" effort is about. Adding a context to `Processor` now, while
-there are six processors, is a day of work. Adding it after the plugin
+there are ten processors, is a day of work. Adding it after the plugin
 wrappers exist would mean changing every wrapper and every user's plugin.
 
 The intended shape:

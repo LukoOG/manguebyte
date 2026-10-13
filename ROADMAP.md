@@ -45,9 +45,12 @@ Everything a standalone audio application needs, short of a user interface.
 - ✅ FFT of any length, real FFT and window functions
 - ⬜ Short-time Fourier transform with overlap-add; spectrum analysis helpers
 - ⬜ Resampling and oversampling
-- ⬜ State-variable, ladder and FIR filters; higher-order filter design
-- ⬜ Dynamics: compressor, limiter, gate
-- ⬜ Reverb, chorus, phaser, convolution
+- ✅ State-variable filter, stable under audio-rate modulation
+- ⬜ Ladder and FIR filters; higher-order filter design
+- ✅ Dynamics: compressor with soft knee, noise gate
+- ⬜ Look-ahead limiter, expander, sidechain input
+- ✅ Reverb (feedback delay network)
+- ⬜ Chorus, phaser, convolution
 - ⬜ Wavetable oscillator, noise generators, LFO
 - ⬜ Polyphonic voice allocation
 - ⬜ SIMD-accelerated buffer operations
