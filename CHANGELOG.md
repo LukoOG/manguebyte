@@ -31,7 +31,10 @@ Nothing has been published to crates.io yet. Everything below is on `main`.
   copying, and `split_at_events` uses it to apply each event on its exact
   frame.
 - `Synth` and `Voice`: polyphonic voice allocation with per-note expression
-  and modulation, sustain pedal and voice stealing.
+  and modulation, sustain pedal and voice stealing. The synth remembers
+  where the pitch wheel and each controller stand on every channel and
+  tells a voice before it starts a note, so a note struck while the wheel
+  is held starts bent, whichever voice it lands on.
 - `Processor::latency_samples`, summed by chains.
 - `ParamId`: a stable 32-bit hash of a parameter's text identifier.
 

@@ -47,7 +47,11 @@ pub trait Voice<S: Sample = f32> {
         let _ = (expression, value);
     }
 
-    /// The pitch wheel moved, by this many semitones from its centre.
+    /// The pitch wheel is this many semitones from its centre.
+    ///
+    /// Called when the wheel moves, and also just before
+    /// [`note_on`](Self::note_on) for every fresh note, so that a note
+    /// struck while the wheel is held starts bent instead of in tune.
     fn pitch_bend(&mut self, semitones: f64) {
         let _ = semitones;
     }
@@ -65,10 +69,17 @@ pub trait Voice<S: Sample = f32> {
     }
 
     /// Any other MIDI message on this voice's channel, such as a controller.
+    ///
+    /// A controller is a position, not a moment: before
+    /// [`note_on`](Self::note_on) for a fresh note the voice is told where
+    /// every controller that has moved on its channel now stands.
     fn midi(&mut self, message: MidiMessage) {
         let _ = message;
     }
 }
+
+/// A controller nobody has moved yet. MIDI values stop at 127.
+const UNMOVED: u8 = 0xFF;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -106,6 +117,10 @@ struct Slot<V> {
 ///   until it is lifted, per channel.
 /// - **Pitch bend** is converted to semitones using
 ///   [`set_pitch_bend_range`](Self::set_pitch_bend_range).
+/// - **The wheel and the controllers are remembered** per channel. A voice
+///   starting a note is told where they stand, so the note sounds the same
+///   whichever voice it lands on and whether or not that voice was sounding
+///   when the wheel moved. Controller 121 puts them back.
 /// - Controllers 120 and 123 silence or release a whole channel.
 ///
 /// When every voice is busy, a new note takes over the voice that will be
@@ -154,6 +169,10 @@ pub struct Synth<V, S: Sample = f32> {
     clock: u64,
     /// Whether the sustain pedal is down, per channel.
     sustain: [bool; 16],
+    /// Where the pitch wheel is, per channel, as MIDI sends it.
+    bend: [i16; 16],
+    /// Where each controller is, per channel, or [`UNMOVED`].
+    controllers: [[u8; 128]; 16],
     bend_range: f64,
     marker: PhantomData<S>,
 }
@@ -173,6 +192,8 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
                 .collect(),
             clock: 0,
             sustain: [false; 16],
+            bend: [0; 16],
+            controllers: [[UNMOVED; 128]; 16],
             bend_range: 2.0,
             marker: PhantomData,
         }
@@ -228,6 +249,21 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
             // A fresh note always starts from a clean voice, whether the
             // voice was idle or is being taken over. See `Voice::choke`.
             slot.voice.choke();
+            // A clean voice knows nothing of the wheel or the controllers,
+            // which were last moved while it was silent or playing a note
+            // on another channel.
+            let channel = usize::from(note.channel & 0x0F);
+            let semitones = f64::from(self.bend[channel]) / 8192.0 * self.bend_range;
+            slot.voice.pitch_bend(semitones);
+            for (controller, &value) in self.controllers[channel].iter().enumerate() {
+                if value != UNMOVED {
+                    slot.voice.midi(MidiMessage::ControlChange {
+                        channel: note.channel,
+                        controller: controller as u8,
+                        value,
+                    });
+                }
+            }
         }
         slot.note = note;
         slot.stage = Stage::Held;
@@ -341,9 +377,39 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
                 }
             }
             MidiMessage::PitchBend { channel, value } => {
+                self.bend[usize::from(channel & 0x0F)] = value;
                 let semitones = f64::from(value) / 8192.0 * self.bend_range;
                 for slot in self.sounding(move |slot| slot.note.channel == channel) {
                     slot.voice.pitch_bend(semitones);
+                }
+            }
+            MidiMessage::ControlChange {
+                channel,
+                controller,
+                value,
+            } => {
+                let index = usize::from(channel & 0x0F);
+                if controller == 121 {
+                    // Reset all controllers: the wheel returns to its
+                    // centre, the pedal comes up and the controllers are
+                    // forgotten, except those the MIDI recommendation
+                    // (RP-015) says a reset leaves alone: bank, volume,
+                    // pan, and the sound and effect controllers.
+                    self.bend[index] = 0;
+                    for (number, held) in self.controllers[index].iter_mut().enumerate() {
+                        if !matches!(number, 0 | 7 | 10 | 32 | 70..=79 | 91..=95) {
+                            *held = UNMOVED;
+                        }
+                    }
+                    self.set_sustain(channel, false);
+                    for slot in self.sounding(move |slot| slot.note.channel == channel) {
+                        slot.voice.pitch_bend(0.0);
+                    }
+                } else {
+                    self.controllers[index][usize::from(controller & 0x7F)] = value.min(127);
+                }
+                for slot in self.sounding(move |slot| slot.note.channel == channel) {
+                    slot.voice.midi(message);
                 }
             }
             other => {
@@ -774,6 +840,55 @@ mod tests {
         assert_eq!(output, [50.0, 45.0, 45.0, 40.0]);
         let output = run(&mut synth, 2, &[(1, on(10)), (1, controller(120, 0))]);
         assert_eq!(output, [40.0, 40.0]);
+    }
+
+    #[test]
+    fn a_note_started_later_hears_where_the_wheel_and_controllers_are() {
+        let mut synth = synth(4);
+        let bend = |value| EventKind::Midi(MidiMessage::PitchBend { channel: 0, value });
+        // Nothing is sounding when the wheel and the mod wheel move.
+        run(&mut synth, 2, &[(0, bend(-8_192)), (0, controller(1, 90))]);
+        let mut expected = Vec::new();
+        for key in [10, 20, 30] {
+            run(&mut synth, 2, &[(0, on(key))]);
+            expected.push((f32::from(key), -2.0, Some((1, 90))));
+        }
+        // Every voice the notes landed on was told, not just the first.
+        let heard: Vec<_> = synth
+            .voices_mut()
+            .filter(|voice| voice.held)
+            .map(|voice| (voice.key, voice.bend, voice.controller))
+            .collect();
+        assert_eq!(heard, expected);
+
+        // A note on another channel has its own wheel, at rest.
+        let elsewhere = EventKind::NoteOn {
+            note: NoteRef::new(5, 40),
+            velocity: 1.0,
+        };
+        run(&mut synth, 2, &[(0, elsewhere)]);
+        let voice = synth.voices_mut().find(|voice| voice.key == 40.0).unwrap();
+        assert_eq!((voice.bend, voice.controller), (0.0, None));
+    }
+
+    #[test]
+    fn reset_all_controllers_puts_the_wheel_and_controllers_back() {
+        let mut synth = synth(2);
+        let bend = EventKind::Midi(MidiMessage::PitchBend {
+            channel: 0,
+            value: 8_191,
+        });
+        let moves = [(0, bend), (0, controller(1, 90)), (0, controller(7, 100))];
+        run(&mut synth, 2, &moves);
+        run(&mut synth, 2, &[(0, on(10)), (1, controller(121, 0))]);
+        // The sounding note is straightened at once.
+        assert_eq!(synth.voices_mut().next().unwrap().bend, 0.0);
+
+        // The next note starts in tune and is told of the volume, which a
+        // reset leaves alone, but not of the mod wheel.
+        run(&mut synth, 2, &[(0, on(20))]);
+        let voice = synth.voices_mut().find(|voice| voice.key == 20.0).unwrap();
+        assert_eq!((voice.bend, voice.controller), (0.0, Some((7, 100))));
     }
 
     #[test]
