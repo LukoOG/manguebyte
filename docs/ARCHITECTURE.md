@@ -49,6 +49,7 @@ nothing beside or above it.
 | `manguebyte-formats` | Audio file reading and writing | core |
 | `manguebyte-devices` | Sound card input, output and duplex | core, `cpal` |
 | `manguebyte-plugin` | `Plugin` trait, state, `Harness` for testing without a host | core, midi, dsp, params |
+| `manguebyte-graph` | A processing graph that is rewired while it plays | core, dsp |
 | `manguebyte-clap` | Turns a `Plugin` into a CLAP plugin | core, midi, dsp, params, plugin, `clap-sys` |
 | `manguebyte` | Everything under one name | all of the above |
 
@@ -125,7 +126,9 @@ parameter values are the single source of truth and live in atomics, so
 `ParamSet::save` and `ParamSet::load` are safe from any thread at any time
 with no lock. Larger state (a sample, a wavetable) follows the swap pattern
 in the diagram above: build off-thread, hand over through a queue, return the
-old value through a queue to be freed.
+old value through a queue to be freed. `manguebyte-graph` is that pattern in
+full: a whole compiled graph is swapped in, and the one it replaces travels
+back to be dropped.
 
 ## Data flow
 

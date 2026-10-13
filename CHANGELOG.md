@@ -35,6 +35,14 @@ Nothing has been published to crates.io yet. Everything below is on `main`.
 - `Processor::latency_samples`, summed by chains.
 - `ParamId`: a stable 32-bit hash of a parameter's text identifier.
 
+### Graph
+
+- `manguebyte-graph`: a processing graph that is edited while it plays.
+  `Graph` is the description and `GraphEngine` the processor; a commit
+  compiles a plan and swaps it in through a wait-free queue. Nodes keep
+  their state across edits, removed nodes are freed off the audio thread,
+  and paths of different latency are aligned automatically.
+
 ### Signal processing
 
 - `StateVariableFilter`, stable while its cutoff is modulated at audio rate.

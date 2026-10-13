@@ -288,6 +288,7 @@ dependencies = [
  "manguebyte-devices",
  "manguebyte-dsp",
  "manguebyte-formats",
+ "manguebyte-graph",
  "manguebyte-midi",
  "manguebyte-params",
  "manguebyte-plugin",
@@ -330,6 +331,14 @@ name = "manguebyte-formats"
 version = "0.1.0"
 dependencies = [
  "manguebyte-core",
+]
+
+[[package]]
+name = "manguebyte-graph"
+version = "0.1.0"
+dependencies = [
+ "manguebyte-core",
+ "manguebyte-dsp",
 ]
 
 [[package]]

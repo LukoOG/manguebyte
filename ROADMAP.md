@@ -103,7 +103,10 @@ are solid.
 
 ## Phase 4: hosting and graphs
 
-- ⬜ Audio processing graph with automatic latency compensation
+- ✅ Audio processing graph, rewired while it plays, with automatic latency
+  compensation
+- ⬜ Graph extras: sidechain and per-node event routing, feedback through an
+  explicit delay, crossfaded swaps, buffer reuse
 - ⬜ Plugin scanning and hosting: CLAP, VST3, AU, LV2
 - ⬜ Transport, tempo map and timeline primitives
 

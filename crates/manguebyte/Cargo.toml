@@ -26,6 +26,7 @@ manguebyte-plugin.workspace = true
 manguebyte-midi.workspace = true
 manguebyte-dsp.workspace = true
 manguebyte-formats.workspace = true
+manguebyte-graph.workspace = true
 manguebyte-devices = { workspace = true, optional = true }
 manguebyte-clap = { workspace = true, optional = true }
 

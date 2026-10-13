@@ -8,6 +8,7 @@
 //! | (root) | `manguebyte-core` | [`AudioBuffer`], [`Sample`], [`Smoothed`], atomics, [`spsc`] queue |
 //! | [`dsp`] | `manguebyte-dsp` | processor chains, sample-accurate events, polyphonic synth, filters, effects, FFT |
 //! | [`params`] | `manguebyte-params` | thread-safe parameters, ranges, smoothing, saved state |
+//! | [`graph`] | `manguebyte-graph` | a processing graph that can be rewired while it plays |
 //! | [`plugin`] | `manguebyte-plugin` | the format-independent plugin API and a test harness |
 //! | [`midi`] | `manguebyte-midi` | MIDI messages, stream parsing, MIDI files, sample-accurate event buffers |
 //! | [`formats`] | `manguebyte-formats` | audio file reading and writing |
@@ -47,6 +48,7 @@ pub use manguebyte_clap as clap;
 pub use manguebyte_devices as devices;
 pub use manguebyte_dsp as dsp;
 pub use manguebyte_formats as formats;
+pub use manguebyte_graph as graph;
 pub use manguebyte_midi as midi;
 pub use manguebyte_params as params;
 pub use manguebyte_plugin as plugin;
@@ -60,6 +62,7 @@ pub mod prelude {
         StateVariableFilter, SvfMode, Synth, Transport, Voice, Waveform, split_at_events,
     };
     pub use crate::formats::wav::{self, WavFormat};
+    pub use crate::graph::{Graph, GraphEngine, GraphError, NodeId};
     pub use crate::midi::file::{MetaEvent, MidiFile, Track};
     pub use crate::midi::{
         MidiBuffer, MidiEvent, MidiMessage, StreamEvent, StreamParser, SystemMessage, hz_to_note,
