@@ -1044,13 +1044,18 @@ fn what_is_not_a_plugin_is_an_error_and_nothing_more() {
         matches!(&error, ClapError::Load { path, reason } if path == &text && !reason.is_empty()),
         "{error:?}"
     );
-    // An empty file, and a file that only starts like a library.
+    // An empty file, and a file that only starts like a library: its first
+    // 16 bytes, fewer than the header of any executable format, so every
+    // system refuses it before mapping anything. (A library cut after its
+    // headers is a different matter: Linux's loader maps it without
+    // checking its length and the process dies inside the loader, which
+    // is why `load` does not promise to survive damaged libraries.)
     let empty = folder.join("empty.clap");
     std::fs::write(&empty, b"").unwrap();
     assert!(matches!(common::load(&empty), Err(ClapError::Load { .. })));
     let real = std::fs::read(common::built_library("mangue_pluck")).unwrap();
     let cut = folder.join("cut.clap");
-    std::fs::write(&cut, &real[..real.len().min(700)]).unwrap();
+    std::fs::write(&cut, &real[..real.len().min(16)]).unwrap();
     assert!(matches!(common::load(&cut), Err(ClapError::Load { .. })));
 
     // A real shared library that is not a CLAP plugin: one that every

@@ -935,10 +935,13 @@ mod tests {
             assert_eq!(super::super::text::wide_text(&name), "Test Host");
             assert_eq!(application.getName(ptr::null_mut()), kInvalidArgument);
 
+            // One pointer for both identifiers: two `&mut` borrows of the
+            // same local alive at once would be undefined behaviour.
             let mut class = IMessage::IID.map(|byte| byte as c_char);
+            let class_and_interface = &raw mut class;
             let mut object = ptr::null_mut();
             assert_eq!(
-                application.createInstance(&mut class, &mut class, &mut object),
+                application.createInstance(class_and_interface, class_and_interface, &mut object),
                 kResultOk
             );
             let message = ComPtr::<IMessage>::from_raw(object.cast()).unwrap();
@@ -999,9 +1002,10 @@ mod tests {
 
             // Anything else the plugin asks its host to make is declined.
             let mut other = IComponent::IID.map(|byte| byte as c_char);
+            let other_both = &raw mut other;
             let mut object = ptr::dangling_mut::<c_void>();
             assert_eq!(
-                application.createInstance(&mut other, &mut other, &mut object),
+                application.createInstance(other_both, other_both, &mut object),
                 kNotImplemented
             );
             assert!(object.is_null());

@@ -181,6 +181,11 @@ impl ClapLibrary {
     /// too, but it is loaded to find that out, so the first term has to
     /// hold for it.
     ///
+    /// A damaged library does not meet them. The system's loader is not
+    /// written to survive one: on Linux a library cut short after its
+    /// headers is mapped without its length being checked, and the process
+    /// dies inside the loader before this function can return an error.
+    ///
     /// Only load files you would be willing to run.
     pub unsafe fn load(path: impl AsRef<Path>) -> Result<Self, ClapError> {
         let path = path.as_ref();

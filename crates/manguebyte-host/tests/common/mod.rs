@@ -138,7 +138,8 @@ pub fn built_library(crate_name: &str) -> PathBuf {
 ///   folder made for the test. Its code is the framework's own CLAP
 ///   wrapper, which keeps to the CLAP specification;
 /// - a path with nothing at it, and files that are not shared libraries:
-///   text, nothing at all, the first bytes of a library. The system
+///   text, nothing at all, the first 16 bytes of a library (fewer than any
+///   executable header). The system
 ///   refuses these before any of their content is run;
 /// - a library of the operating system itself, which is sound to load
 ///   into any process and exports no `clap_entry`.
