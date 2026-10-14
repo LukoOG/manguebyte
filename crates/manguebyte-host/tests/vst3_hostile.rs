@@ -803,6 +803,14 @@ struct Factory {
     script: Arc<Script>,
 }
 
+impl Drop for Factory {
+    fn drop(&mut self) {
+        // The module releases its factory just before it calls the
+        // library's exit function and unloads it.
+        self.script.note("factory released");
+    }
+}
+
 impl Class for Factory {
     type Interfaces = (IPluginFactory,);
 }
@@ -1562,4 +1570,36 @@ fn the_plugin_is_terminated_on_its_main_thread_whichever_half_goes_first() {
     std::thread::spawn(move || drop(processor)).join().unwrap();
     assert_eq!(script.thread_of("component terminate"), None);
     assert_eq!(script.thread_of("controller terminate"), None);
+}
+
+#[test]
+fn the_module_outlives_every_half_of_every_plugin_made_from_it() {
+    // Two plugins, and the caller lets go of the module at once. The
+    // factory is released, and with it the library's code, only when the
+    // last half of the last plugin has gone, whichever that is.
+    let script = Script::new();
+    let module = module(&script);
+    let mut first = module.create(COMPONENT).unwrap();
+    let second = module.create(COMPONENT).unwrap();
+    drop(module);
+    let mut processor = first.activate(RATE, 64).unwrap();
+    drop(first);
+    drop(second);
+    assert_eq!(
+        script.thread_of("factory released"),
+        None,
+        "the module was released under a live plugin"
+    );
+    // The half that is left still runs the plugin's code.
+    processor.process(&mut stereo(1.0, 64));
+    assert_eq!(script.process_calls.load(Relaxed), 1);
+    drop(processor);
+    let log = script.log();
+    assert_eq!(log.last().map(String::as_str), Some("factory released"));
+    assert_eq!(
+        log.iter()
+            .filter(|what| *what == "component terminate")
+            .count(),
+        2
+    );
 }
