@@ -78,7 +78,8 @@ impl Transport {
             return;
         }
         if let Some(position) = &mut self.position_samples {
-            *position += frames as i64;
+            let frames = i64::try_from(frames).unwrap_or(i64::MAX);
+            *position = position.saturating_add(frames);
         }
         let Some(step) = self.beats_per_sample(sample_rate) else {
             return;

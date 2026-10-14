@@ -764,10 +764,18 @@ impl<P: Plugin> Instance<P> {
                 ) else {
                     return;
                 };
+                // CLAP's pan runs from 0 (left) to 1 (right); the
+                // framework's from -1 to 1. The other expressions share
+                // their units.
+                let value = if expression == Expression::Pan {
+                    2.0 * event.value - 1.0
+                } else {
+                    event.value
+                };
                 EventKind::NoteExpression {
                     note,
                     expression,
-                    value: event.value,
+                    value,
                 }
             }
             CLAP_EVENT_PARAM_VALUE => {

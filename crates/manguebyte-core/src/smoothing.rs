@@ -35,9 +35,15 @@ impl<S: Sample> Smoothed<S> {
     }
 
     /// Starts gliding towards `target`.
+    ///
+    /// Setting the target it is already gliding to changes nothing, so a
+    /// caller may set it on every block without slowing the glide down.
     pub fn set_target(&mut self, target: S) {
         if self.ramp_samples == 0 {
             self.set_immediate(target);
+            return;
+        }
+        if target == self.target {
             return;
         }
         self.target = target;
@@ -68,14 +74,15 @@ impl<S: Sample> Smoothed<S> {
         self.current
     }
 
-    /// Advances `samples` samples at once.
+    /// Advances `samples` samples, landing exactly where as many calls to
+    /// [`next_value`](Self::next_value) would. Real-time safe.
     pub fn skip(&mut self, samples: usize) {
-        if samples >= self.remaining as usize {
-            self.current = self.target;
-            self.remaining = 0;
-        } else {
-            self.current += self.step * S::from_f64(samples as f64);
-            self.remaining -= samples as u32;
+        // Adding the step once per sample, as next_value does, rounds
+        // differently from adding a multiple of it, so a multiplication here
+        // would make the result depend on how the samples were grouped.
+        let steps = samples.min(self.remaining as usize);
+        for _ in 0..steps {
+            self.next_value();
         }
     }
 

@@ -59,15 +59,20 @@ impl<S: Sample> Processor<S> for Gain<S> {
             buffer.apply_gain(self.gain.target());
             return;
         }
-        // Every channel must see the same ramp, so each one runs a copy and
-        // the original is advanced once at the end.
+        // Every channel must see the same ramp, so each one runs a copy of
+        // it; the copy that ran through the block becomes the new state.
+        let mut advanced = None;
         for channel in buffer.iter_channels_mut() {
             let mut gain = self.gain;
             for sample in channel {
                 *sample *= gain.next_value();
             }
+            advanced = Some(gain);
         }
-        self.gain.skip(buffer.num_frames());
+        match advanced {
+            Some(gain) => self.gain = gain,
+            None => self.gain.skip(buffer.num_frames()),
+        }
     }
 
     fn reset(&mut self) {
@@ -123,5 +128,42 @@ mod tests {
         let mut next = ones();
         gain.process(&mut next);
         assert_eq!(next.channel(0), &[1.0; 16]);
+    }
+
+    /// Renders 2,000 frames of ones through a gain that glides from 0.1 to
+    /// 0.9 and is told its target again at the start of every block, as a
+    /// plugin that reads its level parameter once per block does.
+    fn glide(blocks: &[usize]) -> Vec<f32> {
+        let mut gain = Gain::new(0.1f32).with_ramp(1.0);
+        gain.prepare(&ProcessSpec {
+            sample_rate: 1000.0,
+            max_block_size: 2000,
+            num_channels: 2,
+        });
+        gain.set_gain(0.9);
+        let mut out = Vec::new();
+        let mut pattern = blocks.iter().cycle();
+        while out.len() < 2000 {
+            let frames = (*pattern.next().unwrap()).min(2000 - out.len());
+            let mut buffer = AudioBuffer::new(2, frames);
+            for channel in buffer.iter_channels_mut() {
+                channel.fill(1.0);
+            }
+            gain.set_gain(0.9);
+            gain.process(&mut buffer);
+            assert_eq!(buffer.channel(0), buffer.channel(1));
+            out.extend_from_slice(buffer.channel(0));
+        }
+        out
+    }
+
+    #[test]
+    fn a_glide_does_not_depend_on_the_block_size() {
+        let whole = glide(&[2000]);
+        assert!((whole[0] - 0.1008).abs() < 1e-6, "{}", whole[0]);
+        assert_eq!(whole[999], 0.9, "the glide takes one second");
+        for blocks in [&[7][..], &[64], &[333], &[1, 999, 13, 64]] {
+            assert!(glide(blocks) == whole, "blocks of {blocks:?}");
+        }
     }
 }

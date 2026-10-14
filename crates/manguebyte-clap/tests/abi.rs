@@ -202,13 +202,14 @@ manguebyte_clap::export_clap!(Level);
 
 const BRIGHTNESS: ParamId = ParamId::from_name("brightness");
 
-/// Outputs its key number while held, plus whatever it was modulated by,
-/// scaled by pressure.
+/// Outputs its key number while held, plus whatever it was modulated by
+/// and ten times its pan, scaled by pressure.
 #[derive(Default)]
 struct KeyVoice {
     level: f32,
     pressure: f32,
     modulation: f32,
+    pan: f32,
 }
 
 impl Voice for KeyVoice {
@@ -223,6 +224,7 @@ impl Voice for KeyVoice {
         self.level = 0.0;
         self.pressure = 1.0;
         self.modulation = 0.0;
+        self.pan = 0.0;
     }
     fn is_active(&self) -> bool {
         self.level > 0.0
@@ -233,14 +235,16 @@ impl Voice for KeyVoice {
             // the piece of the block it finished in, and must stay silent.
             return;
         }
-        let sample = (self.level + self.modulation) * self.pressure;
+        let sample = (self.level + self.modulation + 10.0 * self.pan) * self.pressure;
         for channel in buffer.iter_channels_mut() {
             channel.iter_mut().for_each(|out| *out += sample);
         }
     }
     fn expression(&mut self, expression: Expression, value: f64) {
-        if expression == Expression::Pressure {
-            self.pressure = value as f32;
+        match expression {
+            Expression::Pressure => self.pressure = value as f32,
+            Expression::Pan => self.pan = value as f32,
+            _ => {}
         }
     }
     fn modulate(&mut self, param: ParamId, amount: f64) {
@@ -1003,6 +1007,39 @@ fn a_block_larger_than_promised_and_a_panic_are_errors_not_crashes() {
     level_params().explode.set(false);
     let processed = host.process(&mut stereo(1.0, 8), None, vec![], None);
     assert_eq!(processed.status, CLAP_PROCESS_CONTINUE);
+}
+
+#[test]
+fn note_pan_arrives_in_the_framework_unit() {
+    // CLAP's pan runs from 0 (left) through 0.5 (centre) to 1 (right); the
+    // framework's from -1 to 1.
+    let host = Host::new(plugin_entry::<Keys>(), Keys::INFO.id);
+    host.activate(48_000.0, 32);
+    let pan = |time: u32, value: f64| {
+        Sent::Expression(clap_event_note_expression {
+            header: header::<clap_event_note_expression>(time, CLAP_EVENT_NOTE_EXPRESSION),
+            expression_id: CLAP_NOTE_EXPRESSION_PAN,
+            note_id: 7,
+            port_index: 0,
+            channel: 0,
+            key: -1,
+            value,
+        })
+    };
+    let events = vec![
+        note(0, CLAP_EVENT_NOTE_ON, 60, 7),
+        pan(4, 0.25),
+        pan(8, 0.5),
+        pan(12, 1.0),
+        pan(16, 0.0),
+    ];
+    let processed = host.process(&mut [vec![0.0f32; 20]], None, events, None);
+    let out = &processed.output[0];
+    assert_eq!(&out[..4], &[60.0; 4]);
+    assert_eq!(&out[4..8], &[55.0; 4], "a quarter of the way is -0.5");
+    assert_eq!(&out[8..12], &[60.0; 4], "the middle is the centre");
+    assert_eq!(&out[12..16], &[70.0; 4], "the top is fully right");
+    assert_eq!(&out[16..], &[50.0; 4], "the bottom is fully left");
 }
 
 #[test]

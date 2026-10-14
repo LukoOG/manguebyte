@@ -33,8 +33,10 @@ bundle="target/bundled/${name}.vst3"
 rm -rf "$bundle"
 case "$(uname -s)" in
     Linux*)
-        # Linux keeps the kernel's own name for 64-bit ARM.
+        # Linux keeps the kernel's own name for 64-bit ARM, and calls
+        # 32-bit Intel i386.
         [ "$machine" = "arm64" ] && machine="aarch64"
+        [ "$machine" = "x86" ] && machine="i386"
         mkdir -p "$bundle/Contents/${machine}-linux"
         cp "target/release/lib${library}.so" "$bundle/Contents/${machine}-linux/${name}.so"
         ;;

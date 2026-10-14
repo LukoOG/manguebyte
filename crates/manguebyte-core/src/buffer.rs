@@ -268,11 +268,17 @@ impl<S: Sample> AudioBuffer<S> {
     }
 
     /// Largest absolute sample value across all channels.
+    ///
+    /// A buffer that holds a NaN anywhere has a NaN peak, so that a test
+    /// such as `peak() < 1.0` fails rather than passing on garbage.
     pub fn peak(&self) -> S {
         let mut peak = S::ZERO;
         for channel in self.iter_channels() {
             for &sample in channel {
                 let magnitude = sample.abs();
+                if magnitude.to_f64().is_nan() {
+                    return magnitude;
+                }
                 if magnitude > peak {
                     peak = magnitude;
                 }
