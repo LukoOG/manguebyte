@@ -1,6 +1,8 @@
 //! The `cargo-mangue` program. Everything it does is in the library of the
 //! same name.
 
+#![forbid(unsafe_code)]
+
 use std::process::ExitCode;
 
 fn main() -> ExitCode {

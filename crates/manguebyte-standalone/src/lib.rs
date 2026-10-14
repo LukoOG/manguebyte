@@ -36,6 +36,8 @@
 //! # Ok::<(), manguebyte_standalone::StandaloneError>(())
 //! ```
 
+#![forbid(unsafe_code)]
+
 mod engine;
 
 use std::fmt;

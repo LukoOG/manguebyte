@@ -33,6 +33,8 @@
 //! Every reader treats its input as untrusted: damaged or hostile data
 //! produces an error, never a panic.
 
+#![forbid(unsafe_code)]
+
 pub mod aiff;
 pub mod flac;
 mod pcm;

@@ -135,7 +135,10 @@ the two instructions that tell the processor to treat subnormal numbers as
 zero ([ADR 0006](adr/0006-subnormal-numbers-are-flushed.md)). All but the
 last run under Miri in CI, except where a test has to load a real shared
 library, which Miri cannot do; the last is checked by what the processor then
-does.
+does. Every crate outside that list forbids `unsafe` code outright
+(`#![forbid(unsafe_code)]`), so the list cannot grow without someone deciding
+it should. The example plugins are the exception: the macros that export them
+expand to the `extern "C"` entry points a host looks for.
 
 ### State
 

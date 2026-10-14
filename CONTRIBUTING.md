@@ -118,6 +118,9 @@ Before changing a core trait or adding a crate, read
 - `cargo fmt` decides formatting.
 - Prefer safe code. Every `unsafe` block needs a `// SAFETY:` comment that
   explains why it is sound.
+- A crate that needs no `unsafe` says `#![forbid(unsafe_code)]` at the top of
+  its `lib.rs`, so the compiler keeps it that way. Lifting that is a design
+  change: say why in the pull request.
 - Keep dependencies few. `manguebyte-core` has none and should stay that way.
   Adding a dependency to another crate needs a reason in the pull request.
 - Be generic over `Sample` where it is natural, so code works for both `f32`

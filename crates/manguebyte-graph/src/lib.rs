@@ -59,6 +59,8 @@
 //! latency meet, the graph delays the earlier ones so they line up again,
 //! and reports the total through [`GraphEngine::latency_samples`].
 
+#![forbid(unsafe_code)]
+
 mod engine;
 mod plan;
 

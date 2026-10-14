@@ -22,6 +22,8 @@
 //! Reading and writing values is real-time safe. Converting to and from
 //! text, and saving and loading state, allocate and belong elsewhere.
 
+#![forbid(unsafe_code)]
+
 mod param;
 mod range;
 mod set;

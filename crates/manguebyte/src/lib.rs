@@ -43,6 +43,8 @@
 //! # Ok::<(), wav::WavError>(())
 //! ```
 
+#![forbid(unsafe_code)]
+
 pub use manguebyte_core::{
     AtomicF32, AtomicF64, AudioBuffer, NoDenormals, ParamId, Sample, Smoothed, decibels, spsc,
 };

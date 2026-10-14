@@ -96,6 +96,11 @@ Nothing has been published to crates.io yet. Everything below is on `main`.
   as zero on the current thread, so a fading sound cannot slow it down. The
   CLAP and VST 3 wrappers, the standalone engine, the device streams and
   `Harness` hold it around every block, so plugins need not. See ADR 0006.
+- Every crate that needs no `unsafe` code forbids it
+  (`#![forbid(unsafe_code)]`): the facade, devices, signal processing, file
+  formats, graph, MIDI, parameters, standalone, OSC, plugin, graphics and the
+  command-line tool. The `unsafe` that remains is listed in
+  `docs/ARCHITECTURE.md`.
 
 ### Processing model
 

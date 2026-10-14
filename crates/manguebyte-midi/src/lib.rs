@@ -27,6 +27,8 @@
 //! - [`note_to_hz`] / [`hz_to_note`]: equal-temperament pitch conversions.
 //! - [`MessageList`]: a few messages that belong together, held inline.
 
+#![forbid(unsafe_code)]
+
 mod buffer;
 pub mod file;
 pub mod keyboard;

@@ -40,6 +40,8 @@
 //! allocate, lock, block or do I/O. Share values with it through atomics and
 //! move data in and out through an [`spsc`](manguebyte_core::spsc) queue.
 
+#![forbid(unsafe_code)]
+
 mod blocks;
 mod device;
 mod duplex;

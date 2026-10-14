@@ -81,6 +81,8 @@
 //!   another program: anything it does not understand is an error with a
 //!   message, never a panic, and long output is read in bounded memory.
 
+#![forbid(unsafe_code)]
+
 pub mod bundle;
 pub mod cargo;
 pub mod cli;

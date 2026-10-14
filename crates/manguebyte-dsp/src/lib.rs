@@ -22,6 +22,8 @@
 //! assert!(block.peak() > 0.0);
 //! ```
 
+#![forbid(unsafe_code)]
+
 mod biquad;
 mod cascade;
 mod chorus;
