@@ -16,7 +16,7 @@
 // other.
 #![allow(clippy::unnecessary_cast)]
 
-use std::ffi::{CString, c_void};
+use std::ffi::c_void;
 use std::ptr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -186,7 +186,10 @@ enum Attribute {
     Int(i64),
     Float(f64),
     Text(Vec<u16>),
-    Binary(Box<[u8]>),
+    // A `Vec`, not a `Box<[u8]>`: a pointer handed to a plugin must stay
+    // valid when the value is replaced and moved to `retired`, and moving a
+    // `Box` would invalidate it under Rust's aliasing rules.
+    Binary(Vec<u8>),
 }
 
 /// What an attribute list holds.
@@ -195,7 +198,7 @@ struct Attributes {
     live: Vec<(Vec<u8>, Attribute)>,
     /// Binary values that were replaced. A plugin may still hold the
     /// pointer it was given to one, so they are kept until the list goes.
-    retired: Vec<Box<[u8]>>,
+    retired: Vec<Vec<u8>>,
     /// Bytes of text and binary data held, the retired ones included.
     bytes: usize,
 }
@@ -336,14 +339,14 @@ impl IAttributeListTrait for AttributeList {
             if size > MAX_ATTRIBUTE_BYTES {
                 return kResultFalse;
             }
-            let bytes: Box<[u8]> = if size == 0 {
-                Box::default()
+            let bytes: Vec<u8> = if size == 0 {
+                Vec::new()
             } else if data.is_null() {
                 return kInvalidArgument;
             } else {
                 // SAFETY: the plugin offers `size_in_bytes` readable bytes
                 // at `data`.
-                unsafe { std::slice::from_raw_parts(data.cast::<u8>(), size) }.into()
+                unsafe { std::slice::from_raw_parts(data.cast::<u8>(), size) }.to_vec()
             };
             self.set(id, Attribute::Binary(bytes))
         })
@@ -379,7 +382,10 @@ impl IAttributeListTrait for AttributeList {
 /// A message from one half of a plugin to the other.
 pub(crate) struct Message {
     /// Every identifier the message has had, the current one last.
-    ids: Mutex<Vec<CString>>,
+    /// Each id with its terminating zero. A `Vec<u8>` rather than a
+    /// `CString` (a `Box` inside): the list may grow and move its elements,
+    /// and the pointers handed out earlier must stay valid.
+    ids: Mutex<Vec<Vec<u8>>>,
     attributes: ComWrapper<AttributeList>,
 }
 
@@ -399,9 +405,11 @@ impl Class for Message {
 impl IMessageTrait for Message {
     unsafe fn getMessageID(&self) -> FIDString {
         guard(ptr::null(), || {
-            // A `CString` keeps its bytes on the heap, and none is removed
-            // while the message lives, so the pointer outlasts the lock.
-            lock(&self.ids).last().map_or(ptr::null(), |id| id.as_ptr())
+            // Each id keeps its bytes on the heap, and none is removed while
+            // the message lives, so the pointer outlasts the lock.
+            lock(&self.ids)
+                .last()
+                .map_or(ptr::null(), |id| id.as_ptr().cast())
         })
     }
 
@@ -413,8 +421,10 @@ impl IMessageTrait for Message {
             let mut ids = lock(&self.ids);
             if ids.len() < MAX_MESSAGE_IDS {
                 // The bytes were read up to their first NUL, so none is in
-                // them.
-                ids.push(CString::new(bytes).unwrap_or_default());
+                // them; the terminator is added here.
+                let mut id = bytes;
+                id.push(0);
+                ids.push(id);
             }
         });
     }
