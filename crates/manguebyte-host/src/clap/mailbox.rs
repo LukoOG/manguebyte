@@ -10,8 +10,15 @@
 //! claims full slots the same way, reads them and marks them empty. The
 //! text itself is stored in atomics, eight bytes to a word, so there is no
 //! `unsafe` code here at all: the worst a bug could do is garble a message.
+//!
+//! Messages come out in the order their slots were claimed, across drains:
+//! one still being written holds back the ones after it until a later
+//! drain. `manguebyte_core::log::LogQueue` is the same design for plugins'
+//! own use; this one keeps CLAP's seven severities and text that may not be
+//! UTF-8 until it is read.
 
 use std::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 /// Longest message kept, in bytes. Longer ones are cut.
 pub(crate) const MESSAGE_BYTES: usize = 240;
@@ -47,11 +54,17 @@ impl Slot {
     }
 }
 
+/// Messages taken from their slots and numbered after one that was still
+/// being written, and the number of the next message to hand out.
+type Held = (u64, Vec<(u64, i32, String)>);
+
 /// A fixed set of message slots that any thread may write to.
 pub(crate) struct Mailbox {
     slots: [Slot; SLOTS],
     next: AtomicU64,
     lost: AtomicU32,
+    /// Kept by the reading side only; writers never take it.
+    held: Mutex<Held>,
 }
 
 impl Mailbox {
@@ -60,6 +73,7 @@ impl Mailbox {
             slots: [const { Slot::new() }; SLOTS],
             next: AtomicU64::new(0),
             lost: AtomicU32::new(0),
+            held: Mutex::new((0, Vec::new())),
         }
     }
 
@@ -93,10 +107,15 @@ impl Mailbox {
         self.lost.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Takes every waiting message, oldest first, as `(severity, text)`,
-    /// and the number of messages lost since the last call. Allocates.
+    /// Takes the waiting messages, oldest first, as `(severity, text)`, and
+    /// the number of messages lost since the last call. Allocates.
+    ///
+    /// A message still being written holds back the ones after it, which
+    /// come out with it in a later call.
     pub(crate) fn drain(&self) -> (Vec<(i32, String)>, u32) {
-        let mut found: Vec<(u64, i32, String)> = Vec::new();
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        let (next, waiting) = &mut *held;
+        let mut found = std::mem::take(waiting);
         for slot in &self.slots {
             if slot
                 .state
@@ -118,6 +137,17 @@ impl Mailbox {
             slot.state.store(EMPTY, Ordering::Release);
         }
         found.sort_by_key(|&(order, _, _)| order);
+        // Every number handed out belongs to a message that will be
+        // published, so the run without gaps can go and the rest waits.
+        let mut ready = 0;
+        while found
+            .get(ready)
+            .is_some_and(|&(order, _, _)| order == *next)
+        {
+            *next += 1;
+            ready += 1;
+        }
+        *waiting = found.split_off(ready);
         let messages = found
             .into_iter()
             .map(|(_, severity, text)| (severity, text))
@@ -174,6 +204,28 @@ mod tests {
         // And the slots are free again.
         mailbox.post(7, b"after");
         assert_eq!(mailbox.drain(), (vec![(7, "after".to_owned())], 0));
+    }
+
+    #[test]
+    fn a_message_still_being_written_holds_back_the_ones_after_it() {
+        let mailbox = Mailbox::new();
+        // A writer has claimed the first slot and taken the first number,
+        // and has not finished.
+        let slot = &mailbox.slots[0];
+        slot.state.store(WRITING, Ordering::Relaxed);
+        let order = mailbox.next.fetch_add(1, Ordering::Relaxed);
+        mailbox.post(2, b"later");
+        assert_eq!(mailbox.drain(), (Vec::new(), 0), "held back, not lost");
+        // It finishes.
+        slot.severity.store(1, Ordering::Relaxed);
+        slot.length.store(7, Ordering::Relaxed);
+        slot.order.store(order, Ordering::Relaxed);
+        slot.words[0].store(u64::from_le_bytes(*b"earlier_"), Ordering::Relaxed);
+        slot.state.store(FULL, Ordering::Release);
+        assert_eq!(
+            mailbox.drain(),
+            (vec![(1, "earlier".to_owned()), (2, "later".to_owned())], 0)
+        );
     }
 
     #[test]
