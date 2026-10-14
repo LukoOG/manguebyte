@@ -14,7 +14,7 @@
 //! main thread, outside any call into the plugin. That keeps the plugin
 //! from re-entering the host in the middle of something else.
 
-use std::ffi::{CStr, CString, c_char, c_void};
+use std::ffi::{CStr, c_char, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -76,10 +76,17 @@ pub(crate) const NOTE_DIALECTS: clap_note_dialect = CLAP_NOTE_DIALECT_CLAP | CLA
 // share.
 pub(crate) use crate::threads::{guard, thread_token};
 
-/// A C string holding `text`, without any NUL bytes it contained.
-fn c_string(text: &str) -> CString {
-    let cleaned: Vec<u8> = text.bytes().filter(|&byte| byte != 0).collect();
-    CString::new(cleaned).unwrap_or_default()
+/// The bytes of a C string holding `text`, without any NUL bytes it
+/// contained, and with the terminator.
+///
+/// A `Vec` rather than a `CString`: a `CString` is a `Box`, and moving a
+/// `Box` asserts that nothing else points into it, which would make the
+/// pointers `clap_host` holds invalid the moment the text is moved into
+/// [`Shared`].
+fn c_string(text: &str) -> Vec<u8> {
+    let mut bytes: Vec<u8> = text.bytes().filter(|&byte| byte != 0).collect();
+    bytes.push(0);
+    bytes
 }
 
 /// What both halves of a hosted plugin, and the plugin itself through its
@@ -88,8 +95,8 @@ pub(crate) struct Shared {
     /// What the plugin holds a pointer to. Its `host_data` points back at
     /// this struct.
     host: clap_host,
-    /// Owns the text `host` points to.
-    _text: [CString; 4],
+    /// Owns the text `host` points to, each NUL-terminated.
+    _text: [Vec<u8>; 4],
     /// The plugin, once the factory has made it.
     plugin: AtomicPtr<clap_plugin>,
     /// The thread the plugin was created on, as its [`thread_token`].
@@ -163,12 +170,12 @@ impl Shared {
                 // followed from the callbacks, which the plugin cannot
                 // reach before this value exists.
                 host_data: this.as_ptr().cast_mut().cast(),
-                // A `CString` keeps its bytes on the heap, so these stay
-                // valid when the array is moved into the struct.
-                name: text[0].as_ptr(),
-                vendor: text[1].as_ptr(),
-                url: text[2].as_ptr(),
-                version: text[3].as_ptr(),
+                // A `Vec` keeps its bytes on the heap, so these stay valid
+                // when the array is moved into the struct.
+                name: text[0].as_ptr().cast(),
+                vendor: text[1].as_ptr().cast(),
+                url: text[2].as_ptr().cast(),
+                version: text[3].as_ptr().cast(),
                 get_extension: Some(get_extension),
                 request_restart: Some(request_restart),
                 request_process: Some(request_process),
