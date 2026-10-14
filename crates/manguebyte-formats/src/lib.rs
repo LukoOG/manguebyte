@@ -2,9 +2,9 @@
 //!
 //! | Format | Read | Write |
 //! |---|---|---|
-//! | [`wav`] | 8 to 32-bit PCM, 32 and 64-bit float | 16 and 24-bit PCM, 32-bit float |
+//! | [`wav`] | 8 to 32-bit PCM, 32 and 64-bit float, RF64 | 16 and 24-bit PCM, 32-bit float; RF64 past 4 GiB when streaming |
 //! | [`aiff`] | 1 to 32-bit PCM, either byte order, 32 and 64-bit float | 16 and 24-bit PCM, 32-bit float |
-//! | [`flac`] | everything the format defines | not yet |
+//! | [`flac`] | everything the format defines | 4 to 32 bits, 1 to 8 channels, levels 0 to 8 |
 //!
 //! [`read_file`] and [`decode`] work out which format they have been given,
 //! so a program that only wants the audio does not need to care:
@@ -16,12 +16,36 @@
 //! # Ok::<(), manguebyte_formats::FormatError>(())
 //! ```
 //!
+//! Those load a whole file into memory. There are three ways to work with
+//! audio, depending on where the code runs and how long the audio is:
+//!
+//! | | Whole file | Block by block | From the audio thread |
+//! |---|---|---|---|
+//! | Read | [`read_file`], [`decode`] | [`AudioReader`] | [`StreamingPlayer`] |
+//! | Write | [`wav::write`], [`aiff::write`], [`flac::write`] | [`AudioWriter`] | [`RecordingWriter`] |
+//!
+//! [`AudioReader`] and [`AudioWriter`] keep one block in memory whatever the
+//! length of the file, and the reader seeks to any frame. Both do I/O, which
+//! an audio callback must never do, so [`StreamingPlayer`] and
+//! [`RecordingWriter`] put them on a worker thread and leave the audio
+//! thread with calls that neither block nor allocate.
+//!
 //! Every reader treats its input as untrusted: damaged or hostile data
 //! produces an error, never a panic.
 
 pub mod aiff;
 pub mod flac;
+mod pcm;
+mod player;
+mod reader;
+mod recorder;
 pub mod wav;
+mod writer;
+
+pub use player::{PlayerConfig, PlayerThread, PlayerWorker, StreamingPlayer};
+pub use reader::AudioReader;
+pub use recorder::{RecorderConfig, RecorderThread, RecorderWorker, RecordingWriter};
+pub use writer::AudioWriter;
 
 use std::fmt;
 use std::io;
@@ -65,10 +89,17 @@ pub struct AudioFile {
     pub format: FileFormat,
 }
 
-/// What went wrong while reading an audio file of unknown format.
+/// What went wrong while reading an audio file of unknown format, or while
+/// writing one with [`AudioWriter`].
 #[derive(Debug)]
 pub enum FormatError {
-    /// The file could not be read.
+    /// The file could not be read or written.
+    ///
+    /// When writing FLAC, an error of kind
+    /// [`InvalidInput`](io::ErrorKind::InvalidInput) may instead mean options
+    /// outside the [limits](flac::FlacOptions#limits); a destination can
+    /// fail with that kind too. [`FlacOptions::validate`](flac::FlacOptions::validate)
+    /// checks the options on their own.
     Io(io::Error),
     /// The data is not in a format this crate knows.
     Unrecognized,

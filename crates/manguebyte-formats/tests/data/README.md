@@ -10,11 +10,166 @@ The other files were encoded from them with FFmpeg 7.1:
 ffmpeg -i stereo16.wav -map_metadata -1 -bitexact -c:a flac -compression_level 0 stereo16-level0.flac
 ffmpeg -i stereo16.wav -map_metadata -1 -bitexact -c:a flac -compression_level 5 stereo16-level5.flac
 ffmpeg -i stereo16.wav -map_metadata -1 -bitexact -c:a flac -compression_level 12 -frame_size 1152 stereo16-level12.flac
+ffmpeg -i stereo16.wav -map_metadata -1 -bitexact -c:a flac -compression_level 5 -frame_size 128 stereo16-blocks128.flac
 ffmpeg -i mono24.wav   -map_metadata -1 -bitexact -c:a flac -sample_fmt s32 -bits_per_raw_sample 24 mono24.flac
 ffmpeg -i stereo16.wav -map_metadata -1 -bitexact -c:a pcm_s16be -f aiff stereo16.aiff
 ffmpeg -i mono24.wav   -map_metadata -1 -bitexact -c:a pcm_s24be -f aiff mono24.aiff
 ffmpeg -i stereo16.wav -map_metadata -1 -bitexact -c:a pcm_s16le -f aiff stereo16-sowt.aifc
+ffmpeg -i stereo16.wav -map_metadata -1 -bitexact -c:a pcm_s16le -rf64 always stereo16-rf64.wav
 ```
 
 They exist so that the decoders are checked against an encoder written by
 someone else. Do not regenerate them with this crate's own writers.
+
+`stereo16-blocks128.flac` has 69 short frames where the others have 1 to 8,
+which is what seeking needs to be tested on. `stereo16-rf64.wav` has the
+64-bit header that WAV files past 4 GiB use, on a file of ordinary size.
+
+## What the tests make for themselves
+
+FFmpeg writes neither seek tables nor blocks of varying size, and a file long
+enough to test seeking by bisection would be too large to keep here. So
+`tests/common/mod.rs` builds such streams when the tests run:
+
+- `write_flac` writes FLAC with the two simplest kinds of subframe, with any
+  block sizes, seek table and header fields a test asks for.
+- `repeat_flac` copies the frames of `stereo16-blocks128.flac` many times
+  over, renumbered and with their checksums worked out again, so that a long
+  stream still consists of frames FFmpeg compressed.
+- `with_seek_table` adds a seek table to one of FFmpeg's files.
+
+Since these come from this repository, they were shown to another decoder
+once, by hand. This writes them, together with the files `AudioWriter`
+produces, to a directory:
+
+```bash
+MANGUEBYTE_DUMP_DIR=/some/dir cargo test -p manguebyte-formats --test streaming -- --ignored
+```
+
+With FFmpeg 7.1, run with `-xerror -err_detect +crccheck+explode` so that
+any checksum or syntax error is fatal:
+
+- every stream `write_flac` makes for the tests decodes without a warning to
+  exactly the samples the tests expect, from the start and from a seek
+  (`-ss`) a quarter of the way in: mono to eight channels, 8 to 32 bits,
+  fixed and varying block sizes, with and without a seek table or a declared
+  length, and one whose first frame is numbered 1000;
+- the stream `repeat_flac` makes decodes to the source audio once per round,
+  and `stereo16-level12.flac` with a seek table added decodes to the source,
+  whole and from `-ss 0.1`;
+- the WAV, RF64 and AIFF files `AudioWriter` writes in each of its sample
+  formats are read as the right format, rate, channels and length, and the
+  RF64 ones decode to the same samples as the plain ones;
+- for the same audio, the RF64 header `AudioWriter` writes is byte for byte
+  the 80 bytes at the start of `stereo16-rf64.wav`, and the 16-bit AIFF file
+  it writes is byte for byte `stereo16.aiff`;
+- the files `AudioWriter` leaves when `finish` is never called (the
+  `unfinished-*` files) decode to the same samples as the finished ones in
+  every sample format. The AIFF ones do so even with `-xerror`; FFmpeg gives
+  their duration as 13:31:35, worked out from the stand-in frame count
+  0x7FFFFFFF. The WAV ones need FFmpeg run without `-xerror`: it warns
+  "Ignoring maximum wav data size" and marks the last packet, which comes up
+  short of the size the header states, as corrupt. With the frame count of
+  an unfinished AIFF set to all ones instead, FFmpeg refuses to open the
+  file ("Operation not permitted"), which is why the writer does not use
+  all ones there.
+
+## What this crate's FLAC encoder wrote
+
+The `encoder-*.flac` files go the other way: this crate wrote them, and
+FFmpeg 7.1 decoded them to the same samples, so the tests can check that
+the decoder still reads what the encoder made and FFmpeg accepted.
+
+- `encoder-stereo16-level0.flac`: `stereo16.wav` at level 0, no padding,
+  room for one seek point. Fixed predictors only, in blocks of 1152.
+- `encoder-mono24-level8.flac`: `mono24.wav` at level 8, the same options.
+  Linear prediction up to order 12.
+- `encoder-6ch-20bit.flac`: six channels of 2345 samples at 20 bits and
+  22.05 kHz, worked out by `six_channels` in `tests/flac_encoder.rs` (a
+  tone, the tone later and quieter, silence, a square wave, a ramp, quiet
+  noise), at level 2 in blocks of 1000 with a `TITLE` tag. Its last block
+  is short and its block size has no code of its own.
+
+All three are written by the ignored test that also makes the files below:
+
+```bash
+MANGUEBYTE_DUMP_DIR=/some/dir cargo test -p manguebyte-formats --test flac_encoder -- --ignored
+```
+
+A later version of the encoder may compress differently; these stay as they
+were checked.
+
+## What FFmpeg made of the encoder's output
+
+That test writes 243 FLAC files, each with its samples as raw 32-bit
+integers and a line in `manifest.txt`. They were checked by hand with
+FFmpeg 7.1, by a script that for each file
+
+- ran `ffmpeg -v error -i FILE.flac -f null -` and required it to print
+  nothing;
+- decoded it with `-v error -xerror -err_detect +crccheck+explode` to
+  `s32le`, required that to print nothing as well, and compared the samples
+  with the expected ones (FFmpeg left-aligns them: a sample of `b` bits comes
+  back multiplied by `2^(32 - b)`, and the low bits were checked to be zero);
+- computed the MD5 of the samples FFmpeg decoded, packed as RFC 9639 says
+  (interleaved, little-endian, sign-extended to whole bytes), with Python's
+  `hashlib`, and compared it with the digest in the stream information.
+  FFmpeg does not check that digest itself: a file with its digest changed
+  decodes without a word.
+
+The files cover levels 0 to 8 at 8, 16, 24 and 32 bits with silence,
+full-scale square waves, white noise and sine sweeps; every depth from 4 to
+32 bits; one to eight channels; blocks of 16, 17, 192, 256, 1000, 4608,
+16384 and 65535 samples; rates of 1, 7, 8000, 11000, 11025, 22050, 88200,
+192000, 352800, 705600 and 1048575 Hz, which use every kind of rate code
+and none; streams of 0, 1, 2, 15, 16 and 17 samples; 32-bit channels
+pinned at opposite ends of the range, so that the side channel needs 33
+bits; samples with three low bits always zero; a seek table that had to
+thin itself out, with tags; the largest metadata blocks the format allows,
+16,777,215 bytes of padding, and a seek table of 932,067 points of which
+the 932,066 unused ones became padding; the output of `AudioWriter` written
+in random pieces, and one never finished.
+
+238 passed every check. Among them, the unfinished stream decodes to every
+complete frame and states no checksum (all zeros, which means unknown), as
+intended. The other five are the files whose frames are larger than
+208,012 bytes: 16-bit stereo noise in blocks of 54000, 56000, 60000 and
+65535 samples, and a sweep beside noise in blocks of 65535, with frames of
+216,012 to 262,152 bytes. FFmpeg returns no samples from them and reports
+no error; the same noise in blocks of 52000 samples, frames of 208,012
+bytes, decodes correctly. These frames are valid and this crate reads them;
+no level makes them, since they need blocks far beyond the streamable
+subset.
+
+### Size against FFmpeg's encoder
+
+`music.raw`, written by the same test, is five seconds of the synthetic
+music `music` makes in `tests/flac_encoder.rs`, as 16-bit stereo at
+44.1 kHz. FFmpeg encoded it with
+
+```bash
+ffmpeg -f s16le -ar 44100 -ac 2 -i music.raw -map_metadata -1 -bitexact -c:a flac -compression_level N out.flac
+```
+
+Bytes of audio frames, metadata left out, out of 882,000 bytes of samples:
+
+| Level | FFmpeg 7.1 | This crate | Ratio |
+|---|---|---|---|
+| 0 | 568,369 | 533,210 | 0.938 |
+| 1 | 535,151 | 532,503 | 0.995 |
+| 2 | 533,417 | 532,491 | 0.998 |
+| 3 | 502,383 | 500,247 | 0.996 |
+| 4 | 496,178 | 492,882 | 0.993 |
+| 5 | 492,876 | 492,265 | 0.999 |
+| 6 | 492,438 | 487,100 | 0.989 |
+| 7 | 492,535 | 483,742 | 0.982 |
+| 8 | 490,211 | 482,807 | 0.985 |
+
+FFmpeg's levels 9 to 12 give 489,781, 489,756, 488,119 and 487,535.
+`compression_is_within_a_few_percent_of_ffmpegs` keeps FFmpeg's figures for
+levels 0, 5 and 8 and fails if this encoder's grow past 1.03 times them.
+
+This encoder's levels 1 and 2 differ only in how the stereo coding of each
+block is chosen: level 2 codes all four and keeps the smallest, level 1
+picks one from an estimate. The estimate costs level 1 the 12 bytes between
+them here; the same test checks that level 2 is never the larger.

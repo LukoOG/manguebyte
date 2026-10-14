@@ -4,6 +4,10 @@
 //! or little-endian (`sowt`), and 32 and 64-bit float. Writes 16 and 24-bit
 //! PCM and 32-bit float.
 //!
+//! The functions here hold a whole file in memory. To read or write block by
+//! block, use [`AudioReader`](crate::AudioReader) and
+//! [`AudioWriter`](crate::AudioWriter).
+//!
 //! ```
 //! use manguebyte_core::AudioBuffer;
 //! use manguebyte_formats::aiff::{self, AiffFormat};
@@ -21,10 +25,12 @@
 
 use std::fmt;
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use manguebyte_core::AudioBuffer;
+
+use crate::pcm::{self, PcmLayout, PcmReader, SampleDecoder, SampleEncoder};
 
 /// How samples are stored in an AIFF file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -35,6 +41,40 @@ pub enum AiffFormat {
     Int24,
     /// 32-bit IEEE float, written as AIFF-C.
     Float32,
+}
+
+impl AiffFormat {
+    pub(crate) fn bytes_per_sample(self) -> usize {
+        match self {
+            Self::Int16 => 2,
+            Self::Int24 => 3,
+            Self::Float32 => 4,
+        }
+    }
+
+    fn is_float(self) -> bool {
+        self == Self::Float32
+    }
+}
+
+impl SampleEncoder for AiffFormat {
+    fn encode(self, sample: f32, bytes: &mut [u8]) {
+        match self {
+            Self::Int16 => {
+                let value = (f64::from(sample) * 32_768.0)
+                    .round()
+                    .clamp(-32_768.0, 32_767.0);
+                bytes.copy_from_slice(&(value as i16).to_be_bytes());
+            }
+            Self::Int24 => {
+                let value = (f64::from(sample) * 8_388_608.0)
+                    .round()
+                    .clamp(-8_388_608.0, 8_388_607.0);
+                bytes.copy_from_slice(&(value as i32).to_be_bytes()[1..]);
+            }
+            Self::Float32 => bytes.copy_from_slice(&sample.to_be_bytes()),
+        }
+    }
 }
 
 /// The contents of an AIFF file.
@@ -106,12 +146,43 @@ pub fn read_file<P: AsRef<Path>>(path: P) -> Result<AiffFile, AiffError> {
 }
 
 /// How the sample bytes are to be understood.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Encoding {
     BigEndianInt,
     LittleEndianInt,
     Float32,
     Float64,
+}
+
+/// Decodes the samples of an AIFF stream.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AiffDecoder {
+    encoding: Encoding,
+}
+
+impl SampleDecoder for AiffDecoder {
+    fn decode(self, sample: &[u8]) -> f32 {
+        match self.encoding {
+            Encoding::Float32 => f32::from_be_bytes([sample[0], sample[1], sample[2], sample[3]]),
+            Encoding::Float64 => f64::from_be_bytes([
+                sample[0], sample[1], sample[2], sample[3], sample[4], sample[5], sample[6],
+                sample[7],
+            ]) as f32,
+            Encoding::BigEndianInt | Encoding::LittleEndianInt => {
+                // Samples are left-justified in their bytes, so placing them
+                // at the top of 32 bits scales every depth the same way.
+                let mut raw = [0u8; 4];
+                if self.encoding == Encoding::BigEndianInt {
+                    raw[..sample.len()].copy_from_slice(sample);
+                } else {
+                    for (slot, &byte) in raw.iter_mut().zip(sample.iter().rev()) {
+                        *slot = byte;
+                    }
+                }
+                (f64::from(i32::from_be_bytes(raw)) / 2_147_483_648.0) as f32
+            }
+        }
+    }
 }
 
 /// Reads the 80-bit extended float AIFF stores its sample rate in.
@@ -139,39 +210,77 @@ fn write_extended(value: u32) -> [u8; 10] {
     bytes
 }
 
-fn parse(bytes: &[u8]) -> Result<AiffFile, AiffError> {
-    if bytes.len() < 12 || &bytes[..4] != b"FORM" {
+fn u32_at(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_be_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+    ])
+}
+
+/// What the chunks of an AIFF stream say about it.
+pub(crate) struct AiffStream {
+    pub sample_rate: u32,
+    pub bits_per_sample: u16,
+    pub is_float: bool,
+    pub layout: PcmLayout,
+    encoding: Encoding,
+}
+
+impl AiffStream {
+    pub(crate) fn decoder(&self) -> AiffDecoder {
+        AiffDecoder {
+            encoding: self.encoding,
+        }
+    }
+}
+
+/// Reads the chunks of an AIFF stream, without reading its samples.
+pub(crate) fn open<R: Read + Seek>(reader: &mut R) -> Result<AiffStream, AiffError> {
+    let len = reader.seek(SeekFrom::End(0))?;
+    if len < 12 {
         return Err(AiffError::NotAiff);
     }
-    let is_compressed_form = match &bytes[8..12] {
+    reader.seek(SeekFrom::Start(0))?;
+    let mut form = [0u8; 12];
+    reader.read_exact(&mut form)?;
+    if &form[..4] != b"FORM" {
+        return Err(AiffError::NotAiff);
+    }
+    let is_compressed_form = match &form[8..12] {
         b"AIFF" => false,
         b"AIFC" => true,
         _ => return Err(AiffError::NotAiff),
     };
 
-    let mut common: Option<(usize, usize, u32, f64, Encoding)> = None;
-    let mut sound: Option<&[u8]> = None;
-    let mut position = 12;
-    while position + 8 <= bytes.len() {
-        let id = &bytes[position..position + 4];
-        let size = u32::from_be_bytes([
-            bytes[position + 4],
-            bytes[position + 5],
-            bytes[position + 6],
-            bytes[position + 7],
-        ]) as usize;
+    let mut common: Option<(usize, u64, u32, f64, Encoding)> = None;
+    // Where the samples start, and how many bytes of them there are.
+    let mut sound: Option<(u64, u64)> = None;
+    let mut position = 12u64;
+    while position.checked_add(8).is_some_and(|end| end <= len) {
+        reader.seek(SeekFrom::Start(position))?;
+        let mut header = [0u8; 8];
+        reader.read_exact(&mut header)?;
+        let id = &header[..4];
+        let size = u64::from(u32_at(&header, 4));
         let start = position + 8;
         // A sound chunk that claims to run past the end is read as far as
         // the data goes: some writers leave the size unfinished.
-        let end = start.saturating_add(size).min(bytes.len());
-        let body = &bytes[start..end];
+        let end = start.saturating_add(size).min(len);
+        let body_len = end - start;
         match id {
             b"COMM" => {
+                // The fields of interest end with the compression type.
+                let mut body = [0u8; 22];
+                let have = body_len.min(22) as usize;
+                reader.read_exact(&mut body[..have])?;
+                let body = &body[..have];
                 if body.len() < 18 {
                     return Err(AiffError::Malformed("common chunk too short"));
                 }
                 let channels = u16::from_be_bytes([body[0], body[1]]) as usize;
-                let frames = u32::from_be_bytes([body[2], body[3], body[4], body[5]]) as usize;
+                let frames = u64::from(u32_at(body, 2));
                 let bits = u32::from(u16::from_be_bytes([body[6], body[7]]));
                 let rate = read_extended(&body[8..18]);
                 let encoding = if is_compressed_form {
@@ -189,11 +298,18 @@ fn parse(bytes: &[u8]) -> Result<AiffFile, AiffError> {
                 common = Some((channels, frames, bits, rate, encoding));
             }
             b"SSND" => {
-                if body.len() < 8 {
+                if body_len < 8 {
                     return Err(AiffError::Malformed("sound chunk too short"));
                 }
-                let offset = u32::from_be_bytes([body[0], body[1], body[2], body[3]]) as usize;
-                sound = Some(body.get(8 + offset..).unwrap_or(&[]));
+                let mut offset = [0u8; 4];
+                reader.read_exact(&mut offset)?;
+                // The samples follow two numbers and `offset` unused bytes.
+                let skip = 8 + u64::from(u32::from_be_bytes(offset));
+                sound = Some(if skip <= body_len {
+                    (start + skip, body_len - skip)
+                } else {
+                    (end, 0)
+                });
             }
             _ => {}
         }
@@ -219,41 +335,11 @@ fn parse(bytes: &[u8]) -> Result<AiffFile, AiffError> {
             bits.div_ceil(8) as usize
         }
     };
-    let data = sound.unwrap_or(&[]);
+    let (data_start, data_len) = sound.unwrap_or((len, 0));
     // Trust the data over the header if the two disagree.
-    let frames = frames.min(data.len() / (bytes_per_sample * channels));
+    let frames = frames.min(data_len / (bytes_per_sample * channels) as u64);
 
-    let mut buffer = AudioBuffer::new(channels, frames);
-    for (index, sample) in data
-        .chunks_exact(bytes_per_sample)
-        .take(frames * channels)
-        .enumerate()
-    {
-        let value = match encoding {
-            Encoding::Float32 => f32::from_be_bytes([sample[0], sample[1], sample[2], sample[3]]),
-            Encoding::Float64 => f64::from_be_bytes([
-                sample[0], sample[1], sample[2], sample[3], sample[4], sample[5], sample[6],
-                sample[7],
-            ]) as f32,
-            Encoding::BigEndianInt | Encoding::LittleEndianInt => {
-                // Samples are left-justified in their bytes, so placing them
-                // at the top of 32 bits scales every depth the same way.
-                let mut raw = [0u8; 4];
-                if encoding == Encoding::BigEndianInt {
-                    raw[..bytes_per_sample].copy_from_slice(sample);
-                } else {
-                    for (slot, &byte) in raw.iter_mut().zip(sample.iter().rev()) {
-                        *slot = byte;
-                    }
-                }
-                (f64::from(i32::from_be_bytes(raw)) / 2_147_483_648.0) as f32
-            }
-        };
-        buffer.channel_mut(index % channels)[index / channels] = value;
-    }
-
-    Ok(AiffFile {
-        buffer,
+    Ok(AiffStream {
         sample_rate: rate.round() as u32,
         bits_per_sample: match encoding {
             Encoding::Float32 => 32,
@@ -261,7 +347,100 @@ fn parse(bytes: &[u8]) -> Result<AiffFile, AiffError> {
             _ => bits as u16,
         },
         is_float: matches!(encoding, Encoding::Float32 | Encoding::Float64),
+        layout: PcmLayout {
+            channels,
+            bytes_per_sample,
+            data_start,
+            frames,
+        },
+        encoding,
     })
+}
+
+fn parse(bytes: &[u8]) -> Result<AiffFile, AiffError> {
+    let mut cursor = Cursor::new(bytes);
+    let stream = open(&mut cursor)?;
+    // The samples are in memory, so their count fits in a `usize`.
+    let frames = usize::try_from(stream.layout.frames).map_err(|_| AiffError::TooLarge)?;
+    let mut buffer = AudioBuffer::new(stream.layout.channels, frames);
+    PcmReader::new(cursor, stream.decoder(), stream.layout).read(&mut buffer)?;
+
+    Ok(AiffFile {
+        buffer,
+        sample_rate: stream.sample_rate,
+        bits_per_sample: stream.bits_per_sample,
+        is_float: stream.is_float,
+    })
+}
+
+/// Length of the longest header [`header`] builds, the AIFF-C one.
+pub(crate) const MAX_HEADER_LEN: usize = 60;
+
+/// Whether `frames` frames taking `data_len` bytes fit the 32-bit sizes of
+/// the format, with room for the header.
+pub(crate) fn fits(frames: u64, data_len: u64) -> bool {
+    frames <= u64::from(u32::MAX) && data_len < u64::from(u32::MAX) - 64
+}
+
+/// The number of frames a header states while the real number is unknown.
+///
+/// It is more than a file written here can hold: samples take at least two
+/// bytes, and [`fits`] keeps the sample bytes under 4 GiB. A reader that
+/// stops where the data stops therefore reads all there is. All ones would
+/// do for this crate as well, but FFmpeg 7.1 refuses a file whose frame
+/// count is all ones and reads one with this count to its end (checked by
+/// hand; see `tests/data/README.md`).
+const UNFINISHED_FRAMES: u32 = 0x7FFF_FFFF;
+
+/// Builds everything that precedes the samples of an AIFF file, and returns
+/// it with its length.
+///
+/// `sizes` is the number of frames and of sample bytes, or `None` while they
+/// are unknown. The two chunk sizes are then all ones and the number of
+/// frames is [`UNFINISHED_FRAMES`], all of which this crate reads as "up to
+/// the end of the file", so that a recording cut short before its header
+/// was completed can still be read.
+pub(crate) fn header(
+    channels: u16,
+    sample_rate: u32,
+    format: AiffFormat,
+    sizes: Option<(u32, u32)>,
+) -> ([u8; MAX_HEADER_LEN], usize) {
+    let is_float = format.is_float();
+    let bits = (format.bytes_per_sample() * 8) as u16;
+    // AIFF-C adds a compression type and its name to the common chunk.
+    let common_len: u32 = if is_float { 18 + 4 + 2 } else { 18 };
+    let (frames, sound_len, form_len) = match sizes {
+        Some((frames, data_len)) => {
+            let padding = data_len % 2;
+            let form_len = 4 + (8 + common_len) + (8 + 8 + data_len) + padding;
+            (frames, 8 + data_len, form_len)
+        }
+        None => (UNFINISHED_FRAMES, u32::MAX, u32::MAX),
+    };
+
+    let mut header = [0u8; MAX_HEADER_LEN];
+    header[0..4].copy_from_slice(b"FORM");
+    header[4..8].copy_from_slice(&form_len.to_be_bytes());
+    header[8..12].copy_from_slice(if is_float { b"AIFC" } else { b"AIFF" });
+
+    header[12..16].copy_from_slice(b"COMM");
+    header[16..20].copy_from_slice(&common_len.to_be_bytes());
+    header[20..22].copy_from_slice(&channels.to_be_bytes());
+    header[22..26].copy_from_slice(&frames.to_be_bytes());
+    header[26..28].copy_from_slice(&bits.to_be_bytes());
+    header[28..38].copy_from_slice(&write_extended(sample_rate));
+    let mut position = 38;
+    if is_float {
+        // The type, and a name of no characters padded to an even length.
+        header[38..42].copy_from_slice(b"fl32");
+        position = 44;
+    }
+
+    header[position..position + 4].copy_from_slice(b"SSND");
+    header[position + 4..position + 8].copy_from_slice(&sound_len.to_be_bytes());
+    // An offset and a block size, both zero, fill the next eight bytes.
+    (header, position + 16)
 }
 
 /// Writes `buffer` to `writer` as an AIFF file.
@@ -275,62 +454,25 @@ pub fn write<W: Write>(
 ) -> Result<(), AiffError> {
     let channels = u16::try_from(buffer.num_channels()).map_err(|_| AiffError::TooLarge)?;
     let frames = u32::try_from(buffer.num_frames()).map_err(|_| AiffError::TooLarge)?;
-    let (bytes_per_sample, bits, is_float): (usize, u16, bool) = match format {
-        AiffFormat::Int16 => (2, 16, false),
-        AiffFormat::Int24 => (3, 24, false),
-        AiffFormat::Float32 => (4, 32, true),
-    };
+    let bytes_per_sample = format.bytes_per_sample();
+    let frame_bytes = buffer.num_channels() * bytes_per_sample;
     let data_len = buffer
         .num_frames()
-        .checked_mul(buffer.num_channels() * bytes_per_sample)
+        .checked_mul(frame_bytes)
         .filter(|len| *len < u32::MAX as usize - 64)
         .ok_or(AiffError::TooLarge)?;
 
-    // AIFF-C adds a compression type and its name to the common chunk.
-    let name = b"\x00\x00";
-    let common_len: u32 = if is_float { 18 + 4 + 2 } else { 18 };
-    let padding = data_len % 2;
-    let form_len = 4 + (8 + common_len) + (8 + 8 + data_len as u32) + padding as u32;
+    let (header, header_len) = header(
+        channels,
+        sample_rate,
+        format,
+        Some((frames, data_len as u32)),
+    );
+    writer.write_all(&header[..header_len])?;
 
-    writer.write_all(b"FORM")?;
-    writer.write_all(&form_len.to_be_bytes())?;
-    writer.write_all(if is_float { b"AIFC" } else { b"AIFF" })?;
-
-    writer.write_all(b"COMM")?;
-    writer.write_all(&common_len.to_be_bytes())?;
-    writer.write_all(&channels.to_be_bytes())?;
-    writer.write_all(&frames.to_be_bytes())?;
-    writer.write_all(&bits.to_be_bytes())?;
-    writer.write_all(&write_extended(sample_rate))?;
-    if is_float {
-        writer.write_all(b"fl32")?;
-        writer.write_all(name)?;
-    }
-
-    writer.write_all(b"SSND")?;
-    writer.write_all(&(8 + data_len as u32).to_be_bytes())?;
-    writer.write_all(&[0; 8])?;
-    for frame in 0..buffer.num_frames() {
-        for channel in 0..buffer.num_channels() {
-            let sample = buffer.channel(channel)[frame];
-            match format {
-                AiffFormat::Int16 => {
-                    let value = (f64::from(sample) * 32_768.0)
-                        .round()
-                        .clamp(-32_768.0, 32_767.0);
-                    writer.write_all(&(value as i16).to_be_bytes())?;
-                }
-                AiffFormat::Int24 => {
-                    let value = (f64::from(sample) * 8_388_608.0)
-                        .round()
-                        .clamp(-8_388_608.0, 8_388_607.0);
-                    writer.write_all(&(value as i32).to_be_bytes()[1..])?;
-                }
-                AiffFormat::Float32 => writer.write_all(&sample.to_be_bytes())?,
-            }
-        }
-    }
-    if padding == 1 {
+    let mut scratch = vec![0; pcm::scratch_len(frame_bytes, u64::from(frames))];
+    pcm::write_planar(&mut writer, format, bytes_per_sample, buffer, &mut scratch)?;
+    if data_len % 2 == 1 {
         writer.write_all(&[0])?;
     }
     writer.flush()?;
@@ -451,6 +593,35 @@ mod tests {
                 damaged[index] = value;
                 let _ = read(damaged.as_slice());
             }
+        }
+    }
+
+    #[test]
+    fn an_unfinished_header_reads_to_the_end_of_the_file() {
+        for format in [AiffFormat::Int16, AiffFormat::Float32] {
+            let (header, header_len) = header(1, 8_000, format, None);
+            assert_eq!(u32_at(&header, 4), u32::MAX);
+            assert_eq!(u32_at(&header, 22), UNFINISHED_FRAMES);
+            assert_eq!(u32_at(&header, header_len - 12), u32::MAX);
+            // No file that was finished states this many frames: even one
+            // channel of the narrowest samples would not fit.
+            let frames = u64::from(UNFINISHED_FRAMES);
+            assert_eq!(AiffFormat::Int16.bytes_per_sample(), 2);
+            assert!(!fits(frames, frames * 2));
+            assert!(!fits(frames - 31, (frames - 31) * 2));
+            assert!(fits(frames - 32, (frames - 32) * 2));
+
+            let width = format.bytes_per_sample();
+            let mut bytes = header[..header_len].to_vec();
+            let mut sample = [0u8; 4];
+            for value in [0.5f32, -0.5] {
+                format.encode(value, &mut sample[..width]);
+                bytes.extend_from_slice(&sample[..width]);
+            }
+            // Part of a third sample, as if the writer had been killed.
+            bytes.push(0x12);
+            let file = read(bytes.as_slice()).unwrap();
+            assert_eq!(file.buffer.channel(0), &[0.5, -0.5], "{format:?}");
         }
     }
 }
