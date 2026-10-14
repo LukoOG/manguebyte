@@ -125,8 +125,9 @@
 //! the unit circle. Wherever the sum above is below 1 %, the gain of the
 //! coefficients is within 4 times it of the formula, relatively, where the
 //! formula is above -40 dB, and within twice it in plain gain everywhere
-//! (the largest seen were 3.5 and 1.8 times), give or take `1e-11`, which
-//! is as far as the formulas themselves can be trusted. The gain of the
+//! give or take `1e-11`, which is as far as the formulas themselves can be
+//! trusted. The largest ratios seen depend on the platform's mathematics
+//! library: 3.5 and 1.8 on Windows, 3.7 and 1.4 on Linux. The gain of the
 //! cascade's form, computed, is within `2e-15 / d` of the formula above
 //! -40 dB (the largest seen was `1.0e-15 / d`). Some examples, with the
 //! largest error above -40 dB, `d` being that of the cascade's form:
@@ -1794,14 +1795,11 @@ mod tests {
         }
         assert_eq!(count, 67_200);
         assert_eq!(beyond, BEYOND, "designs beyond double precision");
-        // The largest seen, as the documentation quotes them: 3.5 and 1.8
-        // times the law, and 1.0e-15 / d.
+        // The bounds the documentation states. The largest values seen
+        // differ between platforms' mathematics libraries (3.5 and 1.8 on
+        // Windows, 3.7 and 1.4 on Linux), so they are not pinned here.
         assert!(
             worst[0] < 4.0 && worst[1] < 2.0 && worst[2] < 2e-15,
-            "{worst:?}"
-        );
-        assert!(
-            worst[0] > 3.4 && worst[1] > 1.7 && worst[2] > 9e-16,
             "{worst:?}"
         );
     }

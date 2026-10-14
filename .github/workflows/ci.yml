@@ -88,11 +88,13 @@ jobs:
           components: miri
       # The host's tests that use plugins compiled into the test itself (no
       # shared library is loaded, which Miri cannot do). Some of them leak a
-      # plugin on purpose, to show what happens when one is left loaded.
+      # plugin on purpose, to show what happens when one is left loaded, and
+      # some check that a path with nothing at it is an error, which needs
+      # the file system.
       - run: cargo miri test -p manguebyte-host --lib --test clap_hostile --test clap_edges --test vst3_hostile
         env:
           RUSTFLAGS: ""
-          MIRIFLAGS: -Zmiri-ignore-leaks
+          MIRIFLAGS: -Zmiri-ignore-leaks -Zmiri-disable-isolation
 
   clap:
     name: CLAP validation
