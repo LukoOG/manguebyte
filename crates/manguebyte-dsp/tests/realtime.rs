@@ -13,11 +13,20 @@ use std::cell::Cell;
 use manguebyte_core::AudioBuffer;
 use manguebyte_dsp::event::{Event, EventBuffer, EventKind, Expression, NoteRef};
 use manguebyte_dsp::fft::{Complex, Fft, RealFft};
+use manguebyte_dsp::iir::{Band, Design};
 use manguebyte_dsp::{
     Adsr, AdsrParams, Biquad, BiquadCoefficients, Compressor, DcBlocker, Delay, Filter,
     FilterShape, Gain, Limiter, Noise, NoiseColor, NoiseGate, Oscillator, Oversampled,
     ProcessContext, ProcessSpec, Processor, Resampler, Reverb, ShaperCurve, StateVariableFilter,
     SvfMode, Synth, Transport, Voice, Waveform, Waveshaper,
+};
+use manguebyte_dsp::{
+    BiquadCascade, Crossover, CrossoverSlope, IirFilter, LadderFilter, LadderMode, OnePole,
+    OnePoleMode,
+};
+use manguebyte_dsp::{
+    Chorus, DelayInterpolation, DelayLine, DryWet, EnvelopeFollower, LevelDetector, MixLaw,
+    PanMode, Panner, Phaser,
 };
 
 thread_local! {
@@ -315,4 +324,346 @@ fn transforms_do_not_use_the_heap() {
             real.inverse(&spectrum, &mut restored);
         });
     }
+}
+
+const INTERPOLATIONS: [DelayInterpolation; 4] = [
+    DelayInterpolation::None,
+    DelayInterpolation::Linear,
+    DelayInterpolation::Cubic,
+    DelayInterpolation::Thiran,
+];
+
+/// Whether every sample of `buffer` is a finite number.
+///
+/// `AudioBuffer::peak` cannot tell: it compares with `>`, which is false for
+/// not-a-number, so a buffer that holds nothing else has a peak of zero.
+fn all_finite(buffer: &AudioBuffer<f32>) -> bool {
+    buffer
+        .iter_channels()
+        .all(|channel| channel.iter().all(|sample| sample.is_finite()))
+}
+
+#[test]
+fn the_finiteness_check_catches_nan_and_infinity() {
+    let mut buffer = AudioBuffer::<f32>::new(2, 8);
+    assert!(all_finite(&buffer));
+    buffer.channel_mut(1)[7] = f32::NAN;
+    assert!(!all_finite(&buffer));
+    assert!(
+        buffer.peak().is_nan(),
+        "the peak does not hide a NaN either"
+    );
+    buffer.channel_mut(1)[7] = f32::NEG_INFINITY;
+    assert!(!all_finite(&buffer));
+}
+
+#[test]
+fn modulation_mixing_and_level_processors_do_not_use_the_heap() {
+    check(
+        "Chorus",
+        Chorus::<f32>::new().with_voices(8).with_feedback(-0.9),
+    );
+    check("Chorus as a flanger", Chorus::<f32>::flanger());
+    check(
+        "Phaser",
+        Phaser::<f32>::new()
+            .with_stages(12)
+            .with_feedback(0.9)
+            .with_spread(1.0),
+    );
+    check("Panner", Panner::<f32>::new().with_pan(-0.4));
+    check(
+        "Panner from mono",
+        Panner::<f32>::new()
+            .with_mode(PanMode::MonoToStereo)
+            .with_law(MixLaw::Sine4Point5dB)
+            .with_pan(0.7),
+    );
+    check(
+        "EnvelopeFollower",
+        EnvelopeFollower::<f32>::new().with_detector(LevelDetector::Rms),
+    );
+    check(
+        "linked EnvelopeFollower",
+        EnvelopeFollower::<f32>::new().with_linked(true),
+    );
+    for interpolation in INTERPOLATIONS {
+        check(
+            "Delay between samples",
+            Delay::<f32>::new(0.1)
+                .with_time(0.012_3)
+                .with_feedback(0.5)
+                .with_interpolation(interpolation),
+        );
+    }
+}
+
+#[test]
+fn their_settings_can_change_while_running_without_using_the_heap() {
+    let mut chain = (
+        Chorus::<f32>::new(),
+        Phaser::<f32>::new(),
+        Panner::<f32>::new(),
+        EnvelopeFollower::<f32>::new(),
+    );
+    chain.prepare(&SPEC);
+    let mut buffer = AudioBuffer::<f32>::new(2, 256);
+    assert_no_heap_use("changing settings", || {
+        for step in 0..14u8 {
+            let turn = f64::from(step);
+            for channel in buffer.iter_channels_mut() {
+                channel.fill(0.25);
+            }
+
+            chain.0.set_voices(1 + usize::from(step % 8));
+            chain.0.set_rate_hz(0.2 + turn);
+            chain.0.set_depth_ms(turn);
+            chain.0.set_center_delay_ms(5.0 + 3.0 * turn);
+            chain.0.set_feedback(0.9 - 0.15 * turn);
+            chain.0.set_spread(turn / 14.0);
+            chain.0.set_mix(turn / 14.0);
+
+            chain.1.set_stages(2 + usize::from(step));
+            chain.1.set_rate_hz(0.2 + turn);
+            chain.1.set_depth_octaves(turn / 4.0);
+            chain.1.set_center_hz(200.0 + 500.0 * turn);
+            chain.1.set_feedback(0.15 * turn - 0.9);
+            chain.1.set_spread(turn / 14.0);
+            chain.1.set_mix(1.0 - turn / 14.0);
+
+            let law = MixLaw::ALL[usize::from(step) % MixLaw::ALL.len()];
+            chain.2.set_pan(turn / 7.0 - 1.0);
+            chain.2.set_law(law);
+            chain.2.set_mode(if step % 2 == 0 {
+                PanMode::MonoToStereo
+            } else {
+                PanMode::StereoBalance
+            });
+
+            chain.3.set_detector(if step % 3 == 0 {
+                LevelDetector::Rms
+            } else {
+                LevelDetector::Peak
+            });
+            chain.3.set_attack_ms(turn);
+            chain.3.set_release_ms(10.0 * turn);
+            chain.3.set_linked(step % 2 == 1);
+
+            chain.process(&mut buffer);
+        }
+    });
+    assert!(all_finite(&buffer));
+}
+
+#[test]
+fn a_dry_wet_mixer_does_not_use_the_heap() {
+    let mut limiter = Limiter::<f32>::new();
+    limiter.prepare(&SPEC);
+    let mut mixer = DryWet::<f32>::new()
+        .with_law(MixLaw::EqualPower)
+        .with_mix(0.5)
+        .with_max_latency(512)
+        .with_latency(limiter.latency_samples());
+    mixer.prepare(&SPEC);
+
+    let mut buffer = AudioBuffer::<f32>::new(SPEC.num_channels, SPEC.max_block_size);
+    assert_no_heap_use("DryWet", || {
+        for (round, frames) in [256, 1, 64, 255, 256, 256, 256].into_iter().enumerate() {
+            buffer.set_num_frames(frames);
+            for channel in buffer.iter_channels_mut() {
+                channel.fill(0.25);
+            }
+            // Settings may be changed from the audio thread too. A new
+            // maximum latency is only a number until the next `prepare`, so
+            // the latency stays within the 512 samples there is memory for.
+            mixer.set_mix(round as f64 / 6.0);
+            mixer.set_law(MixLaw::ALL[round % MixLaw::ALL.len()]);
+            mixer.set_max_latency(1_000 * round);
+            mixer.set_latency(100 * round);
+            assert!(mixer.latency() <= 512);
+
+            mixer.push_dry(&buffer);
+            limiter.process(&mut buffer);
+            mixer.mix_wet(&mut buffer);
+        }
+        mixer.reset();
+    });
+    assert!(all_finite(&buffer));
+}
+
+#[test]
+fn a_delay_line_and_a_follower_used_by_the_sample_do_not_use_the_heap() {
+    let mut line = DelayLine::<f32>::new(64);
+    assert_no_heap_use("DelayLine", || {
+        for interpolation in INTERPOLATIONS {
+            line.set_interpolation(interpolation);
+            for step in 0..300u16 {
+                let delay = 1.0 + 0.31 * f64::from(step);
+                let read = line.read_interpolated(delay);
+                line.push(0.25 + 0.5 * read);
+            }
+        }
+        line.clear();
+    });
+
+    let mut follower = EnvelopeFollower::<f32>::new();
+    follower.prepare(&SPEC);
+    let block = AudioBuffer::<f32>::new(2, 256);
+    assert_no_heap_use("EnvelopeFollower", || {
+        for step in 0..256u16 {
+            let sample = f32::from(step) / 256.0;
+            follower.process_sample(0, sample);
+            follower.process_sample(1, -sample);
+            follower.process_frame(&[sample, -sample]);
+        }
+        follower.follow(&block);
+        follower.set_linked(true);
+        follower.follow(&block);
+        assert!(follower.level(0) >= 0.0);
+        assert!(follower.channel_level(1) >= 0.0);
+        assert!(follower.shared_level() >= 0.0);
+        follower.set_linked(false);
+        follower.follow(&block);
+    });
+
+    let mut panner = Panner::<f32>::new();
+    panner.prepare(&SPEC);
+    assert_no_heap_use("Panner", || {
+        panner.set_pan(1.0);
+        for _ in 0..2_000 {
+            panner.next_gains();
+        }
+        assert_eq!(panner.next_gains().0, 0.0);
+    });
+}
+
+#[test]
+fn the_filter_family_does_not_use_the_heap() {
+    check(
+        "OnePole",
+        OnePole::<f32>::new(OnePoleMode::Allpass, 1_000.0),
+    );
+    check(
+        "LadderFilter",
+        LadderFilter::<f32>::new(LadderMode::Lp24, 800.0)
+            .with_resonance(1.0)
+            .with_drive_db(24.0),
+    );
+    let band = Band::Bandpass {
+        low_hz: 300.0,
+        high_hz: 3_000.0,
+    };
+    let design = Design::chebyshev_ii(band, 16, 80.0);
+    check(
+        "BiquadCascade",
+        BiquadCascade::<f32>::new(&design.sections(SPEC.sample_rate)),
+    );
+    check(
+        "BiquadCascade from sections",
+        BiquadCascade::<f32>::from_sections(&design.sections(SPEC.sample_rate)),
+    );
+    check("IirFilter", IirFilter::<f32>::new(design));
+    for slope in CrossoverSlope::ALL {
+        check(
+            "Crossover",
+            Crossover::<f32>::new(slope, &[100.0, 1_000.0, 5_000.0, 10_000.0]),
+        );
+    }
+}
+
+#[test]
+fn a_crossover_splits_and_adds_up_without_using_the_heap() {
+    let mut crossover = Crossover::<f32>::new(CrossoverSlope::Lr4, &[200.0, 2_000.0]);
+    crossover.prepare(&SPEC);
+    let mut input = AudioBuffer::<f32>::new(SPEC.num_channels, SPEC.max_block_size);
+    let mut output = AudioBuffer::<f32>::new(SPEC.num_channels, SPEC.max_block_size);
+    assert_no_heap_use("Crossover", || {
+        for (step, frames) in [256, 1, 64, 255, 256, 256].into_iter().enumerate() {
+            input.set_num_frames(frames);
+            output.set_num_frames(frames);
+            for channel in input.iter_channels_mut() {
+                channel.fill(0.25);
+            }
+            crossover.set_frequency(0, 100.0 + 50.0 * step as f64);
+            crossover.set_frequency(1, 3_000.0 - 200.0 * step as f64);
+            crossover.split(&input);
+            // A band processed in place, as a multiband effect does.
+            crossover.band_mut(1).apply_gain(0.5);
+            crossover.sum_into(&mut output);
+        }
+        crossover.reset();
+    });
+    assert!(all_finite(&output));
+    assert!(all_finite(crossover.band(2)));
+}
+
+#[test]
+fn filters_can_be_redesigned_and_modulated_while_running_without_using_the_heap() {
+    let mut one_pole = OnePole::<f32>::new(OnePoleMode::Lowpass, 100.0);
+    let mut ladder = LadderFilter::<f32>::new(LadderMode::Lp24, 100.0);
+    let mut iir = IirFilter::<f32>::new(Design::butterworth(Band::Lowpass { cutoff_hz: 100.0 }, 4));
+    let mut cascade = BiquadCascade::<f32>::new(&[]);
+    let mut exact = BiquadCascade::<f32>::new(&[]);
+    one_pole.prepare(&SPEC);
+    ladder.prepare(&SPEC);
+    iir.prepare(&SPEC);
+    cascade.prepare(&SPEC);
+    exact.prepare(&SPEC);
+    let mut buffer = AudioBuffer::<f32>::new(SPEC.num_channels, SPEC.max_block_size);
+    assert_no_heap_use("redesigning and modulating filters", || {
+        for step in 0..16u8 {
+            let turn = f64::from(step);
+            for channel in buffer.iter_channels_mut() {
+                channel.fill(0.25);
+            }
+            let hz = 100.0 * 2f64.powf(turn / 2.0);
+            one_pole.set_frequency(hz);
+            one_pole.set_mode([OnePoleMode::Highpass, OnePoleMode::Allpass][usize::from(step % 2)]);
+            ladder.set_frequency(hz);
+            ladder.set_resonance(turn / 15.0);
+            ladder.set_drive_db(3.0 * turn);
+            ladder.set_mode(LadderMode::ALL[usize::from(step) % LadderMode::ALL.len()]);
+
+            // A new design on every block, computed on the audio thread.
+            let band = match step % 4 {
+                0 => Band::Lowpass { cutoff_hz: hz },
+                1 => Band::Highpass { cutoff_hz: hz },
+                2 => Band::Bandpass {
+                    low_hz: hz,
+                    high_hz: 2.0 * hz,
+                },
+                _ => Band::Bandstop {
+                    low_hz: hz,
+                    high_hz: 2.0 * hz,
+                },
+            };
+            let order = 1 + usize::from(step);
+            let design = match step % 4 {
+                0 => Design::butterworth(band, order),
+                1 => Design::chebyshev_i(band, order, 0.5),
+                2 => Design::chebyshev_ii(band, order, 60.0),
+                // Too loose for orders 8, 12 and 16: the least attenuation
+                // is searched for, on the audio thread too.
+                _ => Design::elliptic(band, order, 3.0, 4.0),
+            };
+            iir.set_design(design);
+            cascade.set_sections(&design.sections(SPEC.sample_rate));
+            exact.set_from_sections(&design.sections(SPEC.sample_rate));
+
+            one_pole.process(&mut buffer);
+            ladder.process(&mut buffer);
+            iir.process(&mut buffer);
+            cascade.process(&mut buffer);
+            exact.process(&mut buffer);
+        }
+        // By the sample, as audio-rate modulation does it.
+        for n in 0..512u16 {
+            let hz = 200.0 + 10.0 * f64::from(n);
+            one_pole.set_frequency(hz);
+            ladder.set_frequency(hz);
+            let x = one_pole.process_sample(0, 0.25);
+            ladder.process_sample(1, x);
+        }
+    });
+    assert!(all_finite(&buffer));
 }
