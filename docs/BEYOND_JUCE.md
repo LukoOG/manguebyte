@@ -31,6 +31,11 @@ says where. Nothing here contains JUCE code: see
 | [Testing a plugin](#7-a-plugin-can-be-tested-without-a-host) | Needs a host or a hand-built rig | In a unit test, with `Harness` | [`plugins/pluck`](../plugins/pluck/src/lib.rs) |
 | [Thread safety of parameters and state](#8-parameters-and-state-cannot-race) | Synchronised by each plugin | Atomics; nothing to lock | [`set.rs`](../crates/manguebyte-params/src/set.rs) |
 | [Licence](#9-licence) | AGPLv3 or commercial | MIT or Apache-2.0 | [`LICENSE-MIT`](../LICENSE-MIT) |
+| [Hosting](#11-hosting-a-plugin-thread-rules-in-the-types-every-event-on-its-frame) | No CLAP hosting; one object called from every thread; parameter changes carry no frame | CLAP and VST 3; thread rules in the types; every event on its frame | [`clap_pluck.rs`](../crates/manguebyte-host/tests/clap_pluck.rs), [`vst3_pluck.rs`](../crates/manguebyte-host/tests/vst3_pluck.rs) |
+| [Loudness and broadcast meters](#12-loudness-true-peak-and-broadcast-meters-ready-to-use) | None documented | BS.1770 / R 128 loudness, true peak, VU, PPM, correlation, checked against the EBU's test signals | [`ebu_tech_3341.rs`](../crates/manguebyte-analysis/tests/ebu_tech_3341.rs) |
+| [OSC timing](#13-open-sound-control-that-lands-on-the-sample) | Listeners on the message or network thread | Time-tagged bundles land on their frame; every OSC 1.0 type; TCP | [`bridge.rs`](../crates/manguebyte-osc/tests/bridge.rs) |
+| [Pitch and band analysis](#14-pitch-detection-and-fractional-octave-analysis) | None documented | YIN and McLeod pitch; IEC octave bands and weighting | [`pitch.rs`](../crates/manguebyte-analysis/tests/pitch.rs) |
+| [Keyboard state](#15-a-keyboard-an-interface-can-read-without-listening) | Listeners that may run on the audio thread | Atomics an interface polls; no listener, no lock | [`realtime.rs`](../crates/manguebyte-midi/tests/realtime.rs) |
 | [Slow-downs in silence](#10-a-fading-sound-cannot-slow-the-audio-thread-down) | A guard each plugin places in its own callback | Set by the framework around every plugin and every device callback | [`denormal.rs`](../crates/manguebyte-core/src/denormal.rs), both `abi.rs` |
 
 ## 1. Automation on the exact sample
@@ -218,6 +223,12 @@ preset discovery, 64-bit audio and configurable audio ports for both, plus
 the denormal timing for the instrument (it has no audio input) and the note
 tests for the effect (it takes no notes).
 
+`cargo mangue bundle` writes the `.clap` beside the `.vst3` in each
+system's layout, and `cargo mangue validate` runs the CLAP project's
+validator on it as well as Steinberg's on the `.vst3`. JUCE's
+[`juce_add_plugin`](https://raw.githubusercontent.com/juce-framework/JUCE/master/docs/CMake%20API.md)
+accepts no CLAP format.
+
 **Limit.** No plugin GUI extension yet, no 64-bit audio, no presets. VST 3 is
 the only other format so far, also without an editor: JUCE's AU, AAX and LV2
 support has no counterpart here yet.
@@ -301,6 +312,201 @@ Rust does not define floating-point behaviour under a changed setting, and
 in practice and why the trade is taken. A program that calls a processor in
 its own loop, outside the wrappers, streams and test harness, creates the
 guard itself.
+
+## 11. Hosting a plugin: thread rules in the types, every event on its frame
+
+**The problem.** A host calls a plugin from two kinds of thread, and the
+formats say which calls belong where. Getting it wrong crashes plugins in the
+field, and nothing stops a host from getting it wrong. A host that wants to
+pass automation to a plugin precisely also needs a way to say on which frame
+each change happens.
+
+**In JUCE.** JUCE 9.0.4 does not host CLAP plugins. For the formats it hosts,
+a plugin is one
+[`AudioPluginInstance`](https://docs.juce.com/master/classAudioPluginInstance.html),
+an [`AudioProcessor`](https://docs.juce.com/master/classAudioProcessor.html)
+that the host calls from the message thread and the audio thread; which
+method may run where is set out in the documentation, and the compiler
+checks none of it. The hosting interface is `processBlock(AudioBuffer,
+MidiBuffer)`: MIDI events carry a sample position, but a parameter change,
+made through
+[`AudioProcessorParameter::setValue`](https://docs.juce.com/master/classAudioProcessorParameter.html),
+carries none, so a host can place a change on an exact frame only by cutting
+the block there. JUCE has announced sample-accurate automation for a later
+JUCE 9 update.
+
+**In Manguebyte.** `manguebyte-host` loads CLAP and VST 3 plugins in two
+halves. The main-thread half (parameters, state, activation) is not `Send`,
+so code that would load state from the audio thread does not compile; the
+audio half is `Send`, is the only thing that can process, and processes
+through `&mut self`. Every event of the framework's event buffer reaches the
+plugin on its frame: CLAP events with their offsets, and for VST 3 one
+queue per parameter with every point on its frame, notes with ids, per-note
+pressure and note expression.
+
+**Check it.** The compile-fail doc-tests on `ClapPlugin` and `Vst3Plugin`
+show that the main-thread half cannot be sent to another thread.
+`the_hosted_plugin_sounds_exactly_as_the_plugin_does_alone`, in
+[`clap_pluck.rs`](../crates/manguebyte-host/tests/clap_pluck.rs) and
+[`vst3_pluck.rs`](../crates/manguebyte-host/tests/vst3_pluck.rs), loads the
+example instrument through its real entry point and requires its output to
+be identical bit for bit to the same plugin run in process by `Harness`,
+for four block layouts, with automation of five parameters, notes with ids,
+expression and pitch bend; removing any one kind of event changes the
+output, so the identity is not two deaf paths agreeing.
+`automation_lands_on_its_frame_through_the_host` sends 59 VST 3 points 61
+frames apart.
+
+**Limit.** A second audio half, and deactivating while one exists, are
+refused at run time, not at compile time. "Main thread" means the thread
+that created the plugin; the types do not check that it is the program's
+main thread. At most 4,096 events per call; the rest are counted. No
+modulation is sent to VST 3 plugins. Tested with the framework's own
+plugins and deliberately misbehaving test plugins, not yet with plugins
+from other vendors; no editors of hosted plugins; no scanning yet.
+
+## 12. Loudness, true peak and broadcast meters, ready to use
+
+**The problem.** Anything that delivers audio for broadcast or streaming has
+to measure loudness to ITU-R BS.1770 and EBU R 128, and true peak. Getting
+the gating, the windows and the K-weighting right at every sample rate is
+easy to get subtly wrong.
+
+**In JUCE.** JUCE 9.0.4's documented API has no loudness, LUFS, K-weighting
+or true-peak class or function, and no VU, PPM, correlation or balance meter
+([class list](https://docs.juce.com/master/annotated.html)). Its level tools
+are `AudioBuffer::getRMSLevel` and `getMagnitude`,
+[`AudioDeviceManager::LevelMeter`](https://docs.juce.com/master/structjuce_1_1AudioDeviceManager_1_1LevelMeter.html)
+and [`dsp::BallisticsFilter`](https://docs.juce.com/master/classjuce_1_1dsp_1_1BallisticsFilter.html).
+Users on the forum write their own
+([loudness](https://forum.juce.com/t/does-juce-have-any-loudness-related-functions-or-classes/57424),
+[true peak](https://forum.juce.com/t/does-juce-have-a-function-to-read-true-peak/43454)).
+
+**In Manguebyte.** `manguebyte-analysis` has a `LoudnessMeter` (momentary,
+short-term, integrated, loudness range, maxima), a `TruePeakMeter`
+(BS.1770-4 Annex 2, 4x by default), a VU meter, a PPM with IEC 60268-10
+Type I timing, and a correlation and balance meter. They run on the audio
+thread in memory fixed when they are built, and any thread reads them
+through atomics without waiting.
+
+**Check it.** [`ebu_tech_3341.rs`](../crates/manguebyte-analysis/tests/ebu_tech_3341.rs)
+synthesises the EBU Tech 3341 test signals and requires cases 1 to 6 and 9
+to 14 within 0.1 LU, and the true-peak cases 15 to 23 within +0.2/-0.4 dB;
+[`ebu_tech_3342.rs`](../crates/manguebyte-analysis/tests/ebu_tech_3342.rs)
+does the same for loudness range, cases 1 to 4. The VU needle reaches 99% in
+300 ms ±3 ms with 1.0 to 1.5% overshoot at 44.1 to 192 kHz. Readings are
+identical to the bit whatever the block size, and measuring makes no heap
+call.
+
+**Limit.** The signals are synthesised from the documents' tables; the
+EBU's own files and recorded items were not run. Written to BS.1770-4, which
+the ITU has since superseded with BS.1770-5. The loudness range is kept in
+0.01 LU histograms and can differ from Tech 3342's function when short-term
+values straddle the relative gate within one bin; this is documented and
+tested. The PPM matches Type I at its 5 ms integration point and its return
+time; other burst readings miss the nominal values by up to 0.6 dB, and it
+reads samples, not the waveform. JUCE ships the pieces to build such meters;
+the claim is that it ships none ready.
+
+## 13. Open Sound Control that lands on the sample
+
+**The problem.** OSC bundles carry a time tag so that a controller or a
+live-coding program can say when something should happen. An audio engine
+that applies messages when they arrive, or once per block, throws that
+timing away.
+
+**In JUCE.** [`OSCReceiver`](https://docs.juce.com/master/classOSCReceiver.html)
+calls its listeners on the message thread or directly on the network thread;
+its documentation describes no delivery into the audio callback and no
+scheduling by time tag. [`OSCArgument`](https://docs.juce.com/master/classOSCArgument.html)
+documents five argument types (int32, float32, string, blob, colour).
+[`OSCAddressPattern`](https://docs.juce.com/master/classOSCAddressPattern.html)
+documents the OSC 1.0 wildcards, and
+[`OSCSender`](https://docs.juce.com/master/classOSCSender.html) and
+`OSCReceiver` document UDP only.
+
+**In Manguebyte.** `manguebyte-osc` decodes on a network thread and hands
+fixed events to the audio thread through wait-free queues, and a message in
+a time-tagged bundle lands on the frame nearest its time tag. Every argument
+type the OSC 1.0 specification lists is supported, nested arrays included;
+the `//` wildcard proposed for OSC 1.1
+([Freed and Schmeder, 2009](https://ccrma.stanford.edu/groups/osc/spec-1_1.html))
+is matched; and TCP with the OSC 1.1 SLIP framing sits beside UDP.
+
+**Check it.** [`bridge.rs`](../crates/manguebyte-osc/tests/bridge.rs):
+`a_time_tag_lands_on_its_exact_frame`, `every_frame_of_a_block_can_be_hit`,
+and `where_an_event_lands_does_not_depend_on_the_block_size` (400 events,
+seven block patterns, identical frames); reading on the audio thread makes
+no heap call. [`codec.rs`](../crates/manguebyte-osc/tests/codec.rs) encodes
+the specification's examples byte for byte and round-trips every type.
+
+**Limit.** Exact relative to the block start the caller passes; the
+variant that reads the system clock inherits the callback's jitter and any
+offset between the sender's clock and this one. Fixed capacities (1,024
+events, a pool for messages over 64 bytes); what does not fit is dropped
+whole and counted. OSC 1.1 is a conference paper, not a ratified
+specification, and `//` is read as XPath's descendant step. OSC 1.0's
+size-prefixed stream framing is not implemented. A JUCE user can build the
+same path by hand; JUCE ships none.
+
+## 14. Pitch detection and fractional-octave analysis
+
+**In JUCE.** JUCE 9.0.4's documented class list has no pitch detection and
+no fractional-octave band analyser or A- and C-weighting class
+([classes](https://docs.juce.com/master/classes.html)); it provides
+`dsp::FFT` and `dsp::WindowingFunction` as building blocks, and spectrum
+display appears in its tutorials as code the reader writes.
+
+**In Manguebyte.** `PitchDetector` offers YIN and the McLeod pitch method
+with a confidence value and the nearest note named, refined between samples
+by band-limited interpolation. `SpectrumAnalyzer` gives octave to
+twenty-fourth-octave bands on the exact frequencies of IEC 61260-1 and A and
+C weighting from IEC 61672-1, with ballistics and peak hold, handing whole
+frames to an interface through a wait-free triple buffer.
+
+**Check it.** [`pitch.rs`](../crates/manguebyte-analysis/tests/pitch.rs):
+sines, sawtooths, square waves, tones without their fundamental and tones
+with a strong second harmonic from 55 Hz to 2 kHz read within 2 cents at
+44.1 and 48 kHz, with no octave errors.
+[`spectrum.rs`](../crates/manguebyte-analysis/tests/spectrum.rs): a
+full-scale sine reads 0 dB in its band within 0.01 dB, and the third-octave
+bands of white and pink noise add up within 0.05 dB.
+
+**Limit.** Synthetic, steady, single tones. At 8 to 22 kHz sample rates the
+error grows to 13 cents; a second harmonic more than about four times the
+fundamental makes the detector read an octave high; low-frequency noise can
+read a confidence near 0.7. The bands are formed from FFT bins, not an IEC
+61260-1 filter bank, and bands narrower than about four bins are not
+resolved. Third-party pitch modules for JUCE exist.
+
+## 15. A keyboard an interface can read without listening
+
+**In JUCE.** [`MidiKeyboardState`](https://docs.juce.com/master/classMidiKeyboardState.html)
+reports key changes to its listeners synchronously, on whichever thread
+updates it, and its documentation warns that the callback
+"[could happen from an audio callback thread](https://docs.juce.com/master/classMidiKeyboardState_1_1Listener.html)".
+An interface can poll `isNoteOn()` instead, but the documentation gives no
+guarantee that updates or reads are free of locks or allocation, and the
+class tracks keys, not pedals.
+
+**In Manguebyte.** `midi::keyboard::KeyboardState` keeps keys, velocities
+and the sustain pedal in atomics. The audio thread updates it with no
+listener code, no lock and no heap call; an interface polls it. A reader
+never sees a key that was not struck, and never sees a sustained key go
+silent while it passes from the hand to the pedal.
+
+**Check it.** `the_keyboard_state_does_not_use_the_heap` in
+[`realtime.rs`](../crates/manguebyte-midi/tests/realtime.rs) (20,000 random
+messages, reads interleaved), and
+`a_key_that_goes_on_sounding_is_never_read_as_silent` and
+`an_interface_can_read_while_another_thread_writes` in
+[`keyboard.rs`](../crates/manguebyte-midi/src/keyboard.rs).
+
+**Limit.** One writing thread. A read is consistent within each group of 16
+keys, not across the whole keyboard, and a velocity can briefly lead or lag
+its key. Only the sustain pedal is tracked. "No lock" and "no listener"
+follow from the code (atomic operations only, no callback interface), not
+from a test.
 
 ## Where JUCE is ahead
 

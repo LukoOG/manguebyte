@@ -60,6 +60,9 @@ sources for what is said about JUCE and the limits of each claim.
 | **CLAP** | Not supported natively | One line, `export_clap!`; the example plugin passes the CLAP project's validator in CI | [CI](.github/workflows/ci.yml) |
 | **Testing a plugin** | Needs a host or a hand-built rig | `Harness` plays notes and automation into a plugin inside a unit test | [example](plugins/pluck/src/lib.rs) |
 | **Parameters and state across threads** | Each plugin synchronises state access itself | Parameters are atomics; saving and loading need no lock and cannot race | [test](crates/manguebyte-params/src/set.rs) |
+| **Hosting plugins** | No CLAP hosting; a hosted plugin is one object called from every thread; parameter changes carry no frame | Hosts CLAP and VST 3 with the thread rules in the types, and every event on its frame: hosted output is identical bit for bit to the plugin run alone | [test](crates/manguebyte-host/tests/clap_pluck.rs) |
+| **Loudness and broadcast meters** | None in the documented API | BS.1770 / EBU R 128 loudness, true peak, VU, PPM and correlation, checked against the EBU's own test signals | [test](crates/manguebyte-analysis/tests/ebu_tech_3341.rs) |
+| **OSC timing** | Listeners on the message or network thread | A time-tagged bundle lands on its exact frame in the audio thread | [test](crates/manguebyte-osc/tests/bridge.rs) |
 | **Slow-downs in silence** | A guard against subnormal numbers that each plugin places in its own callback | Set by the framework around every plugin and every device callback | [test](crates/manguebyte-vst3/tests/abi.rs) |
 | **Licence** | AGPLv3 or commercial | MIT or Apache-2.0 | [licence](LICENSE-MIT) |
 
