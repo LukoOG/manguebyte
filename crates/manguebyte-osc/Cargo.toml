@@ -1,0 +1,18 @@
+[package]
+name = "manguebyte-osc"
+description = "Open Sound Control for the Manguebyte audio framework: messages, bundles, address patterns, UDP and TCP transport, and sample-accurate delivery to the audio thread."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+manguebyte-core.workspace = true
+
+[lints]
+workspace = true
