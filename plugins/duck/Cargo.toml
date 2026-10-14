@@ -15,5 +15,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 manguebyte = { path = "../../crates/manguebyte", default-features = false, features = ["clap", "vst3"] }
 
+[package.metadata.manguebyte]
+name = "Mangue Duck"
+
 [lints]
 workspace = true

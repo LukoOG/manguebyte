@@ -1,0 +1,33 @@
+[package]
+name = "cargo-mangue"
+description = "The Manguebyte command-line tool: create, bundle, install and validate audio plugins."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "cargo-mangue"
+path = "src/main.rs"
+# The program is three lines; everything it does is in the library, which is
+# what the documentation and the tests cover.
+doc = false
+test = false
+
+[dependencies]
+# Reads what `cargo metadata` and `cargo build --message-format=json` print.
+serde_json = "1"
+
+[dev-dependencies]
+# The plugin templates are compiled and their own tests run as part of this
+# crate's tests, so a template that stops building fails here and not on the
+# machine of whoever runs `cargo mangue new`.
+manguebyte = { path = "../manguebyte", version = "0.1.0", default-features = false, features = ["clap", "vst3"] }
+
+[lints]
+workspace = true

@@ -23,5 +23,8 @@ required-features = ["standalone"]
 [dependencies]
 manguebyte = { path = "../../crates/manguebyte", default-features = false, features = ["clap", "vst3"] }
 
+[package.metadata.manguebyte]
+name = "Mangue Pluck"
+
 [lints]
 workspace = true
