@@ -50,6 +50,7 @@ Each item is scored from 1 to 5 on three axes:
 | 33 | `AudioReader` cannot open a FLAC file whose first frame header is damaged; a `StreamingPlayer` loop change is not exact to the sample without a seek; the bridges' worker threads poll every 1 to 20 ms instead of being woken | Code | 2 | 2 | 2 | 16 |
 | 34 | The loudness range of a programme whose blocks sit within 0.01 LU of the relative gate can differ from Tech 3342 by the distance between passages; PPM Type II is missing; the meters have no benchmark | Code | 1 | 2 | 2 | 12 |
 | 35 | The test suite takes several minutes unoptimised (the EBU sequences and the analysis tests alone take about 90 s); a workspace `[profile.test] opt-level = 1` would cut that | Infrastructure | 2 | 1 | 1 | 15 |
+| 36 | Plugins cannot log yet: `LogQueue` exists in `manguebyte-core`, but the `Plugin` API does not hand one to a plugin, and the wrappers do not drain it into CLAP's host log (or anywhere, for VST 3) | Architecture | 2 | 2 | 2 | 16 |
 | 15 | The duplex error handler is behind a `Mutex`. It is never taken on the audio path, but it is the one lock in the crate | Code | 1 | 2 | 2 | 12 |
 
 ## Paid back in this audit

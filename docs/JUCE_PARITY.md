@@ -51,7 +51,7 @@ it, so the plan here is mostly to not rebuild it.
 
 | JUCE module | What it covers | Manguebyte | Status |
 |---|---|---|---|
-| `juce_core` | Strings, containers, files, streams, threads, time, XML, JSON, networking, memory utilities, logging | Rust `std` and established crates | ➖ except audio-specific pieces: lock-free queue ✅, atomic floats ✅, denormal guard ✅ (applied automatically, ADR 0006), high-resolution timer ⬜ |
+| `juce_core` | Strings, containers, files, streams, threads, time, XML, JSON, networking, memory utilities, logging | Rust `std` and established crates | ➖ except audio-specific pieces: lock-free queue ✅, atomic floats ✅, denormal guard ✅ (applied automatically, ADR 0006), logging that is safe on the audio thread ✅, high-resolution timer ⬜ |
 | `juce_events` | Message loop, timers, async updaters, change broadcasters, inter-process connections | later `gui` for the event loop | ➖ as a general facility. The audio side deliberately has no broadcaster ([ADR 0002](adr/0002-real-time-thread-model.md)) |
 | `juce_data_structures` | Value trees, undo manager, properties files | later, if the GUI needs it | ⬜ Undo for parameter changes is planned in the plugin layer |
 | `juce_cryptography` | Hashes, RSA, Blowfish | ➖ | Use RustCrypto |

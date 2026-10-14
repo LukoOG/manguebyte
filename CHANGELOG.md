@@ -101,6 +101,13 @@ Nothing has been published to crates.io yet. Everything below is on `main`.
   formats, graph, MIDI, parameters, standalone, OSC, plugin, graphics and the
   command-line tool. The `unsafe` that remains is listed in
   `docs/ARCHITECTURE.md`.
+- `LogQueue` (`manguebyte_core::log`): a log the audio thread can write to.
+  Posting is wait-free and never allocates, even with formatting
+  (`post_fmt(level, format_args!(..))` formats into a buffer on the stack);
+  messages below the queue's level are dropped before being formatted; any
+  number of threads may post; the draining thread gets the messages in the
+  order they were posted, across drains, and a count of the ones that found
+  no room. A counting-allocator test and Miri check it.
 
 ### Processing model
 

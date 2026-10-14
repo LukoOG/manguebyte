@@ -42,7 +42,7 @@ nothing beside or above it.
 
 | Crate | Role | Depends on |
 |---|---|---|
-| `manguebyte-core` | `AudioBuffer`, `Sample`, smoothing, atomics, wait-free queue | nothing |
+| `manguebyte-core` | `AudioBuffer`, `Sample`, smoothing, atomics, wait-free queue, real-time log | nothing |
 | `manguebyte-midi` | MIDI 1.0 and 2.0 messages, translation, MPE, MIDI files, sample-accurate event buffers | nothing |
 | `manguebyte-params` | Parameters, ranges, smoothing, saved state | core |
 | `manguebyte-dsp` | `Processor`, events, transport, synth, filters, effects, FFT | core, midi |
@@ -124,8 +124,16 @@ This is checked, not hoped for. Each crate with audio-thread code has a
 `tests/realtime.rs` that installs a counting allocator and fails if anything
 touches the heap while processing: processors in `manguebyte-dsp`, meters and
 analysers in `manguebyte-analysis`, bridges in `manguebyte-formats`,
-`manguebyte-osc` and `manguebyte-midi`, and the wrappers and the host through
-their own tests. Every new processor is added to the test of its crate.
+`manguebyte-osc` and `manguebyte-midi`, the log in `manguebyte-core`, and the
+wrappers and the host through their own tests. Every new processor is added
+to the test of its crate.
+
+Printing is I/O, so the audio thread logs through a `LogQueue` instead
+(`manguebyte_core::log`). Posting is wait-free and never allocates: the text
+is formatted into a buffer on the stack and copied into one of a fixed set of
+slots, and a message below the queue's level is dropped before it is
+formatted. Another thread drains the queue and receives the messages in the
+order they were posted, with a count of any that found no free slot.
 
 The only `unsafe` code in the framework is in these places: the wait-free
 queue; the triple buffer; the boundaries where the CLAP and VST 3 wrappers
