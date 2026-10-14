@@ -1,0 +1,197 @@
+# ADR 0007: The user-interface layer
+
+Status: accepted, 2026-10-14
+
+## Context
+
+Manguebyte has no user interface yet. Plugins built with it run in hosts with
+the host's generic controls, and the standalone wrapper has no window of its
+own. The layer we add has to:
+
+- embed plugin editors in a host's window through the CLAP `gui` extension
+  and VST 3's `IPlugView`, on Windows, macOS and Linux;
+- survive many instances of many plugin binaries in one process, including
+  binaries built with different versions of this framework, and hosts that
+  open and close editors constantly while audio runs;
+- keep the thread model of ADR 0002 and ADR 0003: no listeners, nothing that
+  can make the audio thread wait or allocate;
+- serve the standalone wrapper and ordinary audio applications as well;
+- be verifiable in CI without a screen or a GPU, because CI is the only place
+  this project can exercise macOS and Linux.
+
+JUCE users' recurring complaints set the bar the other way: styling through
+`LookAndFeel` inheritance, hand-written layout arithmetic, slow software
+rendering on HiDPI screens, OpenGL deprecated on macOS, editor lifetime bugs
+(dangling processor pointers, timers firing after destruction), parameter
+attachments that race, accessibility added late, and no way to test an
+interface in CI.
+
+### How the decision was made
+
+Four architects designed the layer independently, each from a different
+conviction: own the stack; GPU first; build on the Rust ecosystem; developer
+experience first. Three judges scored the designs on ten criteria, from the
+points of view of a commercial plugin developer, the long-term maintainer
+and the verification engineer, and checked the contested facts against the
+crates' source and registries.
+
+Two judges ranked "own the stack" first and one ranked "build on the
+ecosystem" first by one point. All three ranked "GPU first" last, and all
+four architects, including the GPU advocate, recommended rendering on the
+CPU first.
+
+### Facts that shaped it
+
+Checked during judging, October 2026:
+
+- `softbuffer` 0.4.8 registers an Objective-C class under a fixed name, so a
+  second plugin binary in the same process panics on macOS; on Windows it
+  keeps a process-global allocator with a detached thread. It cannot be used
+  in plugins.
+- `accesskit_macos` 0.27.1 also registers fixed class names, with the same
+  result; `accesskit_unix` keeps process-global state and a detached thread.
+- `baseview` 0.4.1 names its macOS view classes per view, which is right, but
+  runs its X11 handling on a thread of its own and installs a per-binary
+  message hook on Windows.
+- `vello_cpu` 0.3 needs Rust 1.89, `parley` 0.12 needs 1.88 and Unicode-3.0
+  data tables, `wgpu` 30 needs 1.87 and `egui` 0.36 needs 1.95. `skrifa` 0.48
+  and `harfrust` 0.14 build on 1.85, the workspace minimum; `tiny-skia` 0.12
+  declares no minimum.
+- The Inter typeface declares no Reserved Font Name, so a subset can keep its
+  name provided the OFL text ships with it.
+- A Rust DAW built on `wgpu` reports graphics-driver crashes on Windows in
+  its own documentation; a plugin cannot tell its users to set environment
+  variables to work around its renderer.
+
+## Decision
+
+**1. Layers.** The editor contract lives in `manguebyte-plugin`, with no
+third-party dependency and no `unsafe`. `Plugin::editor` returns an optional
+factory that is `Send + Sync + 'static`, so it cannot capture the processor,
+a borrow, an `Rc` or a raw pointer. The open editor is `!Send` and is closed
+by being dropped. `EditorHost` gives an editor what a host offers: resize
+requests, main-thread callbacks, and the host's timers and file descriptors.
+The contract does not name any toolkit, so an author can still bring one.
+
+Four new crates sit above it, and none of them may become a dependency of a
+crate that processes audio (CI checks the dependency tree):
+
+| Crate | Holds |
+|---|---|
+| `manguebyte-gfx` | The scene (a display list per widget), the rasteriser behind a private seam, text |
+| `manguebyte-window` | Platform windows behind our own `Window` trait |
+| `manguebyte-ui` | Retained tree, layout, design tokens, widgets, the accessibility model, a test harness |
+| `manguebyte-gui` | Glue between the plugin wrappers and the interface |
+
+**2. CPU first.** Each widget records a display list. The framework derives
+damage from what changed, keeps a back buffer, repaints at most a few damage
+rectangles, and answers an expose by copying the buffer. The rasteriser of
+the first phase is `tiny-skia`, used only behind our seam. Its possible
+replacements, an own rasteriser (for byte-identical output across processor
+architectures) or `vello_cpu` (for speed, once the interface crates may carry
+their own minimum Rust version), will be chosen by benchmark, not by
+conviction. GPU rendering may come later, behind the same seam, and will not
+be the default while CI cannot test its pixels. This replaces the
+"GPU-accelerated renderer" of the roadmap.
+
+**3. Text.** `skrifa` for outlines and metrics, `harfrust` for shaping, a
+small layout of our own, and an embedded subset of Inter with its OFL text.
+
+**4. Windows.** A thin backend per platform behind our seam, presenting with
+the platform's plain copy (GDI on Windows, layer contents on macOS,
+`PutImage` on X11). The interface runs on the host's main thread on every
+platform; on Linux it runs through the host's loop (CLAP `posix-fd-support`
+and `timer-support`, VST 3 `IRunLoop`), and an editor refuses to open where a
+host offers neither. Windows comes first. macOS gets a fixed time box; if our
+backend is not green on the CI runner by then, `baseview`'s macOS view code is
+adapted behind the seam. X11 follows once CI has shown it can read a window
+back.
+
+**5. Parameters.** No listeners. The interface reads the parameters' atomics
+once per frame. An edit is a `Gesture` guard: begin, set, end, and cancel to
+restore the starting value. In CLAP, per-parameter atomic counters record
+gestures; the wrapper turns them into gesture events in `process` or
+`flush`, `flush` writes its output list, and the editor asks for a flush when
+the host is not processing. In VST 3 the guard calls `beginEdit`,
+`performEdit` and `endEdit` on the main thread with the value the control
+set. Neither wrapper ever infers an edit by comparing values, which would
+report host automation and restored state back to the host as user edits;
+while blocks run, the host's points stay the only source of a value, as the
+VST 3 wrapper already ensures.
+
+**6. Accessibility.** The interface has its own accessibility model, and
+every widget must describe itself: the method has no default. The test
+harness finds widgets only by role and name, so a widget that a screen reader
+cannot find cannot be tested either. Platform adapters come later, each only
+after a test with two plugin binaries in one process passes on that platform.
+
+**7. Hygiene.** No code of ours and no dependency we adopt may register an
+operating-system name that is the same in two binaries, change a process-wide
+setting such as DPI awareness, install hooks, start global threads or keep
+mutable statics. Before a dependency is adopted its source is read for these,
+and the result is recorded here. CI loads two separately built plugin
+binaries, opens and closes their editors, and unloads them in both orders.
+
+**8. Verification.** A probe job opens a window and reads its pixels back on
+the three CI systems before any backend depends on that. Scenes are checked
+by an exact text dump of the display list and by images with a measured
+tolerance. A headless editor is driven end to end through the real CLAP
+interface. Editors are opened and closed thousands of times while `process`
+runs under the counting allocator. Calls to the `gui` extension are fuzzed in
+order and arguments. Nothing about the interface goes into the README,
+`BEYOND_JUCE.md` or the website before the test that proves it exists.
+
+## Phase 1, in order
+
+1. This ADR; the roadmap and parity table amended; a layering check, a
+   licence check and the window probe job in CI.
+2. The editor contract, `Gesture` and the gesture counters in
+   `manguebyte-plugin`, with property, allocation and Miri tests.
+3. CLAP: gesture events, `flush` output, `request_flush`, and the `gui`
+   extension tested against a fake editor through the C interface.
+4. VST 3: the component handler kept, `IPlugView`, content scale,
+   `IPlugFrame` and `IRunLoop`, tested against fake host objects.
+5. `manguebyte-gfx`: scene, rasteriser seam on `tiny-skia`, text, image and
+   dump tests, a benchmark that prints its numbers.
+6. `manguebyte-ui`: tree, layout (row, column, stack), tokens, sources, the
+   accessibility model, damage, label, knob, toggle, meter, canvas, harness.
+7. A headless editor driven through the real CLAP interface.
+8. `manguebyte-window` on Windows and `manguebyte-gui`: embedding and
+   read-back tests, open and close cycles, two binaries in one process.
+9. An editor for `plugins/duck`, opened by hand in at least one host on
+   Windows and recorded.
+
+Not in phase 1: macOS and X11 backends, platform accessibility adapters,
+resizing, popups, text entry, GPU code, hot reloading of themes.
+
+## Consequences
+
+- Plugin authors get an interface layer with no process-wide state, one
+  thread model and tests that run in CI, at the cost of a slower start: the
+  first phase ships Windows only, and macOS and Linux claims wait for their
+  tests.
+- More code is ours (the window backends), but it is small, and the pure
+  parts (scene, layout, widgets, accessibility) are safe code that is cheap
+  to keep alive.
+- Rendering quality starts at what `tiny-skia` gives. Heavy visuals that
+  need a GPU wait for a later phase.
+
+Open questions, to be answered by the first phase rather than by argument:
+whether GitHub's macOS runners let a test read a window back; whether
+`tiny-skia` builds on Rust 1.85 and is fast enough at 2x scale; how far
+images differ between the x86-64 and aarch64 runners; which Linux hosts
+offer no loop support; keyboard focus in specific hosts, which only a manual
+matrix can show; and how to give VoiceOver users an accessible interface on
+macOS before AccessKit's class names are fixed upstream.
+
+## Alternatives not taken
+
+- **GPU first** (`wgpu` with a vector renderer): minimum Rust version above
+  ours, a much larger binary, driver failures inside other people's
+  processes, and pixels CI cannot check.
+- **An existing toolkit as the framework's interface** (`egui`, `iced`,
+  `vizia`, `slint`): minimum versions well above ours, a licence outside our
+  list in one case, and thread or global-state models that do not fit
+  plugins. The contract stays open to them for authors who want one.
+- **A web view as the core**: possible later as an optional backend, not as
+  the foundation.

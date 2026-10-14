@@ -43,23 +43,26 @@ nothing beside or above it.
 | Crate | Role | Depends on |
 |---|---|---|
 | `manguebyte-core` | `AudioBuffer`, `Sample`, smoothing, atomics, wait-free queue | nothing |
-| `manguebyte-midi` | MIDI messages and sample-accurate event buffers | nothing |
+| `manguebyte-midi` | MIDI 1.0 and 2.0 messages, translation, MPE, MIDI files, sample-accurate event buffers | nothing |
 | `manguebyte-params` | Parameters, ranges, smoothing, saved state | core |
 | `manguebyte-dsp` | `Processor`, events, transport, synth, filters, effects, FFT | core, midi |
-| `manguebyte-formats` | Audio file reading and writing | core |
+| `manguebyte-formats` | Audio files: whole or streamed, read and written, with play and record bridges | core |
+| `manguebyte-osc` | Open Sound Control, with a real-time bridge | core |
+| `manguebyte-analysis` | Loudness, true peak, level meters, spectrum, pitch | core, dsp |
 | `manguebyte-devices` | Sound card input, output and duplex; MIDI ports | core, midi, `cpal`, `midir` |
 | `manguebyte-plugin` | `Plugin` trait, state, `Harness` for testing without a host | core, midi, dsp, params |
 | `manguebyte-graph` | A processing graph that is rewired while it plays | core, dsp |
 | `manguebyte-standalone` | Runs a `Plugin` on the sound card and MIDI ports | core, midi, dsp, params, plugin, devices |
 | `manguebyte-clap` | Turns a `Plugin` into a CLAP plugin | core, midi, dsp, params, plugin, `clap-sys` |
 | `manguebyte-vst3` | Turns a `Plugin` into a VST 3 plugin | core, midi, dsp, params, plugin, `vst3` |
-| `manguebyte` | Everything under one name | all of the above |
+| `manguebyte-host` | Loads CLAP and VST 3 plugins and runs them as processors | core, midi, dsp, `clap-sys`, `vst3`, `libloading` |
+| `cargo-mangue` | The command-line tool: new, bundle, install, validate | `serde_json` |
+| `manguebyte` | Everything under one name | all of the above except `cargo-mangue` |
 
 Planned crates slot into the same picture: each further plugin format
 gets a crate beside `manguebyte-clap` and `manguebyte-vst3`, on top of
-`manguebyte-plugin`; `manguebyte-gui` sits beside them and is never a
-dependency of anything that processes audio; `manguebyte-graph` and
-`manguebyte-host` sit on the plugin API.
+`manguebyte-plugin`; the interface crates of [ADR 0007](adr/0007-user-interface-layer.md)
+sit beside them and are never a dependency of anything that processes audio.
 
 Rules that keep this healthy:
 
@@ -94,10 +97,12 @@ What crosses between the two sides:
 |---|---|---|
 | Atomic value | One number the other side polls: a parameter, a meter | `AtomicF32`, the `Param` types |
 | Wait-free queue | Ordered messages, blocks of audio, ownership of buffers | `spsc::channel` |
+| Triple buffer | The latest whole frame of something large, such as a spectrum, for one reader who only wants the newest | `manguebyte_analysis::triple_buffer` |
 | Nothing else | | |
 
-There is no third mechanism. In particular the framework has **no listener
-callbacks**: a callback that fires on whichever thread wrote a value is how
+The triple buffer is the queue's sibling for data where only the newest copy
+matters: the writer never waits and never overwrites what the reader holds.
+Beyond these three the framework has **no listener callbacks**: a callback that fires on whichever thread wrote a value is how
 user-interface code ends up running on the audio thread. In JUCE, parameter
 listeners are invoked synchronously on the calling thread, including the
 audio thread during host automation, and the attachment classes respond by
@@ -115,14 +120,21 @@ its own timer. See [ADR 0003](adr/0003-parameters-without-listeners.md).
 - do I/O of any kind,
 - panic.
 
-This is checked, not hoped for. `crates/manguebyte-dsp/tests/realtime.rs`
-installs a counting allocator and fails if any processor touches the heap
-while processing. Every new processor is added to that test. The only
-`unsafe` code in the framework is in four places: the wait-free queue, the
-boundaries where the CLAP and VST 3 wrappers meet a host, and the two
-instructions that tell the processor to treat subnormal numbers as zero
-([ADR 0006](adr/0006-subnormal-numbers-are-flushed.md)). The first three run
-under Miri in CI; the last cannot, and is checked by what the processor then
+This is checked, not hoped for. Each crate with audio-thread code has a
+`tests/realtime.rs` that installs a counting allocator and fails if anything
+touches the heap while processing: processors in `manguebyte-dsp`, meters and
+analysers in `manguebyte-analysis`, bridges in `manguebyte-formats`,
+`manguebyte-osc` and `manguebyte-midi`, and the wrappers and the host through
+their own tests. Every new processor is added to the test of its crate.
+
+The only `unsafe` code in the framework is in these places: the wait-free
+queue; the triple buffer; the boundaries where the CLAP and VST 3 wrappers
+meet a host; the boundaries where the host meets a plugin (loading a library,
+the CLAP and VST 3 interfaces, and on macOS three CoreFoundation calls); and
+the two instructions that tell the processor to treat subnormal numbers as
+zero ([ADR 0006](adr/0006-subnormal-numbers-are-flushed.md)). All but the
+last run under Miri in CI, except where a test has to load a real shared
+library, which Miri cannot do; the last is checked by what the processor then
 does.
 
 ### State

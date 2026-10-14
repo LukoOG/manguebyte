@@ -21,26 +21,26 @@ Manguebyte
 
 | JUCE module | What it covers | Manguebyte | Status |
 |---|---|---|---|
-| `juce_audio_basics` | Audio buffers, sample conversion, MIDI messages and buffers, MIDI files, MPE, UMP, synthesiser voices, smoothed values, basic sources, ADSR | `core`, `midi`, `dsp` | 🚧 Buffers, smoothing, channel and system messages, SysEx, stream parsing, MIDI files, sample-accurate MIDI buffer and ADSR are done. Voice allocation is done too, with per-note expression. Missing: MPE zone handling, UMP, audio sources |
+| `juce_audio_basics` | Audio buffers, sample conversion, MIDI messages and buffers, MIDI files, MPE, UMP, synthesiser voices, smoothed values, basic sources, ADSR | `core`, `midi`, `dsp` | 🚧 Buffers, smoothing, channel and system messages, SysEx, stream parsing, MIDI files, sample-accurate MIDI buffer and ADSR are done. Voice allocation is done too, with per-note expression. MIDI 2.0 packets (UMP) with MIDI 1.0 translation, RPN/NRPN, MPE zones and tracking, and keyboard state are done. Missing: audio sources, MPE and MIDI 2.0 delivered to processors as per-note events |
 | `juce_audio_devices` | Device enumeration and selection, input and output streams, per-platform backends (CoreAudio, WASAPI, ASIO, ALSA, JACK, Oboe, and others), MIDI ports, device manager with saved setup | `devices` | 🚧 Listing, selection by stable id, sample rate and buffer size, output, input, duplex and MIDI ports are done. Missing: host selection (ASIO, JACK), hot-plug notification, a device manager with saved setup, virtual MIDI ports |
-| `juce_audio_formats` | Readers and writers for WAV, AIFF, FLAC, Ogg Vorbis, MP3 and platform codecs; streaming sources; thumbnails cache; sampler | `formats` | 🚧 WAV and AIFF read and write, FLAC decoding, format detection. Missing: streaming, FLAC encoding, Ogg Vorbis, MP3, metadata, thumbnails |
-| `juce_audio_processors` | The plugin and processor model, parameters and their state tree, plugin hosting for VST3, AU, LV2 and others, processor graph, plugin scanning | `params`, later `plugin`, `host`, `graph` | 🚧 Parameters, state and the plugin model are done, with a different design ([ADR 0003](adr/0003-parameters-without-listeners.md), [ADR 0005](adr/0005-one-timestamped-event-stream.md)). The processing graph is done (`graph`). Hosting is not started |
+| `juce_audio_formats` | Readers and writers for WAV, AIFF, FLAC, Ogg Vorbis, MP3 and platform codecs; streaming sources; thumbnails cache; sampler | `formats` | 🚧 WAV (with RF64) and AIFF read and write, FLAC decoding and encoding, format detection, streaming readers and writers with exact seeking, and wait-free play and record bridges for audio callbacks. Missing: Ogg Vorbis, MP3, metadata, thumbnails |
+| `juce_audio_processors` | The plugin and processor model, parameters and their state tree, plugin hosting for VST3, AU, LV2 and others, processor graph, plugin scanning | `params`, later `plugin`, `host`, `graph` | 🚧 Parameters, state and the plugin model are done, with a different design ([ADR 0003](adr/0003-parameters-without-listeners.md), [ADR 0005](adr/0005-one-timestamped-event-stream.md)). The processing graph is done (`graph`). Hosting CLAP and VST 3 plugins is done (`host`), through one interface for both, with every event on its frame. Missing: scanning, AU and LV2 hosting, hosted editors |
 | `juce_audio_processors_headless` | The same, without GUI dependencies (added in JUCE 8.0.11) | the same crates | ✅ by construction: no processing crate depends on a GUI |
 | `juce_audio_plugin_client` | Wrappers that turn a processor into a VST3, AU, AUv3, LV2, AAX, Unity or standalone plugin | `clap`, `vst3`, `standalone`, later one crate per format | 🚧 CLAP and VST 3 are done and pass their projects' validators in CI, and so is the standalone wrapper. Neither has an editor yet. Next: AU, LV2. JUCE has no native CLAP |
 | `juce_audio_utils` | Ready-made audio widgets and helpers: device selector, keyboard, thumbnail, transport-style player | later `gui` | ⬜ |
-| `juce_dsp` | FFT, windows, IIR and FIR filters with design methods, state-variable and ladder filters, oversampling, convolution, delay lines, dynamics, reverb, chorus, phaser, waveshaping, oscillator, panner, SIMD wrappers, lookup tables | `dsp` | 🚧 Processor chains, oscillator, biquad designs, state-variable filter, delay, gain, compressor, noise gate, reverb, FFT of any length and windows are done. Oversampling, resampling, look-ahead limiter, waveshaper, noise, LFO and FIR design are done as well. Missing: ladder filter, high-order IIR design, convolution, chorus, phaser, panner, SIMD, lookup tables |
+| `juce_dsp` | FFT, windows, IIR and FIR filters with design methods, state-variable and ladder filters, oversampling, convolution, delay lines, dynamics, reverb, chorus, phaser, waveshaping, oscillator, panner, SIMD wrappers, lookup tables | `dsp` | 🚧 Processor chains, oscillator, biquad designs, state-variable filter, delay, gain, compressor, noise gate, reverb, FFT of any length and windows are done. Oversampling, resampling, look-ahead limiter, waveshaper, noise, LFO and FIR design are done as well, and so are the one-pole and ladder filters (the ladder's cutoff stops at 0.45 of the sample rate), high-order IIR design (Butterworth, Chebyshev I and II, elliptic, orders 1 to 16), Linkwitz-Riley crossovers, chorus, flanger, phaser, dry/wet mixing, panner, envelope follower and interpolated delay lines. Missing: convolution, SIMD, lookup tables |
 | `juce_midi_ci` | MIDI Capability Inquiry: discovery, profiles, property exchange | later, in `midi` | ⬜ |
-| `juce_osc` | Open Sound Control messages over UDP | later `osc` | ⬜ |
+| `juce_osc` | Open Sound Control messages over UDP | `osc` | ✅ Messages, bundles, address patterns, UDP and TCP (OSC 1.1 framing), and a real-time bridge whose time-tagged bundles land on their frame. Missing: the OSC 1.0 TCP framing |
 
 ## User interface
 
 | JUCE module | What it covers | Manguebyte | Status |
 |---|---|---|---|
-| `juce_graphics` | 2D drawing: paths, colours, gradients, images, fonts and text layout, software and platform renderers | later `gui` | ⬜ |
+| `juce_graphics` | 2D drawing: paths, colours, gradients, images, fonts and text layout, software and platform renderers | later `gfx` (CPU first, see ADR 0007) | ⬜ |
 | `juce_gui_basics` | Component tree, windows, mouse and keyboard, layout, look-and-feel, the standard widgets, menus, drag and drop, accessibility | later `gui` | ⬜ |
 | `juce_gui_extra` | Code editor, web view, system tray, and other specialised widgets | later `gui` | ⬜ |
 | `juce_animation` | Animators and easing | later `gui` | ⬜ |
-| `juce_opengl` | OpenGL contexts and rendering into components | later `gui` (GPU rendering is the default path, not an add-on) | ⬜ |
+| `juce_opengl` | OpenGL contexts and rendering into components | later, behind the renderer seam of `gfx`; not the default while CI cannot test GPU pixels (ADR 0007) | ⬜ |
 | `juce_video` | Video playback and camera capture | ➖ | Use a dedicated crate |
 
 ## Foundation
@@ -51,7 +51,7 @@ it, so the plan here is mostly to not rebuild it.
 
 | JUCE module | What it covers | Manguebyte | Status |
 |---|---|---|---|
-| `juce_core` | Strings, containers, files, streams, threads, time, XML, JSON, networking, memory utilities, logging | Rust `std` and established crates | ➖ except audio-specific pieces: lock-free queue ✅, atomic floats ✅, denormal guard ⬜, high-resolution timer ⬜ |
+| `juce_core` | Strings, containers, files, streams, threads, time, XML, JSON, networking, memory utilities, logging | Rust `std` and established crates | ➖ except audio-specific pieces: lock-free queue ✅, atomic floats ✅, denormal guard ✅ (applied automatically, ADR 0006), high-resolution timer ⬜ |
 | `juce_events` | Message loop, timers, async updaters, change broadcasters, inter-process connections | later `gui` for the event loop | ➖ as a general facility. The audio side deliberately has no broadcaster ([ADR 0002](adr/0002-real-time-thread-model.md)) |
 | `juce_data_structures` | Value trees, undo manager, properties files | later, if the GUI needs it | ⬜ Undo for parameter changes is planned in the plugin layer |
 | `juce_cryptography` | Hashes, RSA, Blowfish | ➖ | Use RustCrypto |

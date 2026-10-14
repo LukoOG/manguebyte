@@ -104,9 +104,11 @@ an audible glitch. In `Processor::process` and anything it calls:
 Say in the documentation whether a function is safe to call from the audio
 thread whenever it is not obvious.
 
-These rules are enforced. `crates/manguebyte-dsp/tests/realtime.rs` replaces
-the allocator with one that counts and fails if a processor touches the heap
-while processing. **When you add a processor, add it to that test.**
+These rules are enforced. Each crate with audio-thread code has a
+`tests/realtime.rs` that replaces the allocator with one that counts and fails
+if anything touches the heap while processing (`manguebyte-dsp` for
+processors, `manguebyte-analysis` for meters and analysers, and so on).
+**When you add a processor, add it to the test of its crate.**
 
 Before changing a core trait or adding a crate, read
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

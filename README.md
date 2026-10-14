@@ -75,10 +75,9 @@ plugin against subnormal numbers. All of them are fixed, and the checks stay
 in CI.
 
 **Where JUCE is ahead.** JUCE has more than twenty years of production use
-behind it and far more breadth: a full GUI toolkit with plugin editors, AU,
-AAX and LV2, plugin hosting, many more DSP blocks and file formats, and
-mobile platforms.
-Manguebyte has none of those yet. [docs/JUCE_PARITY.md](docs/JUCE_PARITY.md)
+behind it and more breadth: a full GUI toolkit with plugin editors, AU, AAX
+and LV2, hosting of AU and LV2 plugins and of plugins' editors, more file
+formats, and mobile platforms. Manguebyte has none of those yet. [docs/JUCE_PARITY.md](docs/JUCE_PARITY.md)
 tracks the gap module by module.
 
 ## Status
@@ -92,20 +91,25 @@ small part of the road ahead and the API will change before 1.0. See
 |---|---|
 | [`manguebyte`](crates/manguebyte) | The whole framework under one name, plus a prelude |
 | [`manguebyte-core`](crates/manguebyte-core) | `AudioBuffer`, the `Sample` trait, `Smoothed` values, atomic floats, a wait-free SPSC queue, decibel maths, a guard against subnormal numbers |
-| [`manguebyte-dsp`](crates/manguebyte-dsp) | The `Processor` trait and tuple chains, sample-accurate events and transport, a polyphonic `Synth` with per-note expression, band-limited oscillator, biquad filters (8 shapes), state-variable filter, ADSR envelope, delay line and echo, compressor, noise gate, look-ahead limiter, reverb, waveshaper, oversampling, resampling at any ratio, noise, LFO, smoothed gain, FFT of any length, window functions, FIR design |
+| [`manguebyte-dsp`](crates/manguebyte-dsp) | The `Processor` trait and tuple chains, sample-accurate events and transport, a polyphonic `Synth` with per-note expression, band-limited oscillator, biquad filters (8 shapes), high-order IIR design (Butterworth, Chebyshev, elliptic), state-variable, one-pole and ladder filters, Linkwitz-Riley crossovers, ADSR envelope, interpolated delay lines and echo, chorus and flanger, phaser, compressor, noise gate, look-ahead limiter, reverb, waveshaper, dry/wet mixing, panner, envelope follower, oversampling, resampling at any ratio, noise, LFO, smoothed gain, FFT of any length, window functions, FIR design |
+| [`manguebyte-analysis`](crates/manguebyte-analysis) | Loudness to BS.1770 and EBU R 128, checked against the EBU's test signals; true peak, peak, RMS, VU and PPM meters; stereo correlation; a spectrum analyser with octave bands and weighting; pitch detection. All real-time safe, readable from any thread |
 | [`manguebyte-graph`](crates/manguebyte-graph) | A processing graph that is rewired while it plays: edits reach the audio thread through a wait-free queue, nodes keep their state, removed nodes are freed off the audio thread, and paths of different latency are lined up automatically |
 | [`manguebyte-params`](crates/manguebyte-params) | Lock-free float, integer, switch and choice parameters; linear, skewed and logarithmic ranges; text conversion; smoothing; saved state that survives version changes |
-| [`manguebyte-plugin`](crates/manguebyte-plugin) | The `Plugin` trait that every format will wrap, plugin state, and a `Harness` that plays notes and automation into a plugin inside a unit test |
+| [`manguebyte-plugin`](crates/manguebyte-plugin) | The `Plugin` trait every format wraps, plugin state, and a `Harness` that plays notes, automation and a sidechain into a plugin inside a unit test |
 | [`manguebyte-clap`](crates/manguebyte-clap) | Exports a `Plugin` as a CLAP plugin with one line. Notes, expression, automation and modulation arrive on their exact frame. Passes the CLAP project's validator |
 | [`manguebyte-vst3`](crates/manguebyte-vst3) | Exports the same `Plugin` as a VST 3 plugin with one line. Every automation point lands on its frame; notes carry ids, tuning and per-note expression; MIDI controllers arrive as MIDI again. Passes Steinberg's validator on Windows, Linux and macOS |
-| [`manguebyte-midi`](crates/manguebyte-midi) | Channel and system messages, a byte-stream parser (running status, real-time, SysEx), standard MIDI file reading and writing, sample-accurate `MidiBuffer`, pitch conversions |
-| [`manguebyte-formats`](crates/manguebyte-formats) | WAV and AIFF reading and writing; FLAC decoding written from the specification and checked bit for bit against files from FFmpeg; the format is recognised from a file's contents |
+| [`manguebyte-host`](crates/manguebyte-host) | Loads CLAP and VST 3 plugins made by anyone and runs them as processors, through one interface for both formats, with every event on its frame and nothing allocated while processing |
+| [`manguebyte-midi`](crates/manguebyte-midi) | MIDI 1.0 channel and system messages, a byte-stream parser, standard MIDI files, sample-accurate `MidiBuffer`; MIDI 2.0 packets (UMP) and translation between the protocols; RPN and NRPN; MPE zones and note tracking; keyboard state |
+| [`manguebyte-formats`](crates/manguebyte-formats) | WAV (with RF64), AIFF and FLAC, read and written, whole or block by block with exact seeking; a FLAC encoder and decoder written from the specification and checked against FFmpeg; wait-free bridges to play and record from an audio callback |
+| [`manguebyte-osc`](crates/manguebyte-osc) | Open Sound Control over UDP and TCP, with a real-time bridge that puts time-tagged bundles on their exact frame |
 | [`manguebyte-devices`](crates/manguebyte-devices) | Device listing and selection, playback, recording and full-duplex streams, in any hardware sample format; MIDI input and output ports, with arrival times mapped to frames so a player's timing survives the audio buffer |
 | [`manguebyte-standalone`](crates/manguebyte-standalone) | Runs a `Plugin` as an application: sound card out, MIDI keyboards in, microphone in for effects |
+| [`cargo-mangue`](crates/cargo-mangue) | The command-line tool: `cargo mangue new` creates a plugin crate, `bundle`, `install` and `validate` turn it into a `.clap` and a `.vst3` |
 
-Not there yet: lossy formats (MP3, Ogg Vorbis, Opus), FLAC encoding, the
-Audio Unit, LV2 and AAX plugin formats, plugin user interfaces, plugin
-hosting and GUI.
+Not there yet: a user interface and plugin editors (designed in
+[ADR 0007](docs/adr/0007-user-interface-layer.md), not built); the Audio
+Unit, LV2 and AAX formats; lossy formats (MP3, Ogg Vorbis, Opus);
+convolution; plugin scanning and the editors of hosted plugins.
 
 ## Quick start
 
@@ -220,17 +224,16 @@ manguebyte::clap::export_clap!(Pluck);
 manguebyte::vst3::export_vst3!(Pluck);
 ```
 
-Build it and load the result in any CLAP host:
+Build it and bundle it as `.clap` and `.vst3` for any host, with the
+framework's command-line tool:
 
 ```bash
-./scripts/bundle-clap.sh mangue-pluck "Mangue Pluck"
+cargo run -p cargo-mangue -- bundle -p mangue-pluck --release
 ```
 
-Or in any VST 3 host:
-
-```bash
-./scripts/bundle-vst3.sh mangue-pluck "Mangue Pluck"
-```
+`cargo mangue new my-synth --kind instrument` starts a plugin of your own
+from a template; `install` copies a plugin into the user's plugin folders,
+and `validate` runs both formats' validators on it.
 
 [`plugins/duck`](plugins/duck) is the same for an effect: a sidechain ducker
 with a main input, a sidechain input and a bypass switch that does not

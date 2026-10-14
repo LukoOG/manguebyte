@@ -14,6 +14,9 @@
 //! | [`formats`] | `manguebyte-formats` | audio file reading and writing |
 //! | `clap` | `manguebyte-clap` | builds CLAP plugins (feature `clap`) |
 //! | `vst3` | `manguebyte-vst3` | builds VST 3 plugins (feature `vst3`) |
+//! | `host` | `manguebyte-host` | loads CLAP and VST 3 plugins and runs them as processors (feature `host`) |
+//! | `analysis` | `manguebyte-analysis` | loudness, true peak, level meters, spectrum and pitch (feature `analysis`, on by default) |
+//! | `osc` | `manguebyte-osc` | Open Sound Control, with time tags landing on their frame (feature `osc`, on by default) |
 //! | `standalone` | `manguebyte-standalone` | runs a plugin on the sound card and MIDI ports (feature `standalone`) |
 //! | [`devices`] | `manguebyte-devices` | audio device input, output and duplex streams (feature `devices`, on by default) |
 //!
@@ -44,6 +47,8 @@ pub use manguebyte_core::{
     AtomicF32, AtomicF64, AudioBuffer, NoDenormals, ParamId, Sample, Smoothed, decibels, spsc,
 };
 
+#[cfg(feature = "analysis")]
+pub use manguebyte_analysis as analysis;
 #[cfg(feature = "clap")]
 pub use manguebyte_clap as clap;
 #[cfg(feature = "devices")]
@@ -51,7 +56,11 @@ pub use manguebyte_devices as devices;
 pub use manguebyte_dsp as dsp;
 pub use manguebyte_formats as formats;
 pub use manguebyte_graph as graph;
+#[cfg(feature = "host")]
+pub use manguebyte_host as host;
 pub use manguebyte_midi as midi;
+#[cfg(feature = "osc")]
+pub use manguebyte_osc as osc;
 pub use manguebyte_params as params;
 pub use manguebyte_plugin as plugin;
 #[cfg(feature = "standalone")]
@@ -63,15 +72,20 @@ pub use manguebyte_vst3 as vst3;
 pub mod prelude {
     pub use crate::dsp::event::{Event, EventBuffer, EventKind, Expression, NoteRef};
     pub use crate::dsp::{
-        Adsr, AdsrParams, Biquad, BiquadCoefficients, Compressor, DcBlocker, Delay, DelayLine,
-        Filter, FilterShape, Gain, Lfo, LfoShape, Limiter, Noise, NoiseColor, NoiseGate,
-        Oscillator, Oversampled, ProcessContext, ProcessSpec, Processor, Resampler, Reverb,
-        ShaperCurve, StateVariableFilter, SvfMode, Synth, Transport, Voice, Waveform, Waveshaper,
-        resample, split_at_events,
+        Adsr, AdsrParams, Biquad, BiquadCascade, BiquadCoefficients, Chorus, Compressor, Crossover,
+        CrossoverSlope, DcBlocker, Delay, DelayInterpolation, DelayLine, DryWet, EnvelopeFollower,
+        Filter, FilterShape, Gain, IirFilter, LadderFilter, LadderMode, LevelDetector, Lfo,
+        LfoShape, Limiter, MixLaw, Noise, NoiseColor, NoiseGate, OnePole, OnePoleMode, Oscillator,
+        Oversampled, PanMode, Panner, Phaser, ProcessContext, ProcessSpec, Processor, Resampler,
+        Reverb, ShaperCurve, StateVariableFilter, SvfMode, Synth, Transport, Voice, Waveform,
+        Waveshaper, resample, split_at_events,
     };
     pub use crate::formats::aiff::{self, AiffFormat};
     pub use crate::formats::wav::{self, WavFormat};
-    pub use crate::formats::{AudioFile, FileFormat, FormatError, flac};
+    pub use crate::formats::{
+        AudioFile, AudioReader, AudioWriter, FileFormat, FormatError, RecordingWriter,
+        StreamingPlayer, flac,
+    };
     pub use crate::graph::{Graph, GraphEngine, GraphError, NodeId};
     pub use crate::midi::file::{MetaEvent, MidiFile, Track};
     pub use crate::midi::{

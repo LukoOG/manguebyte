@@ -13,13 +13,19 @@ homepage.workspace = true
 readme = "../../README.md"
 
 [features]
-default = ["devices"]
+default = ["devices", "analysis", "osc"]
 ## Audio device I/O. Pulls in the platform audio backend.
 devices = ["dep:manguebyte-devices"]
 ## Building CLAP plugins.
 clap = ["dep:manguebyte-clap"]
 ## Building VST 3 plugins.
 vst3 = ["dep:manguebyte-vst3"]
+## Metering and analysis: loudness, true peak, level meters, spectrum, pitch.
+analysis = ["dep:manguebyte-analysis"]
+## Open Sound Control.
+osc = ["dep:manguebyte-osc"]
+## Loading CLAP and VST 3 plugins made by anyone and running them.
+host = ["dep:manguebyte-host"]
 ## Running a plugin as a standalone application.
 standalone = ["dep:manguebyte-standalone", "devices"]
 
@@ -34,6 +40,9 @@ manguebyte-graph.workspace = true
 manguebyte-devices = { workspace = true, optional = true }
 manguebyte-clap = { workspace = true, optional = true }
 manguebyte-vst3 = { workspace = true, optional = true }
+manguebyte-analysis = { workspace = true, optional = true }
+manguebyte-osc = { workspace = true, optional = true }
+manguebyte-host = { workspace = true, optional = true }
 manguebyte-standalone = { workspace = true, optional = true }
 
 [[example]]

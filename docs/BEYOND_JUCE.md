@@ -166,9 +166,10 @@ mutex, which on that platform allocates the first time it is locked.
 **Limit.** This is a test that runs, not a property the compiler proves. It
 catches heap use on the paths the tests exercise, and it does not detect a
 lock that never allocates. Checking this at compile time is a goal listed in
-the roadmap; Rust has no stable way to express it yet. The framework's two
-areas of `unsafe` code are additionally run under Miri, which found and led
-to the fix of an invalid pointer in the CLAP wrapper.
+the roadmap; Rust has no stable way to express it yet. The `unsafe` code that
+handles memory, in the wait-free queue and the CLAP and VST 3 wrappers, also
+runs under Miri, which found and led to the fix of an invalid pointer in the
+CLAP wrapper.
 
 ## 5. Per-note expression and modulation
 
@@ -208,10 +209,14 @@ is the unofficial `clap-juce-extensions`.
 event model is the one this framework is built on, so nothing is approximated
 on the way in.
 
-**Check it.** CI builds the example plugin and runs the CLAP project's own
-[`clap-validator`](https://github.com/free-audio/clap-validator) on it: 34 of
-34 applicable tests pass. Ten are skipped because they concern features not
-implemented yet or another platform.
+**Check it.** CI builds both example plugins and runs the CLAP project's own
+[`clap-validator`](https://github.com/free-audio/clap-validator) on them,
+failing the job on any failed test. On Linux, where CI runs it, the
+instrument passes 35 of 44 tests and the effect 33 of 44, with none failed.
+The rest are skipped because they test what the plugins do not offer yet:
+preset discovery, 64-bit audio and configurable audio ports for both, plus
+the denormal timing for the instrument (it has no audio input) and the note
+tests for the effect (it takes no notes).
 
 **Limit.** No plugin GUI extension yet, no 64-bit audio, no presets. VST 3 is
 the only other format so far, also without an editor: JUCE's AU, AAX and LV2
@@ -304,8 +309,10 @@ it has, and Manguebyte does not:
 
 - a complete GUI toolkit, with plugin editor windows in every format;
 - Audio Unit, AAX and LV2 plugin formats;
-- plugin hosting;
-- many more DSP building blocks, and readers for compressed audio formats;
+- hosting of AU and LV2 plugins, plugin scanning, and the editors of hosted
+  plugins (Manguebyte hosts CLAP and VST 3 plugins, without their editors);
+- more DSP building blocks (convolution among them), and readers for
+  compressed audio formats;
 - iOS and Android;
 - documentation, tutorials and a large community.
 

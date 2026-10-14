@@ -58,12 +58,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri
-      # The framework's unsafe code that handles memory is in three places:
-      # the wait-free queue and the CLAP and VST 3 wrappers, which talk to
-      # hosts through C and COM. Miri runs their tests under an interpreter
-      # that detects undefined behaviour and data races. The wrapper tests
-      # drive each plugin through its binary interface, so every pointer it
-      # handles is checked.
+      # The framework's unsafe code that handles memory is in the wait-free
+      # queue, the triple buffer of the analysis crate, the CLAP and VST 3
+      # wrappers, which talk to hosts through C and COM, and the plugin
+      # host, which talks to plugins the same way. Miri runs their tests
+      # under an interpreter that detects undefined behaviour and data
+      # races. The wrapper tests drive each plugin through its binary
+      # interface, so every pointer it handles is checked.
       - run: cargo miri test -p manguebyte-core
         env:
           RUSTFLAGS: ""
@@ -73,6 +74,25 @@ jobs:
       - run: cargo miri test -p manguebyte-vst3
         env:
           RUSTFLAGS: ""
+      - run: cargo miri test -p manguebyte-analysis --lib triple_buffer --test triple_buffer
+        env:
+          RUSTFLAGS: ""
+
+  miri-host:
+    name: Miri (plugin host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      # The host's tests that use plugins compiled into the test itself (no
+      # shared library is loaded, which Miri cannot do). Some of them leak a
+      # plugin on purpose, to show what happens when one is left loaded.
+      - run: cargo miri test -p manguebyte-host --lib --test clap_hostile --test clap_edges --test vst3_hostile
+        env:
+          RUSTFLAGS: ""
+          MIRIFLAGS: -Zmiri-ignore-leaks
 
   clap:
     name: CLAP validation
@@ -169,6 +189,23 @@ jobs:
             grep -v "Parameter [0-9]* (id=" validation.txt | grep -v "^\[Succeeded\]$" | grep -v "^$" | tail -n 60
             grep -Eq "Result: [1-9][0-9]* tests passed, 0 tests failed" validation.txt
           done
+
+  cli:
+    name: Command-line tool end to end (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install ALSA headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      # Generates a plugin of each kind against this checkout, builds it and
+      # bundles it, which on macOS includes the ad-hoc signature.
+      - run: cargo test -p cargo-mangue -- --ignored
 
   msrv:
     name: Minimum supported Rust version

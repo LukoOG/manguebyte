@@ -41,41 +41,67 @@ Everything a standalone audio application needs, short of a user interface.
 - ✅ System common, system real-time and SysEx messages
 - ✅ Running status and a byte-stream parser
 - ✅ Standard MIDI File reading and writing, with tempo-aware timing
-- ⬜ MPE and MIDI 2.0 / UMP
+- ✅ MIDI 2.0: Universal MIDI Packets with every message type, and MIDI 1.0
+  to 2.0 translation as the specification prescribes
+- ✅ RPN and NRPN, MPE zones, channel allocation and per-note tracking, and
+  a keyboard state an interface can read while the audio thread writes
+- ⬜ MIDI 2.0 and MPE delivered to processors as per-note events, and
+  through the device and plugin layers
 
 **DSP**
 - ✅ FFT of any length, real FFT and window functions
-- ⬜ Short-time Fourier transform with overlap-add; spectrum analysis helpers
+- ✅ Spectrum analysis: short-time Fourier transform with any size, hop and
+  window, ballistics, peak hold, fractional-octave bands, A and C weighting
+  (`manguebyte-analysis`)
+- ⬜ Overlap-add resynthesis for spectral processing
 - ✅ Resampling at any ratio, and oversampling by 2, 4, 8 or 16
 - ✅ State-variable filter, stable under audio-rate modulation
 - ✅ FIR low-pass design (Kaiser-windowed sinc)
-- ⬜ Ladder filter; FIR filter processor; higher-order IIR design
+- ✅ One-pole and ladder filters, stable under audio-rate modulation
+- ✅ High-order IIR design: Butterworth, Chebyshev I and II, elliptic, order
+  1 to 16, gliding between designs without blowing up
+- ✅ Linkwitz-Riley crossovers, 2 to 5 bands that sum flat
+- ⬜ FIR filter processor
 - ✅ Dynamics: compressor with soft knee, noise gate
 - ✅ Look-ahead limiter whose ceiling holds for every sample
 - ⬜ Expander, sidechain input
 - ✅ Reverb (feedback delay network)
-- ⬜ Chorus, phaser, convolution
+- ✅ Chorus and flanger, phaser, dry/wet mixing with latency compensation,
+  panner, envelope follower, interpolated delay lines
+- ⬜ Convolution
 - ✅ Noise (white, pink, brown), LFO with tempo sync, waveshaper, DC blocker
 - ⬜ Wavetable oscillator
 - ✅ Polyphonic voice allocation with per-note expression and modulation
+- ✅ Metering: loudness to ITU-R BS.1770 and EBU R 128 (checked against the
+  EBU's test signals), true peak, peak, RMS, VU, PPM, stereo correlation
+- ✅ Pitch detection (YIN and the McLeod method) with note naming
 - ✅ Sample-accurate events, transport and sidechain in the process call
 - ⬜ SIMD-accelerated buffer operations
 
 **Formats**
-- ⬜ Streaming readers and writers that do not load whole files
+- ✅ Streaming readers and writers that do not load whole files, with
+  sample-exact seeking, RF64, and wait-free bridges for playing and
+  recording from an audio callback
 - ✅ AIFF and AIFF-C reading and writing
 - ✅ FLAC decoding
 - ✅ Recognising a file's format from its contents
 - ⬜ Ogg Vorbis, Opus and MP3 decoding
-- ⬜ FLAC and Ogg Vorbis encoding
+- ✅ FLAC encoding, checked against FFmpeg
+- ⬜ Ogg Vorbis encoding
 - ⬜ Metadata, cue points and loop markers
+
+**Networking**
+- ✅ Open Sound Control: codec, address patterns, UDP and TCP, and a
+  real-time bridge that puts time-tagged bundles on their exact frame
 
 **Core**
 - ✅ Parameter system: ranges, skew, text conversion, smoothing
 - ✅ Sample-accurate parameter automation events
 - ⬜ Change gestures (begin and end of a user edit)
 - ✅ Parameter state save and restore, tolerant of version changes
-- ⬜ Audio thread helpers: denormal protection, allocation checking in debug
+- ✅ Denormal protection: `NoDenormals`, held by the wrappers, the
+  standalone engine, the device streams and the test harness (ADR 0006)
+- ⬜ Allocation checking in debug builds (today it is a test-only allocator)
 - ⬜ `no_std` support for `manguebyte-core` and `manguebyte-dsp`
 
 ## Phase 2: plugins
@@ -99,20 +125,25 @@ Write a processor once and ship it in every format.
 - ⬜ LV2
 - ✅ Standalone application wrapper: sound card, MIDI ports, input for
   effects
-- 🚧 Tooling to bundle, sign and validate plugins: `scripts/bundle-clap.sh`
-  and `scripts/bundle-vst3.sh` build a `.clap` and a `.vst3` on Windows,
-  Linux and macOS; signing is not started
-- 🚧 Project templates: `plugins/pluck` (an instrument) and `plugins/duck`
-  (an effect with a sidechain) are complete one-file examples to start
-  from; a generator is not started
+- 🚧 Tooling: `cargo mangue` bundles, installs and validates plugins and
+  creates new plugin crates from templates; macOS bundles get an ad-hoc
+  signature and universal binaries. Signing with a real identity and
+  notarisation are not started
 
 AAX depends on a proprietary SDK and will be considered once the other formats
 are solid.
 
 ## Phase 3: user interface
 
-- ⬜ GPU-accelerated 2D renderer
-- ⬜ Windowing, including embedding inside a plugin host
+The design is in [ADR 0007](docs/adr/0007-user-interface-layer.md): an editor
+contract in the plugin API, rendering on the CPU first, a thin window layer of
+our own, and nothing claimed before its test exists.
+
+- ⬜ Editor contract and parameter gestures in the plugin API and both wrappers
+- ⬜ 2D renderer on the CPU behind a seam; GPU rendering later, never the
+  default while CI cannot test its pixels
+- ⬜ Windowing, including embedding inside a plugin host (Windows first, then
+  macOS and Linux as CI proves each)
 - ⬜ Layout, styling and a widget set: sliders, knobs, buttons, meters, text
 - ⬜ Audio widgets: waveform, spectrum, keyboard, envelope and EQ editors
 - ⬜ Accessibility
@@ -124,7 +155,9 @@ are solid.
   compensation
 - ⬜ Graph extras: sidechain and per-node event routing, feedback through an
   explicit delay, crossfaded swaps, buffer reuse
-- ⬜ Plugin scanning and hosting: CLAP, VST3, AU, LV2
+- ✅ Hosting CLAP and VST 3 plugins as processors, through one interface
+  for both formats, with every event on its frame
+- ⬜ Plugin scanning (out of process), hosted plugins' editors, AU and LV2
 - ⬜ Transport, tempo map and timeline primitives
 
 ## Phase 5: everywhere
