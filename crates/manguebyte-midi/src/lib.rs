@@ -1,4 +1,7 @@
-//! MIDI messages and sample-accurate event buffers.
+//! MIDI: messages, byte streams, files, packets and the state that follows
+//! from them.
+//!
+//! MIDI 1.0:
 //!
 //! - [`MidiMessage`]: a parsed channel voice message.
 //! - [`SystemMessage`]: clock, transport and the other system messages.
@@ -6,14 +9,37 @@
 //!   interleaved real-time bytes and system exclusive data.
 //! - [`MidiBuffer`]: messages ordered by their position inside an audio block.
 //! - [`mod@file`]: reading and writing standard MIDI files.
+//! - [`mod@rpn`]: registered and non-registered parameter numbers, read
+//!   from and written as controller sequences.
+//! - [`mod@mpe`]: MIDI Polyphonic Expression. Zones, the channel allocator
+//!   a sender needs and the note tracker a receiver needs.
+//! - [`mod@keyboard`]: which keys are down, with the sustain pedal, in a
+//!   form a user interface can read while the audio thread writes it.
+//!
+//! MIDI 2.0:
+//!
+//! - [`mod@ump`]: the Universal MIDI Packet and every message it carries.
+//! - [`mod@translate`]: conversion between the two protocols, as the
+//!   specification prescribes it.
+//!
+//! And for both:
+//!
 //! - [`note_to_hz`] / [`hz_to_note`]: equal-temperament pitch conversions.
+//! - [`MessageList`]: a few messages that belong together, held inline.
 
 mod buffer;
 pub mod file;
+pub mod keyboard;
+mod list;
 mod message;
+pub mod mpe;
+pub mod rpn;
 mod stream;
+pub mod translate;
+pub mod ump;
 
 pub use buffer::{MidiBuffer, MidiEvent};
+pub use list::MessageList;
 pub use message::{MidiMessage, RawMidi};
 pub use stream::{StreamEvent, StreamParser, SystemMessage};
 

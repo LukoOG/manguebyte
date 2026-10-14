@@ -1,6 +1,6 @@
 [package]
 name = "manguebyte-midi"
-description = "MIDI messages and sample-accurate event buffers for the Manguebyte audio framework."
+description = "MIDI 1.0 and 2.0 messages, packets, files and sample-accurate event buffers for the Manguebyte audio framework."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
