@@ -1,0 +1,40 @@
+[package]
+name = "manguebyte-host"
+description = "Plugin hosting for the Manguebyte audio framework: load CLAP and VST 3 plugins and run them as processors."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[features]
+default = ["clap", "vst3"]
+## Hosting CLAP plugins.
+clap = ["dep:clap-sys", "dep:libloading"]
+## Hosting VST 3 plugins.
+vst3 = ["dep:vst3", "dep:libloading"]
+
+[dependencies]
+manguebyte-core.workspace = true
+manguebyte-dsp.workspace = true
+manguebyte-midi.workspace = true
+clap-sys = { version = "0.5", optional = true }
+vst3 = { version = "0.3", optional = true }
+# Opens the plugin's shared library and finds its entry point.
+libloading = { version = "0.8", optional = true }
+
+[dev-dependencies]
+# The framework's own example plugins are what the tests host. Depending on
+# them makes cargo build their shared libraries next to the test executable.
+mangue-pluck = { path = "../../plugins/pluck" }
+mangue-duck = { path = "../../plugins/duck" }
+manguebyte-plugin.workspace = true
+manguebyte-params.workspace = true
+manguebyte-graph.workspace = true
+
+[lints]
+workspace = true

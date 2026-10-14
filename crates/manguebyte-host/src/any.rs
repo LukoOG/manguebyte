@@ -1,0 +1,955 @@
+//! One interface over both plugin formats.
+//!
+//! An application that hosts plugins mostly does not care which format a
+//! plugin comes in. It lists what a file holds, creates a plugin, shows its
+//! parameters, restores a saved state, and runs it. This module does those
+//! things through the same types for a CLAP plugin and a VST 3 plugin:
+//!
+//! | Type | What it is | Stands for |
+//! |---|---|---|
+//! | [`Library`] | A loaded file and the plugins in it | [`ClapLibrary`] or [`Vst3Module`] |
+//! | [`Plugin`] | One plugin, on the main thread | [`ClapPlugin`] or [`Vst3Plugin`] |
+//! | `Box<dyn Processor<f32> + Send>` | The same plugin, on the audio thread | [`ClapProcessor`](crate::clap::ClapProcessor) or [`Vst3Processor`](crate::vst3::Vst3Processor) |
+//!
+//! The thread rules are those of the formats' own modules: a [`Plugin`] is
+//! not `Send`, and its audio half is the only thing that processes.
+//!
+//! # Values
+//!
+//! Each format moves parameter values in a scale of its own, and this
+//! module does not pretend otherwise: a [`Param`] says what its scale is
+//! with [`min`](Param::min) and [`max`](Param::max), and every value given
+//! to or read from a [`Plugin`], or carried by an
+//! [`EventKind::ParamValue`](manguebyte_dsp::event::EventKind::ParamValue)
+//! for its audio half, is in that scale. For CLAP it is the range the
+//! plugin declares; for VST 3 it is the normalized `0..=1` that VST 3
+//! automates. [`Plugin::param_to_text`] turns either into what a person
+//! should see.
+//!
+//! # Example
+//!
+//! This runs as a test. It hosts the framework's example instrument twice,
+//! once through each format, from the entry points it exports, and plays
+//! the same note through both.
+//!
+//! ```
+//! use manguebyte_core::AudioBuffer;
+//! use manguebyte_dsp::event::{Event, EventBuffer, EventKind, NoteRef};
+//! use manguebyte_dsp::{ProcessContext, Transport};
+//! use manguebyte_host::any::{Format, Library};
+//! use manguebyte_host::clap::ClapLibrary;
+//! use manguebyte_host::vst3::Vst3Module;
+//!
+//! // SAFETY: both entry points are Mangue Pluck's, made by the framework's
+//! // own wrappers, which keep to the CLAP and VST 3 interfaces.
+//! let libraries = unsafe {
+//!     [
+//!         Library::from(ClapLibrary::from_entry(&raw const mangue_pluck::clap_entry, "pluck")?),
+//!         Library::from(Vst3Module::from_factory(mangue_pluck::GetPluginFactory().cast(), "pluck")?),
+//!     ]
+//! };
+//!
+//! let mut played = Vec::new();
+//! for library in &libraries {
+//!     let entry = &library.plugins()[0];
+//!     assert_eq!(entry.name, "Mangue Pluck");
+//!     let mut plugin = library.create(&entry.id)?;
+//!     let level = plugin.params().into_iter().find(|param| param.name == "Level").unwrap();
+//!     assert!(plugin.param_to_text(level.id, level.default).unwrap().starts_with("-12"));
+//!
+//!     let mut processor = plugin.activate(48_000.0, 512)?;
+//!     let mut events = EventBuffer::with_capacity(4);
+//!     let note = NoteRef::with_id(0, 57, 1);
+//!     events.push(Event { offset: 0, kind: EventKind::NoteOn { note, velocity: 0.8 } }).ok();
+//!     let mut block = AudioBuffer::<f32>::new(2, 512);
+//!     let transport = Transport::playing_at(120.0);
+//!     processor.process_with(&mut block, &ProcessContext::new(&events, &transport));
+//!     played.push((library.format(), block.channel(0).to_vec()));
+//!
+//!     let state = plugin.save_state()?;
+//!     drop(processor);
+//!     plugin.deactivate()?;
+//!     plugin.load_state(&state)?;
+//! }
+//! // The same plugin, the same note, the same samples, whichever format.
+//! assert_eq!(played[0].0, Format::Clap);
+//! assert_eq!(played[1].0, Format::Vst3);
+//! assert_eq!(played[0].1, played[1].1);
+//! assert!(played[0].1.iter().any(|&sample| sample != 0.0));
+//! # Ok::<(), manguebyte_host::any::Error>(())
+//! ```
+//!
+//! # Limits
+//!
+//! Only what both formats share is here. For the rest of a format, such as
+//! CLAP's note ports or VST 3's controller mappings, reach the format's own
+//! type through [`Library::as_clap`], [`Plugin::as_vst3_mut`] and their
+//! neighbours. Events a plugin reports while processing are read from the
+//! format's own processor type, which a box hides.
+
+use std::fmt;
+use std::path::{Path, PathBuf};
+
+use manguebyte_core::ParamId;
+use manguebyte_dsp::Processor;
+
+#[cfg(feature = "clap")]
+use crate::clap::{ClapError, ClapLibrary, ClapPlugin};
+#[cfg(feature = "vst3")]
+use crate::vst3::{ClassId, Vst3Error, Vst3Module, Vst3Plugin};
+
+/// A plugin format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Format {
+    /// [CLAP](https://cleveraudio.org).
+    Clap,
+    /// VST 3.
+    Vst3,
+}
+
+impl fmt::Display for Format {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Clap => "CLAP",
+            Self::Vst3 => "VST 3",
+        })
+    }
+}
+
+/// What kind of plugin a library says one is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Kind {
+    /// Makes sound from notes.
+    Instrument,
+    /// Changes audio.
+    Effect,
+    /// Changes notes.
+    NoteEffect,
+    /// Looks at audio and passes it on.
+    Analyzer,
+    /// The library does not say, or says something else.
+    Other,
+}
+
+/// Why something in this module did not work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Error {
+    /// What the CLAP host said.
+    #[cfg(feature = "clap")]
+    Clap(ClapError),
+    /// What the VST 3 host said.
+    #[cfg(feature = "vst3")]
+    Vst3(Vst3Error),
+    /// The file is a plugin of neither format this crate was built for.
+    UnknownFormat(PathBuf),
+    /// The format is one this crate was built without: its feature is off.
+    NotBuiltIn(Format),
+    /// The library has no plugin with this identifier.
+    UnknownPlugin(String),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            #[cfg(feature = "clap")]
+            Self::Clap(error) => write!(f, "CLAP: {error}"),
+            #[cfg(feature = "vst3")]
+            Self::Vst3(error) => write!(f, "VST 3: {error}"),
+            Self::UnknownFormat(path) => {
+                write!(f, "{} is not a plugin of a known format", path.display())
+            }
+            Self::NotBuiltIn(format) => write!(f, "this build has no {format} hosting"),
+            Self::UnknownPlugin(id) => write!(f, "the library has no plugin {id:?}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            #[cfg(feature = "clap")]
+            Self::Clap(error) => Some(error),
+            #[cfg(feature = "vst3")]
+            Self::Vst3(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "clap")]
+impl From<ClapError> for Error {
+    fn from(error: ClapError) -> Self {
+        Self::Clap(error)
+    }
+}
+
+#[cfg(feature = "vst3")]
+impl From<Vst3Error> for Error {
+    fn from(error: Vst3Error) -> Self {
+        Self::Vst3(error)
+    }
+}
+
+/// What a library says about one of its plugins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginEntry {
+    /// The plugin's format.
+    pub format: Format,
+    /// What [`Library::create`] takes and what a session stores: a CLAP
+    /// plugin's identifier, or a VST 3 class identifier as 32 hexadecimal
+    /// digits, written in upper case.
+    pub id: String,
+    /// The name shown to people.
+    pub name: String,
+    /// Who makes it.
+    pub vendor: String,
+    /// Its version, as text.
+    pub version: String,
+    /// What kind of plugin it is.
+    pub kind: Kind,
+    /// The words the library files it under: CLAP's features, or VST 3's
+    /// sub-categories.
+    pub categories: Vec<String>,
+}
+
+/// A loaded plugin file of either format, and the plugins in it.
+///
+/// The handle can be cloned and sent between threads.
+#[derive(Debug, Clone)]
+pub struct Library {
+    inner: LibraryInner,
+    plugins: Vec<PluginEntry>,
+}
+
+#[derive(Debug, Clone)]
+enum LibraryInner {
+    #[cfg(feature = "clap")]
+    Clap(ClapLibrary),
+    #[cfg(feature = "vst3")]
+    Vst3(Vst3Module),
+}
+
+/// The format a path's name says it is in, if it says.
+fn format_by_name(path: &Path) -> Option<Format> {
+    let extension = path.extension()?.to_str()?;
+    if extension.eq_ignore_ascii_case("clap") {
+        Some(Format::Clap)
+    } else if extension.eq_ignore_ascii_case("vst3") {
+        Some(Format::Vst3)
+    } else {
+        None
+    }
+}
+
+impl Library {
+    /// Loads a plugin file, in whichever of the two formats it is.
+    ///
+    /// The name decides: a path ending in `.clap` is loaded as CLAP and one
+    /// ending in `.vst3` as VST 3, file or bundle folder alike. A library
+    /// with another name is tried as CLAP, and then, if it has no CLAP
+    /// entry point, as VST 3. A file that exports both is taken as CLAP;
+    /// use [`load_as`](Self::load_as) to choose.
+    ///
+    /// # Errors
+    ///
+    /// The error of the format's own loader, [`Error::UnknownFormat`] if a
+    /// library is a plugin of neither format, and [`Error::NotBuiltIn`] if
+    /// the name asks for a format this crate was built without.
+    ///
+    /// # Safety
+    ///
+    /// The terms of [`ClapLibrary::load`] and [`Vst3Module::load`]: the
+    /// file's code is run, and the caller vouches for it.
+    pub unsafe fn load(path: impl AsRef<Path>) -> Result<Self, Error> {
+        let path = path.as_ref();
+        if let Some(format) = format_by_name(path) {
+            // SAFETY: passed on from the caller.
+            return unsafe { Self::load_as(path, format) };
+        }
+        #[cfg(feature = "clap")]
+        {
+            // SAFETY: passed on from the caller.
+            match unsafe { ClapLibrary::load(path) } {
+                Ok(library) => return Ok(library.into()),
+                Err(ClapError::NoEntryPoint(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        #[cfg(feature = "vst3")]
+        {
+            // SAFETY: passed on from the caller.
+            match unsafe { Vst3Module::load(path) } {
+                Ok(module) => return Ok(module.into()),
+                Err(Vst3Error::NoEntryPoint(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(Error::UnknownFormat(path.to_owned()))
+    }
+
+    /// Loads a plugin file as the format given, whatever its name.
+    ///
+    /// # Errors
+    ///
+    /// The error of the format's own loader, or [`Error::NotBuiltIn`].
+    ///
+    /// # Safety
+    ///
+    /// As for [`load`](Self::load).
+    pub unsafe fn load_as(path: impl AsRef<Path>, format: Format) -> Result<Self, Error> {
+        let path = path.as_ref();
+        match format {
+            #[cfg(feature = "clap")]
+            // SAFETY: passed on from the caller.
+            Format::Clap => Ok(unsafe { ClapLibrary::load(path) }?.into()),
+            #[cfg(feature = "vst3")]
+            // SAFETY: passed on from the caller.
+            Format::Vst3 => Ok(unsafe { Vst3Module::load(path) }?.into()),
+            #[allow(unreachable_patterns)]
+            other => Err(Error::NotBuiltIn(other)),
+        }
+    }
+
+    /// The library's format.
+    pub fn format(&self) -> Format {
+        match self.inner {
+            #[cfg(feature = "clap")]
+            LibraryInner::Clap(_) => Format::Clap,
+            #[cfg(feature = "vst3")]
+            LibraryInner::Vst3(_) => Format::Vst3,
+        }
+    }
+
+    /// The path the library was loaded from, as it was given.
+    pub fn path(&self) -> &Path {
+        match &self.inner {
+            #[cfg(feature = "clap")]
+            LibraryInner::Clap(library) => library.path(),
+            #[cfg(feature = "vst3")]
+            LibraryInner::Vst3(module) => module.path(),
+        }
+    }
+
+    /// The plugins in the library: for VST 3, the classes that are audio
+    /// plugins, without their controllers.
+    pub fn plugins(&self) -> &[PluginEntry] {
+        &self.plugins
+    }
+
+    /// Creates the plugin with this identifier, as
+    /// [`PluginEntry::id`] gives it.
+    ///
+    /// A CLAP identifier is matched exactly. A VST 3 identifier is read as
+    /// the class identifier it is, so its hexadecimal digits may be in
+    /// either case, as `vst3::ClassId` reads them.
+    ///
+    /// The calling thread becomes the plugin's main thread.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownPlugin`] if the library has no such plugin, and
+    /// otherwise the error of the format's own host.
+    pub fn create(&self, id: &str) -> Result<Plugin, Error> {
+        let unknown = || Error::UnknownPlugin(id.to_owned());
+        let find = |wanted: &str| {
+            self.plugins
+                .iter()
+                .find(|entry| entry.id == wanted)
+                .cloned()
+                .ok_or_else(unknown)
+        };
+        match &self.inner {
+            #[cfg(feature = "clap")]
+            LibraryInner::Clap(library) => {
+                let entry = find(id)?;
+                let inner = PluginInner::Clap(Box::new(library.create(id)?));
+                Ok(Plugin { inner, entry })
+            }
+            #[cfg(feature = "vst3")]
+            LibraryInner::Vst3(module) => {
+                let class: ClassId = id.parse().map_err(|_| unknown())?;
+                // The entries hold the identifier as `ClassId` writes it.
+                let entry = find(&class.to_string())?;
+                let inner = PluginInner::Vst3(Box::new(module.create(class)?));
+                Ok(Plugin { inner, entry })
+            }
+        }
+    }
+
+    /// The CLAP library, if this is one.
+    #[cfg(feature = "clap")]
+    pub fn as_clap(&self) -> Option<&ClapLibrary> {
+        match &self.inner {
+            LibraryInner::Clap(library) => Some(library),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// The VST 3 module, if this is one.
+    #[cfg(feature = "vst3")]
+    pub fn as_vst3(&self) -> Option<&Vst3Module> {
+        match &self.inner {
+            LibraryInner::Vst3(module) => Some(module),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "clap")]
+impl From<ClapLibrary> for Library {
+    fn from(library: ClapLibrary) -> Self {
+        let plugins = library
+            .descriptors()
+            .iter()
+            .map(|plugin| {
+                let kind = if plugin.has_feature("instrument") {
+                    Kind::Instrument
+                } else if plugin.has_feature("note-effect") {
+                    Kind::NoteEffect
+                } else if plugin.has_feature("analyzer") {
+                    Kind::Analyzer
+                } else if plugin.has_feature("audio-effect") {
+                    Kind::Effect
+                } else {
+                    Kind::Other
+                };
+                PluginEntry {
+                    format: Format::Clap,
+                    id: plugin.id.clone(),
+                    name: plugin.name.clone(),
+                    vendor: plugin.vendor.clone(),
+                    version: plugin.version.clone(),
+                    kind,
+                    categories: plugin.features.clone(),
+                }
+            })
+            .collect();
+        Self {
+            inner: LibraryInner::Clap(library),
+            plugins,
+        }
+    }
+}
+
+#[cfg(feature = "vst3")]
+impl From<Vst3Module> for Library {
+    fn from(module: Vst3Module) -> Self {
+        let plugins = module
+            .classes()
+            .iter()
+            .filter(|class| class.is_audio_module())
+            .map(|class| {
+                let has = |word: &str| class.sub_categories.iter().any(|given| given == word);
+                let kind = if has("Instrument") {
+                    Kind::Instrument
+                } else if has("Analyzer") {
+                    Kind::Analyzer
+                } else if has("Fx") {
+                    Kind::Effect
+                } else {
+                    Kind::Other
+                };
+                PluginEntry {
+                    format: Format::Vst3,
+                    id: class.id.to_string(),
+                    name: class.name.clone(),
+                    vendor: if class.vendor.is_empty() {
+                        module.factory_info().vendor.clone()
+                    } else {
+                        class.vendor.clone()
+                    },
+                    version: class.version.clone(),
+                    kind,
+                    categories: class.sub_categories.clone(),
+                }
+            })
+            .collect();
+        Self {
+            inner: LibraryInner::Vst3(module),
+            plugins,
+        }
+    }
+}
+
+/// What a plugin says about one of its parameters, the same way for both
+/// formats.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Param {
+    /// The number that stands for the parameter.
+    pub id: ParamId,
+    /// The name shown to people.
+    pub name: String,
+    /// The unit of the value as the plugin shows it, if the format says.
+    pub unit: String,
+    /// The lowest value in the plugin's automation scale: the declared
+    /// minimum for CLAP, 0 for VST 3.
+    pub min: f64,
+    /// The highest value: the declared maximum for CLAP, 1 for VST 3.
+    pub max: f64,
+    /// The value the parameter starts at.
+    pub default: f64,
+    /// How many steps the value moves in, or `None` for a continuous one.
+    pub steps: Option<u32>,
+    /// May be automated.
+    pub automatable: bool,
+    /// Not to be shown to people.
+    pub hidden: bool,
+    /// The host may read it but not change it.
+    pub read_only: bool,
+    /// This is the plugin's bypass switch.
+    pub bypass: bool,
+}
+
+/// What a plugin says about one of its audio ports or buses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bus {
+    /// The name shown to people.
+    pub name: String,
+    /// How many channels it has.
+    pub channels: u32,
+    /// Whether it is the main one of its direction.
+    pub is_main: bool,
+}
+
+/// Why a block came out silent, the same way for both formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Failure {
+    /// The plugin reported an error while processing.
+    Error,
+    /// The plugin refused to start processing.
+    StartRefused,
+    /// The audio half was prepared for another sample rate than the one
+    /// the plugin was activated with.
+    SampleRateMismatch,
+}
+
+/// Something a plugin asked for or reported, as returned by
+/// [`Plugin::pump`]: what both formats can say.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum Notice {
+    /// The plugin asks to be deactivated and activated again.
+    RestartRequested,
+    /// The plugin changed a parameter by itself, to a value in its
+    /// automation scale.
+    ParamValue {
+        /// The parameter.
+        param: ParamId,
+        /// Its new value.
+        value: f64,
+    },
+    /// A control in the plugin's interface was taken hold of.
+    GestureBegin {
+        /// The parameter.
+        param: ParamId,
+    },
+    /// The control was let go.
+    GestureEnd {
+        /// The parameter.
+        param: ParamId,
+    },
+    /// The list of parameters, or their values, changed: read
+    /// [`Plugin::params`] again.
+    ParamsChanged,
+    /// The plugin's state differs from what was last saved or loaded.
+    StateDirty,
+    /// The plugin's latency is now this many frames.
+    LatencyChanged(u32),
+    /// At least one block came out silent since the last call.
+    ProcessFailed(Failure),
+    /// A message from the plugin, or from the host about the plugin.
+    Message(String),
+}
+
+/// A plugin of either format, as the main thread deals with it.
+///
+/// Like the formats' own types, it cannot leave the thread that created
+/// it, and its audio half, from [`activate`](Self::activate), is the only
+/// thing that processes.
+pub struct Plugin {
+    inner: PluginInner,
+    entry: PluginEntry,
+}
+
+enum PluginInner {
+    #[cfg(feature = "clap")]
+    Clap(Box<ClapPlugin>),
+    #[cfg(feature = "vst3")]
+    Vst3(Box<Vst3Plugin>),
+}
+
+/// Runs the same expression on whichever plugin `$inner` holds.
+macro_rules! either {
+    ($inner:expr, $plugin:ident => $work:expr) => {
+        match $inner {
+            #[cfg(feature = "clap")]
+            PluginInner::Clap($plugin) => $work,
+            #[cfg(feature = "vst3")]
+            PluginInner::Vst3($plugin) => $work,
+        }
+    };
+}
+
+impl Plugin {
+    /// What the library said about the plugin.
+    pub fn entry(&self) -> &PluginEntry {
+        &self.entry
+    }
+
+    /// The plugin's format.
+    pub fn format(&self) -> Format {
+        self.entry.format
+    }
+
+    /// The plugin's parameters, in the plugin's order, as they are now.
+    pub fn params(&self) -> Vec<Param> {
+        match &self.inner {
+            #[cfg(feature = "clap")]
+            PluginInner::Clap(plugin) => plugin
+                .params()
+                .iter()
+                .map(|param| Param {
+                    id: param.id,
+                    name: param.name.clone(),
+                    unit: String::new(),
+                    min: param.min,
+                    max: param.max,
+                    default: param.default,
+                    steps: param.flags.stepped.then(|| {
+                        (param.max - param.min)
+                            .round()
+                            .clamp(0.0, f64::from(u32::MAX)) as u32
+                    }),
+                    automatable: param.flags.automatable,
+                    hidden: param.flags.hidden,
+                    read_only: param.flags.read_only,
+                    bypass: param.flags.bypass,
+                })
+                .collect(),
+            #[cfg(feature = "vst3")]
+            PluginInner::Vst3(plugin) => plugin
+                .params()
+                .iter()
+                .map(|param| Param {
+                    id: param.id,
+                    name: param.title.clone(),
+                    unit: param.units.clone(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: param.default,
+                    steps: (param.step_count > 0).then_some(param.step_count),
+                    automatable: param.flags.automatable,
+                    hidden: param.flags.hidden,
+                    read_only: param.flags.read_only,
+                    bypass: param.flags.bypass,
+                })
+                .collect(),
+        }
+    }
+
+    /// The current value of a parameter, in its automation scale.
+    pub fn param_value(&self, id: ParamId) -> Option<f64> {
+        either!(&self.inner, plugin => plugin.param_value(id))
+    }
+
+    /// Sets a parameter, in its automation scale. While an audio half
+    /// exists, the plugin hears it on the first frame of the next block.
+    ///
+    /// # Errors
+    ///
+    /// The error of the format's own host: an unknown parameter, a value
+    /// that is not a number, a full queue.
+    pub fn set_param(&mut self, id: ParamId, value: f64) -> Result<(), Error> {
+        either!(&mut self.inner, plugin => Ok(plugin.set_param(id, value)?))
+    }
+
+    /// The text a person should see for a value of a parameter, as the
+    /// plugin words it.
+    pub fn param_to_text(&self, id: ParamId, value: f64) -> Option<String> {
+        either!(&self.inner, plugin => plugin.param_to_text(id, value))
+    }
+
+    /// The value a piece of text stands for, as the plugin reads it.
+    pub fn text_to_param(&self, id: ParamId, text: &str) -> Option<f64> {
+        either!(&self.inner, plugin => plugin.text_to_param(id, text))
+    }
+
+    /// The plugin's audio inputs, main one first.
+    pub fn audio_inputs(&self) -> Vec<Bus> {
+        match &self.inner {
+            #[cfg(feature = "clap")]
+            PluginInner::Clap(plugin) => clap_buses(plugin.audio_inputs()),
+            #[cfg(feature = "vst3")]
+            PluginInner::Vst3(plugin) => vst3_buses(plugin.audio_inputs()),
+        }
+    }
+
+    /// The plugin's audio outputs, main one first.
+    pub fn audio_outputs(&self) -> Vec<Bus> {
+        match &self.inner {
+            #[cfg(feature = "clap")]
+            PluginInner::Clap(plugin) => clap_buses(plugin.audio_outputs()),
+            #[cfg(feature = "vst3")]
+            PluginInner::Vst3(plugin) => vst3_buses(plugin.audio_outputs()),
+        }
+    }
+
+    /// Whether the plugin takes notes.
+    pub fn takes_notes(&self) -> bool {
+        match &self.inner {
+            #[cfg(feature = "clap")]
+            PluginInner::Clap(plugin) => !plugin.note_inputs().is_empty(),
+            #[cfg(feature = "vst3")]
+            PluginInner::Vst3(plugin) => !plugin.event_inputs().is_empty(),
+        }
+    }
+
+    /// How many frames late the plugin's output is, as it reported when it
+    /// was last activated.
+    pub fn latency(&self) -> u32 {
+        either!(&self.inner, plugin => plugin.latency())
+    }
+
+    /// Everything the plugin needs to come back as it is now, as bytes for
+    /// [`load_state`](Self::load_state). The bytes are the format's: the
+    /// plugin's own for CLAP, component and controller state together for
+    /// VST 3.
+    ///
+    /// # Errors
+    ///
+    /// The error of the format's own host.
+    pub fn save_state(&mut self) -> Result<Vec<u8>, Error> {
+        either!(&mut self.inner, plugin => Ok(plugin.save_state()?))
+    }
+
+    /// Gives the plugin back a state saved by [`save_state`](Self::save_state).
+    ///
+    /// # Errors
+    ///
+    /// The error of the format's own host.
+    pub fn load_state(&mut self, state: &[u8]) -> Result<(), Error> {
+        either!(&mut self.inner, plugin => Ok(plugin.load_state(state)?))
+    }
+
+    /// Whether the plugin is active.
+    pub fn is_active(&self) -> bool {
+        either!(&self.inner, plugin => plugin.is_active())
+    }
+
+    /// Whether the audio half made by the last activation still exists.
+    pub fn has_processor(&self) -> bool {
+        either!(&self.inner, plugin => plugin.has_processor())
+    }
+
+    /// Activates the plugin and returns its audio half, boxed, whichever
+    /// the format.
+    ///
+    /// # Errors
+    ///
+    /// The error of the format's own host.
+    pub fn activate(
+        &mut self,
+        sample_rate: f64,
+        max_block_size: usize,
+    ) -> Result<Box<dyn Processor<f32> + Send>, Error> {
+        either!(&mut self.inner, plugin => {
+            let processor = plugin.activate(sample_rate, max_block_size)?;
+            Ok(Box::new(processor) as Box<dyn Processor<f32> + Send>)
+        })
+    }
+
+    /// Deactivates the plugin, once its audio half has been dropped.
+    ///
+    /// # Errors
+    ///
+    /// The error of the format's own host, notably that the audio half
+    /// still exists.
+    pub fn deactivate(&mut self) -> Result<(), Error> {
+        either!(&mut self.inner, plugin => Ok(plugin.deactivate()?))
+    }
+
+    /// How many blocks have come out silent because the plugin failed.
+    pub fn failed_blocks(&self) -> u64 {
+        either!(&self.inner, plugin => plugin.failed_blocks())
+    }
+
+    /// How many events have been dropped for want of room.
+    pub fn lost_events(&self) -> u64 {
+        either!(&self.inner, plugin => plugin.lost_events())
+    }
+
+    /// How many events have not been sent because the plugin has no way to
+    /// receive them.
+    pub fn undeliverable_events(&self) -> u64 {
+        either!(&self.inner, plugin => plugin.undeliverable_events())
+    }
+
+    /// Answers what the plugin asked for, and returns what both formats can
+    /// say about it. What only one format can say is turned into a
+    /// [`Notice::Message`], or left out when it has been dealt with; the
+    /// format's own `pump`, through [`as_clap_mut`](Self::as_clap_mut) or
+    /// [`as_vst3_mut`](Self::as_vst3_mut), gives everything.
+    pub fn pump(&mut self) -> Vec<Notice> {
+        match &mut self.inner {
+            #[cfg(feature = "clap")]
+            PluginInner::Clap(plugin) => plugin.pump().into_iter().filter_map(from_clap).collect(),
+            #[cfg(feature = "vst3")]
+            PluginInner::Vst3(plugin) => plugin.pump().into_iter().filter_map(from_vst3).collect(),
+        }
+    }
+
+    /// The CLAP plugin, if this is one.
+    #[cfg(feature = "clap")]
+    pub fn as_clap(&self) -> Option<&ClapPlugin> {
+        match &self.inner {
+            PluginInner::Clap(plugin) => Some(&**plugin),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// The CLAP plugin, if this is one, to change.
+    #[cfg(feature = "clap")]
+    pub fn as_clap_mut(&mut self) -> Option<&mut ClapPlugin> {
+        match &mut self.inner {
+            PluginInner::Clap(plugin) => Some(&mut **plugin),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// The VST 3 plugin, if this is one.
+    #[cfg(feature = "vst3")]
+    pub fn as_vst3(&self) -> Option<&Vst3Plugin> {
+        match &self.inner {
+            PluginInner::Vst3(plugin) => Some(&**plugin),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// The VST 3 plugin, if this is one, to change.
+    #[cfg(feature = "vst3")]
+    pub fn as_vst3_mut(&mut self) -> Option<&mut Vst3Plugin> {
+        match &mut self.inner {
+            PluginInner::Vst3(plugin) => Some(&mut **plugin),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Debug for Plugin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Plugin")
+            .field("format", &self.entry.format)
+            .field("id", &self.entry.id)
+            .field("name", &self.entry.name)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "clap")]
+fn clap_buses(ports: &[crate::clap::AudioPortInfo]) -> Vec<Bus> {
+    ports
+        .iter()
+        .map(|port| Bus {
+            name: port.name.clone(),
+            channels: port.channels,
+            is_main: port.is_main,
+        })
+        .collect()
+}
+
+#[cfg(feature = "vst3")]
+fn vst3_buses(buses: &[crate::vst3::BusInfo]) -> Vec<Bus> {
+    buses
+        .iter()
+        .map(|bus| Bus {
+            name: bus.name.clone(),
+            channels: bus.channels,
+            is_main: bus.is_main,
+        })
+        .collect()
+}
+
+#[cfg(feature = "clap")]
+fn from_clap(event: crate::clap::HostEvent) -> Option<Notice> {
+    use crate::clap::{HostEvent, ProcessFailure};
+    Some(match event {
+        HostEvent::RestartRequested => Notice::RestartRequested,
+        HostEvent::ParamValue { param, value } => Notice::ParamValue { param, value },
+        HostEvent::GestureBegin { param } => Notice::GestureBegin { param },
+        HostEvent::GestureEnd { param } => Notice::GestureEnd { param },
+        HostEvent::ParamsRescanned(_) => Notice::ParamsChanged,
+        HostEvent::StateDirty => Notice::StateDirty,
+        HostEvent::LatencyChanged(frames) => Notice::LatencyChanged(frames),
+        HostEvent::ProcessFailed(failure) => Notice::ProcessFailed(match failure {
+            ProcessFailure::Error => Failure::Error,
+            ProcessFailure::StartRefused => Failure::StartRefused,
+            ProcessFailure::SampleRateMismatch => Failure::SampleRateMismatch,
+        }),
+        HostEvent::Log { severity, message } => Notice::Message(format!("{severity:?}: {message}")),
+        // Requests the CLAP host has answered, or that only a CLAP host
+        // acts on.
+        _ => return None,
+    })
+}
+
+#[cfg(feature = "vst3")]
+fn from_vst3(event: crate::vst3::HostEvent) -> Option<Notice> {
+    use crate::vst3::{HostEvent, ProcessFailure};
+    Some(match event {
+        HostEvent::RestartRequested { .. } => Notice::RestartRequested,
+        HostEvent::ParamValue { param, value } => Notice::ParamValue { param, value },
+        HostEvent::GestureBegin { param } => Notice::GestureBegin { param },
+        HostEvent::GestureEnd { param } => Notice::GestureEnd { param },
+        HostEvent::ParamsRescanned { .. } => Notice::ParamsChanged,
+        HostEvent::StateDirty => Notice::StateDirty,
+        HostEvent::LatencyChanged(frames) => Notice::LatencyChanged(frames),
+        HostEvent::ProcessFailed(failure) => Notice::ProcessFailed(match failure {
+            ProcessFailure::Error => Failure::Error,
+            ProcessFailure::StartRefused => Failure::StartRefused,
+            ProcessFailure::SampleRateMismatch => Failure::SampleRateMismatch,
+        }),
+        HostEvent::Remark(message) => Notice::Message(message),
+        HostEvent::EditorRequested => {
+            Notice::Message("the plugin asked for its editor, which this host does not show".into())
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_name_says_the_format() {
+        assert_eq!(
+            format_by_name(Path::new("a/Plugin.clap")),
+            Some(Format::Clap)
+        );
+        assert_eq!(format_by_name(Path::new("Plugin.VST3")), Some(Format::Vst3));
+        assert_eq!(format_by_name(Path::new("libplugin.so")), None);
+        assert_eq!(format_by_name(Path::new("plugin")), None);
+    }
+
+    #[test]
+    fn a_path_with_nothing_at_it_is_an_error_in_every_format() {
+        for path in [
+            "no/such/plugin.clap",
+            "no/such/plugin.vst3",
+            "no/such/plugin.dll",
+        ] {
+            // SAFETY: there is nothing at these paths, so no code is run.
+            let outcome = unsafe { Library::load(path) };
+            assert!(outcome.is_err(), "{path}");
+        }
+    }
+}
