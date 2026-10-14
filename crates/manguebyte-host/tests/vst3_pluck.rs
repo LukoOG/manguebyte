@@ -1344,9 +1344,13 @@ fn what_is_not_a_plugin_is_an_error_and_nothing_more() {
         common::load_vst3(&empty),
         Err(Vst3Error::Load { .. })
     ));
+    // The first 16 bytes of a library, fewer than the header of any
+    // executable format: every system refuses it before mapping anything.
+    // (A library cut after its headers would crash Linux's loader, which
+    // is why `load` does not promise to survive damaged libraries.)
     let real = std::fs::read(common::built_library("mangue_pluck")).unwrap();
     let cut = folder.join("cut.vst3");
-    std::fs::write(&cut, &real[..real.len().min(700)]).unwrap();
+    std::fs::write(&cut, &real[..real.len().min(16)]).unwrap();
     assert!(matches!(
         common::load_vst3(&cut),
         Err(Vst3Error::Load { .. })
