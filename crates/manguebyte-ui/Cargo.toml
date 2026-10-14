@@ -1,0 +1,19 @@
+[package]
+name = "manguebyte-ui"
+description = "The Manguebyte user interface: a retained widget tree with layout, parameter gestures, accessibility and a test harness."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+manguebyte-core.workspace = true
+manguebyte-gfx.workspace = true
+
+[lints]
+workspace = true

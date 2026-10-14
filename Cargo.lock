@@ -531,6 +531,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "manguebyte-gfx"
+version = "0.1.0"
+dependencies = [
+ "manguebyte-core",
+]
+
+[[package]]
 name = "manguebyte-graph"
 version = "0.1.0"
 dependencies = [
@@ -593,6 +600,14 @@ dependencies = [
  "manguebyte-midi",
  "manguebyte-params",
  "manguebyte-plugin",
+]
+
+[[package]]
+name = "manguebyte-ui"
+version = "0.1.0"
+dependencies = [
+ "manguebyte-core",
+ "manguebyte-gfx",
 ]
 
 [[package]]

@@ -4,3 +4,4 @@
 *.flac binary
 *.aiff binary
 *.aifc binary
+*.ttf binary
