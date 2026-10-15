@@ -71,6 +71,9 @@ Everything a standalone audio application needs, short of a user interface.
 - ⬜ Convolution
 - ✅ Noise (white, pink, brown), LFO with tempo sync, waveshaper, DC blocker
 - ⬜ Wavetable oscillator
+- ⬜ Sampler: an SFZ player (multisamples, velocity layers, round robin,
+  loop points, release samples), streamed from disk, open so that any
+  program can play the instruments Parabolic exports
 - ✅ Polyphonic voice allocation with per-note expression and modulation
 - ✅ Metering: loudness to ITU-R BS.1770 and EBU R 128 (checked against the
   EBU's test signals), true peak, peak, RMS, VU, PPM, stereo correlation
