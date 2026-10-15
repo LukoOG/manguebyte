@@ -7,7 +7,7 @@ use manguebyte_dsp::event::EventBuffer;
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Transport};
 use manguebyte_midi::MidiMessage;
 use manguebyte_params::ParamSet;
-use manguebyte_plugin::{ParamWatcher, Plugin, apply_param_events};
+use manguebyte_plugin::{ParamWatcher, Plugin};
 
 /// Most events delivered to the plugin in one block.
 const EVENTS_PER_BLOCK: usize = 2_048;
@@ -86,6 +86,7 @@ impl<P: Plugin> Engine<P> {
         // ports, each message on the frame its arrival time maps to.
         self.events.clear();
         self.watcher.emit_changes(params, &mut self.events);
+        let announced = self.events.len();
         while let Some(message) = self.notes.pop() {
             let _ = self.events.push_midi(0, message);
         }
@@ -97,8 +98,11 @@ impl<P: Plugin> Engine<P> {
                 }
             });
         }
-        apply_param_events(params, &self.events);
-        self.watcher.remember(params);
+        // Only what came after the announcements is stored: the announced
+        // values were read from the parameters, and storing them again
+        // would undo an edit the interface made in the meantime.
+        self.watcher
+            .apply_and_remember(params, &self.events.as_slice()[announced..]);
 
         self.work.set_num_frames(frames);
         self.work.clear();
@@ -248,6 +252,67 @@ mod tests {
         fn process(&mut self, buffer: &mut AudioBuffer<f32>, _: &ProcessContext<'_, f32>) {
             buffer.apply_gain(self.0.level.value());
         }
+    }
+
+    /// One level, and an edit that lands the moment the level has been read:
+    /// the interface storing a value while a block is being prepared.
+    struct Meddled {
+        level: FloatParam,
+        edit: std::sync::Mutex<Option<f32>>,
+    }
+    impl ParamSet for Meddled {
+        fn visit<'a>(&'a self, visitor: &mut dyn FnMut(&'a dyn manguebyte_params::Param)) {
+            visitor(&self.level);
+            if let Some(value) = self.edit.lock().unwrap().take() {
+                self.level.set(value);
+            }
+        }
+    }
+
+    struct Edited(Arc<Meddled>);
+    impl Plugin for Edited {
+        const INFO: PluginInfo = PluginInfo {
+            id: "org.manguebyte.test.standalone-edited",
+            name: "Edited",
+            vendor: "Manguebyte tests",
+            version: "0.1.0",
+            description: "Scales its input by a level edited mid-block",
+            kind: PluginKind::Effect,
+        };
+        const LAYOUT: AudioLayout = AudioLayout::MONO_EFFECT;
+        type Params = Meddled;
+
+        fn new() -> Self {
+            Self(Arc::new(Meddled {
+                level: FloatParam::new("level", "Level", FloatRange::linear(0.0, 2.0), 0.5),
+                edit: std::sync::Mutex::new(None),
+            }))
+        }
+        fn params(&self) -> Arc<Meddled> {
+            Arc::clone(&self.0)
+        }
+        fn prepare(&mut self, _: &ProcessSpec) {}
+        fn process(&mut self, buffer: &mut AudioBuffer<f32>, _: &ProcessContext<'_, f32>) {
+            buffer.apply_gain(self.0.level.value());
+        }
+    }
+
+    #[test]
+    fn an_edit_made_while_a_block_is_prepared_is_kept() {
+        let (mut engine, _notes) = engine::<Edited>();
+        let params = engine.params();
+        let mut device = AudioBuffer::<f32>::new(1, 8);
+        engine.render(None, &mut device);
+
+        // The block announces 1.0, and 1.5 is stored right after it is read.
+        params.level.set(1.0);
+        *params.edit.lock().unwrap() = Some(1.5);
+        engine.render(None, &mut device);
+        assert_eq!(params.level.value(), 1.5, "the edit was undone");
+
+        // Nothing undoes it later either.
+        engine.render(None, &mut device);
+        assert_eq!(params.level.value(), 1.5);
     }
 
     fn engine<P: Plugin>() -> (Engine<P>, Producer<MidiMessage>) {
