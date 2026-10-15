@@ -278,8 +278,9 @@ Recife:
 - **[Aratu](https://github.com/alessonqueirozdev-hub/aratu)**: a live-coding
   language that reads like music, with measures, beats and note values first,
   in Portuguese and English, in the browser and inside a DAW. In development:
-  its manual and design are written, and the language and its web editor are
-  being built.
+  the language reads, checks and schedules every example in its manual, and
+  its web editor plays pieces locally with temporary built-in sounds, which
+  Manguebyte's engine will replace; it is not published online yet.
 - **Parabolic** (planned): a tool for musicians to record their own
   instruments and turn them into plugins and samplers without writing code.
 
