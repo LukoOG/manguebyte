@@ -56,6 +56,8 @@ nothing beside or above it.
 | `manguebyte-clap` | Turns a `Plugin` into a CLAP plugin | core, midi, dsp, params, plugin, `clap-sys` |
 | `manguebyte-vst3` | Turns a `Plugin` into a VST 3 plugin | core, midi, dsp, params, plugin, `vst3` |
 | `manguebyte-host` | Loads CLAP and VST 3 plugins and runs them as processors | core, midi, dsp, `clap-sys`, `vst3`, `libloading` |
+| `manguebyte-gfx` | Scenes, a CPU rasteriser behind a private seam, text with an embedded typeface | `tiny-skia`, `skrifa`, `harfrust` |
+| `manguebyte-ui` | Retained widget tree, layout, theme, accessibility model, widgets, a test harness | core, gfx, params, plugin (for the editor contract) |
 | `cargo-mangue` | The command-line tool: new, bundle, install, validate | `serde_json` |
 | `manguebyte` | Everything under one name | all of the above except `cargo-mangue` |
 
@@ -63,6 +65,12 @@ Planned crates slot into the same picture: each further plugin format
 gets a crate beside `manguebyte-clap` and `manguebyte-vst3`, on top of
 `manguebyte-plugin`; the interface crates of [ADR 0007](adr/0007-user-interface-layer.md)
 sit beside them and are never a dependency of anything that processes audio.
+
+The editor contract is the one piece of the interface below that line. It
+lives in `manguebyte-plugin` as `manguebyte_plugin::editor`, with no
+dependency and no `unsafe`, and the only part of it the audio thread touches
+is `GestureReader`, which reads two atomics per parameter. `manguebyte-gfx`
+and `manguebyte-ui` depend on the plugin API, never the other way round.
 
 Rules that keep this healthy:
 

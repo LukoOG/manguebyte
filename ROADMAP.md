@@ -97,7 +97,9 @@ Everything a standalone audio application needs, short of a user interface.
 **Core**
 - ✅ Parameter system: ranges, skew, text conversion, smoothing
 - ✅ Sample-accurate parameter automation events
-- ⬜ Change gestures (begin and end of a user edit)
+- ✅ Change gestures (begin and end of a user edit): a `Gesture` guard in
+  the editor contract, sent to CLAP hosts as gesture events and to VST 3
+  hosts as `beginEdit`, `performEdit` and `endEdit`
 - ✅ Parameter state save and restore, tolerant of version changes
 - ✅ Denormal protection: `NoDenormals`, held by the wrappers, the
   standalone engine, the device streams and the test harness (ADR 0006)
@@ -113,14 +115,20 @@ Write a processor once and ship it in every format.
 - ✅ CLAP: audio and note ports, sample-accurate events in, parameters,
   state, latency, reporting of parameter changes to the host. Checked in CI
   by the CLAP project's validator
-- ⬜ CLAP extensions still to come: GUI, per-note automation, note-end and
-  voice info, 64-bit audio, tail, presets, remote controls
+- 🚧 CLAP `gui`, `timer-support` and `posix-fd-support` for plugins with an
+  editor, tested through the C interface against a fake editor and host; no
+  window backend yet
+- ⬜ CLAP extensions still to come: per-note automation, note-end and voice
+  info, 64-bit audio, tail, presets, remote controls
 - ✅ VST 3: audio and event buses, every automation point on its frame,
   notes with ids, tuning and note expression, MIDI controllers through
   hidden parameters, parameters, units, state, latency. Checked in CI by
   Steinberg's validator on Windows, Linux and macOS
-- ⬜ VST 3 still to come: editor, 64-bit audio, changing the bus layout,
-  program lists, parameter changes sent back to the host
+- 🚧 VST 3 editor interfaces: the component handler kept and used for
+  edits, `IPlugView` with content scale, `IPlugFrame` and `IRunLoop`, tested
+  against fake host objects; no window backend yet
+- ⬜ VST 3 still to come: 64-bit audio, changing the bus layout, program
+  lists
 - ⬜ Audio Unit (AUv2 and AUv3)
 - ⬜ LV2
 - ✅ Standalone application wrapper: sound card, MIDI ports, input for
@@ -139,15 +147,25 @@ The design is in [ADR 0007](docs/adr/0007-user-interface-layer.md): an editor
 contract in the plugin API, rendering on the CPU first, a thin window layer of
 our own, and nothing claimed before its test exists.
 
-- ⬜ Editor contract and parameter gestures in the plugin API and both wrappers
-- ⬜ 2D renderer on the CPU behind a seam; GPU rendering later, never the
+- ✅ Editor contract and parameter gestures in the plugin API and both
+  wrappers, each tested through the format's real interface against fake
+  hosts
+- ✅ 2D renderer on the CPU behind a seam (`manguebyte-gfx`): paths,
+  gradients, images, clips, layers, a columns primitive for meters and
+  spectra, damage-limited repaint that matches a full repaint bit for bit,
+  and text with an embedded Inter subset. GPU rendering later, never the
   default while CI cannot test its pixels
 - ⬜ Windowing, including embedding inside a plugin host (Windows first, then
   macOS and Linux as CI proves each)
-- ⬜ Layout, styling and a widget set: sliders, knobs, buttons, meters, text
+- 🚧 Layout, styling and a widget set (`manguebyte-ui`): row, column and
+  stack layout, theme tokens, label, knob, slider, toggle, meter and canvas
+  done; text entry, menus and popups not started
 - ⬜ Audio widgets: waveform, spectrum, keyboard, envelope and EQ editors
-- ⬜ Accessibility
-- ⬜ High-DPI and multi-monitor support
+- 🚧 Accessibility: every widget describes itself (the method has no
+  default) and the test harness finds widgets only that way; platform
+  adapters not started
+- 🚧 High-DPI: scale flows from the host through the contract to the
+  renderer; multi-monitor not started
 
 ## Phase 4: hosting and graphs
 

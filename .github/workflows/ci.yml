@@ -39,6 +39,18 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo test --workspace
+      # A golden image that does not match leaves the actual image and the
+      # difference beside each other; keep them so a mismatch on a system
+      # nobody here runs can be looked at.
+      - name: Keep the golden images that did not match
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-failures-${{ matrix.os }}
+          path: |
+            target/tmp/golden-failures
+            target/tmp/ui-golden-failures
+          if-no-files-found: ignore
 
   features:
     name: Without default features
@@ -64,8 +76,13 @@ jobs:
       # host, which talks to plugins the same way. Miri runs their tests
       # under an interpreter that detects undefined behaviour and data
       # races. The wrapper tests drive each plugin through its binary
-      # interface, so every pointer it handles is checked.
+      # interface, so every pointer it handles is checked. The editor
+      # contract has no unsafe code, but its gesture counters are shared
+      # between the main and audio threads, and Miri checks those races.
       - run: cargo miri test -p manguebyte-core
+        env:
+          RUSTFLAGS: ""
+      - run: cargo miri test -p manguebyte-plugin
         env:
           RUSTFLAGS: ""
       - run: cargo miri test -p manguebyte-clap

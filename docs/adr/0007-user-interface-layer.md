@@ -57,6 +57,13 @@ Checked during judging, October 2026:
   data tables, `wgpu` 30 needs 1.87 and `egui` 0.36 needs 1.95. `skrifa` 0.48
   and `harfrust` 0.14 build on 1.85, the workspace minimum; `tiny-skia` 0.12
   declares no minimum.
+- Found while building: `read-fonts` 0.45.0, which `skrifa` 0.48 and
+  `harfrust` 0.14 require, depends on `yoke` 0.8 without making it optional,
+  and `yoke` is under Unicode-3.0, outside the licences this project accepts.
+  `read-fonts` 0.43.3 does not use it, so `manguebyte-gfx` pins
+  `skrifa = 0.46.2` and `harfrust = 0.13.3`, both on `read-fonts` 0.43.3 and
+  both declaring Rust 1.85. Moving up needs a `read-fonts` release that makes
+  `yoke` optional again, or a decision here about Unicode-3.0.
 - The Inter typeface declares no Reserved Font Name, so a subset can keep its
   name provided the OFL text ships with it.
 - A Rust DAW built on `wgpu` reports graphics-driver crashes on Windows in
@@ -72,6 +79,19 @@ a borrow, an `Rc` or a raw pointer. The open editor is `!Send` and is closed
 by being dropped. `EditorHost` gives an editor what a host offers: resize
 requests, main-thread callbacks, and the host's timers and file descriptors.
 The contract does not name any toolkit, so an author can still bring one.
+
+As built, `EditorHost` is the trait the wrappers implement, and editors never
+hold it. An editor is given an `EditorContext`, which the wrapper ties to its
+`EditorHost` through a `HostLink` and cuts off by dropping the link: from
+then on every clone of the context does nothing, open gestures are ended and
+the timers and descriptor watches it registered are cancelled. Gestures are
+the only way an edit reaches the host. Main-thread callbacks go through
+`EditorHost::main_thread_callback`, a `Send` `MainThreadWaker` and
+`OpenEditor::on_main_thread`; timers and descriptors through
+`EditorContext::every` and `watch_fd`, which return handles that cancel when
+dropped. `request_resize` returns the size the host granted and never calls
+back into the editor, so a wrapper never re-enters an editor it is already
+calling.
 
 Four new crates sit above it, and none of them may become a dependency of a
 crate that processes audio (CI checks the dependency tree):
@@ -96,6 +116,10 @@ be the default while CI cannot test its pixels. This replaces the
 
 **3. Text.** `skrifa` for outlines and metrics, `harfrust` for shaping, a
 small layout of our own, and an embedded subset of Inter with its OFL text.
+The versions are pinned as the facts above explain. Every program that ships
+`manguebyte-gfx` ships the typeface, so it has to ship the OFL with it: as a
+file beside the program, or in an about screen through
+`manguebyte_gfx::TYPEFACE_LICENCE`.
 
 **4. Windows.** A thin backend per platform behind our seam, presenting with
 the platform's plain copy (GDI on Windows, layer contents on macOS,
@@ -132,6 +156,30 @@ mutable statics. Before a dependency is adopted its source is read for these,
 and the result is recorded here. CI loads two separately built plugin
 binaries, opens and closes their editors, and unloads them in both orders.
 
+Reading recorded so far:
+
+- `tiny-skia` 0.12.0 and its tree (`tiny-skia-path`, `png`, `fdeflate`,
+  `flate2`, `miniz_oxide`, `crc32fast`, `simd-adler32`, `adler2`,
+  `bytemuck`, `arrayvec`, `arrayref`, `strict-num`): no statics written at
+  run time, no threads, no operating-system names. The one exception is
+  `log`, which keeps a per-binary logger that only `log::set_logger` writes;
+  the framework never calls it, and `tiny-skia` only emits warnings through
+  it. Three behaviours are worked around in our code: a repeating or
+  reflecting linear gradient whose two ends coincide can panic, so such
+  gradients are resolved to one colour first; `Pixmap::decode_png` sizes its
+  buffer from the header alone, so headers are checked against 64 MiB
+  first; targets larger than 8191 pixels a side are drawn in internal tiles,
+  so a partial repaint is exact only up to that size.
+- `skrifa` 0.46.2, `harfrust` 0.13.3, `read-fonts` 0.43.3 and `font-types`
+  0.12.6: no operating-system names, no process-wide settings or environment
+  reads, no hooks; threads only in their own tests; statics only as
+  immutable tables; `harfrust` keeps its lookup caches inside each shaper
+  value, not globally. The only `unsafe` is `font-types`' `bytemuck`
+  implementations. `font-types` turns on `bytemuck`'s derive, which brings
+  `bytemuck_derive`, `syn`, `quote`, `proc-macro2` and `unicode-ident` in as
+  build-time dependencies; `unicode-ident` was already in the tree, and the
+  licence check has to allow it as a build-only dependency.
+
 **8. Verification.** A probe job opens a window and reads its pixels back on
 the three CI systems before any backend depends on that. Scenes are checked
 by an exact text dump of the display list and by images with a measured
@@ -146,15 +194,20 @@ order and arguments. Nothing about the interface goes into the README,
 1. This ADR; the roadmap and parity table amended; a layering check, a
    licence check and the window probe job in CI.
 2. The editor contract, `Gesture` and the gesture counters in
-   `manguebyte-plugin`, with property, allocation and Miri tests.
+   `manguebyte-plugin`, with property, allocation and Miri tests. *Done.*
 3. CLAP: gesture events, `flush` output, `request_flush`, and the `gui`
-   extension tested against a fake editor through the C interface.
+   extension tested against a fake editor through the C interface. *Done.*
 4. VST 3: the component handler kept, `IPlugView`, content scale,
-   `IPlugFrame` and `IRunLoop`, tested against fake host objects.
+   `IPlugFrame` and `IRunLoop`, tested against fake host objects. *Done.*
 5. `manguebyte-gfx`: scene, rasteriser seam on `tiny-skia`, text, image and
-   dump tests, a benchmark that prints its numbers.
+   dump tests, a benchmark that prints its numbers. *Done.*
 6. `manguebyte-ui`: tree, layout (row, column, stack), tokens, sources, the
    accessibility model, damage, label, knob, toggle, meter, canvas, harness.
+   *Done.*
+
+Items 2 to 6 were each built, attacked by an independent reviewer who wrote
+failing tests, and fixed; every fix kept the reviewer's test. None of them
+has been opened in a real host yet: that starts with item 7.
 7. A headless editor driven through the real CLAP interface.
 8. `manguebyte-window` on Windows and `manguebyte-gui`: embedding and
    read-back tests, open and close cycles, two binaries in one process.

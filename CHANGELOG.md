@@ -34,6 +34,21 @@ Nothing has been published to crates.io yet. Everything below is on `main`.
 - `plugins/duck`: an example effect, a sidechain ducker with a bypass that
   does not click. Both examples are validated as CLAP and as VST 3 in CI.
 - `Harness::process_with_sidechain` feeds an effect's sidechain in a test.
+- CLAP: the `gui`, `timer-support` and `posix-fd-support` extensions for
+  plugins with an editor, embedded windows only. Gestures reach the host as
+  gesture events from `process` and from `params.flush`, which now writes
+  its output list; when the host is not processing, an edit asks it for a
+  flush. Events the host's list refuses are sent again. Every `gui` call is
+  safe in any order, including from inside the editor's own calls.
+- VST 3: the `IComponentHandler` the host gives is kept and used for edits
+  (`beginEdit`, `performEdit` with the value the control set, `endEdit`, on
+  the main thread). `createView` returns an `IPlugView` with content scale
+  for plugins with an editor, keeps the `IPlugFrame` for resizing and uses
+  the host's `IRunLoop` for timers. A view outliving its plugin, attached
+  twice or removed without being attached does nothing harmful.
+- Fixed: an edit that the interface stored while a block was being prepared
+  could be undone by that block, in the CLAP and VST 3 wrappers and in the
+  standalone engine.
 - `cargo mangue`, the command-line tool: `new` writes a plugin crate from a
   template (instrument or effect) that builds and tests as it is; `bundle`
   builds a package and writes its `.clap` and `.vst3` with the right layout
@@ -43,6 +58,47 @@ Nothing has been published to crates.io yet. Everything below is on `main`.
   formats' validators and fails on any failed test. Bundle layouts are pure
   functions, tested for every platform on any machine. The two example
   plugins declare their names in `[package.metadata.manguebyte]`.
+
+### User interface
+
+The first half of phase 1 of [ADR 0007](docs/adr/0007-user-interface-layer.md).
+Everything here is tested without a display; there are no windows yet, so no
+editor has been opened inside a real host.
+
+- `manguebyte_plugin::editor`: the editor contract. `Plugin::editor` returns
+  an optional `EditorSpec`, which is `Send + Sync + 'static`, so it cannot
+  hold the processor, a borrow, an `Rc` or a raw pointer (compile-fail tests
+  prove each). An open editor is `!Send` and closes when dropped. Editors
+  reach the host through an `EditorContext` that the wrapper cuts off when
+  the editor closes: open gestures are ended, timers and descriptor watches
+  cancelled, and every clone does nothing from then on. `Gesture` is the
+  only way an edit reaches the host: begin, set, end, and cancel to restore
+  the starting value; gestures on one parameter from several places collapse
+  into one. `Resize` rules with a pure `fit`, `ParentWindow`, key events,
+  main-thread wakes, and test doubles (`RecordingEditorHost`, `ManualLoop`).
+  `Harness::editor` exposes a plugin's editor in tests.
+- `manguebyte-gfx`: scenes recorded as display lists (rectangles, rounded
+  rectangles, circles, arcs and paths, filled or stroked, with solid colour,
+  linear and radial gradients, images, clips, transforms and opacity layers,
+  and a columns primitive for meters and spectra), an exact text dump of a
+  scene, PNG reading and writing, and a CPU rasteriser behind a private seam
+  on `tiny-skia`. A repaint limited to damage rectangles is identical to a
+  full repaint, bit for bit, and leaves every other pixel untouched. Text:
+  `TextStyle` (size, weight, optical size, tabular figures), `TextLayout`
+  (line breaking, alignment, ellipsis, caret positions) and a bounded glyph
+  cache, using an embedded subset of Inter (`TYPEFACE_LICENCE` carries its
+  OFL text). Golden images and dumps, fuzzing and a benchmark.
+- `manguebyte-ui`: a retained widget tree whose views are plain functions;
+  values are sources polled once per frame, with no listeners; a layout of
+  its own (row, column, stack, padding, spacing, weights, limits); theme
+  tokens; label, knob, slider, toggle, meter and canvas widgets; parameter
+  edits made only through `Gesture`, showing the value being sent while a
+  gesture is open; an accessibility model whose method every widget must
+  implement; damage tracking, so a steady interface repaints nothing and
+  touches no memory; and a harness that finds widgets by role and name and
+  drives them with pointer, wheel and keys on a clock the test controls.
+- `Param::stored_plain` says what a parameter would store for a value,
+  without storing it.
 
 ### Hosting
 

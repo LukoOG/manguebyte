@@ -106,12 +106,16 @@ small part of the road ahead and the API will change before 1.0. See
 | [`manguebyte-formats`](crates/manguebyte-formats) | WAV (with RF64), AIFF and FLAC, read and written, whole or block by block with exact seeking; a FLAC encoder and decoder written from the specification and checked against FFmpeg; wait-free bridges to play and record from an audio callback |
 | [`manguebyte-osc`](crates/manguebyte-osc) | Open Sound Control over UDP and TCP, with a real-time bridge that puts time-tagged bundles on their exact frame |
 | [`manguebyte-devices`](crates/manguebyte-devices) | Device listing and selection, playback, recording and full-duplex streams, in any hardware sample format; MIDI input and output ports, with arrival times mapped to frames so a player's timing survives the audio buffer |
+| [`manguebyte-gfx`](crates/manguebyte-gfx) | 2D drawing on the CPU: paths, gradients, images, clips and layers recorded as a scene with an exact text dump; repaint limited to what changed, identical to a full repaint; text shaped and laid out with an embedded Inter subset |
+| [`manguebyte-ui`](crates/manguebyte-ui) | Widgets for plugin editors: a retained tree, row and column layout, theme tokens, label, knob, slider, toggle, meter and canvas, parameter edits as gestures, an accessibility description required of every widget, and a harness that drives it all in a unit test |
 | [`manguebyte-standalone`](crates/manguebyte-standalone) | Runs a `Plugin` as an application: sound card out, MIDI keyboards in, microphone in for effects |
 | [`cargo-mangue`](crates/cargo-mangue) | The command-line tool: `cargo mangue new` creates a plugin crate, `bundle`, `install` and `validate` turn it into a `.clap` and a `.vst3` |
 
-Not there yet: a user interface and plugin editors (designed in
-[ADR 0007](docs/adr/0007-user-interface-layer.md), not built); the Audio
-Unit, LV2 and AAX formats; lossy formats (MP3, Ogg Vorbis, Opus);
+Not there yet: windows, so no editor opens inside a real host yet. The
+editor interfaces of both formats, the renderer and the widget set exist and
+are tested without a display ([ADR 0007](docs/adr/0007-user-interface-layer.md));
+the Windows window layer comes next. Also missing: the Audio Unit, LV2 and
+AAX formats; lossy formats (MP3, Ogg Vorbis, Opus);
 convolution; plugin scanning and the editors of hosted plugins.
 
 ## Quick start
@@ -285,6 +289,13 @@ Licensed under either of
 - MIT license ([LICENSE-MIT](LICENSE-MIT))
 
 at your option.
+
+`manguebyte-gfx` embeds a subset of the [Inter](https://rsms.me/inter/)
+typeface, which is under the SIL Open Font License 1.1
+([crates/manguebyte-gfx/fonts/OFL.txt](crates/manguebyte-gfx/fonts/OFL.txt)).
+A program that ships `manguebyte-gfx` ships the typeface, so it has to ship
+that licence too: as a file beside the program, or on an about screen through
+`manguebyte_gfx::TYPEFACE_LICENCE`.
 
 Unless you explicitly state otherwise, any contribution intentionally
 submitted for inclusion in this project by you, as defined in the Apache-2.0
