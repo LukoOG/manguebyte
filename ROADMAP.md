@@ -184,7 +184,9 @@ our own, and nothing claimed before its test exists.
 ## Phase 5: everywhere
 
 - ⬜ iOS and Android
-- ⬜ WebAssembly and Web Audio
+- ⬜ WebAssembly and Web Audio: the engine running in a browser's
+  AudioWorklet, fed timestamped events; its first user will be
+  [Aratu](https://github.com/alessonqueirozdev-hub/aratu)
 - ⬜ Embedded targets
 
 ## Beyond parity

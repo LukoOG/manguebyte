@@ -270,6 +270,19 @@ host's block size are checked on every commit.
   the order it will be paid back.
 - [docs/adr/](docs/adr): the record of individual design decisions.
 
+## The Manguebyte ecosystem
+
+Manguebyte is the sound engine of two projects built on it, both from
+Recife:
+
+- **[Aratu](https://github.com/alessonqueirozdev-hub/aratu)**: a live-coding
+  language that reads like music, with measures, beats and note values first,
+  in Portuguese and English, in the browser and inside a DAW. In development:
+  its manual and design are written, and the language and its web editor are
+  being built.
+- **Parabolic** (planned): a tool for musicians to record their own
+  instruments and turn them into plugins and samplers without writing code.
+
 ## Contributing
 
 Manguebyte is built in the open and contributions are welcome, from typo
