@@ -3,8 +3,8 @@
 //! Run it in release mode:
 //!
 //! ```text
-//! cargo run -p manguebyte-ui --example bench --release
-//! cargo run -p manguebyte-ui --example bench --release -- --quick
+//! cargo run -p manguebyte-ui --example frame_bench --release
+//! cargo run -p manguebyte-ui --example frame_bench --release -- --quick
 //! ```
 //!
 //! Each case runs a frame many times and prints the median and fastest

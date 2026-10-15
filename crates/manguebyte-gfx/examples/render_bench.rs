@@ -3,8 +3,8 @@
 //! Run it in release mode:
 //!
 //! ```text
-//! cargo run -p manguebyte-gfx --example bench --release
-//! cargo run -p manguebyte-gfx --example bench --release -- --quick
+//! cargo run -p manguebyte-gfx --example render_bench --release
+//! cargo run -p manguebyte-gfx --example render_bench --release -- --quick
 //! ```
 //!
 //! Each case is drawn whole at 1x and 2x, and some also through a damage
