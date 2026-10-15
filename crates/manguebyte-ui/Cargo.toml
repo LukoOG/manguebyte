@@ -14,6 +14,11 @@ homepage.workspace = true
 [dependencies]
 manguebyte-core.workspace = true
 manguebyte-gfx.workspace = true
+manguebyte-params.workspace = true
+# Only for the editor contract (`manguebyte_plugin::editor`): gestures, the
+# context an editor reaches its host through, and key events. The interface
+# depends on the plugin API, never the other way round.
+manguebyte-plugin.workspace = true
 
 [lints]
 workspace = true

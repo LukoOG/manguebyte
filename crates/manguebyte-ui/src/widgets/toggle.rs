@@ -1,0 +1,207 @@
+//! A switch for a parameter that is on or off.
+
+use manguebyte_gfx::{Align, Circle, Point, Rect, RoundedRect, Scene, Size, TextStyle};
+
+use super::{
+    Cached, MARGIN, draw_text, focus_ring, line, line_height, name_style, on_off, text_width,
+};
+use crate::access::{AccessNode, Action, Actions, Role};
+use crate::event::{Button, Event, Handled, Key, KeyEvent};
+use crate::param::{ParamBinding, ParamHandle};
+use crate::widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
+
+/// Space between the switch and its name.
+const SPACE: f32 = 6.0;
+
+/// Space between the edge and the switch, beyond the margin, so that the
+/// focus ring does not touch it.
+const INSET: f32 = 1.0;
+
+/// A switch and the parameter's name beside it.
+///
+/// The parameter is on when its normalized value is at least one half, as
+/// a [`BoolParam`](manguebyte_params::BoolParam) is. A click, or Space or
+/// Enter with the keyboard focus, turns it over as one edit: begin, the
+/// new value, end. Each turn starts from the value shown at that moment,
+/// so two turns before the host has echoed the first switch it back.
+///
+/// A click does not give the switch the keyboard focus: Space and Enter
+/// stay with the host, which may use Space to start and stop its
+/// transport. Tab and [`Action::Focus`] give it the focus.
+pub struct Toggle {
+    binding: ParamBinding,
+    label: Option<String>,
+    name: Cached<TextStyle>,
+}
+
+/// A switch for `param`.
+///
+/// ```
+/// use std::sync::Arc;
+/// use manguebyte_gfx::Size;
+/// use manguebyte_params::{BoolParam, param_set};
+/// use manguebyte_ui::testing::Harness;
+/// use manguebyte_ui::{Key, ParamHandle, Role, toggle};
+///
+/// struct Params { bypass: BoolParam }
+/// param_set!(Params { bypass });
+/// let params = Arc::new(Params { bypass: BoolParam::new("bypass", "Bypass", false) });
+///
+/// let view = toggle(ParamHandle::new(Arc::clone(&params), |p| &p.bypass));
+/// let mut ui = Harness::with_params(view, Size::new(120.0, 30.0), 1.0, params.clone());
+/// ui.frame();
+/// let switch = ui.get(Role::Switch, "Bypass");
+/// assert_eq!(switch.node.state.checked, Some(false));
+///
+/// ui.click(switch.center());
+/// assert!(params.bypass.value());
+/// // The click left Space to the host.
+/// assert!(!ui.key(Key::Character(' ')));
+/// // With the focus from Tab, Space turns it over.
+/// assert!(ui.tab());
+/// assert!(ui.key(Key::Character(' ')));
+/// assert!(!params.bypass.value());
+/// ```
+pub fn toggle(param: ParamHandle) -> Toggle {
+    Toggle::new(param)
+}
+
+impl Toggle {
+    /// A switch for `param`, named by the parameter.
+    pub fn new(param: ParamHandle) -> Toggle {
+        Toggle {
+            binding: ParamBinding::new(param),
+            label: None,
+            name: Cached::new(),
+        }
+    }
+
+    /// The same switch showing `text` as its name instead of the
+    /// parameter's name.
+    #[must_use]
+    pub fn label(mut self, text: impl Into<String>) -> Toggle {
+        self.label = Some(text.into());
+        self
+    }
+
+    fn name_text(&self) -> &str {
+        match &self.label {
+            Some(label) => label,
+            None => self.binding.handle().name(),
+        }
+    }
+
+    fn is_on(&self) -> bool {
+        self.binding.shown() >= 0.5
+    }
+
+    fn press(&mut self, cx: &mut EventCx<'_>) {
+        let next = if self.binding.current() >= 0.5 {
+            0.0
+        } else {
+            1.0
+        };
+        self.binding.set_once(cx.context(), next);
+        cx.request_paint();
+    }
+}
+
+impl Widget for Toggle {
+    fn access(&self, _cx: &AccessCx<'_>) -> AccessNode {
+        AccessNode::new(Role::Switch, self.name_text())
+            .with_value(self.binding.text())
+            .with_checked(self.is_on())
+            .with_actions(Actions::PRESS)
+    }
+
+    fn measure(&mut self, cx: &MeasureCx<'_>) -> Size {
+        let theme = cx.theme();
+        let style = name_style(theme);
+        let sizes = theme.sizes;
+        Size::new(
+            2.0 * MARGIN
+                + INSET
+                + sizes.toggle_width.max(sizes.toggle_height)
+                + SPACE
+                + text_width(self.name_text(), &style),
+            2.0 * (MARGIN + INSET) + sizes.toggle_height.max(line_height(&style)),
+        )
+    }
+
+    fn update(&mut self, cx: &mut UpdateCx<'_>) {
+        if self.binding.poll(cx.now()) {
+            cx.request_paint();
+        }
+    }
+
+    fn paint(&mut self, cx: &PaintCx<'_>, scene: &mut Scene) {
+        let theme = cx.theme();
+        let rect = cx.rect();
+        let sizes = theme.sizes;
+        let style = name_style(theme).with_align(Align::Start);
+        let height = sizes.toggle_height.max(0.0);
+        let width = sizes.toggle_width.max(height);
+        let middle = rect.y + rect.height * 0.5;
+        let pill = Rect::new(
+            rect.x + MARGIN + INSET,
+            middle - height * 0.5,
+            width,
+            height,
+        );
+        let on = self.is_on();
+        scene.fill(RoundedRect::new(pill, height * 0.5), on_off(theme, on));
+        let radius = (height * 0.5 - 2.0).max(0.0);
+        let thumb_x = if on {
+            pill.right() - height * 0.5
+        } else {
+            pill.x + height * 0.5
+        };
+        scene.fill(
+            Circle::new(Point::new(thumb_x, middle), radius),
+            theme.palette.thumb,
+        );
+
+        let text_x = pill.right() + SPACE;
+        let room = (rect.right() - MARGIN - text_x).max(0.0);
+        let (label, binding) = (self.label.as_deref(), &self.binding);
+        let name = self.name.get(room, style, || {
+            let text = label.unwrap_or_else(|| binding.handle().name());
+            line(text, &style, room)
+        });
+        let y = middle - line_height(&style) * 0.5;
+        draw_text(scene, name, Point::new(text_x, y));
+        if cx.is_focused() {
+            focus_ring(scene, rect, theme);
+        }
+    }
+
+    fn event(&mut self, cx: &mut EventCx<'_>, event: &Event) -> Handled {
+        match *event {
+            Event::PointerDown {
+                button: Button::Primary,
+                ..
+            } => {
+                // No focus asked for: see the type's documentation.
+                self.press(cx);
+                Handled::Yes
+            }
+            Event::Key(KeyEvent {
+                key: Key::Character(' ') | Key::Enter,
+                pressed: true,
+                ..
+            }) => {
+                self.press(cx);
+                Handled::Yes
+            }
+            _ => Handled::No,
+        }
+    }
+
+    fn act(&mut self, cx: &mut EventCx<'_>, action: Action) -> bool {
+        if action != Action::Press {
+            return false;
+        }
+        self.press(cx);
+        true
+    }
+}

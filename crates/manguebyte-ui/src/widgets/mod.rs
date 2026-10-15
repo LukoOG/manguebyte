@@ -1,0 +1,156 @@
+//! The built-in widgets.
+//!
+//! | Widget | Role | Shows | Changes |
+//! |---|---|---|---|
+//! | [`Label`] | [`Label`](crate::Role::Label) | text, fixed or from a source | nothing |
+//! | [`Knob`] | [`Slider`](crate::Role::Slider) | a parameter, as an arc and as text | the parameter, by dragging up and down, the wheel and the keys |
+//! | [`Slider`] | [`Slider`](crate::Role::Slider) | a parameter, as a track and as text | the parameter, by dragging sideways, the wheel and the keys |
+//! | [`Toggle`] | [`Switch`](crate::Role::Switch) | a parameter that is on or off | the parameter, by clicking, Space and Enter |
+//! | [`Meter`] | [`Meter`](crate::Role::Meter) | a level the audio thread publishes, as a bar and as text | nothing |
+//! | [`Canvas`] | [`Image`](crate::Role::Image) | whatever a closure draws | nothing |
+//!
+//! Containers ([`row`](crate::row), [`column`](crate::column),
+//! [`stack`](crate::stack), [`panel`](crate::panel)) are
+//! [`Container`]s with the role [`Group`](crate::Role::Group).
+//!
+//! Given at least their natural size, knobs, sliders, switches and meters
+//! draw inside their own rectangles, with a margin, and canvases clip what
+//! they draw to theirs. Given less, a control's fixed parts (a switch's
+//! pill, a slider's track, the text above and below a knob or a meter) can
+//! reach past its rectangle; the [`Root`](crate::Root) clips any widget's
+//! scene that does to the widget's rectangle. Either way the damage of a
+//! change to one widget never reaches its neighbours: the damage tests
+//! check every control at its natural size and in windows smaller than the
+//! panel, at several scales. Knobs, sliders and switches show the keyboard
+//! focus with a ring. Knobs and sliders show values in the parameter's own
+//! words ([`Param::plain_to_text`](manguebyte_params::Param::plain_to_text)
+//! and its unit), and switches give theirs to assistive technology.
+
+mod adjust;
+mod canvas;
+mod container;
+mod knob;
+mod label;
+mod meter;
+mod slider;
+mod toggle;
+
+pub use canvas::{Canvas, CanvasCx, canvas};
+pub use container::Container;
+pub use knob::{Knob, knob};
+pub use label::{Label, label};
+pub use meter::{Meter, meter};
+pub use slider::{Slider, slider};
+pub use toggle::{Toggle, toggle};
+
+use manguebyte_gfx::{Color, Point, Rect, RoundedRect, Scene, Stroke, TextLayout, TextStyle};
+
+use crate::theme::Theme;
+
+/// Space every control keeps free inside its rectangle, in logical pixels:
+/// room for the focus ring, and for the rasteriser's tolerance, so that
+/// nothing a control draws reaches past its rectangle.
+pub(crate) const MARGIN: f32 = 2.0;
+
+/// Space between the parts of a control (its name, its dial, its value).
+pub(crate) const GAP: f32 = 2.0;
+
+/// The distance between baselines of `style`.
+pub(crate) fn line_height(style: &TextStyle) -> f32 {
+    style.metrics().line_height
+}
+
+/// The width to ask for `text` on one line in `style`: its width rounded
+/// up, and one more pixel, because layout snaps a widget's edges to the
+/// nearest device pixels and may take up to a device pixel from it, which
+/// would cut the text with an ellipsis.
+pub(crate) fn text_width(text: &str, style: &TextStyle) -> f32 {
+    TextLayout::new(text, style, None).size().width.ceil() + 1.0
+}
+
+/// A layout of `text` in `style`, one line within `width`.
+pub(crate) fn line(text: &str, style: &TextStyle, width: f32) -> TextLayout {
+    TextLayout::new(text, &style.with_max_lines(1), Some(width.max(0.0)))
+}
+
+/// A layout kept for one width and one key, such as the value it shows,
+/// and made again when either changes.
+pub(crate) struct Cached<K> {
+    entry: Option<(f32, K, TextLayout)>,
+}
+
+impl<K: PartialEq> Cached<K> {
+    pub(crate) fn new() -> Self {
+        Cached { entry: None }
+    }
+
+    /// The layout for `width` and `key`, made by `make` if the one kept was
+    /// made for something else.
+    pub(crate) fn get(
+        &mut self,
+        width: f32,
+        key: K,
+        make: impl FnOnce() -> TextLayout,
+    ) -> &TextLayout {
+        let stale = self
+            .entry
+            .as_ref()
+            .is_none_or(|(w, k, _)| *w != width || *k != key);
+        if stale {
+            self.entry = None;
+        }
+        let (_, _, layout) = self.entry.get_or_insert_with(|| (width, key, make()));
+        layout
+    }
+}
+
+/// Draws the focus ring just inside `rect`.
+pub(crate) fn focus_ring(scene: &mut Scene, rect: Rect, theme: &Theme) {
+    let width = theme.sizes.focus_ring.max(0.0);
+    // Half the width, and a pixel for the rasteriser's tolerance, inside
+    // the edge: the ring never reaches past the widget's rectangle.
+    let inset = width * 0.5 + 1.0;
+    let ring = Rect::new(
+        rect.x + inset,
+        rect.y + inset,
+        (rect.width - 2.0 * inset).max(0.0),
+        (rect.height - 2.0 * inset).max(0.0),
+    );
+    scene.stroke(
+        RoundedRect::new(ring, theme.corners.medium),
+        Stroke::round(width),
+        theme.palette.focus,
+    );
+}
+
+/// Draws `layout` at `at`.
+pub(crate) fn draw_text(scene: &mut Scene, layout: &TextLayout, at: Point) {
+    scene.text(layout, at);
+}
+
+/// The style of a control's name, in the theme's text colour.
+pub(crate) fn name_style(theme: &Theme) -> TextStyle {
+    theme
+        .typography
+        .label
+        .with_color(theme.palette.text)
+        .with_align(manguebyte_gfx::Align::Center)
+}
+
+/// The style of a control's value, in the theme's muted text colour.
+pub(crate) fn value_style(theme: &Theme) -> TextStyle {
+    theme
+        .typography
+        .value
+        .with_color(theme.palette.text_muted)
+        .with_align(manguebyte_gfx::Align::Center)
+}
+
+/// The colour of a switch's track or a knob's arc, by state.
+pub(crate) fn on_off(theme: &Theme, on: bool) -> Color {
+    if on {
+        theme.palette.accent
+    } else {
+        theme.palette.track
+    }
+}
