@@ -75,7 +75,7 @@ the limits of the claim.
 | State and processing | Host may call state functions concurrently with processing; each plugin synchronises | Parameter state is safe from any thread with no lock ✅ |
 | Old sessions after a range change | Position-based automation and state can shift meaning | State stores real values by id; loading is tolerant and reports ✅ |
 | Headless use | Split out in 8.0.11, still needs the event module | No GUI or event loop below the GUI crate ✅ |
-| CLAP | Not available natively; promised for JUCE 9, not in 9.0.x | Native. The example plugin passes all 34 applicable tests of `clap-validator`, which runs in CI ✅ |
+| CLAP | Not available natively; promised for JUCE 9, not in 9.0.x | Native. Both example plugins pass every applicable test of `clap-validator` in CI (the instrument 35 of 44, the effect 33 of 44, none failed) ✅ |
 | Sample-accurate automation | Not in `AudioProcessor` | Timestamped events in the process call, applied on their exact frame ✅ |
 | Note expression, per-voice and non-destructive modulation | Not in the processor model | Part of the event model; the synth routes each to the right voice ✅ (MIDI 2.0 UMP transport ⬜) |
 | Arbitrary FFT length | Powers of two | Any length ✅ |

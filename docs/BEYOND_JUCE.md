@@ -229,9 +229,12 @@ validator on it as well as Steinberg's on the `.vst3`. JUCE's
 [`juce_add_plugin`](https://raw.githubusercontent.com/juce-framework/JUCE/master/docs/CMake%20API.md)
 accepts no CLAP format.
 
-**Limit.** No plugin GUI extension yet, no 64-bit audio, no presets. VST 3 is
-the only other format so far, also without an editor: JUCE's AU, AAX and LV2
-support has no counterpart here yet.
+**Limit.** The `gui` extension exists and is tested through the C interface
+against a fake editor and a fake host, but there are no native windows yet, so
+no editor opens inside a real host. No 64-bit audio, no presets. VST 3 is the
+only other format on `main` so far: JUCE's AU, AAX and LV2 support has no
+counterpart here yet. Both example plugins were also loaded and tested by hand
+in REAPER; see [HOST_TESTS.md](HOST_TESTS.md).
 
 ## 7. A plugin can be tested without a host
 
