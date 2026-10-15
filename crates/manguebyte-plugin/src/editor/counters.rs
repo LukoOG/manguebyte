@@ -551,8 +551,10 @@ mod tests {
         read_all(&mut reader);
 
         assert_eq!(open, [false; PARAMS], "every gesture reported ended");
+        // Parameter `index` gets every PARAMS-th gesture, so the first ones
+        // get one more when the count does not divide evenly.
         for count in begins {
-            assert!((1..=gestures / PARAMS as u32).contains(&count));
+            assert!((1..=gestures.div_ceil(PARAMS as u32)).contains(&count));
         }
         for index in 0..PARAMS {
             assert!(!counters.is_open(index));
