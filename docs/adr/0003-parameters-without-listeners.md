@@ -99,6 +99,7 @@ storage.
 
 1. [x] `FloatParam`, `IntParam`, `BoolParam`, `ChoiceParam`, `ParamSet`
 2. [x] `ParamState` text format with a version header
-3. [ ] Parameter events and gesture guards in `manguebyte-plugin`
+3. [x] Parameter events and gesture guards in `manguebyte-plugin`: events
+   since ADR 0005, the guard as `manguebyte_plugin::editor::Gesture`
 4. [ ] `EnumParam` generic over a Rust enum
 5. [ ] A derive macro as an optional alternative to `param_set!`
