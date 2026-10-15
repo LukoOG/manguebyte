@@ -272,8 +272,8 @@ host's block size are checked on every commit.
 
 ## The Manguebyte ecosystem
 
-Manguebyte is the sound engine of two projects built on it, both from
-Recife:
+Two projects from Recife are being built on Manguebyte, which is to be
+their sound engine:
 
 - **[Aratu](https://github.com/alessonqueirozdev-hub/aratu)**: a live-coding
   language that reads like music, with measures, beats and note values first,
