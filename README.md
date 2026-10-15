@@ -279,8 +279,9 @@ Recife:
   language that reads like music, with measures, beats and note values first,
   in Portuguese and English, in the browser and inside a DAW. In development:
   the language reads, checks and schedules every example in its manual, and
-  its web editor plays pieces locally with temporary built-in sounds, which
-  Manguebyte's engine will replace; it is not published online yet.
+  its web editor runs in the browser with nothing to install
+  ([try it](https://alessonqueirozdev-hub.github.io/aratu/)), playing with
+  temporary built-in sounds that Manguebyte's engine will replace.
 - **Parabolic** (planned): a tool for musicians to record their own
   instruments and turn them into plugins and samplers without writing code.
 
