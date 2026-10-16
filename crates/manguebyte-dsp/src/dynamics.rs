@@ -2,12 +2,15 @@ use core::marker::PhantomData;
 
 use manguebyte_core::{AudioBuffer, Sample};
 
+use crate::curve::{CompressorTransfer, ExpanderTransfer, GateTransfer};
 use crate::{ProcessContext, ProcessSpec, Processor};
 
 /// Level below which a signal is treated as silence, in decibels.
 const FLOOR_DB: f64 = -120.0;
 
-fn to_db(level: f64) -> f64 {
+/// A level as the detectors read it, in decibels: anything at or below
+/// -120 dB is silence.
+pub(crate) fn to_db(level: f64) -> f64 {
     if level > 1e-6 {
         20.0 * level.log10()
     } else {
@@ -15,8 +18,72 @@ fn to_db(level: f64) -> f64 {
     }
 }
 
-fn to_gain(db: f64) -> f64 {
+pub(crate) fn to_gain(db: f64) -> f64 {
     10f64.powf(db / 20.0)
+}
+
+/// The gain reduction of a [`Compressor`], in decibels, for a level of
+/// `level_db` on its detector.
+pub(crate) fn compressor_reduction_db(
+    threshold_db: f64,
+    ratio: f64,
+    knee_db: f64,
+    level_db: f64,
+) -> f64 {
+    let over = level_db - threshold_db;
+    let slope = 1.0 - 1.0 / ratio;
+    if 2.0 * over <= -knee_db {
+        0.0
+    } else if 2.0 * over.abs() < knee_db {
+        let into_knee = over + knee_db / 2.0;
+        slope * into_knee * into_knee / (2.0 * knee_db)
+    } else {
+        slope * over
+    }
+}
+
+/// The gain reduction of an [`Expander`], in decibels, for a level of
+/// `level_db` on its detector.
+pub(crate) fn expander_reduction_db(
+    threshold_db: f64,
+    ratio: f64,
+    knee_db: f64,
+    range_db: f64,
+    level_db: f64,
+) -> f64 {
+    let under = threshold_db - level_db;
+    let slope = ratio - 1.0;
+    let reduction = if 2.0 * under <= -knee_db {
+        0.0
+    } else if 2.0 * under.abs() < knee_db {
+        let into_knee = under + knee_db / 2.0;
+        slope * into_knee * into_knee / (2.0 * knee_db)
+    } else {
+        slope * under
+    };
+    // `min` also turns a not-a-number (an unknown threshold) into the
+    // full range, which is the safe side.
+    reduction.min(range_db)
+}
+
+/// The range of an [`Expander`] as it keeps it: limited to
+/// `0.0..=240.0` dB, with not-a-number taken as zero.
+pub(crate) fn limited_range_db(db: f64) -> f64 {
+    if db.is_nan() {
+        0.0
+    } else {
+        db.clamp(0.0, MAX_RANGE_DB)
+    }
+}
+
+/// The gain of a closed [`NoiseGate`] whose floor is `floor_db`: zero for
+/// a floor at or below -120 dB, and never above 1.
+pub(crate) fn gate_floor_gain(floor_db: f64) -> f64 {
+    if floor_db <= FLOOR_DB {
+        0.0
+    } else {
+        to_gain(floor_db).min(1.0)
+    }
 }
 
 /// One-pole smoothing coefficient that covers 63% of a step in
@@ -242,16 +309,14 @@ impl<S: Sample> Compressor<S> {
     /// The gain reduction, in decibels, that a steady input at `level_db`
     /// settles at.
     pub fn static_reduction_db(&self, level_db: f64) -> f64 {
-        let over = level_db - self.threshold_db;
-        let slope = 1.0 - 1.0 / self.ratio;
-        if 2.0 * over <= -self.knee_db {
-            0.0
-        } else if 2.0 * over.abs() < self.knee_db {
-            let into_knee = over + self.knee_db / 2.0;
-            slope * into_knee * into_knee / (2.0 * self.knee_db)
-        } else {
-            slope * over
-        }
+        compressor_reduction_db(self.threshold_db, self.ratio, self.knee_db, level_db)
+    }
+
+    /// The static curve: the level a steady input settles at against its
+    /// level, makeup gain included, for drawing. See
+    /// [`curve`](crate::curve).
+    pub fn transfer(&self) -> CompressorTransfer {
+        CompressorTransfer::new(self.threshold_db, self.ratio, self.knee_db, self.makeup_db)
     }
 
     fn update(&mut self) {
@@ -481,15 +546,18 @@ impl<S: Sample> NoiseGate<S> {
         self.gain > 0.5 * (1.0 + self.floor)
     }
 
+    /// The static curve: a steady input at or above the threshold comes out
+    /// as it went in, one below it at the floor, for drawing. See
+    /// [`curve`](crate::curve).
+    pub fn transfer(&self) -> GateTransfer {
+        GateTransfer::new(self.threshold_db, self.floor_db)
+    }
+
     fn update(&mut self) {
         self.threshold = to_gain(self.threshold_db);
         self.attack = time_coefficient(self.attack_ms, self.sample_rate);
         self.release = time_coefficient(self.release_ms, self.sample_rate);
-        self.floor = if self.floor_db <= FLOOR_DB {
-            0.0
-        } else {
-            to_gain(self.floor_db).min(1.0)
-        };
+        self.floor = gate_floor_gain(self.floor_db);
         self.hold_samples = (self.hold_ms.max(0.0) * 1e-3 * self.sample_rate).round() as u32;
     }
 }
@@ -677,11 +745,7 @@ impl<S: Sample> Expander<S> {
     /// Sets the most the gain is ever reduced by, in decibels. Infinity is
     /// taken as 240 dB; negative values and not-a-number as zero.
     pub fn set_range_db(&mut self, db: f64) {
-        self.range_db = if db.is_nan() {
-            0.0
-        } else {
-            db.clamp(0.0, MAX_RANGE_DB)
-        };
+        self.range_db = limited_range_db(db);
     }
 
     /// Builder form of [`set_threshold_db`](Self::set_threshold_db).
@@ -753,19 +817,19 @@ impl<S: Sample> Expander<S> {
     /// The gain reduction, in decibels, that a steady input at `level_db`
     /// settles at.
     pub fn static_reduction_db(&self, level_db: f64) -> f64 {
-        let under = self.threshold_db - level_db;
-        let slope = self.ratio - 1.0;
-        let reduction = if 2.0 * under <= -self.knee_db {
-            0.0
-        } else if 2.0 * under.abs() < self.knee_db {
-            let into_knee = under + self.knee_db / 2.0;
-            slope * into_knee * into_knee / (2.0 * self.knee_db)
-        } else {
-            slope * under
-        };
-        // `min` also turns a not-a-number (an unknown threshold) into the
-        // full range, which is the safe side.
-        reduction.min(self.range_db)
+        expander_reduction_db(
+            self.threshold_db,
+            self.ratio,
+            self.knee_db,
+            self.range_db,
+            level_db,
+        )
+    }
+
+    /// The static curve: the level a steady input settles at against its
+    /// level, for drawing. See [`curve`](crate::curve).
+    pub fn transfer(&self) -> ExpanderTransfer {
+        ExpanderTransfer::new(self.threshold_db, self.ratio, self.knee_db, self.range_db)
     }
 
     fn update(&mut self) {

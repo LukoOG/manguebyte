@@ -27,6 +27,11 @@
 //! | [`Crossover`](crate::Crossover) | [`CrossoverResponse`] | each band, or their sum |
 //! | [`FirFilter`](crate::FirFilter) | [`FirResponse`] | frequency response |
 //! | several of the above in a row | a slice, an array or a tuple of them | the response of the chain |
+//! | [`Compressor`](crate::Compressor) | [`CompressorTransfer`] | output level against input level |
+//! | [`Expander`](crate::Expander) | [`ExpanderTransfer`] | output level against input level |
+//! | [`NoiseGate`](crate::NoiseGate) | [`GateTransfer`] | output level against input level |
+//! | [`Limiter`](crate::Limiter) | [`LimiterTransfer`] | output level against input level |
+//! | [`Waveshaper`](crate::Waveshaper), [`ShaperCurve`](crate::ShaperCurve) | themselves | output value against input value |
 //!
 //! Every continuous curve implements [`Curve`]: a [`CurveSpec`] that says
 //! what the axes are (their [`Unit`], [`Scale`] and a suggested range) and
@@ -74,11 +79,13 @@
 //! ```
 
 mod frequency;
+mod transfer;
 
 pub use frequency::{
     BiquadResponse, CascadeResponse, CrossoverResponse, FirResponse, LadderResponse,
     OnePoleResponse, SvfResponse,
 };
+pub use transfer::{CompressorTransfer, ExpanderTransfer, GateTransfer, LimiterTransfer};
 
 use core::f64::consts::{PI, TAU};
 
@@ -576,6 +583,35 @@ impl<R: FrequencyResponse> Curve for Phase<R> {
     }
 }
 
+/// The level axis of a transfer curve that is worth showing from
+/// `lowest_db` up: from 12 dB below that, in steps of 6 dB, but no higher
+/// than -60 dB and no lower than -120 dB, up to +6 dB.
+fn level_axis(lowest_db: f64) -> Axis {
+    let low = if lowest_db.is_finite() {
+        (6.0 * ((lowest_db - 12.0) / 6.0).floor()).clamp(-120.0, -60.0)
+    } else {
+        -60.0
+    };
+    Axis::new(Unit::Decibels, Scale::Linear, low, 6.0)
+}
+
+/// The spec of a transfer curve whose interesting part starts at
+/// `lowest_db` and whose output at the top of the input axis is `top_db`:
+/// the same range on both axes, raised at the top of the output axis to
+/// show `top_db`.
+fn level_transfer_spec(lowest_db: f64, top_db: f64) -> CurveSpec {
+    let x = level_axis(lowest_db);
+    let mut y = x;
+    if top_db > y.max {
+        y.max = (6.0 * (top_db / 6.0).ceil()).min(MAX_DB);
+    }
+    CurveSpec {
+        kind: CurveKind::LevelTransfer,
+        x,
+        y,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -664,5 +700,15 @@ mod tests {
         assert!((wrap(TAU + 0.5) - 0.5).abs() < 1e-12);
         assert_eq!(wrap(f64::NAN), 0.0);
         assert_eq!(phase_of(Complex::new(f64::NAN, 1.0)), 0.0);
+    }
+
+    #[test]
+    fn transfer_axes_fit_the_interesting_part() {
+        assert_eq!(level_axis(-18.0).min, -60.0);
+        assert_eq!(level_axis(-70.0).min, -84.0);
+        assert_eq!(level_axis(-500.0).min, -120.0);
+        assert_eq!(level_axis(f64::NAN).min, -60.0);
+        let spec = level_transfer_spec(-18.0, 10.0);
+        assert_eq!((spec.x.max, spec.y.max), (6.0, 12.0));
     }
 }

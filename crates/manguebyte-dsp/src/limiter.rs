@@ -2,6 +2,7 @@ use core::marker::PhantomData;
 
 use manguebyte_core::{AudioBuffer, Sample};
 
+use crate::curve::LimiterTransfer;
 use crate::{ProcessSpec, Processor};
 
 /// A look-ahead peak limiter: nothing comes out above the ceiling.
@@ -148,6 +149,13 @@ impl<S: Sample> Limiter<S> {
     /// positive number. For driving a meter.
     pub fn gain_reduction_db(&self) -> f64 {
         self.reduction_db
+    }
+
+    /// The static curve: a steady input comes out at its own level or at
+    /// the ceiling, whichever is lower, for drawing. See
+    /// [`curve`](crate::curve).
+    pub fn transfer(&self) -> LimiterTransfer {
+        LimiterTransfer::new(self.ceiling_db)
     }
 
     fn update_release(&mut self) {

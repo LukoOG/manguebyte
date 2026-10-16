@@ -111,6 +111,11 @@ impl<S: Sample> Waveshaper<S> {
         self
     }
 
+    /// The plain gain applied after the curve.
+    pub(crate) fn output_gain(&self) -> f64 {
+        self.output
+    }
+
     /// Shapes one value.
     #[inline]
     pub fn shape(&self, sample: S) -> S {
