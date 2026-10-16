@@ -250,3 +250,33 @@ pub(crate) fn largest_jump(signal: &[f64]) -> f64 {
 pub(crate) fn finite_within(signal: &[f64], bound: f64) -> bool {
     peak(signal) <= bound
 }
+
+/// The share of the energy of `signal` that is not within `tolerance` hertz
+/// of a multiple of `fundamental`, in decibels: how much inharmonic content,
+/// aliasing among it, a harmonic sound has.
+pub(crate) fn inharmonic_db(signal: &[f64], fundamental: f64, tolerance: f64, len: usize) -> f64 {
+    let mut input = vec![0.0; len];
+    for (n, (slot, &x)) in input.iter_mut().zip(signal).enumerate() {
+        // Blackman-Harris, so that the leakage of strong harmonics does not
+        // count as inharmonic.
+        let phase = TAU * n as f64 / len as f64;
+        let w = 0.35875 - 0.48829 * phase.cos() + 0.14128 * (2.0 * phase).cos()
+            - 0.01168 * (3.0 * phase).cos();
+        *slot = x * w;
+    }
+    let mut fft = RealFft::<f64>::new(len);
+    let mut spectrum = vec![Complex::<f64>::ZERO; fft.spectrum_len()];
+    fft.forward(&input, &mut spectrum);
+    let (mut harmonic, mut other) = (0.0, 0.0);
+    for (bin, value) in spectrum.iter().enumerate().skip(1) {
+        let frequency = bin as f64 * RATE / len as f64;
+        let nearest = (frequency / fundamental).round() * fundamental;
+        let power = value.norm_sqr();
+        if (frequency - nearest).abs() <= tolerance && nearest > 0.0 {
+            harmonic += power;
+        } else {
+            other += power;
+        }
+    }
+    10.0 * (other / (harmonic + other).max(1e-300)).max(1e-30).log10()
+}

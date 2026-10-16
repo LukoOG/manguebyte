@@ -157,9 +157,11 @@ impl<T: Tone> Handover<T> {
         }
     }
 
-    /// Takes the sample rate the fade runs at.
+    /// Takes the sample rate the fade runs at, and stops any fade. The
+    /// tones are prepared and silenced by their owner.
     pub(crate) fn prepare(&mut self, sample_rate: f64) {
         self.step = 1.0 / (HANDOVER_SECONDS * sample_rate).max(1.0);
+        self.fade = 0.0;
     }
 
     /// What a choke means; see the type's documentation.

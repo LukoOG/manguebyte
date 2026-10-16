@@ -4,6 +4,7 @@
 //! | Voice | What it is | Presets |
 //! |---|---|---|
 //! | [`PluckedString`] | a plucked string by physical modelling | [nylon](StringParams::nylon_guitar) and [steel](StringParams::steel_guitar) guitar, [finger](StringParams::finger_bass) and [slap](StringParams::slap_bass) bass |
+//! | [`FmVoice`] | four-operator frequency modulation | [electric piano](FmParams::electric_piano), [tubular bell](FmParams::tubular_bell), [FM bass](FmParams::fm_bass) |
 //!
 //! Each voice is built from the crate's own parts (delay lines, filters,
 //! oscillators) and has a settings struct with presets. Give a
@@ -70,9 +71,11 @@
 //! sounds the same every time it is played, whatever was played before it.
 
 mod common;
+mod fm;
 #[cfg(test)]
 pub(crate) mod measure;
 mod string;
 
 pub use common::HANDOVER_SECONDS;
+pub use fm::{Algorithm, FM_OPERATORS, FM_VELOCITY_RANGE_DB, FmOperator, FmParams, FmVoice};
 pub use string::{BodyMode, PluckedString, StringParams};
