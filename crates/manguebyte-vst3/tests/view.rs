@@ -251,6 +251,10 @@ thread_local! {
     static LOG: RefCell<Vec<EditorCall>> = const { RefCell::new(Vec::new()) };
     /// Every editor opened on this thread, in order.
     static PROBES: RefCell<Vec<Weak<Probe>>> = const { RefCell::new(Vec::new()) };
+    /// What the editors on this thread were told by `set_visible`, in
+    /// order, with `None` for an editor dropped. Kept apart from `LOG`, so
+    /// that the other tests' logs need not list the calls.
+    static VISIBILITY: RefCell<Vec<Option<bool>>> = const { RefCell::new(Vec::new()) };
 }
 
 fn set_up(setup: Setup) {
@@ -500,7 +504,9 @@ impl OpenEditor for FakeEditor {
         true
     }
 
-    fn set_visible(&mut self, _visible: bool) {}
+    fn set_visible(&mut self, visible: bool) {
+        VISIBILITY.with(|log| log.borrow_mut().push(Some(visible)));
+    }
 
     fn key(&mut self, event: KeyEvent) -> bool {
         self.enter(EditorCall::Key(event));
@@ -526,6 +532,7 @@ impl Drop for FakeEditor {
             log(EditorCall::Reentered);
         }
         log(EditorCall::Dropped);
+        VISIBILITY.with(|log| log.borrow_mut().push(None));
     }
 }
 
@@ -1871,6 +1878,55 @@ fn a_view_refuses_to_be_removed_unattached_or_attached_twice() {
         ]
     );
     assert_eq!(editors_alive(), 0);
+}
+
+/// VST 3 has no call that shows a view, so the wrapper shows the editor
+/// once `attached` has succeeded, and hides it at the start of `removed`,
+/// before it is dropped.
+#[test]
+fn an_attached_editor_is_shown_and_hidden_before_it_is_dropped() {
+    set_up(Setup::default());
+    let session = Session::panel();
+    let ui = session.view();
+    VISIBILITY.with(|log| log.borrow_mut().clear());
+    let visibility = || VISIBILITY.with(|log| log.borrow().clone());
+    for _ in 0..2 {
+        assert_eq!(ui.attach_hwnd(), kResultOk);
+        assert_eq!(visibility().last(), Some(&Some(true)));
+        // Shown once, and hidden only when removed.
+        assert_eq!(ui.attach_hwnd(), kResultFalse);
+        assert_eq!(visibility().last(), Some(&Some(true)));
+        assert_eq!(editors_alive(), 1);
+        assert_eq!(ui.remove(), kResultOk);
+        // Hidden, then dropped.
+        assert_eq!(visibility()[visibility().len() - 2..], [Some(false), None]);
+        assert_eq!(editors_alive(), 0);
+    }
+    assert_eq!(
+        visibility(),
+        [Some(true), Some(false), None, Some(true), Some(false), None]
+    );
+    assert_eq!(
+        take_log(),
+        [
+            EditorCall::Open(win32(), None),
+            EditorCall::Dropped,
+            EditorCall::Open(win32(), None),
+            EditorCall::Dropped,
+        ]
+    );
+
+    // An editor that fails to open is never shown.
+    set_up(Setup {
+        fail_open: true,
+        ..Setup::default()
+    });
+    let session = Session::panel();
+    let ui = session.view();
+    VISIBILITY.with(|log| log.borrow_mut().clear());
+    assert_eq!(ui.attach_hwnd(), kResultFalse);
+    assert_eq!(visibility(), []);
+    take_log();
 }
 
 #[test]

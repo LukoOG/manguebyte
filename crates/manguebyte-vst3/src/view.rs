@@ -5,7 +5,8 @@
 //! returns a spec answers `createView("editor")` with a [`View`]: an
 //! `IPlugView` with `IPlugViewContentScaleSupport`. The host attaches it to
 //! a window of its own and the view opens the editor inside, passing the
-//! handle on as a [`ParentWindow`]; `removed` closes it again. A view may be
+//! handle on as a [`ParentWindow`], and shows it; `removed` hides it and
+//! closes it again. A view may be
 //! attached and removed any number of times, and the host may make several.
 //!
 //! [`ViewHost`] is what the open editor reaches the host through:
@@ -962,6 +963,16 @@ impl ViewState {
         if let Some(preset) = preset.filter(|_| self.busy.granted.get() == granted) {
             self.give_size(preset);
         }
+        // VST 3 has no call that shows a view: once attached, it is on
+        // screen, so the editor is shown now. It hides again at the start
+        // of `removed`.
+        self.with_editor(|editor| editor.set_visible(true));
+        // Closed while it was being shown: the attach failed after all.
+        self.settle();
+        if !self.is_open() || self.attached.get() != Some(api) {
+            self.attached.set(None);
+            return kResultFalse;
+        }
         kResultOk
     }
 
@@ -997,8 +1008,16 @@ impl ViewState {
     }
 
     fn remove(&self) -> tresult {
-        if self.attached.take().is_none() {
+        if self.attached.get().is_none() {
             return kResultFalse;
+        }
+        // Hidden first, as CLAP's `hide` would: it stops the editor's work
+        // before it is dropped. (An editor that is calling out right now
+        // cannot be called; it is dropped as soon as it returns.)
+        self.with_editor(|editor| editor.set_visible(false));
+        if self.attached.take().is_none() {
+            // Removed from inside the editor's own `set_visible`.
+            return kResultOk;
         }
         if self.busy.is_busy() {
             // Not now: the host considers the view removed, and the editor
