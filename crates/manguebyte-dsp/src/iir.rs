@@ -173,6 +173,7 @@ use core::ops::Deref;
 
 use crate::BiquadCoefficients;
 use crate::cascade::{self, Row};
+use crate::curve::CascadeResponse;
 use crate::elliptic::{Elliptic, least_attenuation};
 use crate::fft::Complex;
 use crate::numeric::limit;
@@ -430,6 +431,14 @@ impl Design {
         sections
     }
 
+    /// The frequency response of the filter at `sample_rate`, for
+    /// drawing: that of its [`sections`](Self::sections) as an
+    /// [`IirFilter`](crate::IirFilter) runs them. Real-time safe. See
+    /// [`curve`](crate::curve).
+    pub fn response(&self, sample_rate: f64) -> CascadeResponse {
+        self.sections(sample_rate).response(sample_rate)
+    }
+
     /// The gain the formulas of the family give at `frequency`, for a
     /// filter at `sample_rate`: what [`sections`](Self::sections) should
     /// realise, independently of how it does it.
@@ -556,6 +565,13 @@ impl Sections {
     /// `1e-16` gives 1, which the sections of a design never do.
     pub fn largest_pole_radius(&self) -> f64 {
         self.as_slice().iter().map(pole_radius).fold(0.0, f64::max)
+    }
+
+    /// The frequency response of the sections run at `sample_rate` by a
+    /// [`BiquadCascade`](crate::BiquadCascade) made from them, for
+    /// drawing. See [`curve`](crate::curve).
+    pub fn response(&self, sample_rate: f64) -> CascadeResponse {
+        CascadeResponse::from_rows(self.rows(), sample_rate)
     }
 }
 

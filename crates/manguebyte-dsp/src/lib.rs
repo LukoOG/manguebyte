@@ -30,6 +30,7 @@ mod chorus;
 mod context;
 pub mod convolution;
 mod crossover;
+pub mod curve;
 mod cutoff;
 mod delay;
 mod dynamics;

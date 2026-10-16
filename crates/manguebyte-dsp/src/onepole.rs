@@ -2,6 +2,7 @@ use core::marker::PhantomData;
 
 use manguebyte_core::{AudioBuffer, Sample, Smoothed};
 
+use crate::curve::OnePoleResponse;
 use crate::cutoff::GlidingCutoff;
 use crate::numeric::glide_to;
 use crate::{ProcessSpec, Processor};
@@ -17,6 +18,14 @@ const CUTOFF_GLIDE_SECONDS: f64 = 0.01;
 /// How long a change of mode cross-fades.
 const MODE_FADE_SECONDS: f64 = 0.01;
 
+/// The integrator gain a filter set to `frequency` arrives at, at
+/// `sample_rate`: the same limits and the same arithmetic as the filter.
+pub(crate) fn integrator_gain(frequency: f64, sample_rate: f64) -> f64 {
+    let mut cutoff = GlidingCutoff::new(frequency, LOWEST_HZ, HIGHEST_RATIO, CUTOFF_GLIDE_SECONDS);
+    cutoff.prepare(sample_rate);
+    cutoff.gain()
+}
+
 /// Which response a [`OnePole`] produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OnePoleMode {
@@ -31,7 +40,7 @@ pub enum OnePoleMode {
 
 impl OnePoleMode {
     /// How much of the low-pass and of the high-pass output the mode takes.
-    fn weights(self) -> (f64, f64) {
+    pub(crate) fn weights(self) -> (f64, f64) {
         match self {
             Self::Lowpass => (1.0, 0.0),
             Self::Highpass => (0.0, 1.0),
@@ -209,6 +218,13 @@ impl<S: Sample> OnePole<S> {
     /// limits.
     pub fn frequency(&self) -> f64 {
         self.motion.cutoff.limited()
+    }
+
+    /// The frequency response at the mode and cutoff the filter is at or
+    /// heading for, for drawing. See [`curve`](crate::curve).
+    pub fn response(&self) -> OnePoleResponse {
+        let cutoff = &self.motion.cutoff;
+        OnePoleResponse::from_gain(self.mode, cutoff.target_gain(), cutoff.sample_rate())
     }
 
     /// Filters one sample of one channel with the settings as they stand,

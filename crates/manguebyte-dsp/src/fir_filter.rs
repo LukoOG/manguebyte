@@ -3,6 +3,7 @@ use manguebyte_core::{AudioBuffer, Sample};
 use crate::convolution::{
     ConvolutionEngine, ConvolutionError, ConvolutionRouting, ConvolutionSettings,
 };
+use crate::curve::FirResponse;
 use crate::{ProcessSpec, Processor};
 
 /// How a [`FirFilter`] computes its output.
@@ -183,6 +184,13 @@ impl<S: Sample> FirFilter<S> {
     /// power of two the taps fit in.
     pub fn partition_size(&self) -> usize {
         self.partition
+    }
+
+    /// The frequency response of the coefficients, as they are held in the
+    /// precision of `S`, run at `sample_rate`, for drawing. See
+    /// [`curve`](crate::curve).
+    pub fn response(&self, sample_rate: f64) -> FirResponse<'_, S> {
+        FirResponse::new(&self.coefficients, sample_rate)
     }
 }
 

@@ -3,7 +3,17 @@ use core::marker::PhantomData;
 
 use manguebyte_core::{AudioBuffer, Sample};
 
+use crate::curve::SvfResponse;
+use crate::numeric::limit;
 use crate::{ProcessSpec, Processor};
+
+/// The integrator gain `g` and the damping `k` of a filter at `frequency`
+/// with resonance `q`, at `sample_rate`: the cutoff limited to between
+/// 1 Hz and 0.49 of the sample rate, and `q` to 0.01 or more.
+pub(crate) fn tuning(frequency: f64, q: f64, sample_rate: f64) -> (f64, f64) {
+    let frequency = limit(frequency, 1.0, sample_rate * 0.49);
+    ((PI * frequency / sample_rate).tan(), 1.0 / q.max(0.01))
+}
 
 /// Which response a [`StateVariableFilter`] produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -202,10 +212,24 @@ impl<S: Sample> StateVariableFilter<S> {
         (self.g, self.k)
     }
 
+    /// The frequency response at the current settings, for drawing. See
+    /// [`curve`](crate::curve).
+    ///
+    /// ```
+    /// use manguebyte_dsp::curve::FrequencyResponse;
+    /// use manguebyte_dsp::{ProcessSpec, Processor, StateVariableFilter, SvfMode};
+    ///
+    /// let mut filter = StateVariableFilter::<f32>::new(SvfMode::Lowpass, 1_000.0, 0.707);
+    /// filter.prepare(&ProcessSpec { sample_rate: 48_000.0, max_block_size: 64, num_channels: 1 });
+    /// let response = filter.response();
+    /// assert!((response.phase_at(3_000.0) - filter.phase_response(3_000.0)).abs() < 1e-12);
+    /// ```
+    pub fn response(&self) -> SvfResponse {
+        SvfResponse::from_coefficients(self.mode, self.g, self.k, self.sample_rate)
+    }
+
     fn update(&mut self) {
-        let frequency = self.frequency.clamp(1.0, self.sample_rate * 0.49);
-        self.g = (PI * frequency / self.sample_rate).tan();
-        self.k = 1.0 / self.q.max(0.01);
+        (self.g, self.k) = tuning(self.frequency, self.q, self.sample_rate);
         self.a1 = 1.0 / (1.0 + self.g * (self.g + self.k));
         self.a2 = self.g * self.a1;
         self.a3 = self.g * self.a2;

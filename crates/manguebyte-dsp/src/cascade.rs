@@ -5,6 +5,7 @@ use core::marker::PhantomData;
 
 use manguebyte_core::{AudioBuffer, Sample, Smoothed};
 
+use crate::curve::CascadeResponse;
 use crate::iir::{self, Design, Sections};
 use crate::numeric::limit;
 use crate::{BiquadCoefficients, ProcessSpec, Processor};
@@ -372,6 +373,14 @@ impl<S: Sample> BiquadCascade<S> {
         self.position.is_smoothing()
     }
 
+    /// The frequency response of the sections asked for (where a glide
+    /// arrives) run at `sample_rate`, for drawing: from the form the
+    /// cascade runs them in, so to the last digit. See
+    /// [`curve`](crate::curve).
+    pub fn response(&self, sample_rate: f64) -> CascadeResponse {
+        CascadeResponse::from_rows(&self.rows[..self.len], sample_rate)
+    }
+
     /// Lets go of the sections that went away, on every channel.
     fn arrive(&mut self) {
         for memory in &mut self.state {
@@ -523,6 +532,12 @@ impl<S: Sample> IirFilter<S> {
     /// The sections of the design at the current sample rate.
     pub fn sections(&self) -> &[BiquadCoefficients] {
         self.cascade.sections()
+    }
+
+    /// The frequency response of the design at the sample rate the filter
+    /// was prepared for, for drawing. See [`curve`](crate::curve).
+    pub fn response(&self) -> CascadeResponse {
+        self.cascade.response(self.sample_rate)
     }
 }
 

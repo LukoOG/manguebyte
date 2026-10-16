@@ -2,6 +2,7 @@ use core::f64::consts::TAU;
 
 use manguebyte_core::{AudioBuffer, Sample};
 
+use crate::curve::BiquadResponse;
 use crate::{ProcessSpec, Processor};
 
 /// The response a second-order filter is designed for.
@@ -162,6 +163,20 @@ impl BiquadCoefficients {
 
         ((num_re * num_re + num_im * num_im) / (den_re * den_re + den_im * den_im)).sqrt()
     }
+
+    /// The coefficients rounded to the precision of `S`, as a
+    /// [`Biquad<S>`](Biquad) holds them.
+    #[must_use]
+    pub fn rounded_to<S: Sample>(&self) -> Self {
+        let round = |c: f64| S::from_f64(c).to_f64();
+        Self {
+            b0: round(self.b0),
+            b1: round(self.b1),
+            b2: round(self.b2),
+            a1: round(self.a1),
+            a2: round(self.a2),
+        }
+    }
 }
 
 /// A second-order filter section driven by raw [`BiquadCoefficients`].
@@ -201,6 +216,23 @@ impl<S: Sample> Biquad<S> {
         self.b2 = S::from_f64(coefficients.b2);
         self.a1 = S::from_f64(coefficients.a1);
         self.a2 = S::from_f64(coefficients.a2);
+    }
+
+    /// The coefficients in use, in the precision of `S` they are held in.
+    pub fn coefficients(&self) -> BiquadCoefficients {
+        BiquadCoefficients {
+            b0: self.b0.to_f64(),
+            b1: self.b1.to_f64(),
+            b2: self.b2.to_f64(),
+            a1: self.a1.to_f64(),
+            a2: self.a2.to_f64(),
+        }
+    }
+
+    /// The frequency response of the section run at `sample_rate`, from
+    /// the coefficients in use, for drawing. See [`curve`](crate::curve).
+    pub fn response(&self, sample_rate: f64) -> BiquadResponse {
+        BiquadResponse::new(self.coefficients(), sample_rate)
     }
 }
 
@@ -282,6 +314,22 @@ impl<S: Sample> Filter<S> {
     /// The coefficients currently in use.
     pub fn coefficients(&self) -> BiquadCoefficients {
         BiquadCoefficients::design(self.shape, self.sample_rate, self.frequency, self.q)
+    }
+
+    /// The frequency response the filter runs, for drawing: that of its
+    /// coefficients as they are held, in the precision of `S`, at the
+    /// sample rate it was prepared for. See [`curve`](crate::curve).
+    ///
+    /// ```
+    /// use manguebyte_dsp::curve::FrequencyResponse;
+    /// use manguebyte_dsp::{Filter, FilterShape, ProcessSpec, Processor};
+    ///
+    /// let mut filter = Filter::<f32>::new(FilterShape::Lowpass, 1_000.0, 0.707);
+    /// filter.prepare(&ProcessSpec { sample_rate: 48_000.0, max_block_size: 64, num_channels: 1 });
+    /// assert!((filter.response().magnitude_db_at(1_000.0) + 3.01).abs() < 0.01);
+    /// ```
+    pub fn response(&self) -> BiquadResponse {
+        self.biquad.response(self.sample_rate)
     }
 
     fn update(&mut self) {

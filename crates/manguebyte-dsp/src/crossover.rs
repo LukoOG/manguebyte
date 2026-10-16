@@ -5,6 +5,7 @@ use core::f64::consts::{PI, SQRT_2};
 
 use manguebyte_core::{AudioBuffer, Sample};
 
+use crate::curve::CrossoverResponse;
 use crate::cutoff::GlidingCutoff;
 use crate::{ProcessSpec, Processor};
 
@@ -21,12 +22,26 @@ const OCTAVES_PER_PERIOD: f64 = 0.1;
 const OCTAVES_PER_SECOND: f64 = 50.0;
 
 /// Most crossover frequencies, one fewer than the most bands.
-const MAX_SPLITS: usize = 4;
+pub(crate) const MAX_SPLITS: usize = 4;
 
 /// The damping of the two second-order factors of a fourth-order
 /// Butterworth polynomial: `2·sin(π/8)` and `2·sin(3π/8)`.
-fn butterworth_4_damping() -> [f64; 2] {
+pub(crate) fn butterworth_4_damping() -> [f64; 2] {
     [2.0 * (PI / 8.0).sin(), 2.0 * (3.0 * PI / 8.0).sin()]
+}
+
+/// A crossover frequency at `hz`, with its limits and its pace.
+fn split_cutoff(hz: f64) -> GlidingCutoff {
+    GlidingCutoff::new(hz, LOWEST_HZ, HIGHEST_RATIO, GLIDE_SECONDS)
+        .with_pace_limit(OCTAVES_PER_PERIOD, OCTAVES_PER_SECOND)
+}
+
+/// The integrator gain a crossover frequency set to `hz` arrives at, at
+/// `sample_rate`: the same limits and the same arithmetic as the crossover.
+pub(crate) fn integrator_gain(hz: f64, sample_rate: f64) -> f64 {
+    let mut cutoff = split_cutoff(hz);
+    cutoff.prepare(sample_rate);
+    cutoff.gain()
 }
 
 /// How steep a [`Crossover`] is.
@@ -266,13 +281,9 @@ impl<S: Sample> Crossover<S> {
     /// has no bands to write to.
     pub fn new(slope: CrossoverSlope, frequencies: &[f64]) -> Self {
         let splits = frequencies.len().min(MAX_SPLITS);
-        let cutoff = |hz: f64| {
-            GlidingCutoff::new(hz, LOWEST_HZ, HIGHEST_RATIO, GLIDE_SECONDS)
-                .with_pace_limit(OCTAVES_PER_PERIOD, OCTAVES_PER_SECOND)
-        };
-        let mut cutoffs = [cutoff(1_000.0); MAX_SPLITS];
+        let mut cutoffs = [split_cutoff(1_000.0); MAX_SPLITS];
         for (slot, &hz) in cutoffs.iter_mut().zip(&frequencies[..splits]) {
-            *slot = cutoff(hz);
+            *slot = split_cutoff(hz);
         }
         let damping = match slope {
             CrossoverSlope::Lr2 => [2.0, 2.0],
@@ -320,6 +331,25 @@ impl<S: Sample> Crossover<S> {
     /// How many bands [`split`](Self::split) writes.
     pub fn num_bands(&self) -> usize {
         self.splits + 1
+    }
+
+    /// The frequency response of the sum of the bands, which is what the
+    /// crossover puts out as a [`Processor`], at the frequencies it is at
+    /// or heading for, for drawing. See [`curve`](crate::curve).
+    pub fn response(&self) -> CrossoverResponse {
+        let mut gains = [1.0; MAX_SPLITS];
+        for (gain, cutoff) in gains.iter_mut().zip(&self.cutoffs[..self.splits]) {
+            *gain = cutoff.target_gain();
+        }
+        let rate = self.cutoffs[0].sample_rate();
+        CrossoverResponse::from_gains(self.slope, &gains[..self.splits], rate)
+    }
+
+    /// The frequency response of band `index`, from the lowest, or `None`
+    /// for a band the crossover does not have. See
+    /// [`response`](Self::response).
+    pub fn band_response(&self, index: usize) -> Option<CrossoverResponse> {
+        self.response().band(index)
     }
 
     /// Band `index`, from the lowest, as the last [`split`](Self::split)

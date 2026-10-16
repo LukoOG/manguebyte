@@ -164,6 +164,17 @@ impl GlidingCutoff {
         self.g
     }
 
+    /// The integrator gain where the glide arrives: the one
+    /// [`snap`](Self::snap) jumps to.
+    pub(crate) fn target_gain(&self) -> f64 {
+        self.gain_at(self.limited().log2())
+    }
+
+    /// The sample rate the cutoff was prepared for.
+    pub(crate) fn sample_rate(&self) -> f64 {
+        self.sample_rate
+    }
+
     /// Moves on by one sample and returns the integrator gain for it.
     #[inline]
     pub(crate) fn next_gain(&mut self) -> f64 {

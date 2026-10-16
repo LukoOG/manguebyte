@@ -2,6 +2,7 @@ use core::marker::PhantomData;
 
 use manguebyte_core::{AudioBuffer, Sample, Smoothed};
 
+use crate::curve::LadderResponse;
 use crate::cutoff::GlidingCutoff;
 use crate::numeric::{glide_to, limit};
 use crate::{ProcessSpec, Processor};
@@ -32,6 +33,35 @@ const MAX_ITERATIONS: usize = 12;
 const CONVERGED: f64 = 1e-9;
 /// Largest input to the saturator that is told apart from a larger one.
 const LARGEST_ARGUMENT: f64 = 1e30;
+
+/// The integrator gain a filter set to `frequency` arrives at, at
+/// `sample_rate`: the same limits and the same arithmetic as the filter.
+pub(crate) fn integrator_gain(frequency: f64, sample_rate: f64) -> f64 {
+    let mut cutoff = GlidingCutoff::new(frequency, LOWEST_HZ, HIGHEST_RATIO, CUTOFF_GLIDE_SECONDS);
+    cutoff.prepare(sample_rate);
+    cutoff.gain()
+}
+
+/// The gain of the feedback around the four stages for a resonance that
+/// is already limited.
+pub(crate) fn feedback(resonance: f64) -> f64 {
+    SELF_OSCILLATION * resonance
+}
+
+/// A drive in decibels as the filter keeps it: limited to `-24.0..=48.0`,
+/// with not-a-number taken as 0 dB.
+pub(crate) fn limited_drive_db(db: f64) -> f64 {
+    if db.is_nan() {
+        0.0
+    } else {
+        limit(db, MIN_DRIVE_DB, MAX_DRIVE_DB)
+    }
+}
+
+/// The plain gain of a drive in decibels.
+pub(crate) fn drive_gain(db: f64) -> f64 {
+    10f64.powf(db / 20.0)
+}
 
 /// Which response a [`LadderFilter`] produces.
 ///
@@ -440,18 +470,14 @@ impl<S: Sample> LadderFilter<S> {
     /// self-oscillation at 1. Real-time safe.
     pub fn set_resonance(&mut self, resonance: f64) {
         self.resonance = limit(resonance, 0.0, 1.0);
-        glide_to(&mut self.motion.feedback, SELF_OSCILLATION * self.resonance);
+        glide_to(&mut self.motion.feedback, feedback(self.resonance));
     }
 
     /// Sets the gain in front of the saturator, in decibels, limited to
     /// `-24.0..=48.0`. Real-time safe.
     pub fn set_drive_db(&mut self, db: f64) {
-        self.drive_db = if db.is_nan() {
-            0.0
-        } else {
-            limit(db, MIN_DRIVE_DB, MAX_DRIVE_DB)
-        };
-        glide_to(&mut self.motion.drive, 10f64.powf(self.drive_db / 20.0));
+        self.drive_db = limited_drive_db(db);
+        glide_to(&mut self.motion.drive, drive_gain(self.drive_db));
     }
 
     /// Builder form of [`set_resonance`](Self::set_resonance).
@@ -487,6 +513,21 @@ impl<S: Sample> LadderFilter<S> {
     /// The drive in decibels, as last set and limited.
     pub fn drive_db(&self) -> f64 {
         self.drive_db
+    }
+
+    /// The frequency response of the linear model at the settings the
+    /// filter is at or heading for, for drawing: what a signal well below
+    /// the level of the saturator gets. See [`LadderResponse`] and
+    /// [`curve`](crate::curve).
+    pub fn response(&self) -> LadderResponse {
+        let cutoff = &self.motion.cutoff;
+        LadderResponse::from_parts(
+            self.mode,
+            cutoff.target_gain(),
+            feedback(self.resonance),
+            drive_gain(self.drive_db),
+            cutoff.sample_rate(),
+        )
     }
 
     /// Filters one sample of one channel with the settings as they stand,
