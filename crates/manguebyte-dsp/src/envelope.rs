@@ -1,5 +1,6 @@
 use manguebyte_core::{AudioBuffer, Sample};
 
+use crate::curve::EnvelopeShape;
 use crate::{ProcessSpec, Processor};
 
 /// Timing and level settings of an [`Adsr`] envelope.
@@ -13,6 +14,14 @@ pub struct AdsrParams {
     pub sustain: f64,
     /// Seconds to fall from the sustain level to silence.
     pub release: f64,
+}
+
+impl AdsrParams {
+    /// The shape of the envelope for a note held for `gate_seconds`, for
+    /// drawing. See [`EnvelopeShape`] and [`curve`](crate::curve).
+    pub fn shape(&self, gate_seconds: f64) -> EnvelopeShape {
+        EnvelopeShape::new(*self, gate_seconds)
+    }
 }
 
 impl Default for AdsrParams {
@@ -68,6 +77,17 @@ impl Adsr {
     /// Replaces the settings. Takes effect from the next sample.
     pub fn set_params(&mut self, params: AdsrParams) {
         self.params = params;
+    }
+
+    /// The settings.
+    pub fn params(&self) -> AdsrParams {
+        self.params
+    }
+
+    /// The shape of the envelope for a note held for `gate_seconds`, for
+    /// drawing. See [`EnvelopeShape`] and [`curve`](crate::curve).
+    pub fn shape(&self, gate_seconds: f64) -> EnvelopeShape {
+        self.params.shape(gate_seconds)
     }
 
     /// Changes the sample rate in hertz.

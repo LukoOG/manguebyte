@@ -2,6 +2,7 @@ use core::f64::consts::TAU;
 
 use manguebyte_core::{AudioBuffer, Sample, Smoothed};
 
+use crate::curve::ChorusSweep;
 use crate::delay::DelayLine;
 use crate::numeric::{glide_to, limit, step_towards};
 use crate::{ProcessSpec, Processor};
@@ -25,7 +26,24 @@ const MAX_FEEDBACK: f64 = 0.95;
 
 /// Shortest delay a voice reads at, in samples: the least at which the cubic
 /// interpolation has a sample on either side of its middle two.
-const MIN_DELAY: f64 = 2.0;
+pub(crate) const MIN_DELAY: f64 = 2.0;
+
+/// The length of the delay lines at `sample_rate`, in samples: the longest
+/// delay the settings allow, and room for the cubic read on its far side.
+pub(crate) fn longest_delay(sample_rate: f64) -> usize {
+    let longest = (MAX_CENTRE_MS + MAX_DEPTH_MS) * sample_rate / 1_000.0;
+    longest.ceil().max(0.0) as usize + 4
+}
+
+/// A centre delay, a depth (both in milliseconds) and a rate as the
+/// setters limit them.
+pub(crate) fn limited(centre_ms: f64, depth_ms: f64, rate_hz: f64) -> (f64, f64, f64) {
+    (
+        limit(centre_ms, 0.0, MAX_CENTRE_MS),
+        limit(depth_ms, 0.0, MAX_DEPTH_MS),
+        limit(rate_hz, 0.0, MAX_RATE_HZ),
+    )
+}
 
 /// How long a change of delay, depth, spread or voice count takes.
 const DELAY_GLIDE_SECONDS: f64 = 0.05;
@@ -365,6 +383,26 @@ impl<S: Sample> Chorus<S> {
         self.voices
     }
 
+    /// How the delay of voice `voice` on channel `channel` sweeps over one
+    /// cycle, at the settings the chorus is at or heading for, for drawing;
+    /// `None` for a voice beyond [`voices`](Self::voices). The channel's
+    /// place in the spread counts the channels the chorus was prepared for.
+    /// See [`ChorusSweep`] and [`curve`](crate::curve).
+    pub fn sweep(&self, voice: usize, channel: usize) -> Option<ChorusSweep> {
+        if voice >= self.voices {
+            return None;
+        }
+        let channels = self.lines.len().max(1) as f64;
+        Some(ChorusSweep::from_samples(
+            self.rate_hz,
+            self.centre_samples(),
+            self.depth_samples(),
+            self.spread_cycles() * (channel as f64 / channels),
+            VOICE_PHASES[voice],
+            self.sample_rate,
+        ))
+    }
+
     fn centre_samples(&self) -> f64 {
         self.centre_ms * self.sample_rate / 1_000.0
     }
@@ -407,9 +445,7 @@ impl<S: Sample> Processor<S> for Chorus<S> {
         let glide = DELAY_GLIDE_SECONDS * spec.sample_rate;
         self.fade_step = if glide >= 1.0 { 1.0 / glide } else { 1.0 };
 
-        let longest = (MAX_CENTRE_MS + MAX_DEPTH_MS) * spec.sample_rate / 1_000.0;
-        // Room for the cubic read on the far side of the longest delay.
-        let longest = longest.ceil().max(0.0) as usize + 4;
+        let longest = longest_delay(spec.sample_rate);
         self.lines = (0..spec.num_channels)
             .map(|_| DelayLine::new(longest))
             .collect();

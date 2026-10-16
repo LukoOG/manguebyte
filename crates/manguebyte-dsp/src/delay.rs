@@ -1,5 +1,6 @@
 use manguebyte_core::{AudioBuffer, Sample};
 
+use crate::curve::DelayTaps;
 use crate::numeric::limit;
 use crate::{ProcessSpec, Processor};
 
@@ -374,6 +375,30 @@ impl<S: Sample> Delay<S> {
     pub fn with_interpolation(mut self, interpolation: DelayInterpolation) -> Self {
         self.set_interpolation(interpolation);
         self
+    }
+
+    /// The dry signal and the echoes, with their times and gains, for
+    /// drawing. The delay time is the one the delay line reads at the
+    /// sample rate the delay was prepared for: within the line's limits,
+    /// and rounded to a whole sample without interpolation. See
+    /// [`DelayTaps`] and [`curve`](crate::curve).
+    pub fn taps(&self) -> DelayTaps {
+        let longest = (self.max_seconds * self.sample_rate).ceil().max(1.0) as usize as f64;
+        let delay = self.time_seconds * self.sample_rate;
+        let delay = match self.interpolation {
+            DelayInterpolation::None => (limit(delay, 1.0, longest) + 0.5) as usize as f64,
+            DelayInterpolation::Linear | DelayInterpolation::Cubic => limit(delay, 1.0, longest),
+            DelayInterpolation::Thiran => {
+                limit(delay, THIRAN_MIN_DELAY, longest.max(THIRAN_MIN_DELAY))
+            }
+        };
+        DelayTaps::from_parts(
+            delay,
+            self.feedback.to_f64(),
+            self.mix.to_f64(),
+            (S::ONE - self.mix).to_f64(),
+            self.sample_rate,
+        )
     }
 }
 

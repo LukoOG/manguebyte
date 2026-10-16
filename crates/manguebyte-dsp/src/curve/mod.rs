@@ -32,13 +32,20 @@
 //! | [`NoiseGate`](crate::NoiseGate) | [`GateTransfer`] | output level against input level |
 //! | [`Limiter`](crate::Limiter) | [`LimiterTransfer`] | output level against input level |
 //! | [`Waveshaper`](crate::Waveshaper), [`ShaperCurve`](crate::ShaperCurve) | themselves | output value against input value |
+//! | [`Adsr`](crate::Adsr), [`AdsrParams`](crate::AdsrParams) | [`EnvelopeShape`] | level against time |
+//! | [`Lfo`](crate::Lfo) | [`LfoCycle`] | one cycle |
+//! | [`Chorus`](crate::Chorus) (and its flanger) | [`ChorusSweep`] | the delay of a voice over one cycle |
+//! | [`Phaser`](crate::Phaser) | [`PhaserSweep`] | the frequency of the stages over one cycle |
+//! | [`Delay`](crate::Delay) | [`DelayTaps`] | the time and gain of each echo |
+//! | [`Reverb`](crate::Reverb) | [`ReverbDecay`] | decay time against frequency, and level against time |
 //!
 //! Every continuous curve implements [`Curve`]: a [`CurveSpec`] that says
 //! what the axes are (their [`Unit`], [`Scale`] and a suggested range) and
 //! the value at any point of the horizontal axis. Frequency responses
 //! implement [`FrequencyResponse`], which gives the complex response, and
 //! become curves through [`magnitude`](FrequencyResponse::magnitude) and
-//! [`phase`](FrequencyResponse::phase).
+//! [`phase`](FrequencyResponse::phase). A [`DelayTaps`] is a set of points
+//! rather than a curve, drawn as stems.
 //!
 //! # Threads
 //!
@@ -79,11 +86,15 @@
 //! ```
 
 mod frequency;
+mod time;
 mod transfer;
 
 pub use frequency::{
     BiquadResponse, CascadeResponse, CrossoverResponse, FirResponse, LadderResponse,
     OnePoleResponse, SvfResponse,
+};
+pub use time::{
+    ChorusSweep, DelayTaps, EnvelopeShape, LfoCycle, PhaserSweep, ReverbDecay, ReverbEnergy,
 };
 pub use transfer::{CompressorTransfer, ExpanderTransfer, GateTransfer, LimiterTransfer};
 

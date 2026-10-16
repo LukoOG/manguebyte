@@ -3,6 +3,7 @@ use core::marker::PhantomData;
 
 use manguebyte_core::{AudioBuffer, Sample, Smoothed};
 
+use crate::curve::PhaserSweep;
 use crate::numeric::{glide_to, limit, step_towards};
 use crate::{ProcessSpec, Processor};
 
@@ -11,10 +12,20 @@ const MIN_STAGES: usize = 2;
 const MAX_STAGES: usize = 12;
 
 /// Limits of the settings.
-const MIN_HZ: f64 = 10.0;
+pub(crate) const MIN_HZ: f64 = 10.0;
 const MAX_CENTRE_HZ: f64 = 20_000.0;
 const MAX_DEPTH_OCTAVES: f64 = 6.0;
 const MAX_RATE_HZ: f64 = 100.0;
+
+/// A centre frequency, a depth in octaves and a rate as the setters limit
+/// them.
+pub(crate) fn limited(centre_hz: f64, depth_octaves: f64, rate_hz: f64) -> (f64, f64, f64) {
+    (
+        limit(centre_hz, MIN_HZ, MAX_CENTRE_HZ),
+        limit(depth_octaves, 0.0, MAX_DEPTH_OCTAVES),
+        limit(rate_hz, 0.0, MAX_RATE_HZ),
+    )
+}
 const MAX_FEEDBACK: f64 = 0.95;
 
 /// How long a change of centre frequency, depth, spread or stage count
@@ -397,6 +408,21 @@ impl<S: Sample> Phaser<S> {
     /// The number of stages, as last set.
     pub fn stages(&self) -> usize {
         self.stages
+    }
+
+    /// How the frequency of the stages on channel `channel` sweeps over one
+    /// cycle, at the settings the phaser is at or heading for, for drawing.
+    /// The channel's place in the spread counts the channels the phaser was
+    /// prepared for. See [`PhaserSweep`] and [`curve`](crate::curve).
+    pub fn sweep(&self, channel: usize) -> PhaserSweep {
+        let channels = self.channels.len().max(1) as f64;
+        PhaserSweep::from_parts(
+            self.rate_hz,
+            self.centre_hz.log2(),
+            self.depth_octaves,
+            self.spread * (channel as f64 / channels),
+            self.sample_rate,
+        )
     }
 
     /// Jumps every gliding value to where it is heading.

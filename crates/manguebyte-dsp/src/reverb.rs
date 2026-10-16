@@ -2,10 +2,11 @@ use core::marker::PhantomData;
 
 use manguebyte_core::{AudioBuffer, Sample};
 
+use crate::curve::ReverbDecay;
 use crate::{ProcessSpec, Processor};
 
 /// Number of delay lines in the feedback network.
-const LINES: usize = 8;
+pub(crate) const LINES: usize = 8;
 
 /// Delay line lengths in samples at 48 kHz and size 1: primes spread between
 /// about 21 and 50 ms, so their echoes never line up into a repeating
@@ -22,6 +23,22 @@ const LEFT_TAPS: [f64; LINES] = [1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0];
 const RIGHT_TAPS: [f64; LINES] = [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0];
 
 const SIZE_RANGE: (f64, f64) = (0.4, 1.6);
+
+/// The lengths of the delay lines, in samples, for a `size` at
+/// `sample_rate`. (A line is never shorter than one sample, nor longer than
+/// the room [`Reverb::prepare`](Processor::prepare) makes for it, which
+/// fits the largest size.)
+pub(crate) fn line_lengths(size: f64, sample_rate: f64) -> [usize; LINES] {
+    let scale = sample_rate / 48_000.0 * (SIZE_RANGE.0 + (SIZE_RANGE.1 - SIZE_RANGE.0) * size);
+    LINE_LENGTHS.map(|base| ((base as f64 * scale).round() as usize).max(1))
+}
+
+/// The pole of the low-pass filter in each loop, for a `damping`. Kept
+/// below one so that even full damping lets the lowest frequencies ring for
+/// the whole decay time.
+pub(crate) fn damping_pole(damping: f64) -> f64 {
+    0.75 * damping
+}
 
 /// A circular buffer read and written at the same position, giving a delay
 /// equal to its active length.
@@ -222,11 +239,23 @@ impl<S: Sample> Reverb<S> {
     }
 
     fn update_lengths(&mut self) {
-        let scale = self.rate_scale() * (SIZE_RANGE.0 + (SIZE_RANGE.1 - SIZE_RANGE.0) * self.size);
-        for (line, &base) in self.lines.iter_mut().zip(&LINE_LENGTHS) {
-            line.set_len((base as f64 * scale).round() as usize);
+        let lengths = line_lengths(self.size, self.sample_rate);
+        for (line, len) in self.lines.iter_mut().zip(lengths) {
+            line.set_len(len);
         }
         self.update_gains();
+    }
+
+    /// How the tail dies away at each frequency, for drawing: computed from
+    /// the decay time, the damping, the size and the sample rate the reverb
+    /// was prepared for. See [`ReverbDecay`] and [`curve`](crate::curve).
+    pub fn decay(&self) -> ReverbDecay {
+        ReverbDecay::from_parts(
+            self.decay_seconds,
+            self.damping,
+            self.size,
+            self.sample_rate,
+        )
     }
 
     fn update_gains(&mut self) {
@@ -262,9 +291,7 @@ impl<S: Sample> Processor<S> for Reverb<S> {
             return;
         }
         let stereo = channels >= 2;
-        // The pole of the damping filter. Kept below one so that even full
-        // damping lets the lowest frequencies ring for the whole decay time.
-        let pole = 0.75 * self.damping;
+        let pole = damping_pole(self.damping);
         let wet_gain = self.mix * 0.35;
         let dry_gain = 1.0 - self.mix;
         // Width blends each side's wet signal with the other's.

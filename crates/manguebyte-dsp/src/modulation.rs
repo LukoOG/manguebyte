@@ -2,6 +2,7 @@ use core::f64::consts::TAU;
 
 use manguebyte_core::{AudioBuffer, Sample};
 
+use crate::curve::LfoCycle;
 use crate::{ProcessSpec, Processor};
 
 /// The shape of an [`Lfo`].
@@ -19,6 +20,32 @@ pub enum LfoShape {
     Square,
     /// A new random level each cycle, held until the next.
     SampleAndHold,
+}
+
+impl LfoShape {
+    /// The value of the shape at `phase`, from 0 at the start of a cycle up
+    /// to but not including 1, from -1 to 1.
+    ///
+    /// A [`SampleAndHold`](Self::SampleAndHold) holds a random level drawn
+    /// at the start of each cycle, which only an [`Lfo`] knows; for it this
+    /// gives 0, the middle of the range the levels are drawn from.
+    #[inline]
+    pub fn value_at(self, phase: f64) -> f64 {
+        match self {
+            Self::Sine => (TAU * phase).sin(),
+            Self::Triangle => 4.0 * (phase - 0.5).abs() - 1.0,
+            Self::SawUp => 2.0 * phase - 1.0,
+            Self::SawDown => 1.0 - 2.0 * phase,
+            Self::Square => {
+                if phase < 0.5 {
+                    1.0
+                } else {
+                    -1.0
+                }
+            }
+            Self::SampleAndHold => 0.0,
+        }
+    }
 }
 
 /// A low-frequency oscillator: a slow, repeating control signal for vibrato,
@@ -108,20 +135,19 @@ impl Lfo {
 
     /// The value at the current position, from -1 to 1, without advancing.
     pub fn value(&self) -> f64 {
-        let phase = self.phase;
         match self.shape {
-            LfoShape::Sine => (TAU * phase).sin(),
-            LfoShape::Triangle => 4.0 * (phase - 0.5).abs() - 1.0,
-            LfoShape::SawUp => 2.0 * phase - 1.0,
-            LfoShape::SawDown => 1.0 - 2.0 * phase,
-            LfoShape::Square => {
-                if phase < 0.5 {
-                    1.0
-                } else {
-                    -1.0
-                }
-            }
             LfoShape::SampleAndHold => self.held,
+            shape => shape.value_at(self.phase),
+        }
+    }
+
+    /// One cycle of the shape, for drawing; a sample-and-hold is drawn at
+    /// the level it holds now. See [`LfoCycle`] and
+    /// [`curve`](crate::curve).
+    pub fn cycle(&self) -> LfoCycle {
+        match self.shape {
+            LfoShape::SampleAndHold => LfoCycle::holding(self.shape, self.held),
+            shape => LfoCycle::new(shape),
         }
     }
 
