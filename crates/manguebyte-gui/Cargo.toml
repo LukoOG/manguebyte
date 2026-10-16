@@ -30,7 +30,9 @@ headless = []
 
 [dev-dependencies]
 # The crate's own tests use the headless mode.
-manguebyte-gui = { workspace = true, features = ["headless"] }
+# A path, not the workspace entry: cargo drops path-only dev-dependencies
+# when it publishes, and a crate cannot depend on itself from crates.io.
+manguebyte-gui = { path = ".", features = ["headless"] }
 # Real windows for the Win32 tests of the glue.
 manguebyte-window = { workspace = true, features = ["testing"] }
 # The test plugins and the wrappers they are driven through.

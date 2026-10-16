@@ -37,7 +37,9 @@ testing = []
 
 [dev-dependencies]
 # The crate's own tests and the probe use the testing helpers.
-manguebyte-window = { workspace = true, features = ["testing"] }
+# A path, not the workspace entry: cargo drops path-only dev-dependencies
+# when it publishes, and a crate cannot depend on itself from crates.io.
+manguebyte-window = { path = ".", features = ["testing"] }
 
 [lints]
 workspace = true
