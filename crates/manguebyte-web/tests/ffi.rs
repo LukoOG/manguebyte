@@ -309,7 +309,18 @@ fn hostile_calls_in_random_orders_never_break_the_engine() {
                 let part = (roll >> 8) as u32 % 9;
                 match roll % 10 {
                     0 => {
-                        let kind = (roll >> 16) as u32 % (InstrumentKind::ALL.len() as u32 + 1);
+                        // Under Miri, the four kinds that render cheaply,
+                        // and an unknown code: what Miri checks here is the
+                        // exports' pointers, the same for every kind.
+                        let known = if cfg!(miri) {
+                            4
+                        } else {
+                            InstrumentKind::ALL.len() as u32
+                        };
+                        let kind = match (roll >> 16) as u32 % (known + 1) {
+                            code if code == known => InstrumentKind::ALL.len() as u32,
+                            code => code,
+                        };
                         let chain =
                             [0, 1, 2, 3, Chain::ALL_BITS, 1 << 13][(roll >> 20) as usize % 6];
                         let result = ffi::mb_create_part(engine, part, kind, chain);
