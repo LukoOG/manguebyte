@@ -99,6 +99,8 @@ impl Root {
         if self.menus.is_some() {
             self.close_menus(MenuEvent::Closed);
         }
+        // No tooltip over a menu: menus are added after it otherwise.
+        self.quiet_tooltip();
         // The menu has the pointer from now on.
         if let Some(holder) = self.capture {
             self.deliver(holder, |widget, cx| widget.event(cx, &Event::PointerCancel));
@@ -168,7 +170,7 @@ impl Root {
 
     /// Removes the nodes from `cut` on, keeping what they covered as
     /// damage for the next frame, and lets go of what pointed at them.
-    fn cut_tree(&mut self, cut: usize) {
+    pub(super) fn cut_tree(&mut self, cut: usize) {
         for node in self.tree.nodes.get(cut..).unwrap_or_default() {
             self.removed.extend(node.painted);
         }
@@ -556,6 +558,7 @@ impl Root {
                 return self.event(event);
             }
             Event::PointerCancel
+            | Event::PointerLeave
             | Event::Wheel { .. }
             | Event::Composition(_)
             | Event::Focus(true)

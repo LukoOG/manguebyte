@@ -56,6 +56,8 @@ pub enum Role {
     MenuItem,
     /// A line between groups of items in a menu.
     Separator,
+    /// Help text shown near the pointer: its name is the text.
+    Tooltip,
 }
 
 /// The range of a widget's numeric value.
@@ -182,6 +184,9 @@ pub struct AccessNode {
     pub state: AccessState,
     /// What it can be asked to do.
     pub actions: Actions,
+    /// What it is for, in a sentence, as help text: what a tooltip shows
+    /// (see [`IntoView::tooltip`](crate::IntoView::tooltip)).
+    pub description: Option<String>,
 }
 
 impl AccessNode {
@@ -196,7 +201,15 @@ impl AccessNode {
             range: None,
             state: AccessState::default(),
             actions: Actions::NONE,
+            description: None,
         }
+    }
+
+    /// The same node with `description` as its help text.
+    #[must_use]
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
     }
 
     /// The same node with its value as text.

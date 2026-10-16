@@ -36,6 +36,7 @@ pub struct View {
     pub(crate) style: Style,
     pub(crate) children: Vec<View>,
     pub(crate) name: Option<String>,
+    pub(crate) tooltip: Option<String>,
 }
 
 impl View {
@@ -46,6 +47,7 @@ impl View {
             style: Style::leaf(),
             children: Vec::new(),
             name: None,
+            tooltip: None,
         }
     }
 
@@ -56,6 +58,7 @@ impl View {
             style,
             children: children.into_children(),
             name: None,
+            tooltip: None,
         }
     }
 
@@ -168,6 +171,35 @@ pub trait IntoView: Sized {
     fn named(self, name: impl Into<String>) -> View {
         let mut view = self.into_view();
         view.name = Some(name.into());
+        view
+    }
+
+    /// Help text, shown in a tooltip once the pointer has rested on the
+    /// view, or on a widget inside it, for
+    /// [`TOOLTIP_DELAY`](crate::TOOLTIP_DELAY), and given to assistive
+    /// technology as the view's description, shown or not.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use manguebyte_gfx::Size;
+    /// use manguebyte_ui::testing::Harness;
+    /// use manguebyte_ui::{IntoView, Role, TOOLTIP_DELAY, label};
+    ///
+    /// let view = label("Drive").tooltip("How hard the signal hits the clipper");
+    /// let mut ui = Harness::new(view, Size::new(200.0, 80.0), 1.0);
+    /// ui.frame();
+    /// let drive = ui.get(Role::Label, "Drive");
+    /// assert_eq!(
+    ///     drive.node.description.as_deref(),
+    ///     Some("How hard the signal hits the clipper")
+    /// );
+    /// ui.move_to(drive.center());
+    /// ui.advance(TOOLTIP_DELAY + Duration::from_millis(20));
+    /// assert!(ui.find(Role::Tooltip, "How hard the signal hits the clipper").is_some());
+    /// ```
+    fn tooltip(self, text: impl Into<String>) -> View {
+        let mut view = self.into_view();
+        view.tooltip = Some(text.into());
         view
     }
 }

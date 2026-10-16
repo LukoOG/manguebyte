@@ -377,7 +377,11 @@ impl Shared {
                 _ => Handled::No,
             }
         });
-        self.follow_typing(window);
+        // A move neither starts nor ends typing or a menu, and comes often:
+        // asking the interface costs a description of the focused widget.
+        if !matches!(event, ui::Event::PointerMove { .. }) {
+            self.follow_typing(window);
+        }
         handled.unwrap_or(Handled::No)
     }
 
@@ -457,6 +461,7 @@ fn to_ui(event: Event) -> Option<ui::Event> {
             modifiers: pointer.modifiers,
         },
         Event::PointerCancel => ui::Event::PointerCancel,
+        Event::PointerLeave => ui::Event::PointerLeave,
         Event::Wheel { pointer, delta } => ui::Event::Wheel {
             at: pointer.position,
             delta,
@@ -465,8 +470,7 @@ fn to_ui(event: Event) -> Option<ui::Event> {
         Event::Key { key, .. } => ui::Event::Key(key),
         Event::Text(c) => ui::Event::Text(c),
         Event::Focus(gained) => ui::Event::Focus(gained),
-        // The pointer leaving and everything else mean nothing to the
-        // interface.
+        // Everything else means nothing to the interface.
         _ => return None,
     })
 }

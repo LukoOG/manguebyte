@@ -8,8 +8,10 @@ use std::time::Duration;
 use manguebyte_gfx::{Color, IRect, Pixmap, Point, Rect, Renderer, Scene, Size};
 use manguebyte_plugin::editor::{EditorContext, MAX_SCALE, MIN_SCALE};
 
+mod hover;
 mod menus;
 
+pub use hover::TOOLTIP_DELAY;
 pub(crate) use menus::{Anchor, MenuRequest};
 
 use crate::access::{AccessEntry, Action};
@@ -149,6 +151,16 @@ pub struct Root {
     removed: Vec<IRect>,
     /// Where the pointer was last.
     pointer: Option<Point>,
+    /// The widget under the pointer while no button is held.
+    hover: Option<NodeId>,
+    /// A button is held: the hovered widget stays as it is until it is let
+    /// go.
+    pressed: bool,
+    /// The tooltip waiting to show, or showing.
+    tip: Option<hover::Tip>,
+    /// The widget whose tooltip a press or a key took away, until the
+    /// pointer leaves it.
+    tip_quiet: Option<NodeId>,
     /// Set while a widget hears that it gained or lost the focus: what it
     /// asks for the focus then is not done, so that focus cannot bounce.
     notifying: bool,
@@ -226,6 +238,10 @@ impl Root {
             menus: None,
             removed: Vec::new(),
             pointer: None,
+            hover: None,
+            pressed: false,
+            tip: None,
+            tip_quiet: None,
             notifying: false,
             needs_layout: true,
             full: true,
@@ -393,6 +409,9 @@ impl Root {
         if let Some(name) = &node.name {
             access.name.clone_from(name);
         }
+        if let Some(tooltip) = &node.tooltip {
+            access.description = Some(tooltip.clone());
+        }
         Some(AccessEntry {
             id,
             parent: node.parent,
@@ -415,14 +434,30 @@ impl Root {
         self.menus.is_some()
     }
 
-    /// The topmost widget at `at`, if any, open menus included.
+    /// The topmost widget at `at`, if any, open menus and a tooltip
+    /// included.
     pub fn hit(&self, at: Point) -> Option<NodeId> {
+        self.hit_among(at, self.tree.nodes.len())
+    }
+
+    /// The topmost of the interface's own widgets at `at`, if any.
+    fn hit_main(&self, at: Point) -> Option<NodeId> {
+        self.hit_among(at, self.tree.main)
+    }
+
+    fn hit_among(&self, at: Point, count: usize) -> Option<NodeId> {
         // Later widgets are drawn over earlier ones, and children over
         // their parents.
-        (0..self.tree.nodes.len())
+        (0..count.min(self.tree.nodes.len()))
             .rev()
             .find(|&index| self.tree.nodes[index].rect.contains(at))
             .map(NodeId::from_index)
+    }
+
+    /// The widget the pointer is over, with no button held, if any (see
+    /// [`Widget::hover_changed`]).
+    pub fn hovered(&self) -> Option<NodeId> {
+        self.hover
     }
 
     /// Carries out `action` on widget `id`, as assistive technology asks:
@@ -614,6 +649,10 @@ impl Root {
     ///   and the release, wherever they happen; nothing else receives
     ///   moves. A press while a widget holds the pointer sends that widget
     ///   [`Event::PointerCancel`] first.
+    /// - A move with no button held, and [`Event::PointerLeave`], change
+    ///   the hovered widget and the tooltip (see
+    ///   [`Widget::hover_changed`] and [`IntoView::tooltip`]); they are not
+    ///   used. A press, a wheel turn and a key take a tooltip away.
     /// - The wheel goes to the widget under the pointer, and on outwards.
     /// - Keys go to the widget holding the pointer, then to the one with
     ///   the focus. Tab and Shift+Tab that no widget used move the focus
@@ -635,8 +674,21 @@ impl Root {
         if let Some(at) = event.position().filter(|at| at.is_finite()) {
             self.pointer = Some(at);
         }
+        match event {
+            Event::PointerDown { .. } => self.pressed = true,
+            Event::PointerUp { .. } | Event::PointerCancel | Event::Focus(false) => {
+                self.pressed = false;
+            }
+            _ => {}
+        }
         if self.menus.is_some() {
             return self.menu_event(event);
+        }
+        match event {
+            Event::PointerDown { .. } | Event::Wheel { .. } => self.quiet_tooltip(),
+            Event::Key(key) if key.pressed => self.quiet_tooltip(),
+            Event::Focus(false) => self.hide_tooltip(),
+            _ => {}
         }
         match event {
             Event::PointerDown { at, .. } => {
@@ -646,7 +698,7 @@ impl Root {
                 if self.capture.is_some() {
                     self.event(Event::PointerCancel);
                 }
-                let Some(target) = self.hit(at) else {
+                let Some(target) = self.hit_main(at) else {
                     self.set_focus(None);
                     return Handled::No;
                 };
@@ -658,21 +710,40 @@ impl Root {
                 }
                 self.bubble(target, &event)
             }
-            Event::PointerMove { .. } => match self.capture {
+            Event::PointerMove { at, .. } => match self.capture {
                 Some(holder) => self.deliver(holder, |widget, cx| widget.event(cx, &event)),
-                None => Handled::No,
-            },
-            Event::PointerUp { .. } | Event::PointerCancel => match self.capture.take() {
-                Some(holder) => {
-                    // Delivered as the holder, then let go whatever it did.
-                    self.capture = Some(holder);
-                    let handled = self.deliver(holder, |widget, cx| widget.event(cx, &event));
-                    self.capture = None;
-                    handled
+                None => {
+                    if !self.pressed {
+                        self.hover_to(Some(at).filter(|at| at.is_finite()));
+                    }
+                    Handled::No
                 }
-                None => Handled::No,
             },
-            Event::Wheel { at, .. } => match self.hit(at) {
+            Event::PointerLeave => {
+                self.hover_to(None);
+                Handled::No
+            }
+            Event::PointerUp { .. } | Event::PointerCancel => {
+                let handled = match self.capture.take() {
+                    Some(holder) => {
+                        // Delivered as the holder, then let go whatever it
+                        // did.
+                        self.capture = Some(holder);
+                        let handled = self.deliver(holder, |widget, cx| widget.event(cx, &event));
+                        self.capture = None;
+                        handled
+                    }
+                    None => Handled::No,
+                };
+                // Let go, the pointer hovers whatever it is over.
+                if let Event::PointerUp { at, .. } = event {
+                    if self.capture.is_none() && self.menus.is_none() {
+                        self.hover_to(Some(at).filter(|at| at.is_finite()));
+                    }
+                }
+                handled
+            }
+            Event::Wheel { at, .. } => match self.hit_main(at) {
                 Some(target) => self.bubble(target, &event),
                 None => Handled::No,
             },
@@ -752,6 +823,9 @@ impl Root {
             }
             animating |= requests.frame;
         }
+        // A tooltip waiting for the pointer to rest long enough wants the
+        // frames that measure it.
+        animating |= self.tick_tooltip();
 
         let laid_out = self.needs_layout;
         if self.needs_layout {
@@ -789,6 +863,7 @@ impl Root {
             self.apply_placement(index, placement);
         }
         self.place_menus();
+        self.place_tooltip();
     }
 
     /// Puts widget `index` where layout placed it, and has it drawn again
@@ -833,6 +908,7 @@ impl Root {
                 rect: node.content,
                 scale: self.scale,
                 focused: self.focus == Some(NodeId::from_index(index)),
+                hovered: self.hover == Some(NodeId::from_index(index)),
                 now: self.now,
             };
             node.widget.paint(&cx, &mut node.spare);

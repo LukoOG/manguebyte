@@ -44,6 +44,11 @@
 //!   interface over everything else, opened by a widget with
 //!   [`EventCx::open_menu`] or at a point with [`EventCx::open_menu_at`],
 //!   and the [`combo`] box that picks a parameter's value from one.
+//! - **Hover and tooltips**: the widget under the pointer hears it
+//!   ([`Widget::hover_changed`]), and a view given a
+//!   [`tooltip`](IntoView::tooltip) shows it after the pointer rests on it
+//!   for [`TOOLTIP_DELAY`]; the text is the view's description for
+//!   assistive technology too.
 //! - **[`Theme`]**: colours, sizes, radii and type as typed data, with no
 //!   inheritance.
 //! - **[Accessibility](access)**: roles, names, values, ranges, states and
@@ -160,7 +165,7 @@ pub use damage::MAX_DAMAGE;
 pub use event::{Button, Composition, Event, Handled, Key, KeyEvent, MenuEvent, Modifiers};
 pub use menu::{Menu, MenuItem};
 pub use param::{ParamBinding, ParamHandle};
-pub use root::{Frame, MAX_BUFFER_SIDE, Root};
+pub use root::{Frame, MAX_BUFFER_SIDE, Root, TOOLTIP_DELAY};
 pub use source::{AtomicSource, Source, State, Watch};
 pub use theme::{Corners, Palette, Sizes, Theme, Typography};
 pub use tree::NodeId;

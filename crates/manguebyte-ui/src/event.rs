@@ -87,6 +87,9 @@ pub enum Event {
     /// The window lost the pointer in the middle of a press, as when the
     /// system takes it away: a drag ends where it is.
     PointerCancel,
+    /// The pointer left the interface while no button was held: nothing is
+    /// hovered any more, and a tooltip goes.
+    PointerLeave,
     /// The wheel turned, or a touchpad scrolled, with the pointer at `at`.
     Wheel {
         /// Where the pointer is, in logical pixels.
@@ -211,6 +214,7 @@ impl Event {
             | Event::Focus(_)
             | Event::Text(_)
             | Event::Composition(_)
+            | Event::PointerLeave
             | Event::Menu(_) => None,
         }
     }

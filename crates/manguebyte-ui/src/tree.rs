@@ -33,6 +33,8 @@ pub(crate) struct Node {
     pub(crate) parent: Option<NodeId>,
     /// The accessible name given with [`IntoView::named`](crate::IntoView::named).
     pub(crate) name: Option<String>,
+    /// The help text given with [`IntoView::tooltip`](crate::IntoView::tooltip).
+    pub(crate) tooltip: Option<String>,
     /// Where layout put it.
     pub(crate) rect: Rect,
     pub(crate) device: IRect,
@@ -94,11 +96,13 @@ impl Tree {
             style,
             children,
             name,
+            tooltip,
         } = view;
         self.nodes.push(Node {
             widget,
             parent,
             name,
+            tooltip,
             rect: Rect::default(),
             device: IRect::default(),
             content: Rect::default(),

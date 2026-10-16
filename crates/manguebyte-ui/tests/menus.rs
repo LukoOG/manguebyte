@@ -640,23 +640,26 @@ fn random_input_with_menus_open_keeps_every_promise() {
         Key::Function(4),
     ];
     let mut menus_seen = 0;
+    let mut tips_seen = 0;
     for seed in 1..=6_u64 {
         let params = params();
         let heard: Heard = Rc::default();
         let name = manguebyte_ui::State::new(String::from("x"));
         let view = column((
             row((
-                combo(ParamHandle::new(Arc::clone(&params), |p| &p.shape)),
+                combo(ParamHandle::new(Arc::clone(&params), |p| &p.shape)).tooltip("The shape"),
                 combo(ParamHandle::new(Arc::clone(&params), |p| &p.voices)),
                 Pad {
                     heard: Rc::clone(&heard),
-                },
+                }
+                .tooltip("A pad with a menu"),
             ))
             .spacing(6.0),
             row((
-                knob(ParamHandle::new(Arc::clone(&params), |p| &p.gain)),
+                knob(ParamHandle::new(Arc::clone(&params), |p| &p.gain)).tooltip("The gain"),
                 manguebyte_ui::text_field("Name", name.clone()),
-            )),
+            ))
+            .tooltip("Gain and name"),
         ))
         .padding(6.0);
         let host = Rc::new(
@@ -699,11 +702,15 @@ fn random_input_with_menus_open_keeps_every_promise() {
                     });
                 }
                 4 => {
-                    ui.send(Event::PointerUp {
-                        at,
-                        button,
-                        modifiers: Modifiers::NONE,
-                    });
+                    if random.below(4) == 0 {
+                        ui.send(Event::PointerLeave);
+                    } else {
+                        ui.send(Event::PointerUp {
+                            at,
+                            button,
+                            modifiers: Modifiers::NONE,
+                        });
+                    }
                 }
                 5 | 6 => {
                     let key = KEYS[random.below(KEYS.len() as u64) as usize];
@@ -728,7 +735,8 @@ fn random_input_with_menus_open_keeps_every_promise() {
                     if random.below(6) == 0 {
                         ui.send(Event::Focus(random.below(2) == 0));
                     }
-                    ui.advance_ms(16);
+                    // Now and then long enough for a tooltip.
+                    ui.advance_ms(if random.below(5) == 0 { 600 } else { 16 });
                     if random.below(4) == 0 {
                         assert!(
                             ui.render_fresh() == *ui.pixels(),
@@ -740,17 +748,23 @@ fn random_input_with_menus_open_keeps_every_promise() {
             if let Err(problem) = host.well_formed() {
                 panic!("seed {seed}, step {step}: {problem}");
             }
-            if ui
-                .everything()
-                .iter()
-                .any(|found| found.role() == Role::Menu)
-            {
+            let everything = ui.everything();
+            if everything.iter().any(|found| found.role() == Role::Menu) {
                 menus_seen += 1;
             }
+            let tips = everything
+                .iter()
+                .filter(|found| found.role() == Role::Tooltip)
+                .count();
+            assert!(tips <= 1, "seed {seed}, step {step}: {tips} tooltips");
+            tips_seen += tips;
         }
         ui.close();
         assert_eq!(host.well_formed(), Ok(()), "seed {seed}");
     }
-    eprintln!("a menu was open after {menus_seen} of 2400 steps");
+    eprintln!(
+        "a menu was open after {menus_seen} of 2400 steps, a tooltip shown after {tips_seen}"
+    );
     assert!(menus_seen > 0);
+    assert!(tips_seen > 0);
 }

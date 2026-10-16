@@ -212,3 +212,42 @@ fn a_steady_frame_while_text_is_typed_makes_no_heap_call() {
     });
     assert_eq!(calls, 0, "100 steady frames made {calls} heap calls");
 }
+
+#[test]
+fn a_steady_frame_with_a_tooltip_waiting_or_shown_makes_no_heap_call() {
+    use manguebyte_ui::IntoView;
+    let params = params();
+    let view = manguebyte_ui::knob(manguebyte_ui::ParamHandle::new(Arc::clone(&params), |p| {
+        &p.cutoff
+    }))
+    .tooltip("Where the filter starts to cut");
+    let mut ui = Harness::with_params(
+        view,
+        manguebyte_gfx::Size::new(120.0, 140.0),
+        2.0,
+        Arc::clone(&params) as Arc<dyn manguebyte_params::ParamSet>,
+    );
+    ui.advance_ms(50);
+    let cutoff = ui.get(Role::Slider, "Cutoff");
+    ui.move_to(cutoff.center());
+    ui.frame();
+    // Waiting: frames ask for more, and touch no memory.
+    let ((), calls) = counted(|| {
+        for _ in 0..20 {
+            assert!(ui.frame().animating);
+        }
+    });
+    assert_eq!(calls, 0, "20 frames waiting made {calls} heap calls");
+    ui.advance(manguebyte_ui::TOOLTIP_DELAY);
+    assert!(
+        ui.everything()
+            .iter()
+            .any(|found| found.role() == Role::Tooltip)
+    );
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+        }
+    });
+    assert_eq!(calls, 0, "100 frames showing made {calls} heap calls");
+}

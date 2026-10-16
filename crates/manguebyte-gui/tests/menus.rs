@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use manguebyte_gfx::Point;
-use manguebyte_gui::{Editor, HeadlessEditor};
+use manguebyte_gui::{Editor, FRAME_PERIOD_MS, HeadlessEditor};
 use manguebyte_params::{ChoiceParam, Param, param_set};
 use manguebyte_plugin::editor::testing::{HostCall, RecordingEditorHost};
 use manguebyte_plugin::editor::{
@@ -43,7 +43,8 @@ fn open(
     let spec = Editor::new(HostSize::new(200, 160), move || {
         column((
             label("Drive").title(),
-            combo(ParamHandle::new(Arc::clone(&shared), |p| &p.mode)),
+            combo(ParamHandle::new(Arc::clone(&shared), |p| &p.mode))
+                .tooltip("How the drive colours the sound"),
         ))
         .spacing(6.0)
         .padding(8.0)
@@ -160,6 +161,39 @@ fn keys_the_host_delivers_open_and_choose() {
     ui.tick();
     assert!(ui.find(Role::Menu, "Mode").is_none());
     assert!(host.take_calls().is_empty());
+    drop(editor);
+    drop(link);
+}
+
+#[test]
+fn a_tooltip_shows_on_the_editors_clock_and_goes_when_the_pointer_leaves() {
+    let params = params();
+    let (_host, editor, link, ui) = open(&params);
+    let tip = |ui: &HeadlessEditor| {
+        ui.access_tree()
+            .into_iter()
+            .any(|entry| entry.node.role == Role::Tooltip)
+    };
+    // The pointer comes to rest on the combo box, with no button held.
+    ui.move_to(center(&ui, Role::ComboBox, "Mode"));
+    ui.tick();
+    assert!(!tip(&ui));
+    // The frame timer measures the rest: a tenth of a second short of the
+    // delay, nothing; past it, the tooltip.
+    for _ in 0..(400 / FRAME_PERIOD_MS) {
+        ui.tick();
+    }
+    assert!(!tip(&ui));
+    for _ in 0..(200 / FRAME_PERIOD_MS) {
+        ui.tick();
+    }
+    assert!(tip(&ui));
+    assert!(ui.shown().expect("open") == ui.pixels().expect("open"));
+    // The system says the pointer left the window: it goes.
+    ui.window().input(RawInput::PointerLeft);
+    ui.tick();
+    assert!(!tip(&ui));
+    assert!(ui.shown().expect("open") == ui.pixels().expect("open"));
     drop(editor);
     drop(link);
 }

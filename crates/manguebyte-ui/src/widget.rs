@@ -155,6 +155,14 @@ pub trait Widget: 'static {
         let _ = (cx, focused);
     }
 
+    /// The pointer came over the widget (`true`), with no button held, or
+    /// went off it (`false`): only the innermost widget under the pointer
+    /// is hovered. It is drawn again either way, and can show it with
+    /// [`PaintCx::is_hovered`]. Nothing unless overridden.
+    fn hover_changed(&mut self, cx: &mut EventCx<'_>, hovered: bool) {
+        let _ = (cx, hovered);
+    }
+
     /// Where the text caret is, in logical pixels, while the widget is
     /// being typed into: the window layer tells the system, so that an
     /// input method opens its window beside it and a screen magnifier
@@ -258,6 +266,7 @@ pub struct PaintCx<'a> {
     pub(crate) rect: Rect,
     pub(crate) scale: f32,
     pub(crate) focused: bool,
+    pub(crate) hovered: bool,
     pub(crate) now: Duration,
 }
 
@@ -283,6 +292,12 @@ impl PaintCx<'_> {
     /// Whether the widget has the keyboard focus, and should show it.
     pub fn is_focused(&self) -> bool {
         self.focused
+    }
+
+    /// Whether the pointer is over the widget, with no button held (see
+    /// [`Widget::hover_changed`]).
+    pub fn is_hovered(&self) -> bool {
+        self.hovered
     }
 
     /// The time of this frame.
