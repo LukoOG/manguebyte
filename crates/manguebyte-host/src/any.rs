@@ -55,7 +55,7 @@
 //!     assert_eq!(entry.name, "Mangue Pluck");
 //!     let mut plugin = library.create(&entry.id)?;
 //!     let level = plugin.params().into_iter().find(|param| param.name == "Level").unwrap();
-//!     assert!(plugin.param_to_text(level.id, level.default).unwrap().starts_with("-12"));
+//!     assert!(plugin.param_to_text(level.id, level.default).unwrap().starts_with("-4"));
 //!
 //!     let mut processor = plugin.activate(48_000.0, 512)?;
 //!     let mut events = EventBuffer::with_capacity(4);

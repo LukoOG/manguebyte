@@ -66,7 +66,7 @@
 //! // Values are normalized, as VST 3 automates them; the plugin gives the
 //! // plain value and the text.
 //! let text = plugin.param_to_text(level.id, level.default).expect("text");
-//! assert!(text.starts_with("-12"), "{text}");
+//! assert!(text.starts_with("-4"), "{text}");
 //!
 //! // Activating hands out the audio half.
 //! let mut processor = plugin.activate(48_000.0, 256)?;

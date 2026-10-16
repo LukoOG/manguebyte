@@ -125,14 +125,64 @@ fn song() -> Vec<(u64, EventKind)> {
 
 const SONG_FRAMES: usize = 24_000;
 
-/// The song as the plugin plays it with nothing in between.
-fn reference(max_block: usize, pattern: &[usize], schedule: &[(u64, EventKind)]) -> AudioBuffer {
+/// `message` on each of the 16 MIDI channels, in channel order, if it is a
+/// controller move (a control change, channel pressure or the pitch wheel),
+/// and otherwise `message` alone.
+///
+/// That is what the VST 3 wrapper delivers for a plugin that shares its
+/// controllers between channels, as Pluck does with the default
+/// `MidiControllers::MUSICAL`: VST 3 carries a controller move as a change
+/// of the one hidden parameter every channel is mapped to, so the wrapper
+/// cannot tell which channel it came from, and hands it to every channel so
+/// that notes on any of them hear it.
+fn as_delivered(message: MidiMessage) -> Vec<MidiMessage> {
+    let on = |channel: u8| match message {
+        MidiMessage::ControlChange {
+            controller, value, ..
+        } => Some(MidiMessage::ControlChange {
+            channel,
+            controller,
+            value,
+        }),
+        MidiMessage::ChannelPressure { pressure, .. } => {
+            Some(MidiMessage::ChannelPressure { channel, pressure })
+        }
+        MidiMessage::PitchBend { value, .. } => Some(MidiMessage::PitchBend { channel, value }),
+        _ => None,
+    };
+    match on(0) {
+        Some(_) => (0..16).filter_map(on).collect(),
+        None => vec![message],
+    }
+}
+
+/// The song as the plugin plays it with nothing in between, given exactly
+/// the events in `schedule`.
+fn played_alone(max_block: usize, pattern: &[usize], schedule: &[(u64, EventKind)]) -> AudioBuffer {
     let mut harness = Harness::<Pluck>::new(RATE, max_block).with_block_pattern(pattern);
     let fresh = Pluck::new().params();
     for &(frame, kind) in schedule {
         harness.schedule(frame, for_harness_vst3(&*fresh, kind));
     }
     harness.render(SONG_FRAMES)
+}
+
+/// The song as the plugin plays it with nothing in between, given the
+/// events a VST 3 host delivers for `schedule`: each controller move on
+/// every channel (see [`as_delivered`]).
+fn reference(max_block: usize, pattern: &[usize], schedule: &[(u64, EventKind)]) -> AudioBuffer {
+    let mut delivered = Vec::with_capacity(schedule.len());
+    for &(frame, kind) in schedule {
+        match kind {
+            EventKind::Midi(message) => delivered.extend(
+                as_delivered(message)
+                    .into_iter()
+                    .map(|message| (frame, EventKind::Midi(message))),
+            ),
+            other => delivered.push((frame, other)),
+        }
+    }
+    played_alone(max_block, pattern, &delivered)
 }
 
 /// The song as the plugin plays it when hosted, and what hosting cost.
@@ -294,9 +344,14 @@ fn parameters_are_the_ones_the_plugin_declares() {
     let mut expected: Vec<&dyn Param> = Vec::new();
     declared.visit(&mut |param| expected.push(param));
     assert_eq!(expected.len(), 6);
-    // The plugin's own six, then one hidden parameter for each of the 130
-    // controllers VST 3 numbers on each of 16 MIDI channels.
-    assert_eq!(plugin.params().len(), 6 + 130 * 16);
+    // The plugin's own six, then one hidden parameter for each of the 13
+    // controllers of the default `MidiControllers::MUSICAL`, shared by every
+    // MIDI channel. (Before plugins declared their controllers, it was one
+    // for each of the 130 VST 3 numbers on each of 16 channels: 2,086 in
+    // all.)
+    assert!(!Pluck::MIDI_CONTROLLERS.is_per_channel());
+    assert_eq!(Pluck::MIDI_CONTROLLERS.len(), 13);
+    assert_eq!(plugin.params().len(), 6 + 13);
 
     for (listed, declared) in plugin.params().iter().zip(expected) {
         assert_eq!(listed.id, vst3_id(declared.param_id()));
@@ -340,8 +395,23 @@ fn parameters_are_the_ones_the_plugin_declares() {
         .expect("the sustain pedal is mapped");
     assert_ne!(bend, sustain);
     assert!(plugin.param(bend).is_some() && plugin.param(sustain).is_some());
+    // Every channel is mapped to the same parameter.
+    for channel in 1..16 {
+        assert_eq!(plugin.midi_mapping(channel, 129), Some(bend), "{channel}");
+        assert_eq!(plugin.midi_mapping(channel, 64), Some(sustain), "{channel}");
+    }
+    // Only what the plugin declared: the modulation wheel (CC 1) is, the
+    // filter cutoff (CC 74) is not.
+    assert!(plugin.midi_mapping(0, 1).is_some());
+    assert_eq!(plugin.midi_mapping(0, 74), None);
     assert_eq!(plugin.midi_mapping(16, 64), None);
     assert_eq!(plugin.midi_mapping(0, 130), None);
+    let titles: Vec<_> = plugin.params()[6..]
+        .iter()
+        .map(|hidden| hidden.title.as_str())
+        .collect();
+    assert!(titles.contains(&"MIDI CC 64"), "{titles:?}");
+    assert!(titles.contains(&"MIDI Pitch Bend"), "{titles:?}");
 
     let nothing = ParamId::from_name("no such parameter");
     assert_eq!(plugin.param(nothing), None);
@@ -492,6 +562,64 @@ fn every_kind_of_event_is_heard() {
 }
 
 #[test]
+fn a_shared_controller_reaches_notes_on_every_channel() {
+    // Pluck shares its controllers between channels, so in VST 3 a move of
+    // the pitch wheel or the sustain pedal reaches notes on every channel,
+    // whatever channel the host had it on: a note on channel 6 is bent by
+    // the wheel on channel 1 exactly as by its own channel's wheel, and held
+    // by the pedal the same way.
+    let module = module();
+    let note = NoteRef::new(5, 57);
+    let schedule = |channel: u8| {
+        vec![
+            (
+                100,
+                EventKind::NoteOn {
+                    note,
+                    velocity: 0.8,
+                },
+            ),
+            (
+                2_000,
+                EventKind::Midi(MidiMessage::PitchBend {
+                    channel,
+                    value: 4_000,
+                }),
+            ),
+            (
+                3_000,
+                EventKind::Midi(MidiMessage::ControlChange {
+                    channel,
+                    controller: 64,
+                    value: 127,
+                }),
+            ),
+            (
+                4_000,
+                EventKind::NoteOff {
+                    note,
+                    velocity: 0.0,
+                },
+            ),
+        ]
+    };
+    let own_channel = played_alone(256, &[256], &schedule(5));
+    let untouched = played_alone(256, &[256], &schedule(5)[..1]);
+    assert!(
+        own_channel != untouched,
+        "the wheel and the pedal made no difference"
+    );
+    for (max_block, pattern) in [(256usize, &[256usize][..]), (512, &[1, 511, 7, 300])] {
+        let (hosted_audio, _) = hosted(&module, max_block, pattern, &schedule(0));
+        assert_same_bits(
+            &hosted_audio,
+            &own_channel,
+            &format!("controllers on channel 1, blocks of {pattern:?}"),
+        );
+    }
+}
+
+#[test]
 fn automation_lands_on_its_frame_through_the_host() {
     // A point every 61 frames for the decay, which the voices follow on
     // their frame, while a note sounds: each one is heard where it is
@@ -529,15 +657,9 @@ fn automation_lands_on_its_frame_through_the_host() {
 #[test]
 fn the_sound_does_not_depend_on_how_the_host_cuts_time() {
     let module = module();
-    // The plugin reads its reverb mix and its output level once per block,
-    // by design; everything else follows events.
-    let schedule: Vec<_> = song()
-        .into_iter()
-        .filter(|(_, kind)| {
-            !matches!(kind, EventKind::ParamValue { param, .. } if [reverb(), level()].contains(param))
-        })
-        .collect();
-    assert_eq!(schedule.len(), song().len() - 2);
+    // The whole song: the plugin follows every event on its frame, the
+    // reverb's blend and the output level included.
+    let schedule = song();
     let (reference, _) = hosted(&module, 256, &[256], &schedule);
     assert!(reference.peak() > 0.05);
 
