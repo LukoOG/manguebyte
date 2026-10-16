@@ -216,6 +216,27 @@ pub(crate) fn t60_at(signal: &[f64], frequency: f64, from: f64, to: f64) -> f64 
     -60.0 / (covariance / variance)
 }
 
+/// How long the whole of `signal` takes to fall from its loudest 20 ms to
+/// 60 dB below, in seconds, judged by the RMS level of 20 ms windows; the
+/// whole length if it never does.
+pub(crate) fn time_to_fall(signal: &[f64], decibels: f64) -> f64 {
+    let window = (0.02 * RATE) as usize;
+    let levels: Vec<f64> = signal.chunks(window).map(rms).collect();
+    let (loudest_at, loudest) =
+        levels
+            .iter()
+            .enumerate()
+            .fold((0, 0.0f64), |best, (index, &level)| {
+                if level > best.1 { (index, level) } else { best }
+            });
+    let quiet = loudest * super::common::db(-decibels);
+    let after = levels[loudest_at..]
+        .iter()
+        .position(|&level| level < quiet)
+        .map_or(levels.len(), |index| index + loudest_at);
+    (after - loudest_at) as f64 * 0.02
+}
+
 /// The root-mean-square level.
 pub(crate) fn rms(signal: &[f64]) -> f64 {
     if signal.is_empty() {

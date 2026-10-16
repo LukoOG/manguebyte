@@ -1,5 +1,5 @@
-//! What the instruments share: pitch and level conversions, noise, and the
-//! hand-over of a stolen voice.
+//! What the instruments share: pitch and level conversions, noise, the
+//! hand-over of a stolen voice, and a saturator that aliases little.
 
 use manguebyte_core::{AudioBuffer, Sample};
 
@@ -206,6 +206,55 @@ impl<T: Tone> Handover<T> {
     }
 }
 
+/// `ln(cosh(x))`, the antiderivative of `tanh`, without overflow.
+#[inline]
+fn log_cosh(x: f64) -> f64 {
+    let x = x.abs();
+    x + (-2.0 * x).exp().ln_1p() - core::f64::consts::LN_2
+}
+
+/// A `tanh` saturator with first-order antiderivative anti-aliasing.
+///
+/// Instead of the curve at each sample, it puts out the curve's average
+/// between the last input and this one, `(F(x[n]) - F(x[n-1])) / (x[n] -
+/// x[n-1])` with `F` the curve's antiderivative. That is the curve applied
+/// to the straight line joining the two samples, filtered by a box one
+/// sample long, which takes most of the aliasing out of the harmonics the
+/// curve makes, for the price of half a sample of delay. The method is
+/// J. D. Parker, V. Zavalishin and E. Le Bivic, "Reducing the aliasing of
+/// nonlinear waveshaping using continuous-time convolution", DAFx 2016.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct SoftClip {
+    last: f64,
+    last_integral: f64,
+}
+
+impl SoftClip {
+    #[inline]
+    pub(crate) fn next(&mut self, x: f64) -> f64 {
+        let x = setting(x, -1e6, 1e6, 0.0);
+        let integral = log_cosh(x);
+        let difference = x - self.last;
+        let y = if difference.abs() < 1e-5 * (1.0 + x.abs()) {
+            // The two inputs are too close for the quotient, whose rounding
+            // error grows as they approach: the curve at their middle is
+            // the same to second order.
+            (0.5 * (x + self.last)).tanh()
+        } else {
+            (integral - self.last_integral) / difference
+        };
+        self.last = x;
+        self.last_integral = integral;
+        // The average of a curve between -1 and 1 lies there too; this only
+        // removes rounding.
+        y.clamp(-1.0, 1.0)
+    }
+
+    pub(crate) fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,5 +298,29 @@ mod tests {
         assert!((sum / 10_000.0).abs() < 0.03);
         // Uniform noise has a mean square of a third.
         assert!((squares / 10_000.0 - 1.0 / 3.0).abs() < 0.02);
+    }
+
+    #[test]
+    fn the_soft_clip_follows_tanh_and_aliases_less() {
+        // A slow signal comes out as tanh of itself, half a sample late.
+        let mut clip = SoftClip::default();
+        let mut worst = 0.0f64;
+        for n in 0..1_000 {
+            let t = f64::from(n) / 1_000.0;
+            let x = 3.0 * (core::f64::consts::TAU * t).sin();
+            let y = clip.next(x);
+            if n > 0 {
+                let middle = 3.0 * (core::f64::consts::TAU * (t - 0.0005)).sin();
+                worst = worst.max((y - middle.tanh()).abs());
+            }
+        }
+        assert!(worst < 1e-4, "{worst}");
+        // Huge and broken inputs stay in range.
+        for x in [1e300, -1e300, f64::NAN, f64::INFINITY, 0.0, 1e-9] {
+            let y = clip.next(x);
+            assert!(y.is_finite() && y.abs() <= 1.0, "{x} gave {y}");
+        }
+        clip.reset();
+        assert_eq!(clip.next(0.0), 0.0);
     }
 }

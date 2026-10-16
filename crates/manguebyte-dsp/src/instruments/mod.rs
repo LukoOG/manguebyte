@@ -6,6 +6,8 @@
 //! | [`PluckedString`] | a plucked string by physical modelling | [nylon](StringParams::nylon_guitar) and [steel](StringParams::steel_guitar) guitar, [finger](StringParams::finger_bass) and [slap](StringParams::slap_bass) bass |
 //! | [`FmVoice`] | four-operator frequency modulation | [electric piano](FmParams::electric_piano), [tubular bell](FmParams::tubular_bell), [FM bass](FmParams::fm_bass) |
 //! | [`OrganVoice`] | a tonewheel organ: drawbars, percussion, key click | [jazz](OrganParams::jazz), [gospel](OrganParams::gospel), [full](OrganParams::full), [ballad](OrganParams::ballad), any [registration](OrganParams::registration) |
+//! | [`AnalogKitVoice`] | sixteen drums of a classic analogue drum machine, on the General MIDI keys | one [setting](DrumSettings) per drum |
+//! | [`KickBassVoice`] | that machine's long kick played as a bass, with slides | [the classic](KickBassParams::default) |
 //!
 //! [`RotarySpeaker`] is not a voice but a [`Processor`](crate::Processor)
 //! to put after the organ: the rotating horn and drum it is usually heard
@@ -75,6 +77,7 @@
 //! Every source of noise is seeded by the note it belongs to, so a note
 //! sounds the same every time it is played, whatever was played before it.
 
+mod analog_drums;
 mod common;
 mod fm;
 #[cfg(test)]
@@ -83,6 +86,10 @@ mod organ;
 mod rotary;
 mod string;
 
+pub use analog_drums::{
+    AnalogDrum, AnalogKitParams, AnalogKitVoice, ChokeGroup, DrumSettings, KickBassParams,
+    KickBassVoice, METAL_HZ,
+};
 pub use common::HANDOVER_SECONDS;
 pub use fm::{Algorithm, FM_OPERATORS, FM_VELOCITY_RANGE_DB, FmOperator, FmParams, FmVoice};
 pub use organ::{
