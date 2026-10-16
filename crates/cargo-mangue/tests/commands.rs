@@ -229,7 +229,7 @@ fn a_plugin_goes_from_source_to_installed_and_validated() {
     succeeded(&bundled);
     let out = flow.target_dir.join("bundled");
     let debug = built_library(&flow.target_dir.join("debug"), os);
-    for format in Format::ALL {
+    for format in Format::DEFAULT {
         let plan = planned(format, fixture::NAME);
         assert_bundled(&plan, &out, &debug, os);
         assert!(
@@ -272,7 +272,7 @@ fn a_plugin_goes_from_source_to_installed_and_validated() {
         succeeded(&flow.run(&all));
         let library = built_library(&flow.target_dir.join(folder), os);
         assert_ne!(library, debug);
-        for format in Format::ALL {
+        for format in Format::DEFAULT {
             assert_bundled(&planned(format, fixture::NAME), &dist, &library, os);
         }
     }
@@ -294,7 +294,7 @@ fn a_plugin_goes_from_source_to_installed_and_validated() {
     let configured = flow.run(&["bundle", "--out", dist.to_str().unwrap()]);
     succeeded(&configured);
     let library = built_library(&in_triple, os);
-    for format in Format::ALL {
+    for format in Format::DEFAULT {
         assert_bundled(&planned(format, fixture::NAME), &dist, &library, os);
     }
     assert!(
@@ -315,7 +315,7 @@ fn a_plugin_goes_from_source_to_installed_and_validated() {
     ]);
     succeeded(&named_target);
     let library = built_library(&in_triple, os);
-    for format in Format::ALL {
+    for format in Format::DEFAULT {
         assert_bundled(&planned(format, fixture::NAME), &dist, &library, os);
     }
     assert!(
@@ -329,7 +329,7 @@ fn a_plugin_goes_from_source_to_installed_and_validated() {
     let installed = flow.run(&["install"]);
     succeeded(&installed);
     let mut places = Vec::new();
-    for format in Format::ALL {
+    for format in Format::DEFAULT {
         let dir = plugin_dir(os, format, Scope::User, &lookup).unwrap();
         assert!(dir.starts_with(scratch.path()), "{}", dir.display());
         let plan = planned(format, fixture::NAME);
@@ -350,7 +350,7 @@ fn a_plugin_goes_from_source_to_installed_and_validated() {
     // review: it was removed as "the copy that is already installed", the
     // command failed to copy what it had just removed and ended with exit
     // code 1, and the plugin was gone.)
-    for (format, place) in Format::ALL.into_iter().zip(&places) {
+    for (format, place) in Format::DEFAULT.into_iter().zip(&places) {
         let dir = place.parent().unwrap();
         let in_place = flow.run(&[
             "install",
@@ -376,7 +376,7 @@ fn a_plugin_goes_from_source_to_installed_and_validated() {
     // --- uninstall, with the name read from Cargo.toml.
     let removed = flow.run(&["uninstall"]);
     succeeded(&removed);
-    for (place, format) in places.iter().zip(Format::ALL) {
+    for (place, format) in places.iter().zip(Format::DEFAULT) {
         let root = planned(format, fixture::NAME).root;
         assert!(reported(&removed, "Removed", &root), "{}", stdout(&removed));
         assert!(!place.exists());

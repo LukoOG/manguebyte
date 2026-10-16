@@ -89,6 +89,8 @@ impl Package {
 pub struct Metadata {
     /// Where cargo puts what it builds.
     pub target_directory: PathBuf,
+    /// The workspace's folder, which holds its `Cargo.lock`, if cargo said.
+    pub workspace_root: Option<PathBuf>,
     /// The packages that are members of the workspace.
     pub packages: Vec<Package>,
 }
@@ -162,6 +164,10 @@ pub fn parse_metadata(json: &str) -> Result<Metadata, Error> {
     }
     Ok(Metadata {
         target_directory: PathBuf::from(target_directory),
+        workspace_root: root
+            .get("workspace_root")
+            .and_then(Value::as_str)
+            .map(PathBuf::from),
         packages,
     })
 }
@@ -698,6 +704,66 @@ impl Cargo {
         match problem {
             Some(problem) => Err(problem),
             None => scan.finish(),
+        }
+    }
+
+    /// Builds and runs the program that writes an LV2 bundle's Turtle files
+    /// (see [`lv2`](crate::lv2)): `cargo run` on the package in
+    /// `helper_manifest`, sharing `target_directory` and the profile of
+    /// `request` with the plugin's own build, so that what both build is
+    /// built once. `args` go to the program.
+    ///
+    /// Cargo's own progress and diagnostics go straight to the terminal.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`Failure::Build`](crate::Failure::Build) if the program
+    /// does not build or does not finish its work.
+    pub fn run_lv2_helper(
+        &self,
+        helper_manifest: &Path,
+        target_directory: &Path,
+        request: &BuildRequest,
+        features: &[String],
+        args: &[OsString],
+    ) -> Result<(), Error> {
+        let mut command = Command::new(&self.program);
+        command
+            .arg("run")
+            .arg("--quiet")
+            .arg("--manifest-path")
+            .arg(helper_manifest)
+            .arg("--target-dir")
+            .arg(target_directory);
+        match &request.profile {
+            Profile::Dev => {}
+            Profile::Release => {
+                command.arg("--release");
+            }
+            Profile::Named(name) => {
+                command.arg("--profile").arg(name);
+            }
+        }
+        for feature in features {
+            command.arg("--features").arg(feature);
+        }
+        let status = command
+            .arg("--")
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .map_err(|error| self.could_not_start(&error))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(Error::build(
+                "The program that writes the LV2 bundle's Turtle files did not build or did not \
+                 finish; its messages are above. The plugin must invoke export_lv2! (from \
+                 manguebyte::lv2 or manguebyte_lv2) at the root of its crate, and the crate must \
+                 have the rlib type as well as cdylib.",
+            ))
         }
     }
 

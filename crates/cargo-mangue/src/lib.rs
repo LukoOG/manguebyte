@@ -5,7 +5,7 @@
 //! | Command | What it does |
 //! |---|---|
 //! | `cargo mangue new <name>` | Writes a plugin crate that builds as it is |
-//! | `cargo mangue bundle` | Builds a plugin and writes its `.clap` and `.vst3` |
+//! | `cargo mangue bundle` | Builds a plugin and writes its `.clap` and `.vst3`, and its `.lv2` when asked |
 //! | `cargo mangue install` | Bundles, then copies into the folders hosts scan |
 //! | `cargo mangue uninstall` | Removes an installed plugin |
 //! | `cargo mangue validate` | Bundles, then runs the CLAP and VST 3 validators |
@@ -30,6 +30,7 @@
 //! | [`cargo`] | Which library cargo built, from cargo's own report |
 //! | [`install`] | Which folder a plugin is installed into |
 //! | [`validate`] | Whether a validator's output is a pass |
+//! | [`lv2`] | The program that writes an LV2 bundle's Turtle files |
 //! | [`scaffold`] | The files of a new plugin crate |
 //!
 //! [`bundle`], [`tools`] and [`commands`] do the work those decide on:
@@ -77,6 +78,11 @@
 //!   for. The tool does not read cargo's configuration files; it goes by
 //!   the folder cargo reports the library in, which names the target.
 //! - `install` copies to the 64-bit plugin folders on Windows.
+//! - An LV2 bundle is made only with `--format lv2`, for a plugin that
+//!   invokes `export_lv2!` at its crate root and has the `rlib` type. Its
+//!   Turtle files come from a second, small build for this machine, and
+//!   `--all-features` is refused for it. `validate` has no LV2 validator
+//!   and refuses LV2.
 //! - It reads the output of cargo and of the validators as text from
 //!   another program: anything it does not understand is an error with a
 //!   message, never a panic, and long output is read in bounded memory.
@@ -91,6 +97,7 @@ mod error;
 pub mod install;
 pub mod layout;
 pub mod lines;
+pub mod lv2;
 pub mod platform;
 pub mod scaffold;
 pub mod tools;

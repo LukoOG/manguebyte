@@ -8,6 +8,11 @@
 //! - VST 3: `validator`, from Steinberg's VST 3 SDK, run as
 //!   `validator -e <bundle>`. It ends with
 //!   `Result: 47 tests passed, 0 tests failed`.
+//! - LV2: nothing is run. `cargo mangue validate --format lv2` is refused;
+//!   an LV2 bundle is checked with lv2lint, from the OpenMusicKontrollers
+//!   project, as this project's CI does. For LV2 the functions below name
+//!   lv2lint where they name a program, and have no variable or option to
+//!   give, and a [`Judge`] finds no summary in any output.
 //!
 //! The summary line decides, exactly as in this project's CI: a plugin
 //! passes when every summary reports no failed test and at least one that
@@ -51,6 +56,7 @@ pub fn program(format: Format) -> &'static str {
     match format {
         Format::Clap => "clap-validator",
         Format::Vst3 => "validator",
+        Format::Lv2 => "lv2lint",
     }
 }
 
@@ -59,6 +65,8 @@ pub fn variable(format: Format) -> &'static str {
     match format {
         Format::Clap => "CLAP_VALIDATOR",
         Format::Vst3 => "VST3_VALIDATOR",
+        // None: no LV2 validator is run.
+        Format::Lv2 => "",
     }
 }
 
@@ -67,6 +75,8 @@ pub fn option(format: Format) -> &'static str {
     match format {
         Format::Clap => "--clap-validator",
         Format::Vst3 => "--vst3-validator",
+        // None: no LV2 validator is run.
+        Format::Lv2 => "",
     }
 }
 
@@ -79,6 +89,10 @@ pub fn where_to_get(format: Format) -> &'static str {
         Format::Vst3 => {
             "Build the validator target of the VST 3 SDK from \
              https://github.com/steinbergmedia/vst3sdk"
+        }
+        Format::Lv2 => {
+            "cargo mangue does not run an LV2 validator; check the bundle with lv2lint, from \
+             the OpenMusicKontrollers project"
         }
     }
 }
@@ -130,6 +144,8 @@ pub fn arguments(format: Format, bundle: &Path) -> Vec<OsString> {
         Format::Clap => "validate",
         // Run the extensive tests, as CI does.
         Format::Vst3 => "-e",
+        // Not run: lv2lint takes the plugin's URI as well as the bundle.
+        Format::Lv2 => return vec![bundle.as_os_str().to_owned()],
     };
     vec![OsString::from(first), bundle.as_os_str().to_owned()]
 }
@@ -233,8 +249,9 @@ impl Judge {
     /// prints, three kinds of line are not:
     ///
     /// - the listing of the plugin's parameters, one line each of the form
-    ///   `Parameter 12 (id=34): [title="Cutoff"] ...`, about two thousand
-    ///   lines for a wrapper that maps MIDI controllers;
+    ///   `Parameter 12 (id=34): [title="Cutoff"] ...`, up to about two
+    ///   thousand lines for a plugin that maps every MIDI controller on
+    ///   every channel;
     /// - `[Succeeded]` after every test, and empty lines;
     /// - a remark about one parameter, such as `Parameter 12 (id=34) is
     ///   kIsHidden and NOT kIsReadOnly!`, when the same remark has already
@@ -249,6 +266,7 @@ impl Judge {
         let summary = match self.format {
             Format::Clap => clap_summary(&line),
             Format::Vst3 => vst3_summary(&line),
+            Format::Lv2 => None,
         };
         if let Some((passed, failed)) = summary {
             self.summaries = self.summaries.saturating_add(1);
@@ -256,7 +274,7 @@ impl Judge {
             self.failed = self.failed.saturating_add(failed);
         }
         match self.format {
-            Format::Clap => true,
+            Format::Clap | Format::Lv2 => true,
             Format::Vst3 => self.shows_vst3(&line),
         }
     }

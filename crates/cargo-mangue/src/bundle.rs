@@ -146,12 +146,16 @@ pub fn write(
 
     let mut notes = Vec::new();
     if plan.sign {
-        let command = codesign_command(&root);
+        let signed = plan
+            .signed
+            .split('/')
+            .fold(out_dir.to_path_buf(), |path, part| path.join(part));
+        let command = codesign_command(&signed);
         match tools.find(command.program) {
             Some(codesign) => tools.run(&codesign, &command.args).map_err(|said| {
                 Error::failed(format!(
                     "codesign could not sign {}: {said}.",
-                    root.display()
+                    signed.display()
                 ))
             })?,
             None => notes.push(format!(
@@ -159,7 +163,7 @@ pub fn write(
                  will refuse to load it. Sign it on a Mac with: codesign --force --sign - \
                  \"{}\"",
                 plan.root,
-                root.display()
+                signed.display()
             )),
         }
     }

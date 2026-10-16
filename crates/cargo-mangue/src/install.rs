@@ -9,11 +9,16 @@
 //! | Linux | `~/.clap`, `~/.vst3` | `/usr/lib/clap`, `/usr/lib/vst3` |
 //! | macOS | `~/Library/Audio/Plug-Ins/CLAP`, `.../VST3` | `/Library/Audio/Plug-Ins/CLAP`, `.../VST3` |
 //!
+//! An LV2 bundle goes to `~/.lv2` and `/usr/lib/lv2` on Linux,
+//! `~/Library/Audio/Plug-Ins/LV2` and `/Library/Audio/Plug-Ins/LV2` on
+//! macOS, and `%APPDATA%\LV2` and `%COMMONPROGRAMFILES%\LV2` on Windows.
+//!
 //! # Sources
 //!
 //! - The CLAP header `clap/entry.h` (free-audio), which lists the folders a
 //!   CLAP host searches.
 //! - *VST 3 Developer Portal*, "Plug-in Locations" (Steinberg).
+//! - The default `LV2_PATH` of lilv, the LV2 project's host library.
 
 use std::ffi::OsString;
 use std::fs;
@@ -52,7 +57,8 @@ pub enum Scope {
 /// # Errors
 ///
 /// Fails if the variable the folder is derived from is not set: `HOME` on
-/// Linux and macOS, `LOCALAPPDATA` or `CommonProgramFiles` on Windows.
+/// Linux and macOS, `LOCALAPPDATA` (`APPDATA` for LV2) or
+/// `CommonProgramFiles` on Windows.
 pub fn plugin_dir(
     os: Os,
     format: Format,
@@ -76,8 +82,11 @@ pub fn plugin_dir(
     let upper = match format {
         Format::Clap => "CLAP",
         Format::Vst3 => "VST3",
+        Format::Lv2 => "LV2",
     };
     Ok(match (os, scope) {
+        // LV2's folder for the user on Windows is in the roaming profile.
+        (Os::Windows, Scope::User) if format == Format::Lv2 => needed("APPDATA")?.join(upper),
         (Os::Windows, Scope::User) => needed("LOCALAPPDATA")?
             .join("Programs")
             .join("Common")

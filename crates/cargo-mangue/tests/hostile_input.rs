@@ -118,7 +118,7 @@ fn nothing_that_reads_text_from_outside_panics_on_hostile_input() {
     let mut random = Random(0x9e37_79b9_7f4a_7c15);
     // One judge of each format lives through the whole sweep, so that what
     // it remembers of earlier lines is in play too.
-    let mut judges = Format::ALL.map(Judge::new);
+    let mut judges = Format::DEFAULT.map(Judge::new);
     for round in 0..20_000 {
         let text = hostile(&mut random);
         let _ = Target::from_triple(&text);
@@ -128,7 +128,7 @@ fn nothing_that_reads_text_from_outside_panics_on_hostile_input() {
         let _ = layout::check_identifier(&text);
         let _ = layout::info_plist(Format::Vst3, &text, &text, &text);
         let _ = strip_ansi(&text);
-        for format in Format::ALL {
+        for format in Format::DEFAULT {
             let mut judge = Judge::new(format);
             judge.feed(&text);
             let _ = judge.verdict();
@@ -149,7 +149,7 @@ fn nothing_that_reads_text_from_outside_panics_on_hostile_input() {
         let other = hostile(&mut random);
         let _ = built_for(Path::new(&text), Path::new(&other));
         for os in cargo_mangue::platform::Os::ALL {
-            for format in Format::ALL {
+            for format in Format::DEFAULT {
                 let _ = layout::plan(&layout::BundleSpec {
                     format,
                     os,

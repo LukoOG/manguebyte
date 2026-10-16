@@ -18,6 +18,13 @@
 //! | Linux | `Name.clap` (the library itself) | `Name.vst3/Contents/x86_64-linux/Name.so` |
 //! | macOS | `Name.clap/Contents/MacOS/Name`, `Info.plist` | `Name.vst3/Contents/MacOS/Name`, `Info.plist`, `PkgInfo` |
 //!
+//! An LV2 bundle is a plain folder on every system, `Name.lv2`, holding the
+//! library (`Name.dll`, `Name.so` or `Name.dylib`) and two Turtle files,
+//! `manifest.ttl` and one named after the plugin's id, that describe it.
+//! Only the plugin's own code can write those, so the plan lists the
+//! library alone, and [`lv2`](crate::lv2) supplies the Turtle files once
+//! the plugin is built.
+//!
 //! # Sources
 //!
 //! - *VST 3 Developer Portal*, "Plug-in Format Structure" (Steinberg): the
@@ -26,6 +33,8 @@
 //!   library named `.clap`, and a bundle on macOS.
 //! - *Information Property List Key Reference* (Apple): the `Info.plist`
 //!   keys.
+//! - *LV2 core* (lv2plug.in): a bundle is a folder whose `manifest.ttl`
+//!   names the plugin's library and its description.
 
 use crate::error::Error;
 use crate::platform::{Arch, Format, Os};
@@ -99,6 +108,21 @@ pub struct BundlePlan {
     /// True on macOS, where an unsigned library does not load on Apple
     /// silicon.
     pub sign: bool,
+    /// What is signed when [`sign`](Self::sign) is true, relative to the
+    /// output folder: the bundle itself, or for LV2, whose bundle is a
+    /// plain folder and not one macOS signs, the library inside it.
+    pub signed: String,
+}
+
+impl BundlePlan {
+    /// The file name of the plugin's library inside the bundle, such as
+    /// `Mangue Pluck.so`: the last part of the first file that holds it.
+    pub fn library_file_name(&self) -> Option<&str> {
+        self.files
+            .iter()
+            .find(|file| matches!(file.contents, Contents::Library(_) | Contents::Universal(_)))
+            .and_then(|file| file.path.rsplit('/').next())
+    }
 }
 
 /// Works out the files of a bundle.
@@ -153,8 +177,37 @@ pub fn plan(spec: &BundleSpec) -> Result<BundlePlan, Error> {
     let root = format!("{name}.{}", spec.format.extension());
     let mut files = Vec::new();
     let mut single_file = false;
+    let mut signed = root.clone();
 
     match (spec.os, spec.format) {
+        (os, Format::Lv2) => {
+            // A plain folder on every system, with the library beside the
+            // Turtle files that commands add once the plugin is built.
+            let binary = match spec.archs.as_slice() {
+                [only] => Contents::Library(*only),
+                several if os == Os::Macos => Contents::Universal(several.to_vec()),
+                several => {
+                    return Err(Error::usage(format!(
+                        "A .lv2 for {} holds one library, for one architecture, and {} were \
+                         asked for. Bundle each target on its own, with --out to keep the \
+                         results apart.",
+                        os.name(),
+                        several.len()
+                    )));
+                }
+            };
+            let extension = match os {
+                Os::Windows => "dll",
+                Os::Linux => "so",
+                Os::Macos => "dylib",
+            };
+            let path = format!("{root}/{name}.{extension}");
+            signed = path.clone();
+            files.push(PlannedFile {
+                path,
+                contents: binary,
+            });
+        }
         (Os::Macos, format) => {
             // On macOS both formats are bundles with the same skeleton, and
             // one binary holds every architecture. Only here is there a
@@ -216,6 +269,7 @@ pub fn plan(spec: &BundleSpec) -> Result<BundlePlan, Error> {
         single_file,
         files,
         sign: spec.os == Os::Macos,
+        signed,
     })
 }
 
@@ -272,7 +326,8 @@ pub fn info_plist(format: Format, name: &str, identifier: &str, version: &str) -
     let identifier = xml_escape(identifier);
     let version = xml_escape(version);
     let signature = match format {
-        Format::Clap => "",
+        // An LV2 bundle has no Info.plist; `plan` never writes one for it.
+        Format::Clap | Format::Lv2 => "",
         Format::Vst3 => "    <key>CFBundleSignature</key><string>????</string>\n",
     };
     format!(

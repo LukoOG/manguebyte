@@ -241,6 +241,7 @@ fn nothing_of_the_template_is_left_in_a_generated_crate() {
             "fn process(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>)",
             "manguebyte::clap::export_clap!(MyGain);",
             "manguebyte::vst3::export_vst3!(MyGain);",
+            "manguebyte::lv2::export_lv2!(MyGain);",
             "#[cfg(test)]",
             "Harness::<MyGain>::new(RATE, 256)",
             "fn sounds_the_same_whatever_the_block_size()",
@@ -284,7 +285,7 @@ description = "My Gain: an audio effect built with Manguebyte"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-manguebyte = {{ git = "{REPOSITORY}", default-features = false, features = ["clap", "vst3"] }}
+manguebyte = {{ git = "{REPOSITORY}", default-features = false, features = ["clap", "vst3", "lv2"] }}
 
 # What `cargo mangue bundle`, `install` and `validate` call the plugin.
 [package.metadata.manguebyte]
@@ -302,7 +303,7 @@ id = "com.example.my-gain"
     let manifest = generate(&plugin).manifest;
     assert!(manifest.contains(
         "manguebyte = { path = \"../manguebyte/crates/manguebyte\", default-features = false, \
-         features = [\"clap\", \"vst3\"] }\n"
+         features = [\"clap\", \"vst3\", \"lv2\"] }\n"
     ));
     assert!(
         manifest.contains("description = \"Órgão do Zé: an instrument built with Manguebyte\"\n")
@@ -613,7 +614,7 @@ fn a_generated_plugin_builds_passes_its_tests_and_bundles() {
             "cargo mangue bundle",
         );
         let said = String::from_utf8_lossy(&bundled.stdout).into_owned();
-        for format in Format::ALL {
+        for format in Format::DEFAULT {
             let plan = plan(&BundleSpec {
                 format,
                 os: host.os,
@@ -632,6 +633,42 @@ fn a_generated_plugin_builds_passes_its_tests_and_bundles() {
             }
             assert!(said.contains(&plan.root), "{said}");
         }
+
+        // The LV2 bundle: the library, and the Turtle files that the plugin's
+        // own code writes, naming it.
+        let bundled = run(
+            in_project(tool.as_ref())
+                .args(["bundle", "--format", "lv2", "--out"])
+                .arg(&out),
+            "cargo mangue bundle --format lv2",
+        );
+        let said = String::from_utf8_lossy(&bundled.stdout).into_owned();
+        let lv2 = plan(&BundleSpec {
+            format: Format::Lv2,
+            os: host.os,
+            archs: vec![host.arch],
+            name: name.to_owned(),
+            identifier: format!("com.example.{package}"),
+            version: bundle_version("0.1.0"),
+        })
+        .unwrap();
+        assert!(said.contains(&lv2.root), "{said}");
+        let folder = out.join(&lv2.root);
+        let library = lv2.library_file_name().unwrap();
+        assert!(fs::metadata(folder.join(library)).unwrap().len() > 0);
+        let manifest = fs::read_to_string(folder.join("manifest.ttl")).unwrap();
+        let encoded = library.replace(' ', "%20");
+        assert!(
+            manifest.contains(&format!("lv2:binary <{encoded}> ;")),
+            "{manifest}"
+        );
+        assert!(
+            manifest.contains(&format!("<urn:manguebyte:com.example.{package}>")),
+            "{manifest}"
+        );
+        let described =
+            fs::read_to_string(folder.join(format!("com.example.{package}.ttl"))).unwrap();
+        assert!(described.contains("lv2:port"), "{described}");
     }
     fs::remove_dir_all(&work).unwrap();
 }

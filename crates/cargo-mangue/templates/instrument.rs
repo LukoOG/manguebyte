@@ -17,6 +17,7 @@
 //! ```text
 //! cargo test                        runs the tests
 //! cargo mangue bundle --release     builds the .clap and the .vst3
+//! cargo mangue bundle --release --format lv2   builds the .lv2
 //! cargo mangue install --release    and copies them to where hosts look
 //! cargo mangue validate --release   runs the CLAP and VST 3 validators
 //! ```
@@ -243,6 +244,7 @@ impl Plugin for PluginTemplate {
 
 manguebyte::clap::export_clap!(PluginTemplate);
 manguebyte::vst3::export_vst3!(PluginTemplate);
+manguebyte::lv2::export_lv2!(PluginTemplate);
 
 #[cfg(test)]
 mod tests {

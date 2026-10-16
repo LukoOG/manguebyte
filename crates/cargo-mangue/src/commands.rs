@@ -14,7 +14,8 @@ use crate::cargo::{BuiltFor, Cargo, built_for, select_package};
 use crate::cli::{self, BundleArgs, Command, InstallArgs, NewArgs, UninstallArgs, ValidateArgs};
 use crate::error::{Error, Failure};
 use crate::install::{self, Scope};
-use crate::layout::{BundleSpec, bundle_version, check_plugin_name, plan};
+use crate::layout::{BundleSpec, Contents, PlannedFile, bundle_version, check_plugin_name, plan};
+use crate::lv2;
 use crate::platform::{Arch, Format, Os, Target};
 use crate::scaffold::{self, Dependency, NewPlugin};
 use crate::tools::SystemTools;
@@ -48,10 +49,10 @@ fn env_var(name: &str) -> Option<OsString> {
     env::var_os(name)
 }
 
-/// The formats asked for, or both.
+/// The formats asked for, or CLAP and VST 3.
 fn formats_or_all(formats: &[Format]) -> Vec<Format> {
     if formats.is_empty() {
-        Format::ALL.to_vec()
+        Format::DEFAULT.to_vec()
     } else {
         formats.to_vec()
     }
@@ -150,6 +151,9 @@ fn bundle_plugin(args: &BundleArgs, for_this_machine: Option<&str>) -> Result<Bu
     // The layouts next, so that a name or a combination that cannot work
     // is reported before a long build and not after it.
     let formats = formats_or_all(&args.formats);
+    if formats.contains(&Format::Lv2) {
+        lv2::helper_features(&args.request)?;
+    }
     let plans_for = |archs: &[Arch]| {
         let planned = formats.iter().map(|&format| {
             plan(&BundleSpec {
@@ -184,6 +188,23 @@ fn bundle_plugin(args: &BundleArgs, for_this_machine: Option<&str>) -> Result<Bu
     let built: Vec<Arch> = libraries.iter().map(|(arch, _)| *arch).collect();
     if built != expected {
         plans = plans_for(&built)?;
+    }
+    // An LV2 bundle's Turtle files, which only the plugin's code can write.
+    for (format, plan) in formats.iter().zip(&mut plans) {
+        if *format != Format::Lv2 {
+            continue;
+        }
+        let binary = plan
+            .library_file_name()
+            .ok_or_else(|| Error::failed("The LV2 bundle has no library in its plan."))?
+            .to_owned();
+        eprintln!("Writing the Turtle files of {}", plan.root);
+        for (file, text) in lv2::turtle_files(&cargo, &metadata, package, &args.request, &binary)? {
+            plan.files.push(PlannedFile {
+                path: format!("{}/{file}", plan.root),
+                contents: Contents::Bytes(text),
+            });
+        }
     }
 
     let out_dir = match &args.out {
@@ -334,6 +355,13 @@ fn uninstall_plugin(args: &UninstallArgs) -> Result<(), Error> {
 fn validate_plugin(args: &ValidateArgs) -> Result<(), Error> {
     host_os("validate")?;
     let formats = formats_or_all(&args.bundle.formats);
+    if formats.contains(&Format::Lv2) {
+        return Err(Error::usage(
+            "cargo mangue validate runs the CLAP and VST 3 validators, and has none for LV2. \
+             Bundle it with cargo mangue bundle --format lv2 and check it with lv2lint, from \
+             the OpenMusicKontrollers project.",
+        ));
+    }
 
     // Find the validators first: a wrong path should not cost a build.
     let tools = SystemTools;
@@ -343,6 +371,8 @@ fn validate_plugin(args: &ValidateArgs) -> Result<(), Error> {
         let named = match format {
             Format::Clap => args.clap_validator.as_deref(),
             Format::Vst3 => args.vst3_validator.as_deref(),
+            // Refused above.
+            Format::Lv2 => None,
         };
         match validate::locate(format, named, &env_var, &tools)? {
             Some(validator) => found.push((format, validator)),
@@ -467,6 +497,7 @@ fn new_plugin(args: &NewArgs) -> Result<(), Error> {
     eprintln!("  cd {}", plugin.package);
     eprintln!("  cargo test                      runs its tests, with no host");
     eprintln!("  cargo mangue bundle --release   builds its .clap and its .vst3");
+    eprintln!("  cargo mangue bundle --release --format lv2   builds its .lv2");
     eprintln!("  cargo mangue install --release  and copies them to where hosts look");
     // Whatever was not chosen is a placeholder, and the id is the one that
     // cannot be changed later.

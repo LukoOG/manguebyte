@@ -190,7 +190,7 @@ fn a_vst3_on_macos_is_a_bundle_with_a_property_list_and_pkginfo() {
 #[test]
 fn several_architectures_on_macos_become_one_universal_binary() {
     let both = [Arch::X86_64, Arch::Aarch64];
-    for format in Format::ALL {
+    for format in Format::DEFAULT {
         let single = planned(format, Os::Macos, &[Arch::Aarch64]);
         let universal = planned(format, Os::Macos, &both);
         // The same files in the same places: only the binary differs.
@@ -251,7 +251,7 @@ fn plan_error(format: Format, os: Os, archs: &[Arch]) -> String {
 #[test]
 fn a_bundle_needs_an_architecture_and_each_only_once() {
     for os in Os::ALL {
-        for format in Format::ALL {
+        for format in Format::DEFAULT {
             assert!(plan(&spec(format, os, &[])).is_err());
             let error = plan_error(format, os, &[Arch::X86_64, Arch::X86_64]);
             assert!(error.contains("once"), "{error}");
@@ -263,7 +263,7 @@ fn a_bundle_needs_an_architecture_and_each_only_once() {
 fn every_planned_path_stays_inside_its_bundle() {
     let archs = [Arch::X86_64, Arch::Aarch64, Arch::X86];
     for os in Os::ALL {
-        for format in Format::ALL {
+        for format in Format::DEFAULT {
             for arch in archs {
                 let plan = planned(format, os, &[arch]);
                 assert_eq!(plan.root, format!("{NAME}.{}", format.extension()));
@@ -297,7 +297,7 @@ fn every_planned_path_stays_inside_its_bundle() {
 fn a_name_that_would_leave_the_output_folder_is_refused_for_every_layout() {
     for name in ["../Pluck", "a/b", "a\\b", "..", ""] {
         for os in Os::ALL {
-            for format in Format::ALL {
+            for format in Format::DEFAULT {
                 let mut bad = spec(format, os, &[Arch::X86_64]);
                 bad.name = name.to_owned();
                 assert_eq!(plan(&bad).unwrap_err().exit_code(), 2, "{name:?}");
@@ -341,7 +341,7 @@ fn an_identifier_only_macos_writes_does_not_stop_a_bundle_for_windows_or_linux()
     // The last ones could not be written even on macOS.
     for identifier in ["com.example.my_gain", "", "com..gain", "no dots at all"] {
         for os in [Os::Windows, Os::Linux] {
-            for format in Format::ALL {
+            for format in Format::DEFAULT {
                 let mut described = spec(format, os, &[Arch::X86_64]);
                 described.identifier = identifier.to_owned();
                 let bundle = plan(&described).unwrap_or_else(|error| {
@@ -368,7 +368,7 @@ fn an_identifier_only_macos_writes_does_not_stop_a_bundle_for_windows_or_linux()
 
 #[test]
 fn on_macos_an_underscore_in_the_identifier_is_written_as_a_hyphen() {
-    for format in Format::ALL {
+    for format in Format::DEFAULT {
         let mut described = spec(format, Os::Macos, &[Arch::Aarch64]);
         described.identifier = "com.example.my_gain".to_owned();
         let with_underscore = plan(&described).unwrap();
@@ -517,4 +517,36 @@ fn the_property_lists_are_the_shell_scripts_own_text() {
     assert_eq!(PKG_INFO, b"BNDL????");
     // bundle-clap.sh writes no PkgInfo, and neither does the tool.
     assert!(!clap.contains("PkgInfo"));
+}
+
+/// An LV2 bundle is a plain folder holding the library, on every system;
+/// the Turtle files beside it are added once the plugin is built. On macOS
+/// the library, not the folder, is what is signed.
+#[test]
+fn an_lv2_bundle_is_a_folder_with_the_library_in_it() {
+    for (os, library) in [
+        (Os::Windows, "Mangue Pluck.lv2/Mangue Pluck.dll"),
+        (Os::Linux, "Mangue Pluck.lv2/Mangue Pluck.so"),
+        (Os::Macos, "Mangue Pluck.lv2/Mangue Pluck.dylib"),
+    ] {
+        let plan = planned(Format::Lv2, os, &[Arch::X86_64]);
+        assert_eq!(plan.root, "Mangue Pluck.lv2");
+        assert!(!plan.single_file);
+        assert_eq!(files(&plan), [(library, &Contents::Library(Arch::X86_64))]);
+        assert_eq!(plan.library_file_name(), library.rsplit('/').next());
+        assert_eq!(plan.sign, os == Os::Macos);
+        assert_eq!(plan.signed, library);
+    }
+    // Two architectures are one universal library on macOS, and refused
+    // elsewhere.
+    let both = [Arch::X86_64, Arch::Aarch64];
+    let mac = planned(Format::Lv2, Os::Macos, &both);
+    assert_eq!(mac.files[0].contents, Contents::Universal(both.to_vec()));
+    for os in [Os::Windows, Os::Linux] {
+        let error = plan(&spec(Format::Lv2, os, &both)).unwrap_err();
+        assert_eq!(error.exit_code(), 2, "{error}");
+    }
+    // The other formats sign the bundle itself.
+    let vst3 = planned(Format::Vst3, Os::Macos, &[Arch::Aarch64]);
+    assert_eq!(vst3.signed, vst3.root);
 }

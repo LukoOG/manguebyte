@@ -238,7 +238,7 @@ fn manifest(plugin: &NewPlugin, description: &str) -> String {
          crate-type = [\"cdylib\", \"rlib\"]\n\
          \n\
          [dependencies]\n\
-         manguebyte = {{ {source}, default-features = false, features = [\"clap\", \"vst3\"] }}\n\
+         manguebyte = {{ {source}, default-features = false, features = [\"clap\", \"vst3\", \"lv2\"] }}\n\
          \n\
          # What `cargo mangue bundle`, `install` and `validate` call the plugin.\n\
          [package.metadata.manguebyte]\n\

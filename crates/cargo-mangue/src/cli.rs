@@ -80,7 +80,7 @@ pub struct BundleArgs {
     pub package: Option<String>,
     /// The plugin's name, if given here and not left to `Cargo.toml`.
     pub name: Option<String>,
-    /// The formats to bundle. Empty means both.
+    /// The formats to bundle. Empty means CLAP and VST 3.
     pub formats: Vec<Format>,
     /// How to build.
     pub request: BuildRequest,
@@ -107,7 +107,7 @@ pub struct UninstallArgs {
     /// The plugin's name, if given here. With it, no `Cargo.toml` is
     /// needed.
     pub name: Option<String>,
-    /// The formats to remove. Empty means both.
+    /// The formats to remove. Empty means CLAP and VST 3.
     pub formats: Vec<Format>,
     /// Remove from the folders shared by every user.
     pub system: bool,
@@ -338,7 +338,7 @@ fn each_item(
 fn add_format(formats: &mut Vec<Format>, name: &str) -> Result<(), Error> {
     let Some(format) = Format::from_name(name) else {
         return Err(Error::usage(format!(
-            "\"{name}\" is not a plugin format. The formats are clap and vst3."
+            "\"{name}\" is not a plugin format. The formats are clap, vst3 and lv2."
         )));
     };
     if !formats.contains(&format) {
@@ -574,7 +574,7 @@ Usage: cargo mangue <command> [options]
 
 Commands:
   new        Create a plugin crate that builds as it is
-  bundle     Build a plugin and write its .clap and its .vst3
+  bundle     Build a plugin and write its .clap and its .vst3 (or .lv2)
   install    Bundle, then copy into the folders hosts scan
   uninstall  Remove an installed plugin from those folders
   validate   Bundle, then run clap-validator and the VST 3 validator
@@ -596,7 +596,8 @@ Run cargo mangue <command> --help for the options of a command.
 ";
 
 const BUNDLE_HELP: &str = "\
-Build a plugin and write its .clap and its .vst3.
+Build a plugin and write its .clap and its .vst3, or with --format lv2 its
+.lv2.
 
 Usage: cargo mangue bundle [options]
 
@@ -608,9 +609,15 @@ then laid out the way hosts expect on the system it was built for:
   macOS    Name.clap/Contents/MacOS/    Name.vst3/Contents/MacOS/
            with Info.plist              with Info.plist and PkgInfo
 
+An LV2 bundle is a folder, Name.lv2, with the library (Name.dll, Name.so
+or Name.dylib) and its Turtle files, manifest.ttl and one named after the
+plugin's id. Those are written by a small program cargo mangue builds and
+runs against the plugin's crate, which must call export_lv2! at its root
+and have the rlib crate type as well as cdylib.
+
 On macOS several --target options make one universal binary with lipo, and
-the bundle gets an ad-hoc signature with codesign. If codesign is missing
-the bundle is written unsigned and a note says so.
+the bundle (for LV2, its library) gets an ad-hoc signature with codesign.
+If codesign is missing the bundle is written unsigned and a note says so.
 
 The plugin's name comes from its Cargo.toml:
 
@@ -637,6 +644,10 @@ With --system it is installed for everybody, which needs an administrator:
   Linux    /usr/lib/clap and /usr/lib/vst3
   macOS    /Library/Audio/Plug-Ins/CLAP and .../VST3
 
+With --format lv2, an LV2 bundle goes to %APPDATA%\\LV2 on Windows (for
+everybody, %COMMONPROGRAMFILES%\\LV2), ~/.lv2 on Linux (/usr/lib/lv2) and
+~/Library/Audio/Plug-Ins/LV2 on macOS (/Library/Audio/Plug-Ins/LV2).
+
 An installed plugin of the same name is replaced. Close the host first:
 Windows does not let go of a plugin that is loaded.
 
@@ -658,6 +669,8 @@ Usage: cargo mangue validate [options]
 
 Each is taken from its option, else from its environment variable, else
 from PATH. A format whose validator is not found is skipped with a note.
+LV2 has no validator here, and --format lv2 is refused: check an LV2
+bundle with lv2lint.
 The command fails with exit code 4 if a validator reports a failed test or
 ends without a result, and with exit code 5 if no validator was found at
 all, so that passing never means that nothing was checked.
@@ -676,8 +689,8 @@ Options:
       --name <name>         The plugin's name, which names the bundles.
                             Default: name under [package.metadata.manguebyte]
                             in its Cargo.toml, else the package name
-      --format <format>     clap or vst3. Repeat it, or write clap,vst3, for
-                            both, which is also the default
+      --format <format>     clap, vst3 or lv2. Repeat it, or write clap,vst3,
+                            for several. Default: clap and vst3
   -r, --release             Build with the release profile
       --profile <name>      Build with this profile. Default: dev
       --target <triple>     Build for this target. Repeat it for several
@@ -716,14 +729,15 @@ Remove an installed plugin from the folders hosts scan.
 
 Usage: cargo mangue uninstall [options]
 
-Removes Name.clap and Name.vst3 from the folders cargo mangue install
-copies into. A plugin that is not there is reported and is not an error.
+Removes Name.clap and Name.vst3 (and Name.lv2 with --format lv2) from the
+folders cargo mangue install copies into. A plugin that is not there is
+reported and is not an error.
 
 Options:
   -p, --package <name>      The plugin's package, to read its name from
       --name <name>         The plugin's name. With it, no Cargo.toml is
                             needed
-      --format <format>     clap or vst3. Default: both
+      --format <format>     clap, vst3 or lv2. Default: clap and vst3
       --system              Remove from the folders shared by every user,
                             which needs an administrator
       --manifest-path <path>  The Cargo.toml to use
@@ -1157,7 +1171,7 @@ mod tests {
         assert!(unknown.contains("no option --frmat"), "{unknown}");
         assert!(unknown.contains("cargo mangue bundle --help"), "{unknown}");
 
-        assert!(usage_error(&["bundle", "--format", "vst2"]).contains("clap and vst3"));
+        assert!(usage_error(&["bundle", "--format", "vst2"]).contains("clap, vst3 and lv2"));
         assert!(usage_error(&["bundle", "--format"]).contains("needs a value"));
         assert!(usage_error(&["bundle", "--format", ","]).contains("needs a value"));
         assert!(usage_error(&["bundle", "--name", "--release"]).contains("--name=VALUE"));

@@ -118,7 +118,7 @@ fn a_plan_is_written_file_for_file_on_every_system() {
     let libraries = libraries(&scratch);
     let mut cases = 0;
     for os in Os::ALL {
-        for format in Format::ALL {
+        for format in Format::DEFAULT {
             let plan = planned(format, os, &[Arch::X86_64]);
             let out = scratch.path().join(format!("{os:?}-{format:?}"));
             // On macOS with neither lipo nor codesign: still written.
