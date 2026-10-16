@@ -1,7 +1,8 @@
 # Contributing to Manguebyte
 
-Thank you for wanting to help. Manguebyte is a large project with a long road
-ahead, and it only gets there if many people build it together.
+Thank you for wanting to help. The Manguebyte Audio Framework is a large
+project with a long road ahead, and it only gets there if many people build it
+together.
 
 Everything in this repository is in English: code, comments, commit messages,
 issues and pull requests. Imperfect English is completely fine.

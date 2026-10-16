@@ -1,8 +1,8 @@
 # Architecture
 
-This document explains how Manguebyte is put together and why. Read it before
-adding a crate, changing a core trait, or touching anything that runs on the
-audio thread. Individual decisions are recorded in [`adr/`](adr/).
+This document explains how the Manguebyte Audio Framework is put together and
+why. Read it before adding a crate, changing a core trait, or touching anything
+that runs on the audio thread. Individual decisions are recorded in [`adr/`](adr/).
 
 ## What we are building
 

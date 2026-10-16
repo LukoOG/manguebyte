@@ -1,6 +1,6 @@
 [package]
 name = "cargo-mangue"
-description = "The Manguebyte command-line tool: create, bundle, install and validate audio plugins."
+description = "The command-line tool of the Manguebyte Audio Framework: create, bundle, install and validate audio plugins."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

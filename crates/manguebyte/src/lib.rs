@@ -1,4 +1,4 @@
-//! Manguebyte is a real-time-safe audio framework for Rust.
+//! The Manguebyte Audio Framework: real-time-safe audio for Rust.
 //!
 //! This crate gathers the whole framework under one name. Each area lives in
 //! its own crate, which you can also depend on directly:

@@ -2,10 +2,11 @@
   <img src="assets/logo.png" alt="Manguebyte logo: a crab wearing headphones and playing an electric guitar" width="280">
 </p>
 
-<h1 align="center">Manguebyte</h1>
+<h1 align="center">Manguebyte Audio Framework</h1>
 
 <p align="center">
   <strong>A modern, real-time-safe audio framework for Rust.</strong><br>
+  The crates are called <code>manguebyte</code>; the project is the Manguebyte Audio Framework.<br>
   Our goal is to be for Rust what JUCE is for C++, and then go further.<br>
   <a href="#where-it-already-goes-beyond-juce">See where it already does.</a>
 </p>

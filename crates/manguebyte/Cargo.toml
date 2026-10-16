@@ -1,6 +1,6 @@
 [package]
 name = "manguebyte"
-description = "A modern, real-time-safe audio framework for Rust: buffers, DSP, MIDI, audio files and device I/O in one place."
+description = "The Manguebyte Audio Framework. Modern, real-time-safe audio for Rust: buffers, DSP, MIDI, audio files and device I/O in one place."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
