@@ -657,6 +657,33 @@ display, and no editor has been opened inside a real host yet.
 
 ### File formats
 
+- `vorbis`: an Ogg Vorbis decoder written from the Vorbis I specification
+  and RFC 3533: floors of type 1, residues of types 0, 1 and 2, codebooks
+  of every lookup type, channel coupling, both block sizes, 1 to 255
+  channels handed out in the order of WAV, and the comments. A floor of
+  type 0, which no encoder in use writes, is refused with an error that
+  says so. Files libvorbis wrote decode to exactly the length encoded.
+- `mp3`: an MP3 decoder written from ISO/IEC 11172-3 and 13818-3: layer
+  III of MPEG-1, 2 and 2.5 at every sample rate, mono, dual channel,
+  stereo and joint stereo with mid/side and intensity coding, long, short
+  and mixed blocks, the bit reservoir and CRCs. ID3v2 tags are stepped
+  over; a Xing, Info or VBRI header gives the length, and a LAME tag the
+  samples the encoder added, which are removed, so that the audio decoded
+  starts where the audio encoded did and has the length the tag states.
+  Layers I and II and free format are refused.
+- `AudioReader`, `decode` and `read_file` recognise both from the
+  contents, and the reader seeks in both exactly: what is read after a
+  seek is, bit for bit, what reading from the start gives there. In Ogg
+  Vorbis by bisection over the pages, decoding two packets; in MP3 by
+  counting the frames once, from their headers.
+- `FileFormat` has two new variants, `OggVorbis` and `Mp3`, and
+  `FormatError` two, `Vorbis` and `Mp3`: a `match` on either without a
+  wildcard needs the new arms. Lossy files report 32 bits per sample and
+  floating point.
+- Both decoders run at a hundred times real time or more for stereo at
+  44.1 kHz in a release build (`cargo run --release -p manguebyte-formats
+  --example decode_speed`: about 340 times for Vorbis, 140 for MP3, on a
+  busy machine).
 - `AudioReader` reads WAV, AIFF and FLAC block by block from any reader,
   and seeks to any frame exactly (FLAC through its seek table, which is
   never trusted blindly, or by bisection); memory does not grow with the
@@ -681,7 +708,9 @@ display, and no editor has been opened inside a real host yet.
   writing (16 and 24-bit PCM, 32-bit float).
 - `decode` and `read_file` recognise WAV, AIFF and FLAC from the contents.
 - The decoders are tested against files encoded by FFmpeg and must match
-  their source sample for sample.
+  their source sample for sample; the lossy ones, against files libvorbis
+  and LAME encoded from signals the tests make, must match their length
+  exactly and their audio within measured bounds.
 
 ### Devices
 

@@ -101,7 +101,7 @@ pub mod prelude {
     pub use crate::formats::wav::{self, WavFormat};
     pub use crate::formats::{
         AudioFile, AudioReader, AudioWriter, FileFormat, FormatError, RecordingWriter,
-        StreamingPlayer, flac,
+        StreamingPlayer, flac, mp3, vorbis,
     };
     pub use crate::graph::{Graph, GraphEngine, GraphError, NodeId};
     pub use crate::midi::file::{MetaEvent, MidiFile, Track};

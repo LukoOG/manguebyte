@@ -105,7 +105,7 @@ small part of the road ahead and the API will change before 1.0. See
 | [`manguebyte-lv2`](crates/manguebyte-lv2) | Exports the same `Plugin` as an LV2 plugin with one line, and generates its Turtle files; `cargo mangue` writes the `.lv2` bundle. Tested through its C interface in process, and CI loads the example plugins' bundles with lilv; not yet checked by `lv2lint` or loaded in a host |
 | [`manguebyte-host`](crates/manguebyte-host) | Loads CLAP and VST 3 plugins made by anyone and runs them as processors, through one interface for both formats, with every event on its frame and nothing allocated while processing |
 | [`manguebyte-midi`](crates/manguebyte-midi) | MIDI 1.0 channel and system messages, a byte-stream parser, standard MIDI files, sample-accurate `MidiBuffer`; MIDI 2.0 packets (UMP) and translation between the protocols; RPN and NRPN; MPE zones and note tracking; keyboard state |
-| [`manguebyte-formats`](crates/manguebyte-formats) | WAV (with RF64), AIFF and FLAC, read and written, whole or block by block with exact seeking; a FLAC encoder and decoder written from the specification and checked against FFmpeg; wait-free bridges to play and record from an audio callback |
+| [`manguebyte-formats`](crates/manguebyte-formats) | WAV (with RF64), AIFF and FLAC, read and written, and Ogg Vorbis and MP3 read, whole or block by block with exact seeking; a FLAC encoder and decoder written from the specification and checked against FFmpeg, and Vorbis and MP3 decoders written from theirs and tested on files libvorbis and LAME wrote; wait-free bridges to play and record from an audio callback |
 | [`manguebyte-osc`](crates/manguebyte-osc) | Open Sound Control over UDP and TCP, with a real-time bridge that puts time-tagged bundles on their exact frame |
 | [`manguebyte-devices`](crates/manguebyte-devices) | Device listing and selection, playback, recording and full-duplex streams, in any hardware sample format; MIDI input and output ports, with arrival times mapped to frames so a player's timing survives the audio buffer |
 | [`manguebyte-gfx`](crates/manguebyte-gfx) | 2D drawing on the CPU: paths, gradients, images, clips and layers recorded as a scene with an exact text dump; repaint limited to what changed, identical to a full repaint; text shaped and laid out with an embedded Inter subset |
@@ -128,8 +128,8 @@ LV2 host has run one and `lv2lint`, which the Ubuntu archive does not
 carry, has not checked one; LV2 plugins have no editor. The browser engine
 and the sampler are tested natively and in Node.js, not yet in a browser's
 audio thread under load. Also missing: the Audio Unit and AAX formats;
-lossy formats (MP3, Ogg Vorbis, Opus); plugin scanning and the editors of
-hosted plugins.
+encoding to lossy formats, and reading Opus; plugin scanning and the
+editors of hosted plugins.
 
 ## Quick start
 
