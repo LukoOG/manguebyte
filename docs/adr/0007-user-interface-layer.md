@@ -99,7 +99,7 @@ crate that processes audio (CI checks the dependency tree):
 | Crate | Holds |
 |---|---|
 | `manguebyte-gfx` | The scene (a display list per widget), the rasteriser behind a private seam, text |
-| `manguebyte-window` | Platform windows behind our own `Window` trait |
+| `manguebyte-window` | Platform windows behind our own `Window` seam (see decision 4) |
 | `manguebyte-ui` | Retained tree, layout, design tokens, widgets, the accessibility model, a test harness |
 | `manguebyte-gui` | Glue between the plugin wrappers and the interface |
 
@@ -130,6 +130,16 @@ host offers neither. Windows comes first. macOS gets a fixed time box; if our
 backend is not green on the CI runner by then, `baseview`'s macOS view code is
 adapted behind the seam. X11 follows once CI has shown it can read a window
 back.
+
+As built, the seam is not a public trait. `Window` is a concrete type over
+a crate-private enum of backends: Win32, and a headless backend for tests
+that runs the same damage merging, back buffer, pointer, timer and dispatch
+code with no system window. A new backend is added inside the crate, as a
+new arm. A public backend trait, which would let a backend live outside the
+crate, can come later as a change of its own. The Win32 backend refuses a
+parent window that belongs to another process: a child of such a window
+shares that process's input queue, so a hang in either process would hang
+both.
 
 **5. Parameters.** No listeners. The interface reads the parameters' atomics
 once per frame. An edit is a `Gesture` guard: begin, set, end, and cancel to
@@ -179,6 +189,30 @@ Reading recorded so far:
   `bytemuck_derive`, `syn`, `quote`, `proc-macro2` and `unicode-ident` in as
   build-time dependencies; `unicode-ident` was already in the tree, and the
   licence check has to allow it as a build-only dependency.
+- `windows-sys` 0.61.2 and `windows-link` 0.2.1, which `manguebyte-window`
+  uses on Windows only: `#![no_std]`, no build script, only types,
+  constants and function declarations, linked through `windows-link`'s
+  `raw-dylib` macro. No statics, no threads, no operating-system names.
+
+How `manguebyte-window` itself keeps the rule on Win32: its window class is
+named after the framework's version, the module handle of the binary it is
+in and the address of an immutable static of that copy of the crate, so two
+plugins, or two copies of the framework in one plugin, never share a class.
+The class is registered with the binary's own module handle when a window
+is made, and a class of that name with another window procedure is refused.
+`UnregisterClassW` is called after every window is destroyed; it succeeds
+only once no window of the class is left, so the system's own count of
+windows decides, and the crate keeps no count of its own. A window keeps its
+state in the class's extra bytes, not in `GWLP_USERDATA`, which anything in
+the process may write. There are no hooks, no threads and no mutable
+statics, and the process's DPI awareness is never changed:
+`GetDpiForWindow` is looked up at run time, with the window's device
+context as the fallback on systems that lack it. The helpers that make
+top-level windows, run message loops or set a thread's DPI awareness for
+tests are behind the crate's `testing` feature, which only tests and the
+probe turn on. `manguebyte-gui` has no `unsafe` code, keeps no global
+state and starts no thread; everything it asks of the system goes through
+`manguebyte-window`.
 
 **8. Verification.** A probe job opens a window and reads its pixels back on
 the three CI systems before any backend depends on that. Scenes are checked
@@ -206,13 +240,54 @@ order and arguments. Nothing about the interface goes into the README,
    *Done.*
 
 Items 2 to 6 were each built, attacked by an independent reviewer who wrote
-failing tests, and fixed; every fix kept the reviewer's test. None of them
-has been opened in a real host yet: that starts with item 7.
-7. A headless editor driven through the real CLAP interface.
+failing tests, and fixed; every fix kept the reviewer's test. Items 7, 8
+and the built part of item 9 went through the same process. One reviewer's
+test, for a fault that needed a change in the VST 3 wrapper, was ignored
+until the wrapper changed: the VST 3 view now shows the editor once
+`attached` succeeds and hides it at the start of `removed`, the glue opens
+an editor hidden, with no frame timer, until the host shows it, and the
+test runs (TECH_DEBT 47, paid back). None of them has been opened in a real
+host yet: that is what is left of item 9.
+7. A headless editor driven through the real CLAP interface. *Done*, and
+   through VST 3's real COM interfaces as well: drags, keys, automation,
+   meters, scales and sizes, editors opened and closed thousands of times
+   while `process` runs under the counting allocator, and fuzzed `gui` and
+   `IPlugView` calls. An editor opens headless only when a test gives it a
+   hook (`Editor::on_headless_open`); the `headless` feature only adds that
+   API, so turning it on changes no other editor in the build.
 8. `manguebyte-window` on Windows and `manguebyte-gui`: embedding and
    read-back tests, open and close cycles, two binaries in one process.
+   *Done.* The glue, embedding in a real Win32 parent, read-back of the
+   presented pixels and open and close cycles are built and tested on
+   Windows; the probe job checks read-back on the CI runner. The test with
+   two plugin binaries in one process (`plugins/duck/tests/two_binaries.rs`)
+   loads Mangue Duck's and Mangue Pluck's libraries with `LoadLibraryW`,
+   opens both editors through the CLAP `gui` extension in real windows,
+   reads their pixels back, fuzzes the `gui` calls in random orders with
+   hostile arguments against a model of CLAP's rules, unloads the libraries
+   in either order and checks that no GDI or USER object and no window
+   class is left behind. It runs on the debug libraries in every Windows
+   `cargo test`; the same tests on the release bundles, which are built
+   without the test features, are `#[ignore]`d and run by the Windows CI
+   job after bundling. `manguebyte-gui` reads "no frames when nothing is damaged" this
+   way: while the editor is visible, a timer the window owns polls about
+   60 times a second, because parameters and meter levels are atomics with
+   no change notification, and a poll that finds nothing changed lays out,
+   draws, renders and presents nothing. The timer is killed while the
+   editor is hidden. An idle backoff would delay the first change after a
+   quiet spell by the backoff period.
 9. An editor for `plugins/duck`, opened by hand in at least one host on
-   Windows and recorded.
+   Windows and recorded. *Built, not yet opened by hand.* Mangue Duck's
+   editor (440 by 210 logical pixels) has a title, the Bypass switch, knobs
+   for Threshold, Depth, Attack and Release that show their values in the
+   parameters' own words, and a Reduction meter from 0 to 40 dB, which the
+   processor feeds through a `ReductionMeter` (one atomic store per block)
+   and which falls to 0 when nothing has been published for half a second.
+   Mangue Pluck has an editor too (520 by 160, a knob for each of its six
+   parameters), as the second binary of item 8's test. Both are tested
+   headless (layout at scales 1 to 2, drags, keys, automation, the meter),
+   Duck's against golden images too. The hand test in REAPER is still to be done
+   and recorded.
 
 Not in phase 1: macOS and X11 backends, platform accessibility adapters,
 resizing, popups, text entry, GPU code, hot reloading of themes.

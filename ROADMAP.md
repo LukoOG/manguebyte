@@ -61,19 +61,28 @@ Everything a standalone audio application needs, short of a user interface.
 - ✅ High-order IIR design: Butterworth, Chebyshev I and II, elliptic, order
   1 to 16, gliding between designs without blowing up
 - ✅ Linkwitz-Riley crossovers, 2 to 5 bands that sum flat
-- ⬜ FIR filter processor
+- ✅ FIR filter processor, choosing direct or FFT convolution by length
 - ✅ Dynamics: compressor with soft knee, noise gate
 - ✅ Look-ahead limiter whose ceiling holds for every sample
-- ⬜ Expander, sidechain input
+- ✅ Expander, and sidechain keying for the compressor, gate and expander,
+  chosen per processor
 - ✅ Reverb (feedback delay network)
 - ✅ Chorus and flanger, phaser, dry/wet mixing with latency compensation,
   panner, envelope follower, interpolated delay lines
-- ⬜ Convolution
+- ✅ Convolution: uniformly partitioned, with zero latency or a latency of
+  one partition, true stereo, and responses swapped with a crossfade while
+  playing. A non-uniformly partitioned scheme, cheaper for long responses
+  at small block sizes, is not started
 - ✅ Noise (white, pink, brown), LFO with tempo sync, waveshaper, DC blocker
-- ⬜ Wavetable oscillator
-- ⬜ Sampler: an SFZ player (multisamples, velocity layers, round robin,
-  loop points, release samples), streamed from disk, open so that any
-  program can play the instruments Parabolic exports
+- ✅ Wavetable oscillator: band-limited by a mip-map, with morphing between
+  frames and phase modulation
+- ✅ Sampler: an SFZ player (`manguebyte-sampler`): multisamples, velocity
+  layers, round robin and random layers, loop points with crossfades,
+  release triggers, choke groups and polyphony limits, from files or from
+  memory, in WebAssembly too, open so that any program can play the
+  instruments Parabolic exports. Samples are loaded whole, not streamed
+  from disk; filters, LFOs, modulation by controllers and keyswitches are
+  not started
 - ✅ Polyphonic voice allocation with per-note expression and modulation
 - ✅ Metering: loudness to ITU-R BS.1770 and EBU R 128 (checked against the
   EBU's test signals), true peak, peak, RMS, VU, PPM, stereo correlation
@@ -99,6 +108,8 @@ Everything a standalone audio application needs, short of a user interface.
 
 **Core**
 - ✅ Parameter system: ranges, skew, text conversion, smoothing
+- ✅ Parameter descriptions as data and as JSON (range, curve, steps,
+  names, smoothing), for editors outside Rust such as Aratu's
 - ✅ Sample-accurate parameter automation events
 - ✅ Change gestures (begin and end of a user edit): a `Gesture` guard in
   the editor contract, sent to CLAP hosts as gesture events and to VST 3
@@ -119,27 +130,36 @@ Write a processor once and ship it in every format.
   state, latency, reporting of parameter changes to the host. Checked in CI
   by the CLAP project's validator
 - 🚧 CLAP `gui`, `timer-support` and `posix-fd-support` for plugins with an
-  editor, tested through the C interface against a fake editor and host; no
-  window backend yet
+  editor, tested through the C interface against fake editors and hosts,
+  including `manguebyte-gui` editors in a headless window; not yet opened
+  in a real host
 - ⬜ CLAP extensions still to come: per-note automation, note-end and voice
   info, 64-bit audio, tail, presets, remote controls
 - ✅ VST 3: audio and event buses, every automation point on its frame,
-  notes with ids, tuning and note expression, MIDI controllers through
-  hidden parameters, parameters, units, state, latency. Checked in CI by
-  Steinberg's validator on Windows, Linux and macOS
+  notes with ids, tuning and note expression, the MIDI controllers a
+  plugin declares through hidden parameters, parameters, units, state,
+  latency. Checked in CI by Steinberg's validator on Windows, Linux and
+  macOS
 - 🚧 VST 3 editor interfaces: the component handler kept and used for
-  edits, `IPlugView` with content scale, `IPlugFrame` and `IRunLoop`, tested
-  against fake host objects; no window backend yet
+  edits, `IPlugView` with content scale, showing the editor once attached,
+  `IPlugFrame` and `IRunLoop`, tested against fake host objects, including
+  `manguebyte-gui` editors in a headless window; not yet opened in a real
+  host
 - ⬜ VST 3 still to come: 64-bit audio, changing the bus layout, program
   lists
 - ⬜ Audio Unit (AUv2 and AUv3)
-- ⬜ LV2
+- 🚧 LV2: audio and sidechain ports, parameters as control ports, MIDI and
+  transport on their frames, state, latency and generated Turtle files,
+  tested in process through the C interface; `.lv2` bundles written by
+  `cargo mangue bundle --format lv2`, and the examples' found and read by
+  lilv in CI. Not yet checked by `lv2lint` or run in a host; no editor
 - ✅ Standalone application wrapper: sound card, MIDI ports, input for
   effects
-- 🚧 Tooling: `cargo mangue` bundles, installs and validates plugins and
-  creates new plugin crates from templates; macOS bundles get an ad-hoc
-  signature and universal binaries. Signing with a real identity and
-  notarisation are not started
+- 🚧 Tooling: `cargo mangue` bundles (CLAP, VST 3 and LV2), installs and
+  validates plugins and creates new plugin crates from templates; macOS
+  bundles get an ad-hoc signature and universal binaries. Signing with a
+  real identity and notarisation are not started, and there is no LV2
+  validator in it
 
 AAX depends on a proprietary SDK and will be considered once the other formats
 are solid.
@@ -158,8 +178,15 @@ our own, and nothing claimed before its test exists.
   spectra, damage-limited repaint that matches a full repaint bit for bit,
   and text with an embedded Inter subset. GPU rendering later, never the
   default while CI cannot test its pixels
-- ⬜ Windowing, including embedding inside a plugin host (Windows first, then
-  macOS and Linux as CI proves each)
+- 🚧 Windowing, including embedding inside a plugin host: Win32 child
+  windows inside a host's window and a headless backend for tests
+  (`manguebyte-window`), and the glue that opens an editor in them
+  (`manguebyte-gui`), tested on Windows, with two plugin binaries'
+  editors open in one process; macOS and Linux follow as CI proves each
+- 🚧 Editors for the example plugins: Mangue Duck's (knobs, a bypass switch
+  and a gain-reduction meter) and Mangue Pluck's (a knob for each
+  parameter), tested headless and in real Win32 windows; not yet opened in
+  a host by hand
 - 🚧 Layout, styling and a widget set (`manguebyte-ui`): row, column and
   stack layout, theme tokens, label, knob, slider, toggle, meter and canvas
   done; text entry, menus and popups not started
@@ -168,7 +195,9 @@ our own, and nothing claimed before its test exists.
   default) and the test harness finds widgets only that way; platform
   adapters not started
 - 🚧 High-DPI: scale flows from the host through the contract to the
-  renderer; multi-monitor not started
+  renderer, and a Win32 window takes the system's scale when the host gives
+  none; a change of scale while a window is open, such as moving it to a
+  monitor with another scale, is handled but untested
 
 ## Phase 4: hosting and graphs
 
@@ -184,8 +213,11 @@ our own, and nothing claimed before its test exists.
 ## Phase 5: everywhere
 
 - ⬜ iOS and Android
-- ⬜ WebAssembly and Web Audio: the engine running in a browser's
-  AudioWorklet, fed timestamped events; its first user will be
+- 🚧 WebAssembly and Web Audio: `manguebyte-web`, an engine running in a
+  browser's AudioWorklet, fed 32-byte timestamped records through a
+  shared-memory ring, with a synth, a drum kit and a small effect chain;
+  tested natively and in Node.js, its demo tried once in Chromium, not yet
+  under load. Its first user will be
   [Aratu](https://github.com/alessonqueirozdev-hub/aratu)
 - ⬜ Embedded targets
 
