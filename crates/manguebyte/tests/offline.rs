@@ -4,10 +4,17 @@
 //! every call. The sound must not depend on it: notes, automation and effect
 //! tails have to land on the same frames however the timeline is cut up.
 //! This renders the example song several ways and requires the results to be
-//! identical, bit for bit.
+//! identical, bit for bit, and does the same with denser material: more
+//! notes at once than the synth has voices, rendered again after a reset
+//! and played again once it has ended. The song also goes through the
+//! processors that keep state of their own across blocks (partitioned
+//! convolution, FIR filters, an expander and a wavetable oscillator), with
+//! the same requirement.
 
 #[path = "../examples/common/mod.rs"]
 mod common;
+
+use std::sync::Arc;
 
 use common::RiffPlayer;
 use manguebyte::prelude::*;
@@ -61,6 +68,171 @@ fn two_renders_are_identical() {
     assert!(render(256, &[256]) == render(256, &[256]));
 }
 
+/// The processors whose state runs across blocks in ways of their own: a
+/// partitioned convolution with no latency and one with a partition of
+/// latency, FIR filters in both of their modes, an expander's envelope, and
+/// a wavetable oscillator whose phase the song modulates. Each block is
+/// fed to them in pieces of at most the size they were prepared for.
+struct Effects {
+    expander: Expander<f32>,
+    direct: FirFilter<f32>,
+    long: FirFilter<f32>,
+    convolution: Convolution<f32>,
+    _loader: ConvolutionLoader<f32>,
+    latent: ConvolutionEngine<f32>,
+    wavetable: WavetableOscillator,
+    modulator: AudioBuffer<f32>,
+    max_block_size: usize,
+}
+
+impl Effects {
+    fn new(max_block_size: usize) -> Self {
+        let spec = ProcessSpec {
+            sample_rate: SAMPLE_RATE,
+            max_block_size,
+            num_channels: 2,
+        };
+        // A decaying noise, a different one for each channel.
+        let response = |seed: u64| {
+            let mut state = seed;
+            (0..3_000)
+                .map(|n| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    let noise = (state >> 40) as f32 / (1 << 24) as f32 - 0.5;
+                    noise * (-(n as f32) / 600.0).exp() * 0.1
+                })
+                .collect::<Vec<f32>>()
+        };
+        let stereo = [
+            response(0x2545_F491_4F6C_DD1D),
+            response(0x9E37_79B9_7F4A_7C15),
+        ];
+        let engine = ConvolutionEngine::new(
+            &stereo,
+            2,
+            ConvolutionRouting::Parallel,
+            ConvolutionSettings::new().with_partition_size(64),
+        )
+        .expect("a valid response");
+        let (convolution, loader) = Convolution::from_engine(engine);
+        let latent = ConvolutionEngine::new(
+            &stereo[..1],
+            2,
+            ConvolutionRouting::Parallel,
+            ConvolutionSettings::new()
+                .with_partition_size(128)
+                .with_zero_latency(false),
+        )
+        .expect("a valid response");
+        let direct = FirFilter::new(&manguebyte::dsp::fir::lowpass(31, 0.2, 60.0)).unwrap();
+        let long = FirFilter::new(&manguebyte::dsp::fir::lowpass(255, 0.15, 80.0)).unwrap();
+        assert_eq!(direct.mode(), FirMode::Direct);
+        assert_eq!(long.mode(), FirMode::Fft);
+        let saw: Vec<f32> = (0..2_048).map(|i| i as f32 / 1_024.0 - 1.0).collect();
+        let table = Arc::new(Wavetable::new(&[saw]).expect("a valid frame"));
+        let mut wavetable = WavetableOscillator::new(table, 110.0);
+        wavetable.set_phase_modulation(0.5);
+        let mut effects = Self {
+            expander: Expander::new().with_threshold_db(-30.0).with_ratio(3.0),
+            direct,
+            long,
+            convolution,
+            _loader: loader,
+            latent,
+            wavetable,
+            modulator: AudioBuffer::new(2, max_block_size),
+            max_block_size,
+        };
+        effects.expander.prepare(&spec);
+        effects.direct.prepare(&spec);
+        effects.long.prepare(&spec);
+        effects.convolution.prepare(&spec);
+        effects.latent.prepare(&spec);
+        Processor::<f32>::prepare(&mut effects.wavetable, &spec);
+        effects
+    }
+
+    fn process(&mut self, block: &mut AudioBuffer<f32>) {
+        let frames = block.num_frames();
+        let mut done = 0;
+        while done < frames {
+            let length = (frames - done).min(self.max_block_size);
+            block.windowed(done..done + length, |piece| self.piece(piece));
+            done += length;
+        }
+    }
+
+    fn piece(&mut self, piece: &mut AudioBuffer<f32>) {
+        self.modulator.set_num_frames(piece.num_frames());
+        for channel in 0..2 {
+            self.modulator
+                .channel_mut(channel)
+                .copy_from_slice(piece.channel(channel));
+        }
+        self.wavetable.process(&mut self.modulator);
+        self.expander.process(piece);
+        self.direct.process(piece);
+        self.long.process(piece);
+        self.convolution.process(piece);
+        self.latent.process(piece);
+        for channel in 0..2 {
+            let tone = self.modulator.channel(channel);
+            for (out, &tone) in piece.channel_mut(channel).iter_mut().zip(tone) {
+                *out += 0.25 * tone;
+            }
+        }
+    }
+}
+
+/// The first two and a half seconds of the song through [`Effects`],
+/// asking for blocks of the lengths in `pattern`. (The whole song, in a
+/// debug build, takes over a minute for the five renders.)
+fn render_through_effects(max_block_size: usize, pattern: &[usize]) -> AudioBuffer<f32> {
+    let mut player = RiffPlayer::new(SAMPLE_RATE, 2, max_block_size);
+    let mut effects = Effects::new(max_block_size);
+    let frames = player.total_frames().min(120_000);
+    let mut song = AudioBuffer::<f32>::new(2, frames);
+    let mut position = 0;
+    for &length in pattern.iter().cycle() {
+        if position == frames {
+            break;
+        }
+        let length = length.min(frames - position);
+        song.windowed(position..position + length, |block| {
+            player.render(block);
+            effects.process(block);
+        });
+        position += length;
+    }
+    song
+}
+
+#[test]
+fn convolution_fir_expander_and_wavetable_are_the_same_whatever_the_block_size() {
+    let reference = render_through_effects(256, &[256]);
+    assert!(reference.peak() > 0.05, "the reference render is silent");
+    let plain = render(256, &[256]);
+    assert!(
+        reference.channel(0) != &plain.channel(0)[..reference.num_frames()],
+        "the effects changed nothing"
+    );
+    for (max_block_size, pattern) in [
+        (64, &[64][..]),
+        (997, &[997]),
+        (512, &[1, 511, 7, 300, 64, 2, 129]),
+        (48, &[5_000]),
+    ] {
+        let other = render_through_effects(max_block_size, pattern);
+        assert_eq!(
+            parting(&other, &reference),
+            None,
+            "blocks of {pattern:?} (max {max_block_size})"
+        );
+    }
+}
+
 #[test]
 fn the_song_contains_the_notes_that_were_asked_for() {
     use manguebyte::dsp::fft::{Complex, RealFft};
@@ -91,4 +263,244 @@ fn the_song_contains_the_notes_that_were_asked_for() {
             "key {key}: level {level} against a floor of {floor}"
         );
     }
+}
+
+// --- Dense material (TECH_DEBT 42) ----------------------------------------
+//
+// In REAPER, two offline renders of one project with many overlapping notes
+// differed by a unit in the last place. The song above has few voices at a
+// time; this material has more notes sounding than there are voices, all
+// at full velocity, with every voice's samples far from whole numbers, so
+// that the order in which the synth adds its voices up shows in the last
+// bit of the output.
+
+/// One note of an instrument like the example `plugins/pluck`: a sawtooth
+/// through a resonant low-pass that closes as the note fades.
+struct Saw {
+    oscillator: Oscillator,
+    filter: StateVariableFilter<f32>,
+    envelope: Adsr,
+    velocity: f32,
+}
+
+impl Saw {
+    fn new() -> Self {
+        Self {
+            oscillator: Oscillator::new(Waveform::Saw, 220.0),
+            filter: StateVariableFilter::new(SvfMode::Lowpass, 9_000.0, 0.9),
+            envelope: Adsr::new(AdsrParams {
+                attack: 0.003,
+                decay: 1.5,
+                sustain: 0.4,
+                release: 1.2,
+            }),
+            velocity: 0.0,
+        }
+    }
+}
+
+impl Voice for Saw {
+    fn prepare(&mut self, spec: &ProcessSpec) {
+        self.oscillator.set_sample_rate(spec.sample_rate);
+        self.envelope.set_sample_rate(spec.sample_rate);
+        self.filter.prepare(&ProcessSpec {
+            num_channels: 1,
+            ..*spec
+        });
+    }
+
+    fn note_on(&mut self, note: NoteRef, velocity: f32) {
+        self.oscillator
+            .set_frequency(note_to_hz(f64::from(note.key)));
+        self.velocity = velocity;
+        self.envelope.note_on();
+    }
+
+    fn note_off(&mut self, _velocity: f32) {
+        self.envelope.note_off();
+    }
+
+    fn choke(&mut self) {
+        self.envelope.silence();
+        self.filter.reset();
+        self.oscillator.reset_phase();
+    }
+
+    fn is_active(&self) -> bool {
+        self.envelope.is_active()
+    }
+
+    fn render(&mut self, buffer: &mut AudioBuffer<f32>) {
+        for frame in 0..buffer.num_frames() {
+            let level = self.envelope.next_sample();
+            self.filter.set_frequency(9_000.0 * (0.25 + 0.75 * level));
+            let raw = self.oscillator.next_sample() as f32;
+            let sample = self.filter.process_sample(0, raw) * level as f32 * self.velocity;
+            for channel in buffer.iter_channels_mut() {
+                channel[frame] += sample;
+            }
+        }
+    }
+}
+
+struct DenseParams {
+    reverb: FloatParam,
+}
+param_set!(DenseParams { reverb });
+
+/// Sixteen of those voices and a reverb, as a plugin, so that the harness
+/// can play it as a host does.
+struct Dense {
+    params: Arc<DenseParams>,
+    synth: Synth<Saw>,
+    reverb: Reverb<f32>,
+}
+
+impl Plugin for Dense {
+    const INFO: PluginInfo = PluginInfo {
+        id: "org.manguebyte.test.dense",
+        name: "Dense",
+        vendor: "Manguebyte",
+        version: "1",
+        description: "Many voices at once",
+        kind: PluginKind::Instrument,
+    };
+    const LAYOUT: AudioLayout = AudioLayout::STEREO_INSTRUMENT;
+    type Params = DenseParams;
+
+    fn new() -> Self {
+        Self {
+            params: Arc::new(DenseParams {
+                reverb: FloatParam::new("reverb", "Reverb", FloatRange::linear(0.0, 1.0), 0.5),
+            }),
+            synth: Synth::with_voices(16, Saw::new),
+            reverb: Reverb::new().with_decay_seconds(2.0),
+        }
+    }
+
+    fn params(&self) -> Arc<DenseParams> {
+        Arc::clone(&self.params)
+    }
+
+    fn prepare(&mut self, spec: &ProcessSpec) {
+        self.synth.prepare(spec);
+        self.reverb.prepare(spec);
+    }
+
+    fn process(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+        self.synth.process_with(buffer, context);
+        // Held still in these tests, so reading it once per block is exact.
+        self.reverb.set_mix(f64::from(self.params.reverb.value()));
+        self.reverb.process(buffer);
+    }
+
+    fn reset(&mut self) {
+        self.synth.reset();
+        self.reverb.reset();
+    }
+}
+
+/// Seconds of dense material; renders run on for the release.
+const DENSE_SECONDS: f64 = 10.0;
+
+fn dense_frames() -> usize {
+    ((DENSE_SECONDS + 1.5) * SAMPLE_RATE) as usize
+}
+
+/// 37 notes at full velocity in ten seconds, keys from 36 to 96, chords
+/// struck on one frame and notes up to three seconds long: often more than
+/// sixteen at once, so voices are stolen too.
+fn schedule_dense(harness: &mut Harness<Dense>, from: u64) {
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut below = move |n: u64| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state % n
+    };
+    let span = (DENSE_SECONDS * SAMPLE_RATE) as u64;
+    let mut start = 0;
+    for index in 0..37_u64 {
+        if index % 4 != 3 {
+            start = index * span / 38 + below(4_800);
+        }
+        let length = (12_000 + below(132_000)).min(span - start);
+        harness.note(from + start, length, 36 + below(61) as u8, 1.0);
+    }
+}
+
+fn render_dense(max_block_size: usize, pattern: &[usize]) -> AudioBuffer<f32> {
+    let mut harness =
+        Harness::<Dense>::new(SAMPLE_RATE, max_block_size).with_block_pattern(pattern);
+    schedule_dense(&mut harness, 0);
+    harness.render(dense_frames())
+}
+
+/// Where two renders part, if they do, and by how much against the
+/// loudest sample, in decibels.
+fn parting(a: &AudioBuffer<f32>, b: &AudioBuffer<f32>) -> Option<String> {
+    let mut first = None;
+    let mut largest = 0.0_f32;
+    for channel in 0..a.num_channels() {
+        for (frame, (x, y)) in a
+            .channel(channel)
+            .iter()
+            .zip(b.channel(channel))
+            .enumerate()
+        {
+            if x.to_bits() != y.to_bits() {
+                first = Some(first.map_or(frame, |at: usize| at.min(frame)));
+                largest = largest.max((x - y).abs());
+            }
+        }
+    }
+    first.map(|frame| {
+        let below = 20.0 * (largest / a.peak().max(b.peak())).log10();
+        format!("from frame {frame}, by up to {largest:e}, {below:.0} dB")
+    })
+}
+
+#[test]
+fn dense_material_is_the_same_whatever_the_block_size() {
+    let reference = render_dense(256, &[256]);
+    assert!(reference.peak() > 1.0, "too few notes overlap");
+    for (max_block_size, pattern) in [
+        (64, &[64][..]),
+        (997, &[997]),
+        (512, &[1, 511, 7, 300, 64, 2, 129]),
+    ] {
+        let other = render_dense(max_block_size, pattern);
+        assert_eq!(parting(&other, &reference), None, "blocks of {pattern:?}");
+    }
+}
+
+#[test]
+fn dense_material_after_a_reset_is_the_same_as_the_first_time() {
+    let first = render_dense(256, &[256]);
+    let mut harness = Harness::<Dense>::new(SAMPLE_RATE, 256).with_block_pattern(&[256]);
+    schedule_dense(&mut harness, 0);
+    harness.render(dense_frames());
+    harness.reset();
+    let from = harness.position();
+    schedule_dense(&mut harness, from);
+    let again = harness.render(dense_frames());
+    assert_eq!(parting(&again, &first), None);
+}
+
+#[test]
+fn dense_material_played_again_after_it_ends_is_the_same_without_a_reset() {
+    // No reverb, whose tail would rightly carry over: the synth alone.
+    let mut harness = Harness::<Dense>::new(SAMPLE_RATE, 256);
+    harness.params().reverb.set(0.0);
+    schedule_dense(&mut harness, 0);
+    let first = harness.render(dense_frames());
+    assert!(first.peak() > 1.0);
+    // Every note has ended: the material ends with a second and a half of
+    // room for the release, which is 1.2 s.
+    let quiet = harness.render(4_800);
+    assert_eq!(quiet.peak(), 0.0);
+    let from = harness.position();
+    schedule_dense(&mut harness, from);
+    let again = harness.render(dense_frames());
+    assert_eq!(parting(&again, &first), None);
 }

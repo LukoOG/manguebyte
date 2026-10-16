@@ -6,7 +6,7 @@
 //! | Module | Crate | What it holds |
 //! |---|---|---|
 //! | (root) | `manguebyte-core` | [`AudioBuffer`], [`Sample`], [`Smoothed`], atomics, [`spsc`] queue, [`NoDenormals`] |
-//! | [`dsp`] | `manguebyte-dsp` | processor chains, sample-accurate events, polyphonic synth, filters, effects, FFT |
+//! | [`dsp`] | `manguebyte-dsp` | processor chains, sample-accurate events, polyphonic synth, filters, effects, dynamics with sidechain keying, convolution, wavetables, FFT |
 //! | [`params`] | `manguebyte-params` | thread-safe parameters, ranges, smoothing, saved state |
 //! | [`graph`] | `manguebyte-graph` | a processing graph that can be rewired while it plays |
 //! | [`plugin`] | `manguebyte-plugin` | the format-independent plugin API and a test harness |
@@ -14,6 +14,10 @@
 //! | [`formats`] | `manguebyte-formats` | audio file reading and writing |
 //! | `clap` | `manguebyte-clap` | builds CLAP plugins (feature `clap`) |
 //! | `vst3` | `manguebyte-vst3` | builds VST 3 plugins (feature `vst3`) |
+//! | `lv2` | `manguebyte-lv2` | builds LV2 plugins and their Turtle files (feature `lv2`) |
+//! | `gui` | `manguebyte-gui` | opens a plugin's editor in the host's window (feature `gui`) |
+//! | `ui` | `manguebyte-ui` | the widgets editors are made of (feature `gui`) |
+//! | `sampler` | `manguebyte-sampler` | an SFZ sampler, from files or from memory (feature `sampler`) |
 //! | `host` | `manguebyte-host` | loads CLAP and VST 3 plugins and runs them as processors (feature `host`) |
 //! | `analysis` | `manguebyte-analysis` | loudness, true peak, level meters, spectrum and pitch (feature `analysis`, on by default) |
 //! | `osc` | `manguebyte-osc` | Open Sound Control, with time tags landing on their frame (feature `osc`, on by default) |
@@ -59,15 +63,23 @@ pub use manguebyte_devices as devices;
 pub use manguebyte_dsp as dsp;
 pub use manguebyte_formats as formats;
 pub use manguebyte_graph as graph;
+#[cfg(feature = "gui")]
+pub use manguebyte_gui as gui;
 #[cfg(feature = "host")]
 pub use manguebyte_host as host;
+#[cfg(feature = "lv2")]
+pub use manguebyte_lv2 as lv2;
 pub use manguebyte_midi as midi;
 #[cfg(feature = "osc")]
 pub use manguebyte_osc as osc;
 pub use manguebyte_params as params;
 pub use manguebyte_plugin as plugin;
+#[cfg(feature = "sampler")]
+pub use manguebyte_sampler as sampler;
 #[cfg(feature = "standalone")]
 pub use manguebyte_standalone as standalone;
+#[cfg(feature = "gui")]
+pub use manguebyte_ui as ui;
 #[cfg(feature = "vst3")]
 pub use manguebyte_vst3 as vst3;
 
@@ -75,13 +87,15 @@ pub use manguebyte_vst3 as vst3;
 pub mod prelude {
     pub use crate::dsp::event::{Event, EventBuffer, EventKind, Expression, NoteRef};
     pub use crate::dsp::{
-        Adsr, AdsrParams, Biquad, BiquadCascade, BiquadCoefficients, Chorus, Compressor, Crossover,
-        CrossoverSlope, DcBlocker, Delay, DelayInterpolation, DelayLine, DryWet, EnvelopeFollower,
-        Filter, FilterShape, Gain, IirFilter, LadderFilter, LadderMode, LevelDetector, Lfo,
-        LfoShape, Limiter, MixLaw, Noise, NoiseColor, NoiseGate, OnePole, OnePoleMode, Oscillator,
-        Oversampled, PanMode, Panner, Phaser, ProcessContext, ProcessSpec, Processor, Resampler,
-        Reverb, ShaperCurve, StateVariableFilter, SvfMode, Synth, Transport, Voice, Waveform,
-        Waveshaper, resample, split_at_events,
+        Adsr, AdsrParams, Biquad, BiquadCascade, BiquadCoefficients, Chorus, Compressor,
+        Convolution, ConvolutionEngine, ConvolutionLoader, ConvolutionRouting, ConvolutionSettings,
+        Crossover, CrossoverSlope, DcBlocker, Delay, DelayInterpolation, DelayLine, DryWet,
+        EnvelopeFollower, Expander, Filter, FilterShape, FirFilter, FirMode, Gain, IirFilter,
+        KeySource, LadderFilter, LadderMode, LevelDetector, Lfo, LfoShape, Limiter, MixLaw, Noise,
+        NoiseColor, NoiseGate, OnePole, OnePoleMode, Oscillator, Oversampled, PanMode, Panner,
+        Phaser, ProcessContext, ProcessSpec, Processor, Resampler, Reverb, ShaperCurve,
+        StateVariableFilter, SvfMode, Synth, Transport, Voice, Waveform, Waveshaper, Wavetable,
+        WavetableOscillator, resample, split_at_events, split_at_events_with,
     };
     pub use crate::formats::aiff::{self, AiffFormat};
     pub use crate::formats::wav::{self, WavFormat};

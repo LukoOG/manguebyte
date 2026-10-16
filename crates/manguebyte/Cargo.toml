@@ -20,6 +20,13 @@ devices = ["dep:manguebyte-devices"]
 clap = ["dep:manguebyte-clap"]
 ## Building VST 3 plugins.
 vst3 = ["dep:manguebyte-vst3"]
+## Building LV2 plugins.
+lv2 = ["dep:manguebyte-lv2"]
+## Plugin editors: the widgets and the glue that opens them in a host's
+## window.
+gui = ["dep:manguebyte-gui", "dep:manguebyte-ui"]
+## An SFZ sampler.
+sampler = ["dep:manguebyte-sampler"]
 ## Metering and analysis: loudness, true peak, level meters, spectrum, pitch.
 analysis = ["dep:manguebyte-analysis"]
 ## Open Sound Control.
@@ -40,6 +47,10 @@ manguebyte-graph.workspace = true
 manguebyte-devices = { workspace = true, optional = true }
 manguebyte-clap = { workspace = true, optional = true }
 manguebyte-vst3 = { workspace = true, optional = true }
+manguebyte-lv2 = { workspace = true, optional = true }
+manguebyte-gui = { workspace = true, optional = true }
+manguebyte-ui = { workspace = true, optional = true }
+manguebyte-sampler = { workspace = true, optional = true }
 manguebyte-analysis = { workspace = true, optional = true }
 manguebyte-osc = { workspace = true, optional = true }
 manguebyte-host = { workspace = true, optional = true }
