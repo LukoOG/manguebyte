@@ -5,6 +5,11 @@
 //! |---|---|---|
 //! | [`PluckedString`] | a plucked string by physical modelling | [nylon](StringParams::nylon_guitar) and [steel](StringParams::steel_guitar) guitar, [finger](StringParams::finger_bass) and [slap](StringParams::slap_bass) bass |
 //! | [`FmVoice`] | four-operator frequency modulation | [electric piano](FmParams::electric_piano), [tubular bell](FmParams::tubular_bell), [FM bass](FmParams::fm_bass) |
+//! | [`OrganVoice`] | a tonewheel organ: drawbars, percussion, key click | [jazz](OrganParams::jazz), [gospel](OrganParams::gospel), [full](OrganParams::full), [ballad](OrganParams::ballad), any [registration](OrganParams::registration) |
+//!
+//! [`RotarySpeaker`] is not a voice but a [`Processor`](crate::Processor)
+//! to put after the organ: the rotating horn and drum it is usually heard
+//! through.
 //!
 //! Each voice is built from the crate's own parts (delay lines, filters,
 //! oscillators) and has a settings struct with presets. Give a
@@ -74,8 +79,15 @@ mod common;
 mod fm;
 #[cfg(test)]
 pub(crate) mod measure;
+mod organ;
+mod rotary;
 mod string;
 
 pub use common::HANDOVER_SECONDS;
 pub use fm::{Algorithm, FM_OPERATORS, FM_VELOCITY_RANGE_DB, FmOperator, FmParams, FmVoice};
+pub use organ::{
+    DRAWBAR_FOOTAGES, DRAWBARS, OrganManual, OrganParams, OrganVoice, Percussion, PercussionDecay,
+    PercussionHarmonic,
+};
+pub use rotary::{RotaryParams, RotarySpeaker, RotarySpeed};
 pub use string::{BodyMode, PluckedString, StringParams};

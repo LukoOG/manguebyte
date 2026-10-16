@@ -132,8 +132,13 @@ pub(crate) fn between(signal: &[f64], from: f64, to: f64) -> &[f64] {
 /// The component of `signal` at `frequency`, through a Hann window: its
 /// amplitude is twice the size of the result over the window's sum.
 fn component(signal: &[f64], frequency: f64) -> (f64, f64) {
+    component_at(signal, RATE, frequency)
+}
+
+/// [`component`] for a signal sampled at `rate`.
+fn component_at(signal: &[f64], rate: f64, frequency: f64) -> (f64, f64) {
     let len = signal.len().max(2);
-    let omega = TAU * frequency / RATE;
+    let omega = TAU * frequency / rate;
     let (mut re, mut im, mut weight) = (0.0, 0.0, 0.0);
     for (n, &x) in signal.iter().enumerate() {
         let w = 0.5 - 0.5 * (TAU * n as f64 / (len - 1) as f64).cos();
@@ -161,15 +166,24 @@ pub(crate) fn amplitude_at(signal: &[f64], frequency: f64) -> f64 {
 /// as they are a few window widths (a few times `RATE / signal.len()`
 /// hertz) away.
 pub(crate) fn frequency_near(signal: &[f64], expected: f64) -> f64 {
+    frequency_near_at(signal, RATE, expected)
+}
+
+/// [`frequency_near`] for a signal sampled at `rate`. Steps whose windows
+/// would be shorter than half the signal are left out.
+pub(crate) fn frequency_near_at(signal: &[f64], rate: f64, expected: f64) -> f64 {
     let mut estimate = expected;
     for hop in [32, 1_024, signal.len() / 3] {
+        if hop == 0 || hop > signal.len() / 2 {
+            continue;
+        }
         let window = signal.len() - hop;
-        let (re1, im1) = component(&signal[..window], estimate);
-        let (re2, im2) = component(&signal[hop..hop + window], estimate);
+        let (re1, im1) = component_at(&signal[..window], rate, estimate);
+        let (re2, im2) = component_at(&signal[hop..hop + window], rate, estimate);
         let turned = im2.atan2(re2) - im1.atan2(re1);
-        let predicted = TAU * estimate * hop as f64 / RATE;
+        let predicted = TAU * estimate * hop as f64 / rate;
         let error = (turned - predicted + PI).rem_euclid(TAU) - PI;
-        estimate += error * RATE / (TAU * hop as f64);
+        estimate += error * rate / (TAU * hop as f64);
     }
     estimate
 }

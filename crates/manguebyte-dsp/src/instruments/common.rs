@@ -101,6 +101,12 @@ impl Noise {
         self.0 ^= self.0 << 17;
         (self.0 >> 11) as f64 / (1u64 << 52) as f64 - 1.0
     }
+
+    /// A number from 0 up to 1.
+    #[inline]
+    pub(crate) fn unit(&mut self) -> f64 {
+        0.5 * (self.next() + 1.0)
+    }
 }
 
 /// Adds the samples `next` produces to every channel of `buffer`, one frame
@@ -239,6 +245,7 @@ mod tests {
             squares += x * x;
         }
         assert!(differs);
+        assert!((0.0..1.0).contains(&a.unit()));
         assert!((sum / 10_000.0).abs() < 0.03);
         // Uniform noise has a mean square of a third.
         assert!((squares / 10_000.0 - 1.0 / 3.0).abs() < 0.02);
