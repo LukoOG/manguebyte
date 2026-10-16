@@ -101,6 +101,81 @@ pub enum Event {
     Key(KeyEvent),
     /// The window gained (`true`) or lost (`false`) the keyboard.
     Focus(bool),
+    /// A character was typed: what the key pressed, or the composition an
+    /// input method finished, produced in the person's keyboard layout,
+    /// shifted, dead keys and AltGr already applied. It follows the
+    /// [`Key`](Event::Key) that typed it, if there was one. Control
+    /// characters never come this way: Enter, Tab, Backspace and Escape
+    /// arrive as keys only.
+    ///
+    /// A widget that takes text takes it from here, not from
+    /// [`Key::Character`], which names the key and not what it typed.
+    Text(char),
+    /// An input method is composing text that is not typed yet, as one
+    /// does for Chinese, Japanese or Korean (see [`Composition`]). What it
+    /// finally produces comes as [`Text`](Event::Text), after or before
+    /// [`Composition::End`].
+    Composition(Composition),
+}
+
+/// What an input method says while it composes text (Chinese, Japanese,
+/// Korean and other scripts typed through an editor of their own).
+///
+/// A composition starts, then gives the text it shows so far, as often as
+/// it changes: [`Clear`](Composition::Clear), then one
+/// [`Push`](Composition::Push) per character, then where its own caret is
+/// within that text. It ends with [`End`](Composition::End), and what it
+/// produced, if anything, arrives as [`Event::Text`]. A widget shows the
+/// text being composed at its caret, marked, and keeps it out of its own
+/// text until it arrives as typed text.
+///
+/// The text arrives one character at a time so that the event stays
+/// `Copy`. A widget keeps at most a bounded number of characters of it.
+///
+/// No window backend sends these yet: on Win32 the system shows the
+/// composition in a window of its own at the caret (which
+/// [`Widget::caret`](crate::Widget::caret) gives) and only the text it
+/// produces reaches the interface. The widgets that take text already
+/// follow this protocol, and the test harness can send it.
+///
+/// ```
+/// use manguebyte_gfx::Size;
+/// use manguebyte_ui::testing::Harness;
+/// use manguebyte_ui::{Composition, Event, Role, State, text_field};
+///
+/// let text = State::new(String::new());
+/// let mut ui = Harness::new(text_field("City", text.clone()), Size::new(160.0, 30.0), 1.0);
+/// ui.frame();
+/// assert!(ui.tab());
+/// // An input method shows "とう" while the person types "tou" ...
+/// ui.send(Event::Composition(Composition::Start));
+/// ui.send(Event::Composition(Composition::Clear));
+/// ui.send(Event::Composition(Composition::Push('と')));
+/// ui.send(Event::Composition(Composition::Push('う')));
+/// ui.send(Event::Composition(Composition::Caret(2)));
+/// // ... which is shown, but not yet typed.
+/// assert_eq!(ui.get(Role::TextInput, "City").value_text(), Some(""));
+/// // The person picks "東" and the input method types it.
+/// ui.send(Event::Composition(Composition::End));
+/// ui.send(Event::Text('東'));
+/// assert_eq!(ui.get(Role::TextInput, "City").value_text(), Some("東"));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Composition {
+    /// A composition starts at the caret. Typing it replaces the selection,
+    /// as typing anything does, so the selection is removed now.
+    Start,
+    /// The text being composed is empty again; what it now is follows.
+    Clear,
+    /// One more character of the text being composed.
+    Push(char),
+    /// Where the input method's caret is in the text being composed, in
+    /// characters from its start.
+    Caret(u32),
+    /// The composition ended. What it produced, if anything, comes as
+    /// [`Event::Text`].
+    End,
 }
 
 impl Event {
@@ -111,7 +186,11 @@ impl Event {
             | Event::PointerMove { at, .. }
             | Event::PointerUp { at, .. }
             | Event::Wheel { at, .. } => Some(at),
-            Event::PointerCancel | Event::Key(_) | Event::Focus(_) => None,
+            Event::PointerCancel
+            | Event::Key(_)
+            | Event::Focus(_)
+            | Event::Text(_)
+            | Event::Composition(_) => None,
         }
     }
 }

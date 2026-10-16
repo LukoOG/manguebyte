@@ -6,6 +6,7 @@ use manguebyte_gfx::{Rect, Scene, Size};
 use manguebyte_plugin::editor::EditorContext;
 
 use crate::access::{AccessNode, Action};
+use crate::clipboard::Clipboard;
 use crate::event::{Event, Handled};
 use crate::theme::Theme;
 
@@ -125,8 +126,9 @@ pub trait Widget: 'static {
     /// first and then the widgets that contain it, until one returns
     /// [`Handled::Yes`]; while a widget holds the pointer (see
     /// [`EventCx::capture_pointer`]) every move and the release go to it.
-    /// Keys go to the widget that holds the pointer, then to the one with
-    /// the focus. Ignores everything unless overridden.
+    /// Keys, typed text and an input method's compositions go to the
+    /// widget that holds the pointer, then to the one with the focus.
+    /// Ignores everything unless overridden.
     fn event(&mut self, cx: &mut EventCx<'_>, event: &Event) -> Handled {
         let _ = (cx, event);
         Handled::No
@@ -139,6 +141,24 @@ pub trait Widget: 'static {
     fn act(&mut self, cx: &mut EventCx<'_>, action: Action) -> bool {
         let _ = (cx, action);
         false
+    }
+
+    /// The widget gained (`true`) or lost (`false`) the keyboard focus:
+    /// by a press, Tab, assistive technology, a menu opening over it, or
+    /// the window losing the keyboard. A text input takes what was typed
+    /// when it loses it. Asking for the focus from here does nothing.
+    /// Nothing unless overridden.
+    fn focus_changed(&mut self, cx: &mut EventCx<'_>, focused: bool) {
+        let _ = (cx, focused);
+    }
+
+    /// Where the text caret is, in logical pixels, while the widget is
+    /// being typed into: the window layer tells the system, so that an
+    /// input method opens its window beside it and a screen magnifier
+    /// follows it. `None`, the default, when the widget takes no text now.
+    fn caret(&self, cx: &AccessCx<'_>) -> Option<Rect> {
+        let _ = cx;
+        None
     }
 }
 
@@ -300,6 +320,7 @@ pub struct EventCx<'a> {
     pub(crate) captured: bool,
     pub(crate) now: Duration,
     pub(crate) context: &'a EditorContext,
+    pub(crate) clipboard: &'a dyn Clipboard,
     pub(crate) requests: &'a mut Requests,
 }
 
@@ -339,6 +360,12 @@ impl EventCx<'_> {
     /// [`Gesture`](manguebyte_plugin::editor::Gesture)s are made on.
     pub fn context(&self) -> &EditorContext {
         self.context
+    }
+
+    /// The clipboard: the system's when the window layer gave the root
+    /// one, the root's own otherwise (see [`crate::clipboard`]).
+    pub fn clipboard(&self) -> &dyn Clipboard {
+        self.clipboard
     }
 
     /// Asks for [`Widget::paint`] to be called on the next frame.

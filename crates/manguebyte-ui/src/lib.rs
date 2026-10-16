@@ -35,6 +35,11 @@
 //!   is sending, and after an edit the value it sent, until the host
 //!   echoes it or [`ParamBinding::ECHO_WAIT`] has passed. Every edit starts
 //!   from the value read at that moment.
+//! - **Text** ([`text_field`], and a value typed into a [`knob`] or a
+//!   [`slider`] after a double click): a caret, a selection, word jumps,
+//!   the [`clipboard`], typed characters in the person's layout
+//!   ([`Event::Text`]), input methods' compositions ([`Composition`]),
+//!   filters and validation, Enter to take and Escape to throw away.
 //! - **[`Theme`]**: colours, sizes, radii and type as typed data, with no
 //!   inheritance.
 //! - **[Accessibility](access)**: roles, names, values, ranges, states and
@@ -130,6 +135,7 @@
 #![forbid(unsafe_code)]
 
 pub mod access;
+pub mod clipboard;
 mod damage;
 pub mod event;
 pub mod layout;
@@ -144,8 +150,9 @@ mod widget;
 pub mod widgets;
 
 pub use access::{AccessEntry, AccessNode, Action, Actions, Role};
+pub use clipboard::{Clipboard, MemoryClipboard};
 pub use damage::MAX_DAMAGE;
-pub use event::{Button, Event, Handled, Key, KeyEvent, Modifiers};
+pub use event::{Button, Composition, Event, Handled, Key, KeyEvent, Modifiers};
 pub use param::{ParamBinding, ParamHandle};
 pub use root::{Frame, MAX_BUFFER_SIDE, Root};
 pub use source::{AtomicSource, Source, State, Watch};
@@ -154,6 +161,6 @@ pub use tree::NodeId;
 pub use view::{Children, IntoView, View, column, filled, panel, row, stack};
 pub use widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
 pub use widgets::{
-    Canvas, CanvasCx, Container, Knob, Label, Meter, Slider, Toggle, canvas, knob, label, meter,
-    slider, toggle,
+    Canvas, CanvasCx, Container, Knob, Label, Meter, Slider, TextField, Toggle, canvas, knob,
+    label, meter, slider, text_field, toggle,
 };

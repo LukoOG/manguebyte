@@ -2,12 +2,14 @@
 //! input.
 
 use std::fmt;
+use std::rc::Rc;
 use std::time::Duration;
 
 use manguebyte_gfx::{Color, IRect, Pixmap, Point, Rect, Renderer, Scene, Size};
 use manguebyte_plugin::editor::{EditorContext, MAX_SCALE, MIN_SCALE};
 
 use crate::access::{AccessEntry, Action};
+use crate::clipboard::{Clipboard, MemoryClipboard};
 use crate::damage::{MAX_DAMAGE, tidy};
 use crate::event::{Event, Handled, Key};
 use crate::layout;
@@ -133,12 +135,23 @@ pub struct Root {
     damage: Vec<IRect>,
     focus: Option<NodeId>,
     capture: Option<NodeId>,
+    clipboard: Rc<dyn Clipboard>,
+    /// Keys whose press a widget used and whose release has not come.
+    keys_used: Vec<Key>,
+    /// Set while a widget hears that it gained or lost the focus: what it
+    /// asks for the focus then is not done, so that focus cannot bounce.
+    notifying: bool,
     needs_layout: bool,
     /// Every widget is drawn again, over the whole buffer, next frame.
     full: bool,
     now: Duration,
     last_frame: Option<Duration>,
 }
+
+/// The most keys remembered as held after the interface used their press:
+/// more than hands hold at once. A key held beyond these is forgotten,
+/// and its release goes on as any other.
+const MAX_KEYS_HELD: usize = 16;
 
 /// A scale an interface may be drawn at.
 fn clean_scale(scale: f32) -> Option<f32> {
@@ -197,6 +210,9 @@ impl Root {
             damage: Vec::new(),
             focus: None,
             capture: None,
+            clipboard: Rc::new(MemoryClipboard::new()),
+            keys_used: Vec::with_capacity(MAX_KEYS_HELD),
+            notifying: false,
             needs_layout: true,
             full: true,
             now: Duration::ZERO,
@@ -236,6 +252,47 @@ impl Root {
     /// How the editor reaches its host.
     pub fn context(&self) -> &EditorContext {
         &self.context
+    }
+
+    /// The same root, copying to and pasting from `clipboard`.
+    #[must_use]
+    pub fn with_clipboard(mut self, clipboard: Rc<dyn Clipboard>) -> Root {
+        self.set_clipboard(clipboard);
+        self
+    }
+
+    /// Copies to and pastes from `clipboard` from now on, in place of the
+    /// [`MemoryClipboard`] a root starts with.
+    pub fn set_clipboard(&mut self, clipboard: Rc<dyn Clipboard>) {
+        self.clipboard = clipboard;
+    }
+
+    /// The clipboard widgets copy to and paste from.
+    pub fn clipboard(&self) -> &Rc<dyn Clipboard> {
+        &self.clipboard
+    }
+
+    /// Whether the widget with the keyboard focus takes typed text now: a
+    /// text input, or a knob whose value is being typed. A window layer
+    /// then asks the system for every key, Tab, Enter and Escape included,
+    /// and keeps the keys that type from the host's shortcuts.
+    pub fn wants_text(&self) -> bool {
+        self.focus
+            .and_then(|id| self.access(id))
+            .is_some_and(|entry| entry.node.state.editable)
+    }
+
+    /// Where the text caret of the widget with the focus is, in logical
+    /// pixels, while text is being typed into it (see [`Widget::caret`]).
+    pub fn caret(&self) -> Option<Rect> {
+        let id = self.focus?;
+        let node = self.tree.get(id)?;
+        let cx = AccessCx {
+            theme: &self.theme,
+            rect: node.content,
+            focused: true,
+        };
+        node.widget.caret(&cx)
     }
 
     /// Changes the size and scale. The back buffer is made again and
@@ -392,7 +449,16 @@ impl Root {
                 node.paint = true;
             }
         }
-        self.focus = id;
+        let old = std::mem::replace(&mut self.focus, id);
+        // Each hears of it once the focus is where it now is, the one that
+        // lost it first.
+        let notifying = std::mem::replace(&mut self.notifying, true);
+        for (changed, focused) in [(old, false), (id, true)] {
+            if let Some(changed) = changed.filter(|at| at.index() < self.tree.nodes.len()) {
+                self.deliver(changed, |widget, cx| widget.focus_changed(cx, focused));
+            }
+        }
+        self.notifying = notifying;
     }
 
     /// Moves the focus to the next widget that takes it, in tree order, or
@@ -436,6 +502,7 @@ impl Root {
             captured: self.capture == Some(id),
             now: self.now,
             context: &self.context,
+            clipboard: &*self.clipboard,
             requests: &mut requests,
         };
         let result = call(&mut *node.widget, &mut cx);
@@ -451,7 +518,7 @@ impl Root {
             Some(false) if self.capture == Some(id) => self.capture = None,
             _ => {}
         }
-        if requests.focus && self.focusable(id) {
+        if requests.focus && !self.notifying && self.focusable(id) {
             self.set_focus(Some(id));
         }
         result
@@ -466,6 +533,22 @@ impl Root {
             at = parent;
         }
         path
+    }
+
+    /// Offers `event` to the widget holding the pointer, then to the one
+    /// with the focus, until one uses it.
+    fn offer_to_keyboard(&mut self, event: &Event) -> Handled {
+        let mut tried = None;
+        for target in [self.capture, self.focus].into_iter().flatten() {
+            if tried == Some(target) {
+                continue;
+            }
+            tried = Some(target);
+            if self.deliver(target, |widget, cx| widget.event(cx, event)) == Handled::Yes {
+                return Handled::Yes;
+            }
+        }
+        Handled::No
     }
 
     /// Offers `event` to `id` and then to the widgets containing it, until
@@ -497,7 +580,10 @@ impl Root {
     ///   the focus. Tab and Shift+Tab that no widget used move the focus
     ///   through the widgets that take it, in tree order, and are used
     ///   only if there is such a widget; otherwise they are left to the
-    ///   host.
+    ///   host. The release of a key whose press was used is used too,
+    ///   whatever the widget does with it, so the host never sees half a
+    ///   keystroke.
+    /// - Typed text and compositions go where keys go.
     /// - Losing the window's focus ends a drag where it is
     ///   ([`Event::PointerCancel`]) and takes the keyboard focus away.
     ///
@@ -543,27 +629,42 @@ impl Root {
                 None => Handled::No,
             },
             Event::Key(key) => {
-                let mut tried = None;
-                for target in [self.capture, self.focus].into_iter().flatten() {
-                    if tried == Some(target) {
-                        continue;
-                    }
-                    tried = Some(target);
-                    if self.deliver(target, |widget, cx| widget.event(cx, &event)) == Handled::Yes {
+                // A key whose press was used has its release used too,
+                // whatever became of the widget that used it, so that the
+                // host never sees half a keystroke.
+                let held = self.keys_used.iter().position(|&used| used == key.key);
+                if !key.pressed {
+                    if let Some(at) = held {
+                        self.keys_used.swap_remove(at);
+                        self.offer_to_keyboard(&event);
                         return Handled::Yes;
                     }
                 }
-                if key.pressed && key.key == Key::Tab && self.move_focus(!key.modifiers.shift) {
-                    return Handled::Yes;
+                let mut handled = self.offer_to_keyboard(&event);
+                if handled == Handled::No
+                    && key.pressed
+                    && key.key == Key::Tab
+                    && self.move_focus(!key.modifiers.shift)
+                {
+                    handled = Handled::Yes;
                 }
-                Handled::No
+                if handled == Handled::Yes && key.pressed && held.is_none() {
+                    if self.keys_used.len() >= MAX_KEYS_HELD {
+                        self.keys_used.remove(0);
+                    }
+                    self.keys_used.push(key.key);
+                }
+                handled
             }
+            Event::Text(_) | Event::Composition(_) => self.offer_to_keyboard(&event),
             Event::Focus(gained) => {
                 if !gained {
                     if self.capture.is_some() {
                         self.event(Event::PointerCancel);
                     }
                     self.set_focus(None);
+                    // Their releases go wherever the keyboard went.
+                    self.keys_used.clear();
                 }
                 Handled::Yes
             }

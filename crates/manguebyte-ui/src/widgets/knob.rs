@@ -2,7 +2,7 @@
 
 use std::f32::consts::PI;
 
-use manguebyte_gfx::{Arc, Path, Point, Scene, Size, Stroke, TextStyle};
+use manguebyte_gfx::{Arc, Path, Point, Rect, Scene, Size, Stroke, TextStyle};
 
 use super::adjust::{Adjust, Axis};
 use super::{
@@ -12,6 +12,7 @@ use super::{
 use crate::access::{AccessNode, Action, Role};
 use crate::event::{Event, Handled};
 use crate::param::ParamHandle;
+use crate::theme::Theme;
 use crate::widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
 
 /// Where the arc starts: down and to the left.
@@ -30,7 +31,18 @@ const SWEEP: f32 = 1.5 * PI;
 ///   drag is one gesture from press to release, so a click that does not
 ///   move sends a begin and an end with no value between; Escape during
 ///   it puts the starting value back.
-/// - A double click puts the default back.
+/// - A double click, or Enter with the keyboard focus, opens the value to
+///   be typed: the value's text, all selected, in a box on the value's
+///   line, edited as a [`TextField`](super::TextField) is. Enter takes
+///   it, read by the parameter's own parser
+///   ([`ParamHandle::parse`](crate::ParamHandle::parse), with or without
+///   the unit) and sent as one edit: begin, the value, end. Text that
+///   reads as no value keeps the box open and marks it wrong; Escape
+///   closes it and sends nothing. A press elsewhere, or the knob losing
+///   the focus, takes what was typed if it reads as a value and throws it
+///   away if not. While the box is open, assistive technology sees a
+///   [`TextInput`](crate::Role::TextInput) with the knob's name.
+/// - A click with Alt, Control or Command held puts the default back.
 /// - Each notch of the wheel moves it by one step: one of the parameter's
 ///   steps, or a hundredth of the range.
 /// - With the keyboard focus, which a press on the knob gives it: the
@@ -195,13 +207,18 @@ impl Widget for Knob {
             line(name_of(label, adjust), &name_style, width)
         });
         draw_text(scene, name, Point::new(rect.x + MARGIN, rect.y + MARGIN));
-        let binding = &adjust.binding;
-        let key = (binding.shown().to_bits(), binding.shows_sent(), value_style);
-        let value = self
-            .value
-            .get(width, key, || line(&binding.text(), &value_style, width));
-        let y = rect.bottom() - MARGIN - value_height;
-        draw_text(scene, value, Point::new(rect.x + MARGIN, y));
+        let entry_box = value_line(rect, theme);
+        if !self
+            .adjust
+            .paint_entry(scene, entry_box, theme, cx.is_focused())
+        {
+            let binding = &self.adjust.binding;
+            let key = (binding.shown().to_bits(), binding.shows_sent(), value_style);
+            let value = self
+                .value
+                .get(width, key, || line(&binding.text(), &value_style, width));
+            draw_text(scene, value, entry_box.origin());
+        }
         if cx.is_focused() {
             focus_ring(scene, rect, theme);
         }
@@ -209,11 +226,31 @@ impl Widget for Knob {
 
     fn event(&mut self, cx: &mut EventCx<'_>, event: &Event) -> Handled {
         let sizes = cx.theme().sizes;
+        let entry_box = value_line(cx.rect(), cx.theme());
         self.adjust
-            .event(cx, event, sizes.drag_range, sizes.fine_factor)
+            .event(cx, event, sizes.drag_range, sizes.fine_factor, entry_box)
     }
 
     fn act(&mut self, cx: &mut EventCx<'_>, action: Action) -> bool {
         self.adjust.act(cx, action)
     }
+
+    fn focus_changed(&mut self, cx: &mut EventCx<'_>, focused: bool) {
+        self.adjust.focus_changed(cx, focused);
+    }
+
+    fn caret(&self, _cx: &AccessCx<'_>) -> Option<Rect> {
+        self.adjust.caret()
+    }
+}
+
+/// The line under the dial where the value is shown, and typed.
+fn value_line(rect: Rect, theme: &Theme) -> Rect {
+    let height = line_height(&value_style(theme));
+    Rect::new(
+        rect.x + MARGIN,
+        rect.bottom() - MARGIN - height,
+        (rect.width - 2.0 * MARGIN).max(0.0),
+        height,
+    )
 }

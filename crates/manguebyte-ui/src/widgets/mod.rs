@@ -3,8 +3,9 @@
 //! | Widget | Role | Shows | Changes |
 //! |---|---|---|---|
 //! | [`Label`] | [`Label`](crate::Role::Label) | text, fixed or from a source | nothing |
-//! | [`Knob`] | [`Slider`](crate::Role::Slider) | a parameter, as an arc and as text | the parameter, by dragging up and down, the wheel and the keys |
-//! | [`Slider`] | [`Slider`](crate::Role::Slider) | a parameter, as a track and as text | the parameter, by dragging sideways, the wheel and the keys |
+//! | [`Knob`] | [`Slider`](crate::Role::Slider) | a parameter, as an arc and as text | the parameter, by dragging up and down, the wheel, the keys and a typed value |
+//! | [`Slider`] | [`Slider`](crate::Role::Slider) | a parameter, as a track and as text | the parameter, by dragging sideways, the wheel, the keys and a typed value |
+//! | [`TextField`] | [`TextInput`](crate::Role::TextInput) | one line of text from a [`State`](crate::State) | the text, by typing, the clipboard and input methods |
 //! | [`Toggle`] | [`Switch`](crate::Role::Switch) | a parameter that is on or off | the parameter, by clicking, Space and Enter |
 //! | [`Meter`] | [`Meter`](crate::Role::Meter) | a level the audio thread publishes, as a bar and as text | nothing |
 //! | [`Canvas`] | [`Image`](crate::Role::Image) | whatever a closure draws | nothing |
@@ -33,6 +34,8 @@ mod knob;
 mod label;
 mod meter;
 mod slider;
+mod text_edit;
+mod text_field;
 mod toggle;
 
 pub use canvas::{Canvas, CanvasCx, canvas};
@@ -41,6 +44,7 @@ pub use knob::{Knob, knob};
 pub use label::{Label, label};
 pub use meter::{Meter, meter};
 pub use slider::{Slider, slider};
+pub use text_field::{TextField, text_field};
 pub use toggle::{Toggle, toggle};
 
 use manguebyte_gfx::{Color, Point, Rect, RoundedRect, Scene, Stroke, TextLayout, TextStyle};

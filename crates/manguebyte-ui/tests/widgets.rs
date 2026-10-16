@@ -419,28 +419,40 @@ fn each_notch_of_the_wheel_is_one_step_and_one_edit() {
 }
 
 #[test]
-fn a_double_click_puts_the_default_back() {
+fn a_click_with_alt_control_or_command_puts_the_default_back() {
     let params = params();
     let mut ui = open(&params, 1.0);
-    params.drive.set(20.0);
-    ui.frame();
-    let knob = ui.get(Role::Slider, "Drive");
-    assert_eq!(knob.value_text(), Some("20.0 dB"));
-    ui.double_click(knob.center());
     let id = params.drive.param_id();
-    assert_eq!(
-        ui.take_calls(),
-        [
-            // The first click: hold and let go, no move.
-            BeginGesture(id),
-            EndGesture(id),
-            // The second: the default.
-            BeginGesture(id),
-            Perform(id, 0.25),
-            EndGesture(id)
-        ]
-    );
-    assert_eq!(params.drive.value(), 6.0);
+    let held = [
+        Modifiers {
+            alt: true,
+            ..Modifiers::NONE
+        },
+        Modifiers {
+            control: true,
+            ..Modifiers::NONE
+        },
+        Modifiers {
+            meta: true,
+            ..Modifiers::NONE
+        },
+    ];
+    for modifiers in held {
+        params.drive.set(20.0);
+        ui.frame();
+        let knob = ui.get(Role::Slider, "Drive");
+        assert_eq!(knob.value_text(), Some("20.0 dB"));
+        ui.set_modifiers(modifiers);
+        ui.click(knob.center());
+        ui.set_modifiers(Modifiers::NONE);
+        // One edit, and no drag after it.
+        assert_eq!(
+            ui.take_calls(),
+            [BeginGesture(id), Perform(id, 0.25), EndGesture(id)],
+            "{modifiers:?}"
+        );
+        assert_eq!(params.drive.value(), 6.0);
+    }
 }
 
 #[test]

@@ -59,6 +59,7 @@ use manguebyte_plugin::editor::testing::{HostCall, RecordingEditorHost};
 use manguebyte_plugin::editor::{EditorContext, HostLink};
 
 use crate::access::{AccessEntry, AccessNode, Action, Role, first_problem};
+use crate::clipboard::MemoryClipboard;
 use crate::event::{Button, Event, Key, KeyEvent, Modifiers};
 use crate::root::Root;
 use crate::theme::Theme;
@@ -141,6 +142,7 @@ pub struct Harness {
     root: Root,
     link: Option<HostLink>,
     host: Rc<RecordingEditorHost>,
+    clipboard: Rc<MemoryClipboard>,
     clock: Duration,
     period: Duration,
     damage: Vec<IRect>,
@@ -182,10 +184,12 @@ impl Harness {
         host: Rc<RecordingEditorHost>,
     ) -> Harness {
         let (context, link) = EditorContext::attach(host.clone());
+        let clipboard = Rc::new(MemoryClipboard::new());
         Harness {
-            root: Root::new(view, size, scale, context),
+            root: Root::new(view, size, scale, context).with_clipboard(clipboard.clone()),
             link: Some(link),
             host,
+            clipboard,
             clock: Duration::ZERO,
             period: Duration::from_millis(16),
             damage: Vec::new(),
@@ -224,6 +228,12 @@ impl Harness {
     /// Every call the interface made on the host so far, forgetting them.
     pub fn take_calls(&self) -> Vec<HostCall> {
         self.host.take_calls()
+    }
+
+    /// The clipboard the interface copies to and pastes from: one in
+    /// memory, which the test reads and fills.
+    pub fn clipboard(&self) -> &MemoryClipboard {
+        &self.clipboard
     }
 
     /// Closes the interface as a wrapper does: drops it, which ends any
@@ -386,12 +396,14 @@ impl Harness {
     ///   range, and accepts increment, decrement and set value;
     /// - every meter has its value as text, and every switch says whether
     ///   it is on;
+    /// - every text input has its text as its value and takes the focus;
     /// - no two widgets with a name share their role and name within the
     ///   same named group, so a screen reader, and
     ///   [`get`](Harness::get), can tell them apart;
     /// - the theme's text and muted text colours have a contrast of at
     ///   least [`MIN_TEXT_CONTRAST`](crate::access::MIN_TEXT_CONTRAST) on
-    ///   its background and surface colours.
+    ///   its background and surface colours, and its text colour on the
+    ///   selection of a text input.
     ///
     /// # Panics
     ///
@@ -508,6 +520,40 @@ impl Harness {
             modifiers,
             pressed: false,
         }));
+        used
+    }
+
+    /// Types `text` as a keyboard does, character by character: for each,
+    /// the key goes down, the character is typed, and the key comes up.
+    /// Returns whether every character was used. Line breaks and tabs are
+    /// typed as the keys Enter and Tab, which type no text.
+    pub fn type_text(&mut self, text: &str) -> bool {
+        let mut used = true;
+        for c in text.chars() {
+            let key = match c {
+                '\n' | '\r' => Key::Enter,
+                '\t' => Key::Tab,
+                c => Key::Character(c.to_lowercase().next().unwrap_or(c)),
+            };
+            let shift = c.is_uppercase();
+            let modifiers = Modifiers {
+                shift,
+                ..Modifiers::NONE
+            };
+            let press = |pressed| {
+                Event::Key(KeyEvent {
+                    key,
+                    modifiers,
+                    pressed,
+                })
+            };
+            let mut this = self.send(press(true));
+            if !c.is_control() {
+                this = self.send(Event::Text(c)) && this;
+            }
+            self.send(press(false));
+            used &= this;
+        }
         used
     }
 

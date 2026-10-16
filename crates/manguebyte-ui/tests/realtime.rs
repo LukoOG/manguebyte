@@ -171,3 +171,44 @@ fn a_frame_in_which_nothing_changed_makes_no_heap_call() {
     let (summary, _) = counted(|| ui.frame());
     assert_eq!(summary.painted, 1);
 }
+
+#[test]
+fn a_steady_frame_while_text_is_typed_makes_no_heap_call() {
+    let params = params();
+    let name = manguebyte_ui::State::new(String::from("Lead"));
+    let view = manguebyte_ui::column((
+        manguebyte_ui::text_field("Name", name.clone()),
+        manguebyte_ui::knob(manguebyte_ui::ParamHandle::new(Arc::clone(&params), |p| {
+            &p.cutoff
+        })),
+    ));
+    let mut ui = Harness::with_params(
+        view,
+        manguebyte_gfx::Size::new(200.0, 140.0),
+        2.0,
+        Arc::clone(&params) as Arc<dyn manguebyte_params::ParamSet>,
+    );
+    ui.advance_ms(50);
+    // A field being typed into, with a selection and a caret.
+    assert!(ui.tab());
+    ui.type_text(" synth");
+    ui.advance_ms(50);
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+        }
+    });
+    assert_eq!(calls, 0, "100 steady frames made {calls} heap calls");
+    // A value being typed into a knob.
+    let cutoff = ui.get(Role::Slider, "Cutoff");
+    ui.double_click(cutoff.center());
+    ui.type_text("2k");
+    ui.advance_ms(50);
+    assert!(ui.root().wants_text());
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+        }
+    });
+    assert_eq!(calls, 0, "100 steady frames made {calls} heap calls");
+}

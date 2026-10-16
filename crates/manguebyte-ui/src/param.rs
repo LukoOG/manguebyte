@@ -217,6 +217,34 @@ impl ParamHandle {
         self.param().map_or(0.0, |param| param.plain())
     }
 
+    /// The position, in `0..=1`, of the value `text` reads as: text a
+    /// person typed, with or without the unit, or text
+    /// [`text`](Self::text) wrote, read by
+    /// [`Param::parse_display`] and so by the parameter's own parser.
+    /// `None` if it reads as no value, or the parameter has gone.
+    /// Allocates.
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use manguebyte_params::{FloatParam, FloatRange, param_set};
+    /// # use manguebyte_ui::ParamHandle;
+    /// # struct Params { gain: FloatParam }
+    /// # param_set!(Params { gain });
+    /// let params = Arc::new(Params {
+    ///     gain: FloatParam::new("gain", "Gain", FloatRange::linear(-24.0, 24.0), 0.0).with_unit("dB"),
+    /// });
+    /// let gain = ParamHandle::new(params, |p| &p.gain);
+    /// assert_eq!(gain.parse("12 dB"), Some(0.75));
+    /// assert_eq!(gain.parse("-24"), Some(0.0));
+    /// assert_eq!(gain.parse("loud"), None);
+    /// ```
+    pub fn parse(&self, text: &str) -> Option<f64> {
+        let param = self.param()?;
+        let plain = param.parse_display(text.trim())?;
+        let normalized = param.plain_to_normalized(plain);
+        normalized.is_finite().then_some(normalized)
+    }
+
     /// The value at `normalized` as text in the parameter's own words,
     /// followed by its unit, as [`Param::display`] shows the current value.
     /// Allocates.

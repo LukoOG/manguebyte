@@ -17,7 +17,7 @@ use manguebyte_params::Param;
 use manguebyte_plugin::editor::testing::RecordingEditorHost;
 use manguebyte_ui::layout::{Insets, LayoutNode, Style, solve};
 use manguebyte_ui::testing::{Found, Harness};
-use manguebyte_ui::{Action, Button, Event, Key, KeyEvent, Modifiers};
+use manguebyte_ui::{Action, Button, Composition, Event, Key, KeyEvent, Modifiers};
 
 use common::{PANEL, levels, panel_view, params};
 
@@ -92,8 +92,31 @@ const KEYS: [Key; 14] = [
     Key::Character('x'),
 ];
 
+/// Characters to type: digits and units that read as values, and ones no
+/// field should choke on.
+const TEXT: [char; 16] = [
+    '1',
+    '5',
+    '0',
+    '-',
+    '.',
+    'k',
+    'H',
+    'z',
+    ' ',
+    'é',
+    '\u{301}',
+    '\u{200D}',
+    '\u{1F44D}',
+    '\u{1F3FD}',
+    '\n',
+    '\u{0}',
+];
+
 #[test]
 fn random_input_keeps_gestures_well_formed_and_frames_exact() {
+    // Steps, over every seed, after which a value was being typed.
+    let mut typing = 0;
     for seed in 1..=12_u64 {
         let params = params();
         let levels = levels();
@@ -152,14 +175,32 @@ fn random_input_keeps_gestures_well_formed_and_frames_exact() {
                         modifiers,
                     });
                 }
-                8 | 9 => {
-                    let key = KEYS[random.below(KEYS.len() as u64) as usize];
-                    ui.send(Event::Key(KeyEvent {
-                        key,
-                        modifiers,
-                        pressed: random.below(4) != 0,
-                    }));
-                }
+                8 | 9 => match random.below(5) {
+                    // Typed text and input methods, which knobs and sliders
+                    // take while a value is being typed into them.
+                    0 => {
+                        let c = TEXT[random.below(TEXT.len() as u64) as usize];
+                        ui.send(Event::Text(c));
+                    }
+                    1 => {
+                        let step = match random.below(5) {
+                            0 => Composition::Start,
+                            1 => Composition::Clear,
+                            2 => Composition::Caret(random.next() as u32),
+                            3 => Composition::End,
+                            _ => Composition::Push(TEXT[random.below(TEXT.len() as u64) as usize]),
+                        };
+                        ui.send(Event::Composition(step));
+                    }
+                    _ => {
+                        let key = KEYS[random.below(KEYS.len() as u64) as usize];
+                        ui.send(Event::Key(KeyEvent {
+                            key,
+                            modifiers,
+                            pressed: random.below(4) != 0,
+                        }));
+                    }
+                },
                 10 => {
                     ui.send(Event::Focus(random.below(2) == 0));
                 }
@@ -227,6 +268,9 @@ fn random_input_keeps_gestures_well_formed_and_frames_exact() {
             if let Err(problem) = host.well_formed() {
                 panic!("seed {seed}, step {step}: {problem}");
             }
+            if ui.root().wants_text() {
+                typing += 1;
+            }
         }
         assert!(checks > 0);
         let begins = host
@@ -247,6 +291,8 @@ fn random_input_keeps_gestures_well_formed_and_frames_exact() {
             "seed {seed}: a gesture never ended"
         );
     }
+    eprintln!("a value was being typed after {typing} of 6000 steps");
+    assert!(typing > 0, "no value was ever typed");
 }
 
 #[test]

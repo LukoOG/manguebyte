@@ -17,8 +17,9 @@ use crate::widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
 ///
 /// Dragging to the right raises the value, and the thumb follows the
 /// pointer; everything else works as for a [`Knob`](super::Knob): Shift
-/// for fine changes, Escape to cancel a drag, a double click for the
-/// default, the wheel and the keys in steps.
+/// for fine changes, Escape to cancel a drag, a double click or Enter to
+/// type a value (on the line of the name and value), a click with Alt,
+/// Control or Command for the default, the wheel and the keys in steps.
 pub struct Slider {
     adjust: Adjust,
     label: Option<String>,
@@ -167,31 +168,53 @@ impl Widget for Slider {
         );
 
         let text_y = rect.y + MARGIN;
-        let (label, adjust) = (self.label.as_deref(), &self.adjust);
-        let name = self.name.get(width, name_style, || {
-            line(name_of(label, adjust), &name_style, width)
-        });
-        draw_text(scene, name, Point::new(rect.x + MARGIN, text_y));
-        let binding = &adjust.binding;
-        let key = (binding.shown().to_bits(), binding.shows_sent(), value_style);
-        let value = self
-            .value
-            .get(width, key, || line(&binding.text(), &value_style, width));
-        draw_text(scene, value, Point::new(rect.x + MARGIN, text_y));
+        let entry_box = Rect::new(rect.x + MARGIN, text_y, width, label_height);
+        if !self
+            .adjust
+            .paint_entry(scene, entry_box, theme, cx.is_focused())
+        {
+            let (label, adjust) = (self.label.as_deref(), &self.adjust);
+            let name = self.name.get(width, name_style, || {
+                line(name_of(label, adjust), &name_style, width)
+            });
+            draw_text(scene, name, Point::new(rect.x + MARGIN, text_y));
+            let binding = &adjust.binding;
+            let key = (binding.shown().to_bits(), binding.shows_sent(), value_style);
+            let value = self
+                .value
+                .get(width, key, || line(&binding.text(), &value_style, width));
+            draw_text(scene, value, Point::new(rect.x + MARGIN, text_y));
+        }
         if cx.is_focused() {
             focus_ring(scene, rect, theme);
         }
     }
 
     fn event(&mut self, cx: &mut EventCx<'_>, event: &Event) -> Handled {
-        let thumb = cx.theme().sizes.slider_thumb.max(0.0);
+        let theme = cx.theme();
+        let thumb = theme.sizes.slider_thumb.max(0.0);
         let rect = cx.rect();
         let (x0, x1, _) = track(rect, 0.0, thumb);
-        let fine = cx.theme().sizes.fine_factor;
-        self.adjust.event(cx, event, x1 - x0, fine)
+        let fine = theme.sizes.fine_factor;
+        let label_height = line_height(&name_style(theme)).max(line_height(&value_style(theme)));
+        let entry_box = Rect::new(
+            rect.x + MARGIN,
+            rect.y + MARGIN,
+            (rect.width - 2.0 * MARGIN).max(0.0),
+            label_height,
+        );
+        self.adjust.event(cx, event, x1 - x0, fine, entry_box)
     }
 
     fn act(&mut self, cx: &mut EventCx<'_>, action: Action) -> bool {
         self.adjust.act(cx, action)
+    }
+
+    fn focus_changed(&mut self, cx: &mut EventCx<'_>, focused: bool) {
+        self.adjust.focus_changed(cx, focused);
+    }
+
+    fn caret(&self, _cx: &AccessCx<'_>) -> Option<Rect> {
+        self.adjust.caret()
     }
 }

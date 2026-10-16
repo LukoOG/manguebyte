@@ -46,6 +46,8 @@ pub enum Role {
     Meter,
     /// A picture or drawing.
     Image,
+    /// One line of text a person types: its value is the text.
+    TextInput,
 }
 
 /// The range of a widget's numeric value.
@@ -75,6 +77,8 @@ pub struct AccessState {
     pub disabled: bool,
     /// For something that is on or off, whether it is on.
     pub checked: Option<bool>,
+    /// Its value is text that a person can change by typing, now.
+    pub editable: bool,
 }
 
 /// Which [`Action`]s a widget accepts.
@@ -206,6 +210,13 @@ impl AccessNode {
         self
     }
 
+    /// The same node, whose value is text a person can type into now.
+    #[must_use]
+    pub fn editable(mut self) -> Self {
+        self.state.editable = true;
+        self
+    }
+
     /// The same node, accepting `actions`.
     #[must_use]
     pub fn with_actions(mut self, actions: Actions) -> Self {
@@ -276,25 +287,55 @@ pub fn contrast_ratio(text: Color, background: Color) -> f64 {
     (front.max(back) + 0.05) / (front.min(back) + 0.05)
 }
 
+/// The colour selected text is drawn on in `theme`: its focus colour, at
+/// two fifths, over its background.
+pub(crate) fn selection_color(theme: &Theme) -> Color {
+    theme.palette.focus.with_alpha(0x66)
+}
+
+/// `over`, drawn at its alpha on the opaque `under`.
+fn blend(over: Color, under: Color) -> Color {
+    let alpha = u32::from(over.a);
+    let mix =
+        |a: u8, b: u8| ((u32::from(a) * alpha + u32::from(b) * (255 - alpha) + 127) / 255) as u8;
+    Color::rgb(
+        mix(over.r, under.r),
+        mix(over.g, under.g),
+        mix(over.b, under.b),
+    )
+}
+
 /// The first pair of the theme's text and background colours whose
 /// contrast is below [`MIN_TEXT_CONTRAST`], if any: text and muted text,
-/// each on the background and on the surface of panels.
+/// each on the background and on the surface of panels, and text on the
+/// selection colour of a text input, over the background.
 fn contrast_problem(theme: &Theme) -> Option<String> {
     let palette = &theme.palette;
-    let texts = [("text", palette.text), ("text_muted", palette.text_muted)];
-    let behind = [
-        ("background", palette.background),
-        ("surface", palette.surface),
+    let selection = blend(selection_color(theme), palette.background);
+    let pairs = [
+        ("text", palette.text, "background", palette.background),
+        ("text", palette.text, "surface", palette.surface),
+        (
+            "text_muted",
+            palette.text_muted,
+            "background",
+            palette.background,
+        ),
+        ("text_muted", palette.text_muted, "surface", palette.surface),
+        (
+            "text",
+            palette.text,
+            "selection (focus over background)",
+            selection,
+        ),
     ];
-    for (text_name, text) in texts {
-        for (back_name, back) in behind {
-            let ratio = contrast_ratio(text, back);
-            if ratio < MIN_TEXT_CONTRAST {
-                return Some(format!(
-                    "the theme's {text_name} colour on its {back_name} colour has a contrast of \
-                     {ratio:.2} to 1, below {MIN_TEXT_CONTRAST} to 1"
-                ));
-            }
+    for (text_name, text, back_name, back) in pairs {
+        let ratio = contrast_ratio(text, back);
+        if ratio < MIN_TEXT_CONTRAST {
+            return Some(format!(
+                "the theme's {text_name} colour on its {back_name} colour has a contrast of \
+                 {ratio:.2} to 1, below {MIN_TEXT_CONTRAST} to 1"
+            ));
         }
     }
     None
@@ -309,11 +350,13 @@ fn contrast_problem(theme: &Theme) -> Option<String> {
 ///   and can be raised, lowered and set;
 /// - every meter has its value as text;
 /// - every switch says whether it is on;
+/// - every text input has its text as its value and takes the focus;
 /// - no two widgets with a name share their role and name within the same
 ///   named group (groups with no name only arrange their children, and a
 ///   screen reader does not tell them apart);
 /// - the theme's text colours have a contrast of at least
-///   [`MIN_TEXT_CONTRAST`] on its background and surface colours.
+///   [`MIN_TEXT_CONTRAST`] on its background and surface colours, and its
+///   text colour on the selection of a text input.
 pub(crate) fn first_problem(entries: &[AccessEntry], theme: &Theme) -> Option<String> {
     for entry in entries {
         let node = &entry.node;
@@ -354,6 +397,15 @@ pub(crate) fn first_problem(entries: &[AccessEntry], theme: &Theme) -> Option<St
         if node.role == Role::Switch && node.state.checked.is_none() {
             return Some(format!(
                 "switch {:?} does not say whether it is on",
+                node.name
+            ));
+        }
+        if node.role == Role::TextInput && node.value.is_none() {
+            return Some(format!("text input {:?} has no value as text", node.name));
+        }
+        if node.role == Role::TextInput && !actions.focus {
+            return Some(format!(
+                "text input {:?} cannot take the focus, so nothing can be typed into it",
                 node.name
             ));
         }
