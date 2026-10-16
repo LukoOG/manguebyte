@@ -3,20 +3,31 @@
 //!
 //! Every function here reads the parameters as they stand (the values the
 //! last events set, not the smoothed values a block is processing with)
-//! and computes the curve in closed form, outside the render call, from
-//! the same formulas the effects run on: the filters' magnitude from their
-//! biquad coefficients ([`BiquadCoefficients::magnitude_at`]), the
-//! compressor's static curve ([`Compressor::static_reduction_db`]), the
-//! waveshaper's and the bitcrusher's transfer, one cycle of an [`Lfo`], the
-//! echoes of an impulse, the decay of a reverb.
+//! and computes the curve outside the render call with
+//! `manguebyte-dsp`'s response curves ([`manguebyte_dsp::curve`]), which
+//! come from the coefficients and limits the effects run on:
 //!
-//! These are meant to be replaced by the response-curve functions
-//! `manguebyte-dsp` is getting: the swap happens in [`part_curve`] and
-//! [`master_curve`], one match arm per effect, and nothing outside this
-//! file changes, as long as the new functions keep the axes of
-//! [`Visual`].
+//! | Effect | Curve |
+//! |---|---|
+//! | high-pass, low-pass | [`SvfResponse`], the state-variable filter's own |
+//! | EQ | three [`BiquadResponse`]s of the bands' coefficients, in a row |
+//! | drive | the [`ShaperCurve`]'s, between the drive's gains and its mix |
+//! | compressor, glue | [`CompressorTransfer`], with the make-up and the mix |
+//! | limiter | [`LimiterTransfer`] |
+//! | chorus, flanger | [`ChorusSweep`] |
+//! | phaser | [`PhaserSweep`] |
+//! | tremolo, auto-pan | [`LfoCycle`], through what the effect does with its wave |
+//! | delay | [`DelayTaps`], with the spread of a ping-pong between the sides |
+//! | reverb | [`ReverbDecay`] at 1 kHz |
+//!
+//! The bitcrusher is this crate's own, and so is its staircase. The axes
+//! are those of [`Visual`], which the crate's README lists.
 
-use manguebyte_dsp::{BiquadCoefficients, Compressor, FilterShape, Lfo};
+use manguebyte_dsp::curve::{
+    BiquadResponse, ChorusSweep, CompressorTransfer, Curve as _, DelayTaps, FrequencyResponse,
+    LfoCycle, LimiterTransfer, PhaserSweep, ReverbDecay, SvfResponse, linear_spaced, log_spaced,
+};
+use manguebyte_dsp::{ShaperCurve, SvfMode};
 use manguebyte_params::Param;
 
 use crate::effect::{Effect, Visual};
@@ -49,73 +60,79 @@ const LOWEST_HZ: f64 = 20.0;
 /// An echo quieter than this, -60 dB, ends a delay's taps.
 const LAST_TAP: f64 = 1e-3;
 
+/// The frequency a reverb's tail is drawn at: where reverberation times
+/// are usually quoted.
+const REVERB_CURVE_HZ: f64 = 1_000.0;
+
+/// The damping and the size of a part's reverb, which have no parameters.
+const PART_REVERB_DAMPING: f64 = 0.45;
+const PART_REVERB_SIZE: f64 = 0.6;
+
 fn db(gain: f64) -> f64 {
     20.0 * gain.max(1e-12).log10()
 }
 
 /// `points` values from `from` to `to`, evenly spaced.
-fn linear(from: f64, to: f64, points: usize) -> impl Iterator<Item = f64> {
-    let last = (points - 1).max(1) as f64;
-    (0..points).map(move |index| from + (to - from) * index as f64 / last)
+fn linear(from: f64, to: f64, points: usize) -> Vec<f64> {
+    let mut values = vec![0.0; points];
+    linear_spaced(from, to, &mut values);
+    values
 }
 
 /// `points` frequencies from 20 Hz to 20 kHz or just under half the
 /// sample rate, evenly spaced in octaves.
-fn frequencies(sample_rate: f64, points: usize) -> impl Iterator<Item = f64> {
+fn frequencies(sample_rate: f64, points: usize) -> Vec<f64> {
     let highest = (0.49 * sample_rate).min(20_000.0);
-    linear(LOWEST_HZ.log2(), highest.log2(), points).map(f64::exp2)
+    let mut values = vec![0.0; points];
+    log_spaced(LOWEST_HZ, highest, &mut values);
+    values
 }
 
-fn response(
-    sample_rate: f64,
-    points: usize,
-    bands: &[BiquadCoefficients],
-) -> impl Iterator<Item = [f32; 2]> {
-    frequencies(sample_rate, points).map(move |frequency| {
-        let gain: f64 = bands
-            .iter()
-            .map(|band| band.magnitude_at(frequency, sample_rate))
-            .product();
-        [frequency as f32, db(gain) as f32]
-    })
+/// The gain of `response` in decibels at each of `points` frequencies.
+fn response(sample_rate: f64, points: usize, response: &impl FrequencyResponse) -> Vec<[f32; 2]> {
+    frequencies(sample_rate, points)
+        .into_iter()
+        .map(|frequency| [frequency as f32, response.magnitude_db_at(frequency) as f32])
+        .collect()
 }
 
 /// A compressor's output level for each input level, with `mix` of it in
 /// parallel with the input.
-fn compression(
-    compressor: &Compressor<f32>,
-    makeup_db: f64,
-    mix: f64,
-    points: usize,
-) -> Vec<[f32; 2]> {
+fn compression(transfer: &CompressorTransfer, mix: f64, points: usize) -> Vec<[f32; 2]> {
     linear(LEVELS_DB.0, LEVELS_DB.1, points)
+        .into_iter()
         .map(|level| {
-            let compressed = level - compressor.static_reduction_db(level) + makeup_db;
+            let compressed = transfer.value_at(level);
             let out = (1.0 - mix) * 10f64.powf(level / 20.0) + mix * 10f64.powf(compressed / 20.0);
             [level as f32, db(out) as f32]
         })
         .collect()
 }
 
-/// One cycle of the wave of shape `shape` (a parameter's value), mapped
-/// through `value`.
-fn cycle(shape: f64, points: usize, value: impl Fn(f64) -> f64) -> Vec<[f32; 2]> {
-    let mut lfo = Lfo::new(lfo_shape(shape), 1.0);
+/// One cycle of `curve`, from its start to its end, mapped through
+/// `value`.
+fn cycle(
+    curve: &impl manguebyte_dsp::curve::Curve,
+    points: usize,
+    value: impl Fn(f64) -> f64,
+) -> Vec<[f32; 2]> {
     linear(0.0, 1.0, points)
+        .into_iter()
         .map(|phase| {
-            lfo.set_phase(phase.min(1.0 - 1e-12));
-            [phase as f32, value(lfo.value()) as f32]
+            // The cycle repeats beyond 1: the last point is its end.
+            let at = curve.value_at(phase.min(1.0 - 1e-12));
+            [phase as f32, value(at) as f32]
         })
         .collect()
 }
 
-/// A sine cycle mapped through `value`.
-fn sine_cycle(points: usize, value: impl Fn(f64) -> f64) -> Vec<[f32; 2]> {
-    linear(0.0, 1.0, points)
-        .map(|phase| {
-            let wave = (core::f64::consts::TAU * phase).sin();
-            [phase as f32, value(wave) as f32]
-        })
+/// A reverb's tail: `level` (a gain) at the start, falling as `decay` says
+/// at [`REVERB_CURVE_HZ`], over one and a half times its decay time.
+fn tail(decay: &ReverbDecay, level: f64, points: usize) -> Vec<[f32; 2]> {
+    let energy = decay.energy_at(REVERB_CURVE_HZ);
+    linear(0.0, 1.5 * decay.decay_seconds(), points)
+        .into_iter()
+        .map(|time| [time as f32, (db(level) + energy.value_at(time)) as f32])
         .collect()
 }
 
@@ -132,19 +149,21 @@ pub(crate) fn part_curve(
     let points = points.clamp(2, MAX_CURVE_POINTS);
     let curve: Vec<[f32; 2]> = match effect {
         Effect::Lowpass | Effect::Highpass => {
-            let (shape, cutoff, resonance) = if effect == Effect::Lowpass {
+            // The filter runs on the parameters' values, single precision.
+            let (mode, cutoff, resonance) = if effect == Effect::Lowpass {
                 let p = &params.lowpass;
-                (FilterShape::Lowpass, p.cutoff.plain(), p.resonance.plain())
+                (SvfMode::Lowpass, p.cutoff.value(), p.resonance.value())
             } else {
                 let p = &params.highpass;
-                (FilterShape::Highpass, p.cutoff.plain(), p.resonance.plain())
+                (SvfMode::Highpass, p.cutoff.value(), p.resonance.value())
             };
-            // The state-variable filters are the bilinear transform of the
-            // same prototype as the cookbook biquad, prewarped at the
-            // cutoff: their responses are the same.
-            let band =
-                BiquadCoefficients::design(shape, sample_rate, cutoff, resonance_to_q(resonance));
-            response(sample_rate, points, &[band]).collect()
+            let filter = SvfResponse::new(
+                mode,
+                f64::from(cutoff),
+                resonance_to_q(f64::from(resonance)),
+                sample_rate,
+            );
+            response(sample_rate, points, &filter)
         }
         Effect::Eq => {
             let p = &params.eq;
@@ -153,20 +172,22 @@ pub(crate) fn part_curve(
                 [p.low_gain.plain(), p.mid_gain.plain(), p.high_gain.plain()],
                 [p.low_freq.plain(), p.mid_freq.plain(), p.high_freq.plain()],
                 p.mid_q.plain(),
-            );
-            response(sample_rate, points, &bands).collect()
+            )
+            .map(|band| BiquadResponse::new(band, sample_rate));
+            response(sample_rate, points, &bands)
         }
         Effect::Drive => {
             let p = &params.drive;
-            let curve = drive_curve(p.shape.plain());
+            let curve: ShaperCurve = drive_curve(p.shape.plain());
             let (drive, output, mix) = (
                 f64::from(gain_from_db(p.amount.plain())),
                 f64::from(gain_from_db(p.output.plain())),
                 p.mix.plain(),
             );
             linear(-1.0, 1.0, points)
+                .into_iter()
                 .map(|x| {
-                    let y = x + (curve.apply(x * drive) * output - x) * mix;
+                    let y = x + (curve.value_at(x * drive) * output - x) * mix;
                     [x as f32, y as f32]
                 })
                 .collect()
@@ -176,6 +197,7 @@ pub(crate) fn part_curve(
             let step = crush_step(p.bits.plain()) as f32;
             let mix = p.mix.value();
             linear(-1.0, 1.0, points)
+                .into_iter()
                 .map(|x| {
                     let x = x as f32;
                     [x, x + (crush(x, step) - x) * mix]
@@ -184,34 +206,37 @@ pub(crate) fn part_curve(
         }
         Effect::Compressor => {
             let p = &params.compressor;
-            let mut compressor = Compressor::<f32>::new();
-            crate::fx::Squeeze::configure(
-                &mut compressor,
+            let transfer = CompressorTransfer::new(
                 p.threshold.plain(),
                 p.ratio.plain(),
                 p.knee.plain(),
-                p.attack.plain(),
-                p.release.plain(),
+                p.makeup.plain(),
             );
-            compression(&compressor, p.makeup.plain(), p.mix.plain(), points)
+            compression(&transfer, p.mix.plain(), points)
         }
         Effect::Chorus | Effect::Flanger => {
-            let (centre, depth) = if effect == Effect::Chorus {
-                (params.chorus.delay.plain(), params.chorus.depth.plain())
+            let (centre, depth, rate) = if effect == Effect::Chorus {
+                let p = &params.chorus;
+                (p.delay.plain(), p.depth.plain(), p.rate.plain())
             } else {
-                (params.flanger.delay.plain(), params.flanger.depth.plain())
+                let p = &params.flanger;
+                (p.delay.plain(), p.depth.plain(), p.rate.plain())
             };
-            // The chorus never reads closer than two frames.
-            let shortest = 2_000.0 / sample_rate;
-            sine_cycle(points, |wave| (centre + depth * wave).max(shortest))
+            cycle(
+                &ChorusSweep::new(centre, depth, rate, sample_rate),
+                points,
+                |ms| ms,
+            )
         }
         Effect::Phaser => {
             let p = &params.phaser;
-            let (centre, depth) = (p.center.plain(), p.depth.plain());
-            let highest = 0.49 * sample_rate;
-            sine_cycle(points, |wave| {
-                (centre * (depth * wave).exp2()).clamp(10.0f64.min(highest), highest)
-            })
+            let sweep = PhaserSweep::new(
+                p.center.plain(),
+                p.depth.plain(),
+                p.rate.plain(),
+                sample_rate,
+            );
+            cycle(&sweep, points, |hertz| hertz)
         }
         Effect::Tremolo | Effect::Autopan => {
             let p = if effect == Effect::Tremolo {
@@ -220,9 +245,8 @@ pub(crate) fn part_curve(
                 &params.autopan
             };
             let depth = p.depth.plain();
-            cycle(p.shape.plain(), points, |wave| {
-                wobble_target(effect, wave, depth)
-            })
+            let wave = LfoCycle::new(lfo_shape(p.shape.plain()));
+            cycle(&wave, points, |wave| wobble_target(effect, wave, depth))
         }
         Effect::Delay => {
             let p = &params.delay;
@@ -231,18 +255,25 @@ pub(crate) fn part_curve(
             } else {
                 p.time.plain()
             };
+            // The delay reads its lines a whole number of frames back.
             let seconds = (seconds * sample_rate).round().max(1.0) / sample_rate;
-            delay_taps(
+            let taps = DelayTaps::new(
                 seconds.min(crate::fx::DELAY_MAX_SECONDS),
                 p.feedback.plain(),
                 p.mix.plain(),
-                p.pingpong.plain(),
-                points,
-            )
+                sample_rate,
+            );
+            delay_taps(&taps, p.pingpong.plain(), points)
         }
         Effect::Reverb => {
             let p = &params.reverb;
-            decay(p.decay.plain(), p.mix.plain(), points)
+            let decay = ReverbDecay::new(
+                p.decay.plain(),
+                PART_REVERB_DAMPING,
+                PART_REVERB_SIZE,
+                sample_rate,
+            );
+            tail(&decay, p.mix.plain(), points)
         }
         Effect::Glue | Effect::Limiter => return None,
     };
@@ -252,77 +283,79 @@ pub(crate) fn part_curve(
     })
 }
 
-/// The echoes of a short sound in the centre: time and the gain of the
-/// louder side, at low frequencies (the damping only darkens them), until
-/// they fall below -60 dB or `points` have been given.
-fn delay_taps(
-    seconds: f64,
-    feedback: f64,
-    mix: f64,
-    pingpong: f64,
-    points: usize,
-) -> Vec<[f32; 2]> {
-    let (straight, crossed) = (1.0 - pingpong, pingpong);
-    // What goes into each line, then what each echo puts back.
-    let mut sides = [1.0, straight];
-    let mut taps = Vec::new();
+/// The echoes of a short sound in the centre, from the first: their times
+/// and the gain of the louder side, at low frequencies (the damping only
+/// darkens them), until they fall below -60 dB or `points` have been
+/// given.
+///
+/// A delay that does not ping-pong echoes each side on itself, the echoes
+/// of [`DelayTaps`]. The ping-pong sends the sound to the left line and
+/// the right side's share (`1 - pingpong`) to the right one, and crosses
+/// `pingpong` of the feedback over: the sum of the two sides' echoes keeps
+/// the taps' gains, and their difference falls by `|1 - 2·pingpong|` an
+/// echo more. The louder side of echo `k` is therefore the tap's gain
+/// times `1 - p/2 + p/2·|1 - 2p|^(k-1)`, with `p` the ping-pong: 1 at
+/// either end, every echo on one side or the other.
+fn delay_taps(taps: &DelayTaps, pingpong: f64, points: usize) -> Vec<[f32; 2]> {
+    let p = pingpong.clamp(0.0, 1.0);
+    let (common, apart, narrowing) = (1.0 - 0.5 * p, 0.5 * p, (1.0 - 2.0 * p).abs());
+    let mut spread = 1.0;
+    let mut echoes = Vec::new();
     for echo in 1..=points {
-        let loudest = sides[0].abs().max(sides[1].abs()) * mix;
-        if loudest < LAST_TAP && echo > 1 {
+        let tap = taps.tap(echo);
+        let louder = tap.y * (common + apart * spread);
+        if louder < LAST_TAP && echo > 1 {
             break;
         }
-        taps.push([(echo as f64 * seconds) as f32, loudest as f32]);
-        sides = [
-            feedback * (straight * sides[0] + crossed * sides[1]),
-            feedback * (straight * sides[1] + crossed * sides[0]),
-        ];
+        echoes.push([tap.x as f32, louder as f32]);
+        spread *= narrowing;
     }
-    taps
-}
-
-/// A reverb's tail: `level` (a gain) at the start, falling 60 dB in
-/// `seconds`, over one and a half times that.
-fn decay(seconds: f64, level: f64, points: usize) -> Vec<[f32; 2]> {
-    linear(0.0, 1.5 * seconds, points)
-        .map(|time| [time as f32, (db(level) - 60.0 * time / seconds) as f32])
-        .collect()
+    echoes
 }
 
 /// The curve of the master bus's `effect`: the glue compressor, the
 /// limiter, or the shared reverb. `None` for any other.
-pub(crate) fn master_curve(params: &MasterParams, effect: Effect, points: usize) -> Option<Curve> {
+pub(crate) fn master_curve(
+    params: &MasterParams,
+    effect: Effect,
+    sample_rate: f64,
+    points: usize,
+) -> Option<Curve> {
     let points = points.clamp(2, MAX_CURVE_POINTS);
     let curve = match effect {
         Effect::Glue => {
             let p = &params.glue;
-            let mut compressor = Compressor::<f32>::new();
-            crate::fx::Squeeze::configure(
-                &mut compressor,
+            let transfer = CompressorTransfer::new(
                 p.threshold.plain(),
                 p.ratio.plain(),
                 p.knee.plain(),
-                p.attack.plain(),
-                p.release.plain(),
+                p.makeup.plain(),
             );
-            compression(&compressor, p.makeup.plain(), 1.0, points)
+            compression(&transfer, 1.0, points)
         }
         Effect::Limiter => {
+            // No sample ever goes beyond the output ceiling, whatever the
+            // limiter's own.
             let ceiling = params
                 .limiter
                 .ceiling
                 .plain()
                 .min(20.0 * f64::from(crate::engine::OUTPUT_CEILING).log10());
+            let transfer = LimiterTransfer::new(ceiling);
             linear(LEVELS_DB.0, LEVELS_DB.1, points)
-                .map(|level| [level as f32, level.min(ceiling) as f32])
+                .into_iter()
+                .map(|level| [level as f32, transfer.value_at(level) as f32])
                 .collect()
         }
         Effect::Reverb => {
             let p = &params.reverb;
-            decay(
+            let decay = ReverbDecay::new(
                 p.decay.plain(),
-                f64::from(gain_from_db(p.level.plain())),
-                points,
-            )
+                p.damping.plain(),
+                p.size.plain(),
+                sample_rate,
+            );
+            tail(&decay, f64::from(gain_from_db(p.level.plain())), points)
         }
         _ => return None,
     };

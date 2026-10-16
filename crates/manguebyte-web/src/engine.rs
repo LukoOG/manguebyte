@@ -993,7 +993,7 @@ impl Engine {
     /// [`effect_curve`](Self::effect_curve) gives a part's. `None` for any
     /// other effect.
     pub fn master_curve(&self, effect: Effect, points: usize) -> Option<Curve> {
-        curve::master_curve(&self.master.params, effect, points)
+        curve::master_curve(&self.master.params, effect, self.config.sample_rate, points)
     }
 
     /// Whether `effect` of a part has work to do: switched on, fading, or

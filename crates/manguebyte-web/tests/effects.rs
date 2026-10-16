@@ -888,3 +888,205 @@ fn every_part_effect_has_a_curve_of_its_visual() {
     }
     assert_eq!(Visual::DelayTaps.name(), "delay_taps");
 }
+
+/// Asserts that every point of `points` is at `x`, `y` with the `y` that
+/// `expected` gives for `x`, to the precision of an `f32`.
+fn assert_curve(name: &str, points: &[[f32; 2]], xs: &[f64], expected: impl Fn(f64) -> f64) {
+    assert_eq!(points.len(), xs.len(), "{name}");
+    for (&[x, y], &at) in points.iter().zip(xs) {
+        assert_eq!(x, at as f32, "{name}");
+        let want = expected(at);
+        assert!(
+            (f64::from(y) - want).abs() <= 1e-5 * want.abs().max(1.0),
+            "{name} at {at}: {y} against {want}"
+        );
+    }
+}
+
+/// The curves are `manguebyte-dsp`'s own response curves of the settings
+/// the parameters hold, worked out from the same coefficients and limits
+/// the effects run on.
+#[test]
+fn the_curves_are_those_of_manguebyte_dsp() {
+    use manguebyte_dsp::curve::{
+        BiquadResponse, ChorusSweep, CompressorTransfer, Curve as _, DelayTaps, FrequencyResponse,
+        LfoCycle, LimiterTransfer, PhaserSweep, ReverbDecay, SvfResponse, linear_spaced,
+        log_spaced,
+    };
+    use manguebyte_dsp::{FilterShape, LfoShape, ShaperCurve, SvfMode};
+
+    let points = 97;
+    let mut hertz = vec![0.0; points];
+    log_spaced(20.0, 20_000.0, &mut hertz);
+    let mut levels = vec![0.0; points];
+    linear_spaced(-60.0, 6.0, &mut levels);
+    let mut samples = vec![0.0; points];
+    linear_spaced(-1.0, 1.0, &mut samples);
+    let mut cycle = vec![0.0; points];
+    linear_spaced(0.0, 1.0, &mut cycle);
+    let in_cycle = |phase: f64| phase.min(1.0 - 1e-12);
+    // The filters' resonance as their Q, as the README gives it.
+    let q = |resonance: f64| core::f64::consts::FRAC_1_SQRT_2 * 16f64.powf(resonance);
+    let f32_of = |value: f64| f64::from(value as f32);
+
+    let filters = [
+        (
+            Effect::Lowpass,
+            SvfMode::Lowpass,
+            ids::LOWPASS_CUTOFF,
+            ids::LOWPASS_RESONANCE,
+        ),
+        (
+            Effect::Highpass,
+            SvfMode::Highpass,
+            ids::HIGHPASS_CUTOFF,
+            ids::HIGHPASS_RESONANCE,
+        ),
+    ];
+    for (effect, mode, cutoff, resonance) in filters {
+        let curve = curve_of(effect, &[(cutoff, 1_234.5), (resonance, 0.6)], points);
+        let filter = SvfResponse::new(mode, f32_of(1_234.5), q(f32_of(0.6)), RATE);
+        assert_curve(effect.name(), &curve, &hertz, |f| filter.magnitude_db_at(f));
+    }
+
+    let eq = [
+        (ids::EQ_LOW_GAIN, 4.0),
+        (ids::EQ_LOW_FREQ, 150.0),
+        (ids::EQ_MID_GAIN, -7.5),
+        (ids::EQ_MID_FREQ, 2_000.0),
+        (ids::EQ_MID_Q, 2.5),
+        (ids::EQ_HIGH_GAIN, 3.0),
+        (ids::EQ_HIGH_FREQ, 9_000.0),
+    ];
+    let curve = curve_of(Effect::Eq, &eq, points);
+    let shelf = core::f64::consts::FRAC_1_SQRT_2;
+    let bands = [
+        BiquadResponse::design(FilterShape::LowShelf { gain_db: 4.0 }, 150.0, shelf, RATE),
+        BiquadResponse::design(FilterShape::Peak { gain_db: -7.5 }, 2_000.0, 2.5, RATE),
+        BiquadResponse::design(
+            FilterShape::HighShelf { gain_db: 3.0 },
+            9_000.0,
+            shelf,
+            RATE,
+        ),
+    ];
+    assert_curve("eq", &curve, &hertz, |f| bands.magnitude_db_at(f));
+
+    let compressor = [
+        (ids::COMPRESSOR_THRESHOLD, -24.0),
+        (ids::COMPRESSOR_RATIO, 5.0),
+        (ids::COMPRESSOR_KNEE, 8.0),
+        (ids::COMPRESSOR_MAKEUP, 3.0),
+    ];
+    let curve = curve_of(Effect::Compressor, &compressor, points);
+    let transfer = CompressorTransfer::new(-24.0, 5.0, 8.0, 3.0);
+    assert_curve("compressor", &curve, &levels, |level| {
+        transfer.value_at(level)
+    });
+
+    let drive = [
+        (ids::DRIVE_AMOUNT, 0.0),
+        (ids::DRIVE_OUTPUT, 0.0),
+        (ids::DRIVE_SHAPE, 1.0),
+    ];
+    let curve = curve_of(Effect::Drive, &drive, points);
+    assert_curve("drive", &curve, &samples, |x| {
+        ShaperCurve::SoftClip.value_at(x)
+    });
+
+    let chorus = [
+        (ids::CHORUS_DELAY, 12.0),
+        (ids::CHORUS_DEPTH, 4.0),
+        (ids::CHORUS_RATE, 1.5),
+    ];
+    let curve = curve_of(Effect::Chorus, &chorus, points);
+    let sweep = ChorusSweep::new(12.0, 4.0, 1.5, RATE);
+    assert_curve("chorus", &curve, &cycle, |phase| {
+        sweep.value_at(in_cycle(phase))
+    });
+
+    let flanger = [(ids::FLANGER_DELAY, 1.0), (ids::FLANGER_DEPTH, 2.0)];
+    let curve = curve_of(Effect::Flanger, &flanger, points);
+    let sweep = ChorusSweep::new(1.0, 2.0, f32_of(0.25), RATE);
+    assert_curve("flanger", &curve, &cycle, |phase| {
+        sweep.value_at(in_cycle(phase))
+    });
+
+    let phaser = [(ids::PHASER_CENTER, 700.0), (ids::PHASER_DEPTH, 3.0)];
+    let curve = curve_of(Effect::Phaser, &phaser, points);
+    let sweep = PhaserSweep::new(700.0, 3.0, 0.5, RATE);
+    assert_curve("phaser", &curve, &cycle, |phase| {
+        sweep.value_at(in_cycle(phase))
+    });
+
+    let tremolo = [(ids::TREMOLO_DEPTH, 0.75), (ids::TREMOLO_SHAPE, 1.0)];
+    let curve = curve_of(Effect::Tremolo, &tremolo, points);
+    let wave = LfoCycle::new(LfoShape::Triangle);
+    assert_curve("tremolo", &curve, &cycle, |phase| {
+        let value = wave.value_at(in_cycle(phase));
+        1.0 - 0.75 * (1.0 - (value + 1.0) / 2.0)
+    });
+
+    // A delay of 0.2 s: its echoes, and with ping-pong part of the way the
+    // louder side's.
+    for pingpong in [0.0, 0.5, 0.8, 1.0] {
+        let settings = [
+            (ids::DELAY_TIME, 0.2),
+            (ids::DELAY_FEEDBACK, 0.6),
+            (ids::DELAY_MIX, 0.5),
+            (ids::DELAY_PINGPONG, pingpong),
+        ];
+        let curve = curve_of(Effect::Delay, &settings, 64);
+        let taps = DelayTaps::new(0.2, f32_of(0.6), 0.5, RATE);
+        assert!(curve.len() > 5);
+        let p = f32_of(pingpong);
+        let louder = |echo: usize| {
+            let spread = 1.0 - 0.5 * p + 0.5 * p * (1.0 - 2.0 * p).abs().powi(echo as i32 - 1);
+            taps.tap(echo).y * spread
+        };
+        for (index, &[time, gain]) in curve.iter().enumerate() {
+            let echo = index + 1;
+            assert_eq!(time, taps.tap(echo).x as f32);
+            assert!(
+                (f64::from(gain) - louder(echo)).abs() < 1e-6,
+                "{pingpong} {echo}"
+            );
+            assert!(louder(echo) >= 1e-3);
+        }
+        assert!(
+            louder(curve.len() + 1) < 1e-3,
+            "every echo above -60 dB, and no more"
+        );
+    }
+
+    let reverb = [(ids::REVERB_DECAY, 2.0), (ids::REVERB_MIX, 0.5)];
+    let curve = curve_of(Effect::Reverb, &reverb, points);
+    let decay = ReverbDecay::new(2.0, 0.45, 0.6, RATE).energy_at(1_000.0);
+    let mut times = vec![0.0; points];
+    linear_spaced(0.0, 3.0, &mut times);
+    assert_curve("reverb", &curve, &times, |t| db(0.5) + decay.value_at(t));
+
+    // The master bus's.
+    let mut engine = signal_engine(&[0.0; 4], Chain::NONE);
+    push_all(
+        &mut engine,
+        &[
+            EventRecord::param(0, 0, id(ids::GLUE_THRESHOLD), -20.0),
+            EventRecord::param(0, 0, id(ids::GLUE_RATIO), 3.0),
+            EventRecord::param(0, 0, id(ids::LIMITER_CEILING), -2.0),
+            EventRecord::param(0, 0, id(ids::MASTER_REVERB_DECAY), 3.0),
+            EventRecord::param(0, 0, id(ids::MASTER_REVERB_DAMPING), 0.8),
+        ],
+    );
+    render(&mut engine, 1, 1);
+    let curve = engine.master_curve(Effect::Glue, points).unwrap().points;
+    let transfer = CompressorTransfer::new(-20.0, 3.0, 6.0, 0.0);
+    assert_curve("glue", &curve, &levels, |level| transfer.value_at(level));
+    let curve = engine.master_curve(Effect::Limiter, points).unwrap().points;
+    let transfer = LimiterTransfer::new(-2.0);
+    assert_curve("limiter", &curve, &levels, |level| transfer.value_at(level));
+    let curve = engine.master_curve(Effect::Reverb, points).unwrap().points;
+    let decay = ReverbDecay::new(3.0, f32_of(0.8), f32_of(0.7), RATE).energy_at(1_000.0);
+    linear_spaced(0.0, 4.5, &mut times);
+    assert_curve("master reverb", &curve, &times, |t| decay.value_at(t));
+}
