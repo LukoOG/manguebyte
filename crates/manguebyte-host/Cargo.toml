@@ -1,6 +1,6 @@
 [package]
 name = "manguebyte-host"
-description = "Plugin hosting for the Manguebyte audio framework: load CLAP and VST 3 plugins and run them as processors."
+description = "Plugin hosting for the Manguebyte Audio Framework: load CLAP and VST 3 plugins and run them as processors."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

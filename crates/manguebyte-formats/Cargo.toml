@@ -1,6 +1,6 @@
 [package]
 name = "manguebyte-formats"
-description = "Audio file reading and writing for the Manguebyte audio framework."
+description = "Audio files for the Manguebyte Audio Framework: WAV, RF64, AIFF and FLAC reading and writing, file playback and recording."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

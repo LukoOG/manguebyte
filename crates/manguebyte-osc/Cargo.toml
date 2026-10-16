@@ -1,6 +1,6 @@
 [package]
 name = "manguebyte-osc"
-description = "Open Sound Control for the Manguebyte audio framework: messages, bundles, address patterns, UDP and TCP transport, and sample-accurate delivery to the audio thread."
+description = "Open Sound Control for the Manguebyte Audio Framework: messages, bundles, address patterns, UDP and TCP transport, and sample-accurate delivery to the audio thread."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

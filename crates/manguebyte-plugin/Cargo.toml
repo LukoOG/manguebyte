@@ -1,6 +1,6 @@
 [package]
 name = "manguebyte-plugin"
-description = "The format-independent plugin API of the Manguebyte audio framework, with a harness for testing plugins without a host."
+description = "The format-independent plugin API of the Manguebyte Audio Framework, with a harness for testing plugins without a host."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

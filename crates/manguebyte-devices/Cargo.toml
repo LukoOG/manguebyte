@@ -1,6 +1,6 @@
 [package]
 name = "manguebyte-devices"
-description = "Audio device input and output for the Manguebyte audio framework."
+description = "Audio and MIDI device input and output for the Manguebyte Audio Framework."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

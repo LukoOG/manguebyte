@@ -1,6 +1,6 @@
 [package]
 name = "manguebyte-params"
-description = "Thread-safe parameters for the Manguebyte audio framework: ranges, skew, text conversion, smoothing and state."
+description = "Thread-safe parameters for the Manguebyte Audio Framework: ranges, skew, text conversion, smoothing and state."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

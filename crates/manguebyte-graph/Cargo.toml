@@ -1,6 +1,6 @@
 [package]
 name = "manguebyte-graph"
-description = "A dynamic audio processing graph for the Manguebyte audio framework: rewire it while it plays, with automatic latency compensation."
+description = "A dynamic audio processing graph for the Manguebyte Audio Framework: rewire it while it plays, with automatic latency compensation."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

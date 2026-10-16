@@ -361,6 +361,15 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check licenses
+      # A published crate carries only the files under its own folder, so
+      # each one keeps a copy of both licence texts, identical to the root.
+      - name: Every crate carries both licence texts
+        run: |
+          for crate in crates/*/; do
+            for licence in LICENSE-MIT LICENSE-APACHE; do
+              cmp "$licence" "$crate$licence"
+            done
+          done
 
   msrv:
     name: Minimum supported Rust version

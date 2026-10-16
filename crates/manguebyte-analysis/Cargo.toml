@@ -1,6 +1,6 @@
 [package]
 name = "manguebyte-analysis"
-description = "Metering and analysis for the Manguebyte audio framework: loudness, true peak, level meters, spectrum and pitch."
+description = "Metering and analysis for the Manguebyte Audio Framework: loudness, true peak, level meters, spectrum and pitch."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
