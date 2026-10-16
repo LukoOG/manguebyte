@@ -583,6 +583,34 @@ display, and no editor has been opened inside a real host yet.
   frequency in every mode, and `StateVariableFilter::coefficients`.
 - `Waveshaper` (hard clip, tanh, soft clip, fold), `DcBlocker`, `Noise`
   (white, pink, brown), `Lfo` with tempo sync, and `fir` design functions.
+- `curve`: the curves an interface draws, computed from the settings the
+  processor runs on rather than imitated. Each is a small `Copy` value,
+  taken from the processor (`Filter::response`, `Compressor::transfer`,
+  `Adsr::shape`, `Chorus::sweep`, `Delay::taps`, `Reverb::decay` and so
+  on) or made from parameter values on any thread with the same limits;
+  nothing allocates. Frequency responses (`FrequencyResponse`: complex,
+  magnitude in dB, phase) of `Biquad` and `Filter` (with their
+  coefficients rounded as they are held), `BiquadCascade`, `IirFilter` and
+  `iir::Design` (from the form the cascade runs, exact where the
+  coefficients are not), `StateVariableFilter`, `OnePole`, the linear model
+  of `LadderFilter`, every band of a `Crossover` and their sum, and
+  `FirFilter`; a slice, array or tuple of them is a chain whose decibels
+  add up. Static transfer curves of `Compressor` (knee and makeup),
+  `Expander`, `NoiseGate`, `Limiter` and `Waveshaper`; the corners of an
+  `Adsr`; one cycle of an `Lfo`; the delay of each `Chorus` voice and the
+  frequency of the `Phaser` stages over a cycle; the time and gain of each
+  echo of a `Delay`; and the RT60 of a `Reverb` against frequency, from an
+  energy model of its network. `CurveSpec` says what a curve is and how to
+  draw its axes (unit, linear or logarithmic, a fitted range), and
+  `log_spaced`, `Axis::fill` and `unwrap_phase` make the grids. Every
+  curve was checked against the processor itself: frequency responses
+  against impulse responses up to 0.45 of the sample rate (the largest
+  difference measured was 4e-9 dB and 2e-11 rad, the tests allow 1e-7)
+  and steady sines (1e-12 dB), transfer curves against settled steady
+  levels (within 1e-9 dB), envelopes, sweeps and echoes sample by sample,
+  and the reverb's RT60 against impulse responses rendered offline (see
+  `ReverbDecay` for how close). The `response_curves` example writes them
+  all as SVG and CSV.
 
 ### Parameters
 

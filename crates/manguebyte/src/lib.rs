@@ -6,7 +6,7 @@
 //! | Module | Crate | What it holds |
 //! |---|---|---|
 //! | (root) | `manguebyte-core` | [`AudioBuffer`], [`Sample`], [`Smoothed`], atomics, [`spsc`] queue, [`NoDenormals`] |
-//! | [`dsp`] | `manguebyte-dsp` | processor chains, sample-accurate events, polyphonic synth, filters, effects, dynamics with sidechain keying, convolution, wavetables, FFT |
+//! | [`dsp`] | `manguebyte-dsp` | processor chains, sample-accurate events, polyphonic synth, filters, effects, dynamics with sidechain keying, convolution, wavetables, FFT, response curves for drawing |
 //! | [`params`] | `manguebyte-params` | thread-safe parameters, ranges, smoothing, saved state |
 //! | [`graph`] | `manguebyte-graph` | a processing graph that can be rewired while it plays |
 //! | [`plugin`] | `manguebyte-plugin` | the format-independent plugin API and a test harness |
