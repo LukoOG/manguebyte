@@ -19,6 +19,7 @@ use crate::record::{Event, EventRecord, RECORD_SIZE};
 use crate::ring::RingConsumer;
 use crate::sampled::SampledInstrument;
 use crate::synth::{SynthInstrument, choke_synth, fade_synth, new_synth, synth_note_on};
+use crate::voiced::Voiced;
 
 /// The most the output ever reaches: about -0.3 dB below full scale. The
 /// master bus's limiter keeps every sample within
@@ -64,11 +65,51 @@ pub enum InstrumentKind {
     /// map its SFZ text has no region for, and every drum until it has
     /// one. It has the kit's parameters as well as the sampler's.
     SamplerKit,
+    /// Code 4: plucked strings by physical modelling,
+    /// [`PluckedString`](manguebyte_dsp::instruments::PluckedString), eight
+    /// voices: nylon and steel guitar, finger and slap bass
+    /// (`plucked.preset`).
+    Plucked,
+    /// Code 5: four-operator FM,
+    /// [`FmVoice`](manguebyte_dsp::instruments::FmVoice), eight voices:
+    /// electric piano, tubular bell, FM bass (`fm.preset`).
+    Fm,
+    /// Code 6: a tonewheel organ,
+    /// [`OrganVoice`](manguebyte_dsp::instruments::OrganVoice), sixteen
+    /// voices on one manual, heard through a
+    /// [`RotarySpeaker`](manguebyte_dsp::instruments::RotarySpeaker)
+    /// (`organ.rotary`, `organ.speaker`).
+    Organ,
+    /// Code 7: an analogue drum machine in the manner of the 808,
+    /// [`AnalogKitVoice`](manguebyte_dsp::instruments::AnalogKitVoice),
+    /// sixteen voices sharing a choke group, on the drum map; the ride and
+    /// the guitar tap, which the machine does not have, are the
+    /// synthesized drums of [`Drums`](Self::Drums).
+    AnalogKit,
+    /// Code 8: the machine's long kick played as a bass,
+    /// [`KickBassVoice`](manguebyte_dsp::instruments::KickBassVoice), one
+    /// voice, legato: a note struck while the last is held slides to it.
+    KickBass,
+    /// Code 9: the acid bass,
+    /// [`AcidVoice`](manguebyte_dsp::instruments::AcidVoice), one voice,
+    /// legato: a note struck while the last is held slides to it.
+    Acid,
 }
 
 impl InstrumentKind {
     /// Every kind, in the order of their codes.
-    pub const ALL: [Self; 4] = [Self::Synth, Self::Drums, Self::Sampler, Self::SamplerKit];
+    pub const ALL: [Self; 10] = [
+        Self::Synth,
+        Self::Drums,
+        Self::Sampler,
+        Self::SamplerKit,
+        Self::Plucked,
+        Self::Fm,
+        Self::Organ,
+        Self::AnalogKit,
+        Self::KickBass,
+        Self::Acid,
+    ];
 
     /// The code the WebAssembly exports use.
     pub const fn code(self) -> u32 {
@@ -77,12 +118,48 @@ impl InstrumentKind {
             Self::Drums => 1,
             Self::Sampler => 2,
             Self::SamplerKit => 3,
+            Self::Plucked => 4,
+            Self::Fm => 5,
+            Self::Organ => 6,
+            Self::AnalogKit => 7,
+            Self::KickBass => 8,
+            Self::Acid => 9,
         }
+    }
+
+    /// The name `js/engine.js` gives the kind (its `INSTRUMENT`):
+    /// `"synth"`, `"drums"`, `"sampler"`, `"sampler_kit"`, `"plucked"`,
+    /// `"fm"`, `"organ"`, `"analog_kit"`, `"kick_bass"` or `"acid"`.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Synth => "synth",
+            Self::Drums => "drums",
+            Self::Sampler => "sampler",
+            Self::SamplerKit => "sampler_kit",
+            Self::Plucked => "plucked",
+            Self::Fm => "fm",
+            Self::Organ => "organ",
+            Self::AnalogKit => "analog_kit",
+            Self::KickBass => "kick_bass",
+            Self::Acid => "acid",
+        }
+    }
+
+    /// The kind with this [name](Self::name), if there is one.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.name() == name)
     }
 
     /// Whether parts of this kind play SFZ instruments.
     pub const fn is_sampler(self) -> bool {
         matches!(self, Self::Sampler | Self::SamplerKit)
+    }
+
+    /// Whether parts of this kind play one note at a time, sliding from a
+    /// note to the next one struck while it is held: the kick bass and the
+    /// acid bass.
+    pub const fn is_mono(self) -> bool {
+        matches!(self, Self::KickBass | Self::Acid)
     }
 
     /// The kind with this code, if there is one.
@@ -92,6 +169,12 @@ impl InstrumentKind {
             1 => Some(Self::Drums),
             2 => Some(Self::Sampler),
             3 => Some(Self::SamplerKit),
+            4 => Some(Self::Plucked),
+            5 => Some(Self::Fm),
+            6 => Some(Self::Organ),
+            7 => Some(Self::AnalogKit),
+            8 => Some(Self::KickBass),
+            9 => Some(Self::Acid),
             _ => None,
         }
     }
@@ -425,6 +508,40 @@ enum Instrument {
     Synth(Box<SynthInstrument>),
     Drums(Box<DrumKit>),
     Sampled(Box<SampledInstrument>),
+    Voiced(Box<Voiced>),
+}
+
+impl Instrument {
+    /// The instrument `params` describe, at their values. Allocates.
+    fn new(params: &InstrumentParams, spec: &ProcessSpec) -> Self {
+        match params {
+            InstrumentParams::Synth(synth) => Self::Synth(Box::new(new_synth(
+                synth,
+                &ProcessSpec {
+                    num_channels: 1,
+                    ..*spec
+                },
+            ))),
+            InstrumentParams::Drums(kit) => {
+                Self::Drums(Box::new(DrumKit::new(kit, spec.sample_rate)))
+            }
+            InstrumentParams::Sampler(sampler) => {
+                Self::Sampled(Box::new(SampledInstrument::new(sampler, spec)))
+            }
+            InstrumentParams::Plucked(knobs) => {
+                Self::Voiced(Box::new(Voiced::plucked(knobs, spec)))
+            }
+            InstrumentParams::Fm(knobs) => Self::Voiced(Box::new(Voiced::fm(knobs, spec))),
+            InstrumentParams::Organ(knobs) => Self::Voiced(Box::new(Voiced::organ(knobs, spec))),
+            InstrumentParams::AnalogKit(knobs) => {
+                Self::Voiced(Box::new(Voiced::analog_kit(knobs, spec)))
+            }
+            InstrumentParams::KickBass(knobs) => {
+                Self::Voiced(Box::new(Voiced::kick_bass(knobs, spec)))
+            }
+            InstrumentParams::Acid(knobs) => Self::Voiced(Box::new(Voiced::acid(knobs, spec))),
+        }
+    }
 }
 
 struct Part {
@@ -437,21 +554,7 @@ struct Part {
 impl Part {
     fn new(id: u16, kind: InstrumentKind, stages: Chain, spec: &ProcessSpec) -> Self {
         let params = PartParams::new(kind, stages);
-        let instrument = match &params.instrument {
-            InstrumentParams::Synth(synth) => Instrument::Synth(Box::new(new_synth(
-                synth,
-                &ProcessSpec {
-                    num_channels: 1,
-                    ..*spec
-                },
-            ))),
-            InstrumentParams::Drums(kit) => {
-                Instrument::Drums(Box::new(DrumKit::new(kit, spec.sample_rate)))
-            }
-            InstrumentParams::Sampler(sampler) => {
-                Instrument::Sampled(Box::new(SampledInstrument::new(sampler, spec)))
-            }
-        };
+        let instrument = Instrument::new(&params.instrument, spec);
         let chain = ChainDsp::new(&params.chain, stages, spec);
         Self {
             id,
@@ -461,12 +564,21 @@ impl Part {
         }
     }
 
+    /// Makes the part play `kind`, its instrument's parameters at their
+    /// defaults, keeping its chain and every value the chain's parameters
+    /// hold. The notes of the instrument it had stop. Allocates.
+    fn set_instrument(&mut self, kind: InstrumentKind, spec: &ProcessSpec) {
+        self.params.instrument = InstrumentParams::new(kind);
+        self.instrument = Instrument::new(&self.params.instrument, spec);
+    }
+
     fn kind(&self) -> InstrumentKind {
         match self.instrument {
             Instrument::Synth(_) => InstrumentKind::Synth,
             Instrument::Drums(_) => InstrumentKind::Drums,
             Instrument::Sampled(ref sampled) if sampled.is_kit() => InstrumentKind::SamplerKit,
             Instrument::Sampled(_) => InstrumentKind::Sampler,
+            Instrument::Voiced(ref voiced) => voiced.kind(),
         }
     }
 
@@ -490,6 +602,12 @@ impl Part {
             }
             Instrument::Drums(kit) => kit.set_param(id, plain),
             Instrument::Sampled(sampled) => sampled.set_param(id, plain),
+            Instrument::Voiced(voiced) => {
+                // A preset moves the knobs it covers first, on this frame.
+                self.params.instrument.load_preset(id);
+                voiced.set_param(id, plain, &self.params.instrument);
+                true
+            }
         }
     }
 
@@ -552,6 +670,24 @@ impl Part {
             (Instrument::Sampled(sampled), Event::Cancel { .. }) => {
                 sampled.fade_out(CANCEL_FADE_SECONDS);
             }
+            (
+                Instrument::Voiced(voiced),
+                Event::NoteOn {
+                    channel,
+                    note,
+                    velocity,
+                    accent,
+                    ..
+                },
+            ) => voiced.note_on(channel, note, velocity, accent),
+            (Instrument::Voiced(voiced), Event::NoteOff { channel, note, .. }) => {
+                voiced.note_off(channel, note);
+            }
+            (Instrument::Voiced(voiced), Event::Choke { .. }) => voiced.choke(),
+            (Instrument::Voiced(voiced), Event::AllNotesOff { .. }) => voiced.all_notes_off(),
+            (Instrument::Voiced(voiced), Event::Cancel { .. }) => {
+                voiced.fade_out(CANCEL_FADE_SECONDS);
+            }
             (_, Event::Param { .. }) => {}
         }
         true
@@ -562,6 +698,7 @@ impl Part {
             Instrument::Synth(synth) => synth.active_voices(),
             Instrument::Drums(kit) => kit.active_voices(),
             Instrument::Sampled(sampled) => sampled.active_voices(),
+            Instrument::Voiced(voiced) => voiced.active_voices(),
         }
     }
 
@@ -585,6 +722,10 @@ impl Part {
             }
             Instrument::Sampled(sampled) => {
                 sampled.render(mono, stereo);
+                false
+            }
+            Instrument::Voiced(voiced) => {
+                voiced.render(mono, stereo);
                 false
             }
         };
@@ -611,6 +752,7 @@ impl Part {
             Instrument::Synth(synth) => choke_synth(synth),
             Instrument::Drums(kit) => kit.choke(),
             Instrument::Sampled(sampled) => sampled.choke(),
+            Instrument::Voiced(voiced) => voiced.recover(),
         }
         self.chain.recover(&self.params.chain);
     }
@@ -848,6 +990,39 @@ impl Engine {
         Ok(())
     }
 
+    /// Makes part `part` play `kind`, keeping its chain: which effects it
+    /// has, their memory and the values of their parameters, gain, pan and
+    /// the send. The new instrument's parameters start at their defaults;
+    /// the notes of the instrument it replaces stop. This is where the
+    /// instrument's memory is made: a plucked part's strings, the organ's
+    /// tonewheels and speaker, every voice of every kind. Allocates.
+    ///
+    /// ```
+    /// use manguebyte_web::{Engine, EngineConfig, EventRecord, InstrumentKind};
+    ///
+    /// let mut engine = Engine::new(EngineConfig::new(48_000.0)).unwrap();
+    /// engine.create_part(0, InstrumentKind::Synth).unwrap();
+    /// engine.set_instrument(0, InstrumentKind::Acid).unwrap();
+    /// assert_eq!(engine.part_kind(0), Some(InstrumentKind::Acid));
+    /// // Accented, and the next note slides from it: it starts while this one is held.
+    /// engine.push(EventRecord::note_on(0, 0, 36, 1.0).with_accent(true));
+    /// engine.push(EventRecord::note_on(6_000, 0, 48, 1.0));
+    /// engine.push(EventRecord::note_off(6_001, 0, 36));
+    /// engine.push(EventRecord::note_off(12_000, 0, 48));
+    /// engine.render(512);
+    /// assert!(engine.output().0.iter().any(|&sample| sample != 0.0));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::NoSuchPart`] if there is no such part.
+    pub fn set_instrument(&mut self, part: u16, kind: InstrumentKind) -> Result<(), EngineError> {
+        let index = self.index_of(part)?;
+        let spec = self.spec;
+        self.parts[index].set_instrument(kind, &spec);
+        Ok(())
+    }
+
     /// Gives a sampler part an SFZ instrument, made with
     /// [`SfzLoad`](crate::SfzLoad). New notes play it from the next frame
     /// rendered; the notes the part's previous instrument had started ring
@@ -924,6 +1099,17 @@ impl Engine {
     /// running on silence sound the same; this is for tests and meters.
     pub fn reverb_asleep(&self, part: u16) -> Option<bool> {
         self.part(part).map(|part| part.chain.reverb_asleep())
+    }
+
+    /// Whether an organ part's rotating speaker is asleep: cleared and
+    /// skipped because the organ has been silent for
+    /// [`SPEAKER_SLEEP_SECONDS`](crate::SPEAKER_SLEEP_SECONDS). `None` if
+    /// there is no such part or it is not an organ.
+    pub fn speaker_asleep(&self, part: u16) -> Option<bool> {
+        match &self.part(part)?.instrument {
+            Instrument::Voiced(voiced) => voiced.speaker_asleep(),
+            _ => None,
+        }
     }
 
     /// The value a parameter of a part holds, in its own units.
@@ -1486,5 +1672,81 @@ mod tests {
             Some(0.0),
             "the parameters are kept"
         );
+    }
+
+    /// A part made of `manguebyte-dsp`'s voices that goes wrong is silenced
+    /// and cleared, its two generations of voices, its synthesized drums
+    /// and its speaker too, and plays again as a new one would: something
+    /// that is not a number never stays in it.
+    #[test]
+    fn nothing_that_is_not_a_number_sticks_in_a_part_of_voices() {
+        let kinds = [
+            InstrumentKind::Plucked,
+            InstrumentKind::Fm,
+            InstrumentKind::Organ,
+            InstrumentKind::AnalogKit,
+            InstrumentKind::KickBass,
+            InstrumentKind::Acid,
+        ];
+        for kind in kinds {
+            for poison_speaker in [false, true] {
+                if poison_speaker && kind != InstrumentKind::Organ {
+                    continue;
+                }
+                let play = |engine: &mut Engine| {
+                    let at = engine.frame() + 1_000;
+                    // Notes, one cancelled into the fading generation.
+                    engine.push(EventRecord::note_on(at, 0, 45, 0.9).with_accent(true));
+                    engine.push(EventRecord::note_on(at, 0, 52, 0.9));
+                    engine.push(EventRecord::cancel(at + 2_000, 0));
+                    engine.push(EventRecord::note_on(at + 2_000, 0, 57, 0.9));
+                    engine.push(EventRecord::note_off(at + 9_000, 0, 57));
+                };
+                let mut engine = Engine::new(EngineConfig::new(48_000.0)).unwrap();
+                engine.create_part(0, kind).unwrap();
+                play(&mut engine);
+                for _ in 0..30 {
+                    engine.render(128);
+                }
+                assert!(engine.active_voices(0).unwrap() > 0, "{kind:?}");
+                // Something goes wrong while the fading generation still
+                // fades.
+                let Instrument::Voiced(voiced) = &mut engine.parts[0].instrument else {
+                    unreachable!("{kind:?} is made of voices");
+                };
+                if poison_speaker {
+                    assert!(voiced.poison_speaker());
+                } else {
+                    engine.parts[0].chain.poison();
+                }
+                engine.render(128);
+                assert_eq!(engine.stats().recovered, 1, "{kind:?}");
+                assert_eq!(engine.active_voices(0), Some(0), "{kind:?}");
+                assert!(engine.speaker_asleep(0).unwrap_or(true), "{kind:?}");
+
+                // The same notes again sound as on a new part, bit for bit.
+                for _ in 0..400 {
+                    engine.render(128);
+                }
+                let mut fresh = Engine::new(EngineConfig::new(48_000.0)).unwrap();
+                fresh.create_part(0, kind).unwrap();
+                // Both at the same frame from here, and silent.
+                while fresh.frame() < engine.frame() {
+                    fresh.render(128);
+                }
+                assert_eq!(fresh.frame(), engine.frame());
+                play(&mut engine);
+                play(&mut fresh);
+                let mut sounded = false;
+                for _ in 0..200 {
+                    engine.render(128);
+                    fresh.render(128);
+                    assert_eq!(left_bits(&engine), left_bits(&fresh), "{kind:?}");
+                    sounded |= engine.output().0.iter().any(|&sample| sample != 0.0);
+                }
+                assert!(sounded, "{kind:?} sounds again");
+                assert_eq!(engine.stats().recovered, 1, "{kind:?}");
+            }
+        }
     }
 }

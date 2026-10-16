@@ -47,6 +47,15 @@ fn loud(kind: InstrumentKind) -> Vec<EventRecord> {
         // The sampled open hat, and the crash and the floor tom from the
         // synthesized kit.
         InstrumentKind::SamplerKit => &[46, 49, 43],
+        InstrumentKind::Plucked => &[40, 52, 59],
+        InstrumentKind::Fm => &[48, 55, 60, 64],
+        InstrumentKind::Organ => &[48, 55, 60, 64, 67],
+        // The machine's cymbal, open hat and low tom, and the synthesized
+        // ride.
+        InstrumentKind::AnalogKit => &[49, 46, 43, 51],
+        // The second slides from the first: one voice.
+        InstrumentKind::KickBass => &[33, 45],
+        InstrumentKind::Acid => &[36, 48],
     };
     notes
         .iter()
@@ -117,10 +126,23 @@ fn a_cancel_fades_every_kind_of_part_out_without_a_step() {
         println!("{kind:?}: step {before:.4} before, {fading:.4} in the fade, peak {loudest:.3}");
         assert!(loudest > 0.1, "{kind:?}");
         assert!(fading <= before, "{kind:?}: {fading} against {before}");
-        assert!(
-            left[at + CANCEL_FADE..].iter().all(|&sample| sample == 0.0),
-            "{kind:?}: still sounding after the fade"
-        );
+        if kind == InstrumentKind::Organ {
+            // The rotating speaker the organ is heard through is a
+            // millisecond late, as the air between a loudspeaker and a
+            // microphone, and its crossover rings on for a few more, then
+            // below -120 dB until it falls asleep.
+            let air = (0.005 * RATE) as usize;
+            let tail = peak(&left[at + CANCEL_FADE + air..]);
+            assert!(
+                tail < 1e-6,
+                "{kind:?}: still sounding after the fade: {tail}"
+            );
+        } else {
+            assert!(
+                left[at + CANCEL_FADE..].iter().all(|&sample| sample == 0.0),
+                "{kind:?}: still sounding after the fade"
+            );
+        }
         assert_eq!(engine.active_voices(0), Some(0), "{kind:?}");
     }
 }

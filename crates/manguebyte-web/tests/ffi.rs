@@ -181,6 +181,29 @@ fn control_calls_report_their_status() {
         let map = ffi::mb_drum_map_json(engine);
         assert_eq!(text(engine, map), drum_map_json());
 
+        // Another instrument on the same part, through the same chain.
+        let organ = InstrumentKind::Organ.code();
+        assert_eq!(ffi::mb_set_instrument(engine, 0, organ), status::OK);
+        assert_eq!(ffi::mb_part_chain(engine, 0), 3, "the chain is kept");
+        assert_eq!(
+            ffi::mb_set_instrument(engine, 0, unknown),
+            status::BAD_INSTRUMENT
+        );
+        assert_eq!(
+            ffi::mb_set_instrument(engine, 9, organ),
+            status::NO_SUCH_PART
+        );
+        assert_eq!(
+            ffi::mb_set_instrument(engine, 70_000, organ),
+            status::BAD_PART
+        );
+        assert_eq!(
+            ffi::mb_set_instrument(core::ptr::null_mut(), 0, organ),
+            status::NO_ENGINE
+        );
+        let json = ffi::mb_params_json(engine, 0);
+        assert!(text(engine, json).starts_with(r#"[{"id":"organ.preset""#));
+
         for index in 0..11 {
             assert_eq!(ffi::mb_stat(engine, index), 0.0);
         }

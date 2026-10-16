@@ -280,11 +280,127 @@ pub mod ids {
     /// 1 sinc.
     pub const SAMPLER_INTERPOLATION: &str = "sampler.interpolation";
 
+    /// Plucked string preset: 0 nylon guitar, 1 steel guitar, 2 finger
+    /// bass, 3 slap bass. Setting it moves the other `plucked.*` knobs to
+    /// the preset's positions.
+    pub const PLUCKED_PRESET: &str = "plucked.preset";
+    /// How long the fundamental of middle C rings while held, to -60 dB,
+    /// seconds; lower notes ring longer, higher ones shorter.
+    pub const PLUCKED_DECAY: &str = "plucked.decay";
+    /// The brightness of a pluck at full velocity: the cut-off of the
+    /// low-pass that shapes it, hertz.
+    pub const PLUCKED_BRIGHTNESS: &str = "plucked.brightness";
+    /// Where the string is plucked, as a fraction of its length from the
+    /// bridge, 0.02 to 0.5.
+    pub const PLUCKED_POSITION: &str = "plucked.position";
+    /// The cut-off of the final low-pass (the pickup or the body), hertz.
+    pub const PLUCKED_TONE: &str = "plucked.tone";
+    /// How long a released string takes to fall 60 dB, seconds.
+    pub const PLUCKED_RELEASE: &str = "plucked.release";
+
+    /// FM preset: 0 electric piano, 1 tubular bell, 2 FM bass. Setting it
+    /// puts the other `fm.*` knobs back to 1.
+    pub const FM_PRESET: &str = "fm.preset";
+    /// A factor on every modulator's index: above 1 brighter, below
+    /// darker, 0 the carriers alone.
+    pub const FM_BRIGHTNESS: &str = "fm.brightness";
+    /// A factor on every operator's decay time.
+    pub const FM_DECAY: &str = "fm.decay";
+    /// A factor on every operator's release time.
+    pub const FM_RELEASE: &str = "fm.release";
+
+    /// Organ preset: 0 jazz, 1 gospel, 2 full, 3 ballad. Setting it moves
+    /// the drawbars, the percussion, the click and the leakage to the
+    /// preset's positions.
+    pub const ORGAN_PRESET: &str = "organ.preset";
+    /// The 16' drawbar, 0 (in) to 8 (all the way out), 3 dB a step.
+    pub const ORGAN_DRAWBAR_16: &str = "organ.drawbar_16";
+    /// The 5 1/3' drawbar.
+    pub const ORGAN_DRAWBAR_5_1_3: &str = "organ.drawbar_5_1_3";
+    /// The 8' drawbar, the pitch of the key.
+    pub const ORGAN_DRAWBAR_8: &str = "organ.drawbar_8";
+    /// The 4' drawbar.
+    pub const ORGAN_DRAWBAR_4: &str = "organ.drawbar_4";
+    /// The 2 2/3' drawbar.
+    pub const ORGAN_DRAWBAR_2_2_3: &str = "organ.drawbar_2_2_3";
+    /// The 2' drawbar.
+    pub const ORGAN_DRAWBAR_2: &str = "organ.drawbar_2";
+    /// The 1 3/5' drawbar.
+    pub const ORGAN_DRAWBAR_1_3_5: &str = "organ.drawbar_1_3_5";
+    /// The 1 1/3' drawbar.
+    pub const ORGAN_DRAWBAR_1_1_3: &str = "organ.drawbar_1_1_3";
+    /// The 1' drawbar, silent while the percussion is on.
+    pub const ORGAN_DRAWBAR_1: &str = "organ.drawbar_1";
+    /// The percussion: 0 off, 1 second harmonic fast, 2 second slow, 3
+    /// third fast, 4 third slow.
+    pub const ORGAN_PERCUSSION: &str = "organ.percussion";
+    /// How much the keys click, 0 to 1.
+    pub const ORGAN_CLICK: &str = "organ.click";
+    /// How much of the neighbouring tonewheels leaks in, 0 to 1.
+    pub const ORGAN_LEAKAGE: &str = "organ.leakage";
+    /// How much the level follows the velocity, 0 (none, as on the
+    /// instrument) to 1 (the lowest velocity 24 dB down).
+    pub const ORGAN_VELOCITY: &str = "organ.velocity";
+    /// The rotating speaker's speed: 0 stop, 1 slow (chorale), 2 fast
+    /// (tremolo). The rotors speed up and slow down at their own pace.
+    pub const ORGAN_ROTARY: &str = "organ.rotary";
+    /// How much of the organ is heard through the rotating speaker, 0 to 1.
+    pub const ORGAN_SPEAKER: &str = "organ.speaker";
+
+    /// The analogue kit's tone, 0 to 1, whose meaning each drum gives:
+    /// the click of the kick, the snare's upper head, the hats' band...
+    pub const ANALOG_TONE: &str = "analog.tone";
+    /// The analogue kit's snap, 0 to 1: the kick's pitch drop and click,
+    /// the snare's wires, the toms' noise...
+    pub const ANALOG_SNAP: &str = "analog.snap";
+    /// A factor on the analogue kick's decay, on top of `kit.decay`: the
+    /// long kick of the machine.
+    pub const ANALOG_KICK_DECAY: &str = "analog.kick_decay";
+
+    /// Kick bass tuning, semitones.
+    pub const KICK_BASS_TUNE: &str = "kick_bass.tune";
+    /// How long a held note takes to fall 60 dB, seconds.
+    pub const KICK_BASS_DECAY: &str = "kick_bass.decay";
+    /// How far above the note the pitch starts, semitones.
+    pub const KICK_BASS_SWEEP: &str = "kick_bass.sweep";
+    /// How hard the saturator is driven, 0 to 1.
+    pub const KICK_BASS_DRIVE: &str = "kick_bass.drive";
+    /// How long a slide takes, seconds (95% of the way).
+    pub const KICK_BASS_GLIDE: &str = "kick_bass.glide";
+    /// The click at the start of a note, 0 to 1.
+    pub const KICK_BASS_CLICK: &str = "kick_bass.click";
+
+    /// Acid preset: 0 classic, 1 squelch, 2 square. Setting it moves the
+    /// other `acid.*` knobs, but `acid.velocity`, to the preset's
+    /// positions.
+    pub const ACID_PRESET: &str = "acid.preset";
+    /// The oscillator: 0 saw, 1 square.
+    pub const ACID_WAVE: &str = "acid.wave";
+    /// Where the resonance sits with the envelope closed, hertz.
+    pub const ACID_CUTOFF: &str = "acid.cutoff";
+    /// The filter's resonance, 0 to 1.
+    pub const ACID_RESONANCE: &str = "acid.resonance";
+    /// How far the envelope opens the filter, 0 to 1 (4.5 octaves).
+    pub const ACID_ENV_MOD: &str = "acid.env_mod";
+    /// How long the filter envelope takes to fall 60 dB, seconds.
+    pub const ACID_DECAY: &str = "acid.decay";
+    /// How strong an accent is, 0 to 1.
+    pub const ACID_ACCENT: &str = "acid.accent";
+    /// How long a slide takes, seconds (95% of the way).
+    pub const ACID_SLIDE: &str = "acid.slide";
+    /// The gain into the filter's saturator, decibels.
+    pub const ACID_DRIVE: &str = "acid.drive";
+    /// How much the level and the filter follow the velocity, 0 (none, as
+    /// on the instrument) to 1.
+    pub const ACID_VELOCITY: &str = "acid.velocity";
+
     /// Every identifier a part can have: the chain's, the synth's, the
     /// kit's, the sampler's, then the switches of the low-pass and the
-    /// reverb, the send, and the other effects' in the order of their
-    /// codes ([`Effect`](crate::Effect)).
-    pub const ALL: [&str; 100] = [
+    /// reverb, the send, the other effects' in the order of their codes
+    /// ([`Effect`](crate::Effect)), then the instruments' added after them:
+    /// the plucked string's, the FM's, the organ's, the analogue kit's, the
+    /// kick bass's and the acid bass's.
+    pub const ALL: [&str; 145] = [
         LOWPASS_CUTOFF,
         LOWPASS_RESONANCE,
         REVERB_MIX,
@@ -385,6 +501,65 @@ pub mod ids {
         DELAY_DAMPING,
         DELAY_PINGPONG,
         DELAY_SYNC,
+        PLUCKED_PRESET,
+        PLUCKED_DECAY,
+        PLUCKED_BRIGHTNESS,
+        PLUCKED_POSITION,
+        PLUCKED_TONE,
+        PLUCKED_RELEASE,
+        FM_PRESET,
+        FM_BRIGHTNESS,
+        FM_DECAY,
+        FM_RELEASE,
+        ORGAN_PRESET,
+        ORGAN_DRAWBAR_16,
+        ORGAN_DRAWBAR_5_1_3,
+        ORGAN_DRAWBAR_8,
+        ORGAN_DRAWBAR_4,
+        ORGAN_DRAWBAR_2_2_3,
+        ORGAN_DRAWBAR_2,
+        ORGAN_DRAWBAR_1_3_5,
+        ORGAN_DRAWBAR_1_1_3,
+        ORGAN_DRAWBAR_1,
+        ORGAN_PERCUSSION,
+        ORGAN_CLICK,
+        ORGAN_LEAKAGE,
+        ORGAN_VELOCITY,
+        ORGAN_ROTARY,
+        ORGAN_SPEAKER,
+        ANALOG_TONE,
+        ANALOG_SNAP,
+        ANALOG_KICK_DECAY,
+        KICK_BASS_TUNE,
+        KICK_BASS_DECAY,
+        KICK_BASS_SWEEP,
+        KICK_BASS_DRIVE,
+        KICK_BASS_GLIDE,
+        KICK_BASS_CLICK,
+        ACID_PRESET,
+        ACID_WAVE,
+        ACID_CUTOFF,
+        ACID_RESONANCE,
+        ACID_ENV_MOD,
+        ACID_DECAY,
+        ACID_ACCENT,
+        ACID_SLIDE,
+        ACID_DRIVE,
+        ACID_VELOCITY,
+    ];
+
+    /// The drawbars' identifiers, from the lowest footage to the highest
+    /// (`manguebyte_dsp::instruments::DRAWBAR_FOOTAGES`).
+    pub const ORGAN_DRAWBARS: [&str; 9] = [
+        ORGAN_DRAWBAR_16,
+        ORGAN_DRAWBAR_5_1_3,
+        ORGAN_DRAWBAR_8,
+        ORGAN_DRAWBAR_4,
+        ORGAN_DRAWBAR_2_2_3,
+        ORGAN_DRAWBAR_2,
+        ORGAN_DRAWBAR_1_3_5,
+        ORGAN_DRAWBAR_1_1_3,
+        ORGAN_DRAWBAR_1,
     ];
 
     /// Every identifier of the master bus, in the order
@@ -523,6 +698,12 @@ param_ids!(
     KIT_TUNE,
     KIT_DECAY,
     SAMPLER_INTERPOLATION,
+    PLUCKED_PRESET,
+    FM_PRESET,
+    ORGAN_PRESET,
+    ORGAN_ROTARY,
+    ORGAN_SPEAKER,
+    ACID_PRESET,
 );
 
 /// The level parameters of the drums, in [`Drum`](crate::Drum) order.
@@ -733,6 +914,402 @@ impl KitParams {
         for level in &self.levels {
             visitor(level);
         }
+    }
+}
+
+/// Names of the plucked string's presets, in the order of their values.
+pub(crate) const PLUCKED_PRESET_NAMES: [&str; 4] =
+    ["Nylon guitar", "Steel guitar", "Finger bass", "Slap bass"];
+/// Names of the FM presets, in the order of their values.
+pub(crate) const FM_PRESET_NAMES: [&str; 3] = ["Electric piano", "Tubular bell", "FM bass"];
+/// Names of the organ presets, in the order of their values.
+pub(crate) const ORGAN_PRESET_NAMES: [&str; 4] = ["Jazz", "Gospel", "Full", "Ballad"];
+/// Names of the organ's percussion settings, in the order of their values.
+pub(crate) const PERCUSSION_NAMES: [&str; 5] = [
+    "Off",
+    "Second, fast",
+    "Second, slow",
+    "Third, fast",
+    "Third, slow",
+];
+/// Names of the rotating speaker's speeds, in the order of their values.
+pub(crate) const ROTARY_NAMES: [&str; 3] = ["Stop", "Slow", "Fast"];
+/// Names of the acid presets, in the order of their values.
+pub(crate) const ACID_PRESET_NAMES: [&str; 3] = ["Classic", "Squelch", "Square"];
+/// Names of the acid oscillator's waves, in the order of their values.
+pub(crate) const ACID_WAVE_NAMES: [&str; 2] = ["Saw", "Square"];
+
+/// A factor from a quarter to four times, 1 in the middle of the knob.
+fn factor(id: &str, name: &str) -> FloatParam {
+    FloatParam::new(id, name, FloatRange::logarithmic(0.25, 4.0), 1.0)
+        .with_unit("x")
+        .with_precision(2)
+}
+
+/// The plucked string's knobs: the preset, and what it sets.
+pub(crate) struct PluckedKnobs {
+    pub(crate) preset: ChoiceParam,
+    pub(crate) decay: FloatParam,
+    pub(crate) brightness: FloatParam,
+    pub(crate) position: FloatParam,
+    pub(crate) tone: FloatParam,
+    pub(crate) release: FloatParam,
+}
+
+impl PluckedKnobs {
+    pub(crate) fn new() -> Self {
+        let preset = crate::voiced::string_preset(0);
+        Self {
+            preset: ChoiceParam::new(ids::PLUCKED_PRESET, "Preset", &PLUCKED_PRESET_NAMES, 0),
+            decay: seconds(ids::PLUCKED_DECAY, "Decay", 0.1, 20.0, preset.decay as f32),
+            brightness: FloatParam::new(
+                ids::PLUCKED_BRIGHTNESS,
+                "Brightness",
+                FloatRange::logarithmic(100.0, 20_000.0),
+                preset.pluck_brightness as f32,
+            )
+            .with_unit("Hz")
+            .with_precision(0),
+            position: FloatParam::new(
+                ids::PLUCKED_POSITION,
+                "Pluck position",
+                FloatRange::linear(0.02, 0.5),
+                preset.pluck_position as f32,
+            )
+            .with_precision(3),
+            tone: FloatParam::new(
+                ids::PLUCKED_TONE,
+                "Tone",
+                FloatRange::logarithmic(200.0, 20_000.0),
+                preset.tone as f32,
+            )
+            .with_unit("Hz")
+            .with_precision(0),
+            release: seconds(
+                ids::PLUCKED_RELEASE,
+                "Release",
+                0.01,
+                2.0,
+                preset.release as f32,
+            ),
+        }
+    }
+
+    /// Moves every knob to the position of the preset now chosen.
+    pub(crate) fn load_preset(&self) {
+        let preset = crate::voiced::string_preset(self.preset.index());
+        self.decay.set_plain(preset.decay);
+        self.brightness.set_plain(preset.pluck_brightness);
+        self.position.set_plain(preset.pluck_position);
+        self.tone.set_plain(preset.tone);
+        self.release.set_plain(preset.release);
+    }
+
+    pub(crate) fn visit<'a>(&'a self, visitor: &mut dyn FnMut(&'a dyn Param)) {
+        visitor(&self.preset);
+        visitor(&self.decay);
+        visitor(&self.brightness);
+        visitor(&self.position);
+        visitor(&self.tone);
+        visitor(&self.release);
+    }
+}
+
+/// The FM voice's knobs: the preset, and factors on what it sets.
+pub(crate) struct FmKnobs {
+    pub(crate) preset: ChoiceParam,
+    pub(crate) brightness: FloatParam,
+    pub(crate) decay: FloatParam,
+    pub(crate) release: FloatParam,
+}
+
+impl FmKnobs {
+    pub(crate) fn new() -> Self {
+        Self {
+            preset: ChoiceParam::new(ids::FM_PRESET, "Preset", &FM_PRESET_NAMES, 0),
+            brightness: FloatParam::new(
+                ids::FM_BRIGHTNESS,
+                "Brightness",
+                FloatRange::linear(0.0, 2.0),
+                1.0,
+            )
+            .with_unit("x")
+            .with_precision(2),
+            decay: factor(ids::FM_DECAY, "Decay"),
+            release: factor(ids::FM_RELEASE, "Release"),
+        }
+    }
+
+    /// Puts the factors back to 1, the preset as it is.
+    pub(crate) fn load_preset(&self) {
+        self.brightness.set_plain(1.0);
+        self.decay.set_plain(1.0);
+        self.release.set_plain(1.0);
+    }
+
+    pub(crate) fn visit<'a>(&'a self, visitor: &mut dyn FnMut(&'a dyn Param)) {
+        visitor(&self.preset);
+        visitor(&self.brightness);
+        visitor(&self.decay);
+        visitor(&self.release);
+    }
+}
+
+/// The organ's knobs: the preset and the registration it sets, then the
+/// velocity and the rotating speaker, which presets leave alone.
+pub(crate) struct OrganKnobs {
+    pub(crate) preset: ChoiceParam,
+    pub(crate) drawbars: [FloatParam; 9],
+    pub(crate) percussion: ChoiceParam,
+    pub(crate) click: FloatParam,
+    pub(crate) leakage: FloatParam,
+    pub(crate) velocity: FloatParam,
+    pub(crate) rotary: ChoiceParam,
+    pub(crate) speaker: FloatParam,
+}
+
+/// How much an organ or an acid part follows the velocity unless told
+/// otherwise: halfway, so that Aratu's dynamics are heard on instruments
+/// that have none of their own.
+pub(crate) const DEFAULT_VELOCITY_SENSITIVITY: f32 = 0.5;
+
+impl OrganKnobs {
+    pub(crate) fn new() -> Self {
+        let preset = crate::voiced::organ_preset(0);
+        let names = [
+            "16'", "5 1/3'", "8'", "4'", "2 2/3'", "2'", "1 3/5'", "1 1/3'", "1'",
+        ];
+        let mut index = 0;
+        let drawbars = ids::ORGAN_DRAWBARS.map(|id| {
+            let drawbar = FloatParam::new(
+                id,
+                names[index],
+                FloatRange::linear(0.0, 8.0),
+                preset.drawbars[index] as f32,
+            )
+            .with_precision(1);
+            index += 1;
+            drawbar
+        });
+        Self {
+            preset: ChoiceParam::new(ids::ORGAN_PRESET, "Preset", &ORGAN_PRESET_NAMES, 0),
+            drawbars,
+            percussion: ChoiceParam::new(
+                ids::ORGAN_PERCUSSION,
+                "Percussion",
+                &PERCUSSION_NAMES,
+                crate::voiced::percussion_index(preset.percussion),
+            ),
+            click: unit(ids::ORGAN_CLICK, "Click", preset.click as f32).with_precision(2),
+            leakage: unit(ids::ORGAN_LEAKAGE, "Leakage", preset.leakage as f32).with_precision(2),
+            velocity: unit(
+                ids::ORGAN_VELOCITY,
+                "Velocity",
+                DEFAULT_VELOCITY_SENSITIVITY,
+            )
+            .with_precision(2),
+            rotary: ChoiceParam::new(ids::ORGAN_ROTARY, "Rotary speed", &ROTARY_NAMES, 1),
+            speaker: amount(ids::ORGAN_SPEAKER, "Rotary speaker", 1.0),
+        }
+    }
+
+    /// Moves the registration to the preset now chosen.
+    pub(crate) fn load_preset(&self) {
+        let preset = crate::voiced::organ_preset(self.preset.index());
+        for (drawbar, &position) in self.drawbars.iter().zip(&preset.drawbars) {
+            drawbar.set_plain(position);
+        }
+        self.percussion
+            .set_plain(crate::voiced::percussion_index(preset.percussion) as f64);
+        self.click.set_plain(preset.click);
+        self.leakage.set_plain(preset.leakage);
+    }
+
+    pub(crate) fn visit<'a>(&'a self, visitor: &mut dyn FnMut(&'a dyn Param)) {
+        visitor(&self.preset);
+        for drawbar in &self.drawbars {
+            visitor(drawbar);
+        }
+        visitor(&self.percussion);
+        visitor(&self.click);
+        visitor(&self.leakage);
+        visitor(&self.velocity);
+        visitor(&self.rotary);
+        visitor(&self.speaker);
+    }
+}
+
+/// The analogue kit's knobs: the kit's own (tune, decay, a level per drum
+/// of the drum map), then those of the machine.
+pub(crate) struct AnalogKitKnobs {
+    pub(crate) kit: KitParams,
+    pub(crate) tone: FloatParam,
+    pub(crate) snap: FloatParam,
+    pub(crate) kick_decay: FloatParam,
+}
+
+impl AnalogKitKnobs {
+    pub(crate) fn new() -> Self {
+        Self {
+            kit: KitParams::new(),
+            tone: unit(ids::ANALOG_TONE, "Tone", 0.5).with_precision(2),
+            snap: unit(ids::ANALOG_SNAP, "Snap", 0.5).with_precision(2),
+            kick_decay: FloatParam::new(
+                ids::ANALOG_KICK_DECAY,
+                "Kick decay",
+                FloatRange::logarithmic(0.25, 8.0),
+                1.0,
+            )
+            .with_unit("x")
+            .with_precision(2),
+        }
+    }
+
+    pub(crate) fn visit<'a>(&'a self, visitor: &mut dyn FnMut(&'a dyn Param)) {
+        self.kit.visit(visitor);
+        visitor(&self.tone);
+        visitor(&self.snap);
+        visitor(&self.kick_decay);
+    }
+}
+
+/// The kick bass's knobs, at the machine's classic setting by default.
+pub(crate) struct KickBassKnobs {
+    pub(crate) tune: FloatParam,
+    pub(crate) decay: FloatParam,
+    pub(crate) sweep: FloatParam,
+    pub(crate) drive: FloatParam,
+    pub(crate) glide: FloatParam,
+    pub(crate) click: FloatParam,
+}
+
+impl KickBassKnobs {
+    pub(crate) fn new() -> Self {
+        let classic = crate::voiced::kick_bass_classic();
+        Self {
+            tune: FloatParam::new(
+                ids::KICK_BASS_TUNE,
+                "Tune",
+                FloatRange::linear(-12.0, 12.0),
+                classic.tune as f32,
+            )
+            .with_unit("st")
+            .with_precision(1),
+            decay: seconds(
+                ids::KICK_BASS_DECAY,
+                "Decay",
+                0.05,
+                20.0,
+                classic.decay as f32,
+            ),
+            sweep: FloatParam::new(
+                ids::KICK_BASS_SWEEP,
+                "Sweep",
+                FloatRange::linear(0.0, 48.0),
+                classic.sweep as f32,
+            )
+            .with_unit("st")
+            .with_precision(1),
+            drive: unit(ids::KICK_BASS_DRIVE, "Drive", classic.drive as f32).with_precision(2),
+            glide: seconds(
+                ids::KICK_BASS_GLIDE,
+                "Glide",
+                0.0,
+                2.0,
+                classic.glide as f32,
+            ),
+            click: unit(ids::KICK_BASS_CLICK, "Click", classic.click as f32).with_precision(2),
+        }
+    }
+
+    pub(crate) fn visit<'a>(&'a self, visitor: &mut dyn FnMut(&'a dyn Param)) {
+        visitor(&self.tune);
+        visitor(&self.decay);
+        visitor(&self.sweep);
+        visitor(&self.drive);
+        visitor(&self.glide);
+        visitor(&self.click);
+    }
+}
+
+/// The acid bass's knobs: the preset and the knobs of the machine it sets,
+/// then the velocity, which presets leave alone.
+pub(crate) struct AcidKnobs {
+    pub(crate) preset: ChoiceParam,
+    pub(crate) wave: ChoiceParam,
+    pub(crate) cutoff: FloatParam,
+    pub(crate) resonance: FloatParam,
+    pub(crate) env_mod: FloatParam,
+    pub(crate) decay: FloatParam,
+    pub(crate) accent: FloatParam,
+    pub(crate) slide: FloatParam,
+    pub(crate) drive: FloatParam,
+    pub(crate) velocity: FloatParam,
+}
+
+impl AcidKnobs {
+    pub(crate) fn new() -> Self {
+        let preset = crate::voiced::acid_preset(0);
+        Self {
+            preset: ChoiceParam::new(ids::ACID_PRESET, "Preset", &ACID_PRESET_NAMES, 0),
+            wave: ChoiceParam::new(
+                ids::ACID_WAVE,
+                "Wave",
+                &ACID_WAVE_NAMES,
+                crate::voiced::acid_wave_index(preset.wave),
+            ),
+            cutoff: FloatParam::new(
+                ids::ACID_CUTOFF,
+                "Cutoff",
+                FloatRange::logarithmic(30.0, 8_000.0),
+                preset.cutoff as f32,
+            )
+            .with_unit("Hz")
+            .with_precision(0),
+            resonance: unit(ids::ACID_RESONANCE, "Resonance", preset.resonance as f32)
+                .with_precision(2),
+            env_mod: unit(ids::ACID_ENV_MOD, "Env mod", preset.env_mod as f32).with_precision(2),
+            decay: seconds(ids::ACID_DECAY, "Decay", 0.05, 4.0, preset.decay as f32),
+            accent: unit(ids::ACID_ACCENT, "Accent", preset.accent as f32).with_precision(2),
+            slide: seconds(ids::ACID_SLIDE, "Slide", 0.005, 1.0, preset.slide as f32),
+            drive: FloatParam::new(
+                ids::ACID_DRIVE,
+                "Drive",
+                FloatRange::linear(-12.0, 24.0),
+                preset.drive_db as f32,
+            )
+            .with_unit("dB")
+            .with_precision(1),
+            velocity: unit(ids::ACID_VELOCITY, "Velocity", DEFAULT_VELOCITY_SENSITIVITY)
+                .with_precision(2),
+        }
+    }
+
+    /// Moves every knob but the velocity to the preset now chosen.
+    pub(crate) fn load_preset(&self) {
+        let preset = crate::voiced::acid_preset(self.preset.index());
+        self.wave
+            .set_plain(crate::voiced::acid_wave_index(preset.wave) as f64);
+        self.cutoff.set_plain(preset.cutoff);
+        self.resonance.set_plain(preset.resonance);
+        self.env_mod.set_plain(preset.env_mod);
+        self.decay.set_plain(preset.decay);
+        self.accent.set_plain(preset.accent);
+        self.slide.set_plain(preset.slide);
+        self.drive.set_plain(preset.drive_db);
+    }
+
+    pub(crate) fn visit<'a>(&'a self, visitor: &mut dyn FnMut(&'a dyn Param)) {
+        visitor(&self.preset);
+        visitor(&self.wave);
+        visitor(&self.cutoff);
+        visitor(&self.resonance);
+        visitor(&self.env_mod);
+        visitor(&self.decay);
+        visitor(&self.accent);
+        visitor(&self.slide);
+        visitor(&self.drive);
+        visitor(&self.velocity);
     }
 }
 
@@ -1321,6 +1898,56 @@ pub(crate) enum InstrumentParams {
     Synth(Box<SynthParams>),
     Drums(Box<KitParams>),
     Sampler(Box<SamplerParams>),
+    Plucked(Box<PluckedKnobs>),
+    Fm(Box<FmKnobs>),
+    Organ(Box<OrganKnobs>),
+    AnalogKit(Box<AnalogKitKnobs>),
+    KickBass(Box<KickBassKnobs>),
+    Acid(Box<AcidKnobs>),
+}
+
+impl InstrumentParams {
+    /// The parameters of an instrument of `kind`, at their defaults.
+    pub(crate) fn new(kind: InstrumentKind) -> Self {
+        match kind {
+            InstrumentKind::Synth => Self::Synth(Box::new(SynthParams::new())),
+            InstrumentKind::Drums => Self::Drums(Box::new(KitParams::new())),
+            InstrumentKind::Sampler => Self::Sampler(Box::new(SamplerParams::new(false))),
+            InstrumentKind::SamplerKit => Self::Sampler(Box::new(SamplerParams::new(true))),
+            InstrumentKind::Plucked => Self::Plucked(Box::new(PluckedKnobs::new())),
+            InstrumentKind::Fm => Self::Fm(Box::new(FmKnobs::new())),
+            InstrumentKind::Organ => Self::Organ(Box::new(OrganKnobs::new())),
+            InstrumentKind::AnalogKit => Self::AnalogKit(Box::new(AnalogKitKnobs::new())),
+            InstrumentKind::KickBass => Self::KickBass(Box::new(KickBassKnobs::new())),
+            InstrumentKind::Acid => Self::Acid(Box::new(AcidKnobs::new())),
+        }
+    }
+
+    pub(crate) fn visit<'a>(&'a self, visitor: &mut dyn FnMut(&'a dyn Param)) {
+        match self {
+            Self::Synth(synth) => synth.visit(visitor),
+            Self::Drums(kit) => kit.visit(visitor),
+            Self::Sampler(sampler) => sampler.visit(visitor),
+            Self::Plucked(knobs) => knobs.visit(visitor),
+            Self::Fm(knobs) => knobs.visit(visitor),
+            Self::Organ(knobs) => knobs.visit(visitor),
+            Self::AnalogKit(knobs) => knobs.visit(visitor),
+            Self::KickBass(knobs) => knobs.visit(visitor),
+            Self::Acid(knobs) => knobs.visit(visitor),
+        }
+    }
+
+    /// Moves the knobs a preset covers to its positions, if `id` is the
+    /// instrument's preset. Real-time safe: the parameters are atomics.
+    pub(crate) fn load_preset(&self, id: ParamId) {
+        match self {
+            Self::Plucked(knobs) if id == PLUCKED_PRESET => knobs.load_preset(),
+            Self::Fm(knobs) if id == FM_PRESET => knobs.load_preset(),
+            Self::Organ(knobs) if id == ORGAN_PRESET => knobs.load_preset(),
+            Self::Acid(knobs) if id == ACID_PRESET => knobs.load_preset(),
+            _ => {}
+        }
+    }
 }
 
 /// Every parameter of one part: its instrument's, then those of the chain
@@ -1334,16 +1961,7 @@ pub(crate) struct PartParams {
 impl PartParams {
     pub(crate) fn new(kind: InstrumentKind, stages: Chain) -> Self {
         Self {
-            instrument: match kind {
-                InstrumentKind::Synth => InstrumentParams::Synth(Box::new(SynthParams::new())),
-                InstrumentKind::Drums => InstrumentParams::Drums(Box::new(KitParams::new())),
-                InstrumentKind::Sampler => {
-                    InstrumentParams::Sampler(Box::new(SamplerParams::new(false)))
-                }
-                InstrumentKind::SamplerKit => {
-                    InstrumentParams::Sampler(Box::new(SamplerParams::new(true)))
-                }
-            },
+            instrument: InstrumentParams::new(kind),
             chain: Box::new(ChainParams::new()),
             stages,
         }
@@ -1354,11 +1972,7 @@ impl PartParams {
     pub(crate) fn tagged_json(&self) -> String {
         let mut json = TaggedJson::new();
         let mut plain = |param: &dyn Param| json.push(param, None);
-        match &self.instrument {
-            InstrumentParams::Synth(synth) => synth.visit(&mut plain),
-            InstrumentParams::Drums(kit) => kit.visit(&mut plain),
-            InstrumentParams::Sampler(sampler) => sampler.visit(&mut plain),
-        }
+        self.instrument.visit(&mut plain);
         for effect in Effect::PART_ORDER {
             if self.stages.has(effect) {
                 self.chain
@@ -1374,11 +1988,7 @@ impl PartParams {
 
 impl ParamSet for PartParams {
     fn visit<'a>(&'a self, visitor: &mut dyn FnMut(&'a dyn Param)) {
-        match &self.instrument {
-            InstrumentParams::Synth(synth) => synth.visit(visitor),
-            InstrumentParams::Drums(kit) => kit.visit(visitor),
-            InstrumentParams::Sampler(sampler) => sampler.visit(visitor),
-        }
+        self.instrument.visit(visitor);
         for effect in Effect::PART_ORDER {
             if self.stages.has(effect) {
                 self.chain.visit_effect(effect, visitor);

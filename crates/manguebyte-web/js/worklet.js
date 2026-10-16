@@ -68,6 +68,8 @@ const STALE = -100;
 const UNSUPPORTED = -101;
 /** The module predates the effects (`ffi::status::NO_SUCH_EFFECT`). */
 const NO_EFFECTS = -14;
+/** The module predates setting a part's instrument (`ffi::status::BAD_INSTRUMENT`). */
+const BAD_INSTRUMENT = -3;
 
 /** The name the processor is registered under. */
 export const PROCESSOR_NAME = 'manguebyte-engine';
@@ -270,6 +272,13 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
         break;
       case 'createPart':
         result = x.mb_create_part(engine, message.part, message.kind, message.chain);
+        break;
+      case 'setInstrument':
+        // A module from before the export cannot change a part's
+        // instrument: it answers as for an instrument it does not know.
+        result = typeof x.mb_set_instrument === 'function'
+          ? x.mb_set_instrument(engine, message.part, message.kind)
+          : BAD_INSTRUMENT;
         break;
       case 'removePart':
         result = x.mb_remove_part(engine, message.part);

@@ -239,7 +239,50 @@ fn events(start: u64) -> Vec<EventRecord> {
     records.push(EventRecord::choke(start + 4_500, 4));
     records.push(EventRecord::all_notes_off(start + 5_000, 1));
     records.push(EventRecord::choke(start + 6_000, 0));
-    records.push(EventRecord::note_on(start, 9, 60, 1.0)); // no such part
+    // The instruments of manguebyte-dsp: plucked, FM, organ, analogue kit,
+    // kick bass and acid, parts 10 to 15. Chords and drums with accents,
+    // the basses sliding into every other note, presets, the speaker sped
+    // up, then a cancel, a choke and an all-notes-off on each.
+    for step in 0..24u64 {
+        let frame = start + 11 + step * 250;
+        let accent = step % 3 == 2;
+        let key = 40 + (step * 5 % 24) as u8;
+        for part in [10u16, 11, 12] {
+            records.push(EventRecord::note_on(frame, part, key + 12, 0.8).with_accent(accent));
+            records.push(EventRecord::note_off(frame + 400, part, key + 12));
+        }
+        let drum = [36u8, 38, 42, 46, 49, 51, 88, 39][step as usize % 8];
+        records.push(EventRecord::note_on(frame, 13, drum, 0.9).with_accent(accent));
+        let off = if step % 2 == 0 {
+            frame + 260
+        } else {
+            frame + 200
+        };
+        for part in [14u16, 15] {
+            records.push(EventRecord::note_on(frame, part, key - 12, 0.9).with_accent(accent));
+            records.push(EventRecord::note_off(off, part, key - 12));
+        }
+    }
+    for (frame, part, name, value) in [
+        (start + 900, 10, ids::PLUCKED_PRESET, 3.0),
+        (start + 901, 11, ids::FM_PRESET, 2.0),
+        (start + 902, 12, ids::ORGAN_PRESET, 2.0),
+        (start + 903, 12, ids::ORGAN_ROTARY, 2.0),
+        (start + 904, 12, ids::ORGAN_SPEAKER, 0.4),
+        (start + 905, 13, ids::KIT_TUNE, 5.0),
+        (start + 906, 15, ids::ACID_PRESET, 1.0),
+        (start + 907, 14, ids::KICK_BASS_GLIDE, 0.3),
+    ] {
+        records.push(EventRecord::param(frame, part, id(name), value));
+    }
+    for part in 10..16u16 {
+        records.push(EventRecord::cancel(start + 3_200 + u64::from(part), part));
+        records.push(EventRecord::note_on(start + 3_300, part, 45, 1.0));
+        records.push(EventRecord::choke(start + 4_200, part));
+        records.push(EventRecord::note_on(start + 4_300, part, 50, 1.0));
+        records.push(EventRecord::all_notes_off(start + 5_200, part));
+    }
+    records.push(EventRecord::note_on(start, 19, 60, 1.0)); // no such part
     records.push(EventRecord {
         kind: 200,
         ..EventRecord::default()
@@ -248,10 +291,12 @@ fn events(start: u64) -> Vec<EventRecord> {
 }
 
 /// How many parts `parts` makes.
-const PARTS: u16 = 10;
+const PARTS: u16 = 16;
 
 /// Both instruments through every chain: parts 0 to 5; part 6, a sampler
-/// with an instrument; part 7, a sampler kit with one.
+/// with an instrument; part 7, a sampler kit with one; parts 8 and 9 with
+/// every effect; parts 10 to 15, the instruments of manguebyte-dsp, some
+/// with every effect.
 fn parts(engine: &mut Engine) {
     let lowpass = Chain {
         lowpass: true,
@@ -274,6 +319,12 @@ fn parts(engine: &mut Engine) {
         (7, InstrumentKind::SamplerKit, Chain::FULL),
         (8, InstrumentKind::Drums, Chain::ALL),
         (9, InstrumentKind::Synth, Chain::ALL),
+        (10, InstrumentKind::Plucked, Chain::FULL),
+        (11, InstrumentKind::Fm, Chain::NONE),
+        (12, InstrumentKind::Organ, Chain::ALL),
+        (13, InstrumentKind::AnalogKit, Chain::FULL),
+        (14, InstrumentKind::KickBass, Chain::NONE),
+        (15, InstrumentKind::Acid, Chain::ALL),
     ] {
         engine.create_part_with(part, kind, chain).unwrap();
     }
@@ -393,6 +444,11 @@ fn the_webassembly_exports_never_allocate_while_rendering() {
     unsafe {
         assert_eq!(ffi::mb_create_part(engine, 0, 1, 3), ffi::status::OK);
         assert_eq!(ffi::mb_create_part(engine, 1, 0, 3), ffi::status::OK);
+        // Parts 12 and 15 of `events`: an organ and an acid bass.
+        let (organ, acid) = (InstrumentKind::Organ.code(), InstrumentKind::Acid.code());
+        assert_eq!(ffi::mb_create_part(engine, 12, 1, 3), ffi::status::OK);
+        assert_eq!(ffi::mb_set_instrument(engine, 12, organ), ffi::status::OK);
+        assert_eq!(ffi::mb_create_part(engine, 15, acid, 3), ffi::status::OK);
         let staging = ffi::mb_staging_ptr(engine);
         let records = events(0);
         let calls = heap_calls(|| {

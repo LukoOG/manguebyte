@@ -3,7 +3,9 @@
 mod common;
 
 use common::*;
-use manguebyte_web::{Chain, Effect, EventRecord, InstrumentKind, ParamId, ids};
+use manguebyte_web::{
+    Chain, Effect, Engine, EngineConfig, EventRecord, InstrumentKind, ParamId, ids,
+};
 
 /// The `"id"` of every object in a description, in order.
 fn ids_in(json: &str) -> Vec<String> {
@@ -51,6 +53,77 @@ const KIT: [&str; 13] = [
 ];
 
 const SAMPLER: [&str; 1] = [ids::SAMPLER_INTERPOLATION];
+
+const PLUCKED: [&str; 6] = [
+    ids::PLUCKED_PRESET,
+    ids::PLUCKED_DECAY,
+    ids::PLUCKED_BRIGHTNESS,
+    ids::PLUCKED_POSITION,
+    ids::PLUCKED_TONE,
+    ids::PLUCKED_RELEASE,
+];
+const FM: [&str; 4] = [
+    ids::FM_PRESET,
+    ids::FM_BRIGHTNESS,
+    ids::FM_DECAY,
+    ids::FM_RELEASE,
+];
+const ORGAN: [&str; 16] = [
+    ids::ORGAN_PRESET,
+    ids::ORGAN_DRAWBAR_16,
+    ids::ORGAN_DRAWBAR_5_1_3,
+    ids::ORGAN_DRAWBAR_8,
+    ids::ORGAN_DRAWBAR_4,
+    ids::ORGAN_DRAWBAR_2_2_3,
+    ids::ORGAN_DRAWBAR_2,
+    ids::ORGAN_DRAWBAR_1_3_5,
+    ids::ORGAN_DRAWBAR_1_1_3,
+    ids::ORGAN_DRAWBAR_1,
+    ids::ORGAN_PERCUSSION,
+    ids::ORGAN_CLICK,
+    ids::ORGAN_LEAKAGE,
+    ids::ORGAN_VELOCITY,
+    ids::ORGAN_ROTARY,
+    ids::ORGAN_SPEAKER,
+];
+const ANALOG: [&str; 3] = [ids::ANALOG_TONE, ids::ANALOG_SNAP, ids::ANALOG_KICK_DECAY];
+const KICK_BASS: [&str; 6] = [
+    ids::KICK_BASS_TUNE,
+    ids::KICK_BASS_DECAY,
+    ids::KICK_BASS_SWEEP,
+    ids::KICK_BASS_DRIVE,
+    ids::KICK_BASS_GLIDE,
+    ids::KICK_BASS_CLICK,
+];
+const ACID: [&str; 10] = [
+    ids::ACID_PRESET,
+    ids::ACID_WAVE,
+    ids::ACID_CUTOFF,
+    ids::ACID_RESONANCE,
+    ids::ACID_ENV_MOD,
+    ids::ACID_DECAY,
+    ids::ACID_ACCENT,
+    ids::ACID_SLIDE,
+    ids::ACID_DRIVE,
+    ids::ACID_VELOCITY,
+];
+
+/// The identifiers of the instrument of `kind`, in the order its part
+/// lists them.
+fn instrument_ids(kind: InstrumentKind) -> Vec<&'static str> {
+    match kind {
+        InstrumentKind::Synth => SYNTH.to_vec(),
+        InstrumentKind::Drums => KIT.to_vec(),
+        InstrumentKind::Sampler => SAMPLER.to_vec(),
+        InstrumentKind::SamplerKit => SAMPLER.iter().chain(&KIT).copied().collect(),
+        InstrumentKind::Plucked => PLUCKED.to_vec(),
+        InstrumentKind::Fm => FM.to_vec(),
+        InstrumentKind::Organ => ORGAN.to_vec(),
+        InstrumentKind::AnalogKit => KIT.iter().chain(&ANALOG).copied().collect(),
+        InstrumentKind::KickBass => KICK_BASS.to_vec(),
+        InstrumentKind::Acid => ACID.to_vec(),
+    }
+}
 
 #[test]
 fn the_identifiers_are_the_published_ones() {
@@ -232,7 +305,12 @@ fn effect_ids(effect: Effect) -> Vec<&'static str> {
 
 #[test]
 fn every_part_lists_its_instrument_then_its_stages_then_gain_pan_and_send() {
-    let mut engine = engine();
+    // A part for every kind and chain.
+    let mut engine = Engine::new(EngineConfig {
+        max_parts: 128,
+        ..EngineConfig::new(RATE)
+    })
+    .unwrap();
     let mut part = 0;
     let chains = (0..4)
         .chain([Chain::ALL.bits(), 1 << 12 | 1, 0b1010_1010_1010])
@@ -242,12 +320,7 @@ fn every_part_lists_its_instrument_then_its_stages_then_gain_pan_and_send() {
         for &chain in &chains {
             engine.create_part_with(part, kind, chain).unwrap();
             let json = engine.params_json(part).unwrap();
-            let mut expected: Vec<&str> = match kind {
-                InstrumentKind::Synth => SYNTH.to_vec(),
-                InstrumentKind::Drums => KIT.to_vec(),
-                InstrumentKind::Sampler => SAMPLER.to_vec(),
-                InstrumentKind::SamplerKit => SAMPLER.iter().chain(&KIT).copied().collect(),
-            };
+            let mut expected: Vec<&str> = instrument_ids(kind);
             for effect in Effect::PART_ORDER {
                 if chain.has(effect) {
                     expected.extend(effect_ids(effect));
@@ -273,14 +346,7 @@ fn every_part_lists_its_instrument_then_its_stages_then_gain_pan_and_send() {
             }
             assert_eq!(
                 json.matches(r#""effect":"#).count(),
-                expected.len()
-                    - 3
-                    - match kind {
-                        InstrumentKind::Synth => SYNTH.len(),
-                        InstrumentKind::Drums => KIT.len(),
-                        InstrumentKind::Sampler => SAMPLER.len(),
-                        InstrumentKind::SamplerKit => SAMPLER.len() + KIT.len(),
-                    }
+                expected.len() - 3 - instrument_ids(kind).len()
             );
             part += 1;
         }

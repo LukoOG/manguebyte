@@ -1,7 +1,8 @@
 //! A Manguebyte engine for the browser, that builds and runs natively too.
 //!
-//! The [`Engine`] holds numbered parts. Each part plays an instrument, the
-//! polyphonic synth, the drum kit or an SFZ instrument, through a chain of
+//! The [`Engine`] holds numbered parts. Each part plays an instrument (the
+//! polyphonic synth, the drum kit, an SFZ instrument, or one of
+//! `manguebyte-dsp`'s, see [Instruments](#instruments)) through a chain of
 //! effects (see [Effects](#effects)), then gain and pan, into a master bus
 //! with a shared reverb, a glue compressor and a true-peak limiter (see
 //! [The master bus](#the-master-bus)). Parts are made and configured with
@@ -55,16 +56,51 @@
 //!   for the hi-hats and cymbals). An accented kick also starts higher in
 //!   pitch, with a louder click.
 //!
+//! - The instruments of `manguebyte-dsp` take the accent as an argument of
+//!   the note ([`Synth::note_on_accented`](manguebyte_dsp::Synth::note_on_accented)),
+//!   and each does what its voice's settings say: louder, and brighter on
+//!   the strings, the FM voice and the acid bass.
+//!
 //! At full velocity the peak rises by 3 to 3.5 dB on the synth and by 3 to
 //! 4.6 dB on the drums, and an accented note or drum alone still stays
-//! below [`OUTPUT_CEILING`]; `tests/accent.rs` measures it.
+//! below [`OUTPUT_CEILING`]; `tests/accent.rs` measures it, and
+//! `tests/voices.rs` for the other instruments.
+//!
+//! # Instruments
+//!
+//! Besides the synth, the drum kit and the two samplers, a part can play
+//! the voices of [`manguebyte_dsp::instruments`], each a
+//! [`Synth`](manguebyte_dsp::Synth) of them made when the part's
+//! instrument is set ([`Engine::create_part`], [`Engine::set_instrument`]):
+//!
+//! - [`InstrumentKind::Plucked`]: plucked strings, [`PLUCKED_VOICES`]
+//!   voices, nylon and steel guitar, finger and slap bass;
+//! - [`InstrumentKind::Fm`]: four-operator FM, [`FM_VOICES`] voices,
+//!   electric piano, tubular bell, FM bass;
+//! - [`InstrumentKind::Organ`]: the tonewheel organ, [`ORGAN_VOICES`]
+//!   voices on one manual, through a rotating speaker that is part of the
+//!   instrument (`organ.rotary`, `organ.speaker`) and sleeps in silence;
+//! - [`InstrumentKind::AnalogKit`]: the 808-style drum machine,
+//!   [`ANALOG_KIT_VOICES`] voices sharing a choke group, on the drum map;
+//!   the ride and the guitar tap, which the machine does not have, are the
+//!   synthesized drums of [`InstrumentKind::Drums`];
+//! - [`InstrumentKind::KickBass`] and [`InstrumentKind::Acid`]: one voice
+//!   with legato on, so that a note struck while the last one is held (its
+//!   note on before the last note's note off) slides to its pitch.
+//!
+//! Each has its parameters in its part's JSON: a preset where it has
+//! several (`plucked.preset`, `fm.preset`, `organ.preset`, `acid.preset`),
+//! which moves the knobs it covers on its frame, and the main knobs. Each
+//! part keeps two synths of its voices, so that a cancel fades out the
+//! notes sounding while the notes after it start on clean voices. The
+//! crate's README lists every parameter.
 //!
 //! # Parts and parameters
 //!
 //! A part is a `u16` the caller chooses, made with
-//! [`Engine::create_part`] as an [`InstrumentKind::Synth`],
-//! [`InstrumentKind::Drums`] or [`InstrumentKind::Sampler`] and given its
-//! stages with [`Engine::set_chain`]. Its parameters have stable text
+//! [`Engine::create_part`] as one of the [`InstrumentKind`]s, given another
+//! with [`Engine::set_instrument`], and given its stages with
+//! [`Engine::set_chain`]. Its parameters have stable text
 //! identifiers, listed in [`ids`] (`"lowpass.cutoff"`, `"reverb.mix"`,
 //! `"gain"`, `"pan"`, `"send"`, `"delay.time"`,
 //! `"synth.cutoff"`, `"kick.level"` and so on); an event names one by its
@@ -289,13 +325,14 @@
 //!
 //! [`Engine::push`], [`Engine::push_bytes`], [`Engine::admit_bytes`],
 //! [`Engine::drain`] and [`Engine::render`] never allocate, lock or panic,
-//! sampler parts and every effect included (an effect's memory is made
-//! when it joins a part's chain, by a control call), and rendering holds
+//! every kind of instrument and every effect included (an instrument's
+//! memory is made when a part is given it, and an effect's when it joins a
+//! part's chain, by control calls), and rendering holds
 //! [`NoDenormals`](manguebyte_core::NoDenormals) (which does nothing in
-//! WebAssembly, where the reverbs and the delay are put to sleep in
-//! silence instead, and the master bus comes to rest). `tests/realtime.rs`
-//! checks the first part of that with a counting allocator, with every
-//! effect on.
+//! WebAssembly, where the reverbs, the delay and the organ's speaker are
+//! put to sleep in silence instead, and the master bus comes to rest).
+//! `tests/realtime.rs` checks the first part of that with a counting
+//! allocator, with every kind of instrument playing and every effect on.
 
 #![deny(unsafe_code)]
 
@@ -315,6 +352,7 @@ pub mod record;
 pub mod ring;
 mod sampled;
 mod synth;
+mod voiced;
 
 pub use curve::{Curve, MAX_CURVE_POINTS};
 pub use drums::{
@@ -338,4 +376,8 @@ pub use sampled::{PANIC_FADE_SECONDS, SAMPLER_ACCENT_DB, SAMPLER_LEVEL_DB, SAMPL
 pub use synth::{
     RETRIGGER_GLIDE_SECONDS, STEAL_FADE_SECONDS, SYNTH_ACCENT_ATTACK, SYNTH_ACCENT_DB,
     SYNTH_ACCENT_OCTAVES, SYNTH_VOICES,
+};
+pub use voiced::{
+    ANALOG_KIT_LEVEL_DB, ANALOG_KIT_VOICES, FM_LEVEL_DB, FM_VOICES, ORGAN_VOICES,
+    PLUCKED_LEVEL_DB, PLUCKED_VOICES, SPEAKER_SLEEP_SECONDS,
 };

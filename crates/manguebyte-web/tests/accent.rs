@@ -75,6 +75,7 @@ fn compare(kind: InstrumentKind, note: u8, velocity: f32) -> Comparison {
         InstrumentKind::Sampler | InstrumentKind::SamplerKit => {
             unreachable!("tests/sampler.rs measures their accents")
         }
+        _ => unreachable!("tests/voices.rs measures their accents"),
     };
     let plain = play(kind, note, velocity, false, 24_000);
     let accented = play(kind, note, velocity, true, 24_000);

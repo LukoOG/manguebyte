@@ -165,7 +165,7 @@ test('control calls report errors and describe parameters', { skip: skipWithoutW
   await engine.createPart(3, 'synth');
   await assert.rejects(engine.createPart(4, 'drums'), /every part slot is taken/);
   await assert.rejects(engine.setChain(9, 'none'), /no such part/);
-  assert.throws(() => engine.createPart(0, 'organ'), RangeError);
+  assert.throws(() => engine.createPart(0, 'theremin'), RangeError);
   const params = await engine.params(3);
   assert.equal(params[0].id, 'synth.wave');
   assert.equal(params.at(-1).id, 'send');

@@ -11,6 +11,13 @@
 // It loads worklet.js into the context, makes the AudioWorkletNode, owns the
 // event ring, and turns AudioContext times into the engine's frames.
 //
+// Instruments. A part plays one of INSTRUMENT: the synth, the drums, the
+// samplers, or manguebyte-dsp's plucked strings, FM, organ, 808-style kit,
+// kick bass and acid bass. createPart makes a part of a kind, setInstrument
+// gives a part another one and keeps its effects, setPreset and setRotary
+// move their knobs on the beat. On the two basses a note slides from the
+// last when its noteOn comes before the last note's noteOff.
+//
 // Effects. A method chain such as `.delay(0.25, 0.5).chorus()` maps onto
 //
 //   await engine.setEffects(part, { delay: [0.25, 0.5], chorus: [] }, time);
@@ -52,8 +59,35 @@ import { EventRing, KIND, RECORD_SIZE, encodeRecord, paramId } from './ring.js';
 
 export { FLAG, KIND, RECORD_SIZE, paramId } from './ring.js';
 
-/** Instrument codes, as `InstrumentKind::code` gives them. */
-export const INSTRUMENT = Object.freeze({ synth: 0, drums: 1, sampler: 2, sampler_kit: 3 });
+/** Instrument codes, as `InstrumentKind::code` gives them, by `InstrumentKind::name`. */
+export const INSTRUMENT = Object.freeze({
+  synth: 0,
+  drums: 1,
+  sampler: 2,
+  sampler_kit: 3,
+  plucked: 4,
+  fm: 5,
+  organ: 6,
+  analog_kit: 7,
+  kick_bass: 8,
+  acid: 9,
+});
+
+/**
+ * The presets of the instruments that have them, in the order of the
+ * values of their `<kind>.preset` parameter: setPreset(part, 'plucked',
+ * 'slap_bass') sets `plucked.preset` to 3. A preset moves the knobs it
+ * covers to its positions, on the frame it lands on; the README says which.
+ */
+export const PRESETS = Object.freeze({
+  plucked: Object.freeze(['nylon_guitar', 'steel_guitar', 'finger_bass', 'slap_bass']),
+  fm: Object.freeze(['electric_piano', 'tubular_bell', 'fm_bass']),
+  organ: Object.freeze(['jazz', 'gospel', 'full', 'ballad']),
+  acid: Object.freeze(['classic', 'squelch', 'square']),
+});
+
+/** The speeds of an organ part's rotating speaker, in the order of the values of `organ.rotary`. */
+export const ROTARY = Object.freeze(['stop', 'slow', 'fast']);
 
 /**
  * Effect codes, as `Effect::code` gives them. A part's effect's bit in its
@@ -295,8 +329,23 @@ function masterSettings(settings) {
 
 function instrumentCode(kind) {
   if (typeof kind === 'number') return kind;
-  if (!(kind in INSTRUMENT)) throw new RangeError(`unknown instrument ${kind}`);
+  if (!Object.hasOwn(INSTRUMENT, kind)) throw new RangeError(`unknown instrument ${kind}`);
   return INSTRUMENT[kind];
+}
+
+/** The value of `<kind>.preset` for a preset given by name or by value. */
+function presetValue(kind, preset) {
+  if (!Object.hasOwn(PRESETS, kind)) throw new RangeError(`${kind} has no presets`);
+  const names = PRESETS[kind];
+  if (typeof preset === 'number') {
+    if (!Number.isInteger(preset) || preset < 0 || preset >= names.length) {
+      throw new RangeError(`${kind} has presets 0 to ${names.length - 1}`);
+    }
+    return preset;
+  }
+  const index = names.indexOf(preset);
+  if (index < 0) throw new RangeError(`${kind} has no preset ${preset}: ${names.join(', ')}`);
+  return index;
 }
 
 async function wasmBytes(source) {
@@ -572,12 +621,28 @@ export class ManguebyteEngine {
   }
 
   /**
-   * Makes part `part` a 'synth', 'drums', 'sampler' (silent until loadSfz
-   * gives it an instrument) or 'sampler_kit' (an SFZ drum kit that plays
-   * the synthesized drum for a note of the drum map it has no sample for,
-   * and every drum until loadSfz gives it one) with `chain` ('full', the
-   * low-pass and the reverb; 'none'; bits; a list of effect names; or
-   * {lowpass, reverb, delay, ...} flags), as setChain takes it.
+   * Makes part `part` play `kind` (a name of INSTRUMENT, or its code) with
+   * `chain` ('full', the low-pass and the reverb; 'none'; bits; a list of
+   * effect names; or {lowpass, reverb, delay, ...} flags), as setChain
+   * takes it. The kinds:
+   *
+   *   'synth'        the eight-voice synth
+   *   'drums'        the synthesized drum kit of the drum map
+   *   'sampler'      an SFZ instrument, silent until loadSfz gives it one
+   *   'sampler_kit'  an SFZ drum kit that plays the synthesized drum for a
+   *                  note of the drum map it has no sample for, and every
+   *                  drum until loadSfz gives it one
+   *   'plucked'      guitars and basses (PRESETS.plucked)
+   *   'fm'           electric piano, tubular bell, FM bass (PRESETS.fm)
+   *   'organ'        a tonewheel organ through a rotating speaker
+   *                  (PRESETS.organ, setRotary)
+   *   'analog_kit'   the 808-style drum machine on the drum map; its ride
+   *                  and guitar tap are the synthesized kit's
+   *   'kick_bass'    the 808's long kick as a bass, one voice, sliding
+   *   'acid'         the acid bass, one voice, sliding (PRESETS.acid)
+   *
+   * On the two basses a note slides from the one before when it starts
+   * while that one is held: noteOn before the last note's noteOff.
    */
   createPart(part, kind = 'synth', chain = 'full') {
     // A bad kind or chain throws at once, as it always has.
@@ -586,6 +651,43 @@ export class ManguebyteEngine {
     return this.control('createPart', { part, kind: code, chain: bits }).then(() => {
       this.chains.set(part, bits);
     });
+  }
+
+  /**
+   * Makes part `part` play `kind` (as createPart takes it) and keeps its
+   * chain: its effects, their settings, gain, pan and the send. The
+   * instrument's own parameters start at their defaults, and the notes of
+   * the one it replaces stop. Resolves once the part plays it, so notes
+   * scheduled after that, at least latency() ahead, use it. This is where
+   * the instrument's memory is made; rendering never allocates.
+   */
+  setInstrument(part, kind) {
+    const code = instrumentCode(kind);
+    return this.control('setInstrument', { part, kind: code });
+  }
+
+  /**
+   * Sets the preset of `part`, which plays `kind` ('plucked', 'fm',
+   * 'organ' or 'acid'), at `time`: `preset` is a name of PRESETS[kind] or
+   * its value. The knobs the preset covers move to its positions on that
+   * frame, so knobs set for the same frame are set after it.
+   */
+  setPreset(part, kind, preset, time = undefined) {
+    return this.setParam(part, `${kind}.preset`, presetValue(kind, preset), time);
+  }
+
+  /**
+   * Sets the speed of an organ part's rotating speaker at `time`: 'stop',
+   * 'slow' (chorale) or 'fast' (tremolo), or 0, 1 or 2. The rotors get
+   * there at their own pace, the horn in under a second, the drum in
+   * several.
+   */
+  setRotary(part, speed, time = undefined) {
+    const value = typeof speed === 'number' ? speed : ROTARY.indexOf(speed);
+    if (!Number.isInteger(value) || value < 0 || value >= ROTARY.length) {
+      throw new RangeError(`the rotary speeds are ${ROTARY.join(', ')}`);
+    }
+    return this.setParam(part, 'organ.rotary', value, time);
   }
 
   /**

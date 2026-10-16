@@ -9,7 +9,8 @@
 //! The usual sequence, which `js/worklet.js` follows:
 //!
 //! 1. [`mb_engine_new`] once, keeping the returned engine.
-//! 2. [`mb_create_part`] for each part, and [`mb_set_chain`] as needed.
+//! 2. [`mb_create_part`] for each part, [`mb_set_instrument`] to give one
+//!    another instrument, and [`mb_set_chain`] as needed.
 //! 3. For every quantum: copy records into the staging area at
 //!    [`mb_staging_ptr`] and call [`mb_admit_staged`], keeping the records
 //!    it did not take for the next quantum (or call [`mb_push_staged`],
@@ -89,6 +90,15 @@ use manguebyte_params::ParamId;
 /// parameters up by id reads as before; and [`mb_latency_frames`] is
 /// larger by the master bus's look-ahead, which is what it is for: an
 /// event scheduled that far ahead lands on its frame, exactly as before.
+///
+/// Nor did the instruments of `manguebyte-dsp`: instrument codes 4 to 9
+/// are only added (an older engine refuses them with
+/// [`status::BAD_INSTRUMENT`]), with parameter ids of their own and the
+/// export [`mb_set_instrument`], which `js/worklet.js` looks for by name.
+/// A note on before the last note's note off was two notes and still is on
+/// every kind that was there; on the two monophonic kinds it is a slide.
+/// The synth takes its accent as an argument of the note now, and sounds
+/// the same.
 pub const ABI_VERSION: u32 = 2;
 
 /// The part number [`mb_effect_curve`] and [`mb_effect_running`] take for
@@ -424,6 +434,31 @@ pub unsafe extern "C" fn mb_create_part(
         return status::BAD_CHAIN;
     };
     status_of(web.engine.create_part_with(part, kind, chain))
+}
+
+/// Makes part `part` play instrument `kind`
+/// ([`InstrumentKind::code`](crate::InstrumentKind::code)), keeping its
+/// chain, the values of the chain's parameters, gain, pan and the send
+/// ([`Engine::set_instrument`](crate::Engine::set_instrument)). Returns a
+/// [`status`]. Allocates.
+///
+/// # Safety
+///
+/// `engine` is null or a live pointer from [`mb_engine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mb_set_instrument(engine: *mut WebEngine, part: u32, kind: u32) -> i32 {
+    // SAFETY: as the caller promises.
+    let Some(web) = (unsafe { web(engine) }) else {
+        return status::NO_ENGINE;
+    };
+    let part = match part_number(part) {
+        Ok(part) => part,
+        Err(status) => return status,
+    };
+    let Some(kind) = InstrumentKind::from_code(kind) else {
+        return status::BAD_INSTRUMENT;
+    };
+    status_of(web.engine.set_instrument(part, kind))
 }
 
 /// Removes a part. Returns a [`status`].

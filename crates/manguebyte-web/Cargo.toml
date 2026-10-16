@@ -1,6 +1,6 @@
 [package]
 name = "manguebyte-web"
-description = "A Manguebyte engine for the browser: parts with a synth, a drum kit or an SFZ sampler through a chain of effects, a master bus with a true-peak limiter, sample-exact 32-byte event records, a shared-memory event ring, WebAssembly exports and an AudioWorklet."
+description = "A Manguebyte engine for the browser: parts with a synth, drum kits, an SFZ sampler or the instruments of manguebyte-dsp through a chain of effects, a master bus with a true-peak limiter, sample-exact 32-byte event records, a shared-memory event ring, WebAssembly exports and an AudioWorklet."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
