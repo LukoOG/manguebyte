@@ -525,6 +525,40 @@ display, and no editor has been opened inside a real host yet.
   `partChain`, `limiterReduction`, and the lists `EFFECT`, `CHAIN`,
   `EFFECT_ORDER`, `EFFECT_PARAMS`, `VISUAL` and `SHAPES`. Everything is
   added beside what was there, so the ABI version stays 2.
+- The instruments of `manguebyte_dsp::instruments` in parts, instrument
+  codes 4 to 9: `plucked` (nylon and steel guitar, finger and slap bass,
+  eight voices), `fm` (electric piano, tubular bell, FM bass, eight),
+  `organ` (drawbars, percussion, click, leakage, sixteen voices on one
+  manual, through a rotating speaker that is part of the instrument, its
+  speed a parameter, `organ.rotary`), `analog_kit` (the 808-style machine
+  on the drum map, its voices sharing a choke group; the ride and the
+  guitar tap, which it does not have, are the synthesized kit's),
+  `kick_bass` and `acid` (one voice with legato, so a note on before the
+  last note's note off slides). Each has a preset where it has several
+  (`<kind>.preset`, which moves the knobs it covers on its frame) and its
+  main knobs, with units, ranges, scales and defaults in the parameter
+  JSON; the crate's README lists them all. Accents reach every voice as an
+  argument of the note (`Synth::note_on_accented`), the synth's too.
+  `Engine::set_instrument`, `mb_set_instrument` and `setInstrument` give a
+  part another kind and keep its chain; an instrument's memory is made
+  there or by `create_part`, never while rendering. A cancel fades the
+  notes sounding over 8 ms while the notes after it play in full, as on
+  every kind (each of these parts keeps two synths of its voices for it),
+  and all notes off fades the organ and the drum machine. `setPreset`,
+  `setRotary`, `PRESETS` and `ROTARY` in `js/engine.js`. Measured in
+  `tests/voices.rs`: every kind within a cent of equal temperament (0.7
+  cents at worst), velocity and accents louder and brighter, slides that
+  glide, the hats choked and the fallback drums identical to the drum
+  kit's, the same samples in quanta of 1, 7, 128 and 512, finite whatever
+  the knobs. The ABI version stays 2: codes, parameters and the export are
+  added. The `aratu_song` example renders eight bars of all of them
+  through the engine to WAV files.
+- The curves of the effects and the master bus are `manguebyte-dsp`'s
+  response curves (`SvfResponse`, `BiquadResponse`, `CompressorTransfer`,
+  `LimiterTransfer`, `ChorusSweep`, `PhaserSweep`, `LfoCycle`,
+  `DelayTaps`, `ReverbDecay`), from the settings the parameters hold; the
+  axes are as they were, and the reverb's tail is drawn at 1 kHz with its
+  damping.
 
 ### Hosting
 

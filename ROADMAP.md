@@ -222,7 +222,9 @@ our own, and nothing claimed before its test exists.
 - ⬜ iOS and Android
 - 🚧 WebAssembly and Web Audio: `manguebyte-web`, an engine running in a
   browser's AudioWorklet, fed 32-byte timestamped records through a
-  shared-memory ring, with a synth, a drum kit, an SFZ sampler, thirteen
+  shared-memory ring, with a synth, a drum kit, an SFZ sampler, the
+  instruments of `manguebyte-dsp` (plucked strings, FM, an organ, an
+  808-style kit and bass, an acid bass), thirteen
   effects and a master bus with a true-peak limiter;
   tested natively and in Node.js, its demo tried once in Chromium, not yet
   under load. Its first user will be
