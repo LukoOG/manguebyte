@@ -388,10 +388,6 @@ pub(crate) struct SynthVoice {
     tail_fade: Ramp,
     steal_frames: u32,
     glide_frames: u32,
-    /// Whether the next note this voice is given is accented. The part
-    /// sets it on every voice before each note on, since only the synth
-    /// knows which voice will take the note.
-    next_accent: bool,
 }
 
 impl SynthVoice {
@@ -409,7 +405,6 @@ impl SynthVoice {
             tail_fade: Ramp::at(0.0),
             steal_frames: 1,
             glide_frames: 1,
-            next_accent: false,
         };
         voice.configure();
         voice
@@ -437,10 +432,6 @@ impl SynthVoice {
     /// Stops the fading note of a voice that was taken over, at once. A
     /// choke of the whole part uses it, since a choke stops every note
     /// without a fade.
-    pub(crate) fn set_next_accent(&mut self, accent: bool) {
-        self.next_accent = accent;
-    }
-
     pub(crate) fn silence_tail(&mut self) {
         self.tail_fade = Ramp::at(0.0);
         self.tail.reset(&self.settings);
@@ -468,11 +459,17 @@ impl Voice for SynthVoice {
     }
 
     fn note_on(&mut self, note: NoteRef, velocity: f32) {
+        self.note_on_accented(note, velocity, false);
+    }
+
+    /// The accent belongs to this note alone: it is an argument of the
+    /// call that starts it, which the part passes on from the record's
+    /// flags through [`Synth::note_on_accented`].
+    fn note_on_accented(&mut self, note: NoteRef, velocity: f32, accent: bool) {
         let tone = &mut self.tone;
         tone.key = note.key.min(127);
         tone.velocity = f64::from(velocity);
         tone.tune(&self.settings);
-        let accent = self.next_accent;
         tone.accent_octaves = if accent { SYNTH_ACCENT_OCTAVES } else { 0.0 };
         tone.amplitude.attack_speed = if accent {
             1.0 / SYNTH_ACCENT_ATTACK
@@ -559,17 +556,15 @@ impl Voice for SynthVoice {
 /// A synth part's instrument.
 pub(crate) type SynthInstrument = Synth<SynthVoice>;
 
-/// Starts a note, accented or not.
+/// Starts a note, accented or not: the accent travels with the note to the
+/// voice the synth gives it, and to no other.
 pub(crate) fn synth_note_on(
     synth: &mut SynthInstrument,
     note: NoteRef,
     velocity: f32,
     accent: bool,
 ) {
-    for voice in synth.voices_mut() {
-        voice.set_next_accent(accent);
-    }
-    synth.note_on(note, velocity);
+    synth.note_on_accented(note, velocity, accent);
 }
 
 pub(crate) fn new_synth(params: &SynthParams, spec: &ProcessSpec) -> SynthInstrument {
