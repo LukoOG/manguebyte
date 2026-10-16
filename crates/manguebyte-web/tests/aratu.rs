@@ -72,6 +72,11 @@ fn every_aratu_voice_loads_and_plays() {
                 _ => u8::try_from(region.lokey).ok(),
             })
             .collect();
+        let single_keys = load
+            .sfz()
+            .regions
+            .iter()
+            .all(|region| region.lokey == region.hikey);
         let files: Vec<String> = load.paths().map(str::to_owned).collect();
         let mut slowest = 0.0f64;
         let mut bytes_total = 0;
@@ -91,8 +96,31 @@ fn every_aratu_voice_loads_and_plays() {
             bytes_total / 1_000,
             slowest * 1e3
         );
-        let mut engine = engine_with(InstrumentKind::Sampler, Chain::NONE);
+        // A kit: every region on a key of its own. It is played as a
+        // sampler kit, which takes the drums it has no sample for from the
+        // synthesized kit.
+        let is_kit = single_keys;
+        let kind = if is_kit {
+            InstrumentKind::SamplerKit
+        } else {
+            InstrumentKind::Sampler
+        };
+        let mut engine = engine_with(kind, Chain::NONE);
         engine.load_instrument(0, instrument).unwrap();
+        if is_kit {
+            let missing: Vec<u8> = manguebyte_web::DRUM_MAP
+                .iter()
+                .map(|entry| entry.note)
+                .filter(|note| !keys.contains(note))
+                .collect();
+            println!("{name}: the kit plays {missing:?}");
+            for note in missing {
+                engine.push(EventRecord::note_on(engine.frame(), 0, note, 0.9));
+                let (left, _) = render(&mut engine, 9_600, 128);
+                assert!(peak(&left) > 0.01, "{name}: drum {note} is silent");
+                render(&mut engine, 48_000, 128);
+            }
+        }
         for &key in &keys {
             engine.push(EventRecord::note_on(engine.frame(), 0, key, 0.9));
             let (left, right) = render(&mut engine, 9_600, 128);

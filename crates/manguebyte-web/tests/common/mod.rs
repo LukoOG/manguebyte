@@ -131,3 +131,37 @@ pub fn tone_instrument() -> (String, Vec<(String, Vec<u8>)>) {
         vec![("a4.wav".to_owned(), low), ("a5.wav".to_owned(), high)],
     )
 }
+
+/// A kit like Aratu's: GM keys, one-shots, the open hat in group 1 cut off
+/// by group 2, the closed hat; at 32 kHz.
+pub fn kit_instrument() -> (String, Vec<(String, Vec<u8>)>) {
+    let decaying = |frequency: f64, frames: usize| {
+        let mut tone = sine(frequency, 32_000.0, frames, 0.9);
+        for (n, sample) in tone.iter_mut().enumerate() {
+            *sample *= (1.0 - n as f32 / frames as f32).powi(2);
+        }
+        tone
+    };
+    let files = vec![
+        (
+            "kick.wav".to_owned(),
+            wav16(&decaying(60.0, 16_000), 32_000),
+        ),
+        ("snare.wav".to_owned(), wav16(&noise(8_000, 0.8, 3), 32_000)),
+        (
+            "closed-hat.wav".to_owned(),
+            wav16(&noise(2_000, 0.6, 5), 32_000),
+        ),
+        (
+            "open-hat.wav".to_owned(),
+            wav16(&noise(32_000, 0.6, 7), 32_000),
+        ),
+    ];
+    let sfz = "<control> default_path=./
+        <group> loop_mode=one_shot
+        <region> sample=kick.wav key=36
+        <region> sample=snare.wav key=38
+        <region> sample=closed-hat.wav key=42 group=2
+        <region> sample=open-hat.wav key=46 group=1 off_by=2";
+    (sfz.to_owned(), files)
+}

@@ -42,7 +42,7 @@ import { EventRing, KIND, RECORD_SIZE, encodeRecord, paramId } from './ring.js';
 export { FLAG, KIND, RECORD_SIZE, paramId } from './ring.js';
 
 /** Instrument codes, as `InstrumentKind::code` gives them. */
-export const INSTRUMENT = Object.freeze({ synth: 0, drums: 1, sampler: 2 });
+export const INSTRUMENT = Object.freeze({ synth: 0, drums: 1, sampler: 2, sampler_kit: 3 });
 
 /** Chain bits, as `Chain::bits` gives them. */
 export const CHAIN = Object.freeze({ none: 0, lowpass: 1, reverb: 2, full: 3 });
@@ -342,9 +342,11 @@ export class ManguebyteEngine {
   }
 
   /**
-   * Makes part `part` a 'synth', 'drums' or 'sampler' (silent until loadSfz
-   * gives it an instrument) with `chain` ('full', 'none', bits or {lowpass,
-   * reverb}).
+   * Makes part `part` a 'synth', 'drums', 'sampler' (silent until loadSfz
+   * gives it an instrument) or 'sampler_kit' (an SFZ drum kit that plays
+   * the synthesized drum for a note of the drum map it has no sample for,
+   * and every drum until loadSfz gives it one) with `chain` ('full',
+   * 'none', bits or {lowpass, reverb}).
    */
   createPart(part, kind = 'synth', chain = 'full') {
     return this.control('createPart', { part, kind: instrumentCode(kind), chain: chainBits(chain) });
@@ -352,9 +354,9 @@ export class ManguebyteEngine {
 
   /**
    * Loads an SFZ instrument into sampler part `part` (made with
-   * createPart(part, 'sampler')) and resolves once the part plays it: notes
-   * scheduled from then on use it, while the notes of the instrument it
-   * replaces ring on to their end. Resolves with a summary,
+   * createPart(part, 'sampler') or 'sampler_kit') and resolves once the
+   * part plays it: notes scheduled from then on use it, while the notes of
+   * the instrument it replaces ring on to their end. Resolves with a summary,
    * `{ regions, samples, sample_bytes, warnings }`, `warnings` being what
    * the parser had to say about opcodes it ignored.
    *

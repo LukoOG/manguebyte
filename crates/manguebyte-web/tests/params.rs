@@ -145,6 +145,7 @@ fn every_part_lists_its_instrument_then_its_stages_then_gain_and_pan() {
                 InstrumentKind::Synth => SYNTH.to_vec(),
                 InstrumentKind::Drums => KIT.to_vec(),
                 InstrumentKind::Sampler => SAMPLER.to_vec(),
+                InstrumentKind::SamplerKit => SAMPLER.iter().chain(&KIT).copied().collect(),
             };
             if chain.lowpass {
                 expected.extend([ids::LOWPASS_CUTOFF, ids::LOWPASS_RESONANCE]);

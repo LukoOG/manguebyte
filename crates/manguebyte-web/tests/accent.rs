@@ -72,7 +72,9 @@ fn compare(kind: InstrumentKind, note: u8, velocity: f32) -> Comparison {
     let window = match kind {
         InstrumentKind::Synth => SYNTH_WINDOW,
         InstrumentKind::Drums => DRUM_WINDOW,
-        InstrumentKind::Sampler => unreachable!("tests/sampler.rs measures its accent"),
+        InstrumentKind::Sampler | InstrumentKind::SamplerKit => {
+            unreachable!("tests/sampler.rs measures their accents")
+        }
     };
     let plain = play(kind, note, velocity, false, 24_000);
     let accented = play(kind, note, velocity, true, 24_000);

@@ -150,6 +150,14 @@ fn events(start: u64) -> Vec<EventRecord> {
     records.push(EventRecord::choke(start + 4_000, 6));
     records.push(EventRecord::note_on(start + 4_100, 6, 69, 1.0));
     records.push(EventRecord::all_notes_off(start + 5_500, 6));
+    // The sampler kit: its samples, and the drums it has none for.
+    for (step, drum) in [36u8, 88, 42, 50, 46, 38, 43, 37].into_iter().enumerate() {
+        let frame = start + 150 + step as u64 * 300;
+        records.push(EventRecord::note_on(frame, 7, drum, 0.8).with_accent(step % 3 == 0));
+    }
+    records.push(EventRecord::choke(start + 3_000, 7));
+    records.push(EventRecord::note_on(start + 3_100, 7, 88, 1.0));
+    records.push(EventRecord::all_notes_off(start + 4_000, 7));
     // A held key struck again: it glides to its new level.
     records.push(EventRecord::note_on(start + 3_500, 4, 50, 0.2));
     records.push(EventRecord::note_on(start + 3_900, 4, 50, 1.0));
@@ -165,10 +173,10 @@ fn events(start: u64) -> Vec<EventRecord> {
 }
 
 /// How many parts `parts` makes.
-const PARTS: u16 = 7;
+const PARTS: u16 = 8;
 
-/// Both instruments through every chain: parts 0 to 5; and part 6, a
-/// sampler with an instrument.
+/// Both instruments through every chain: parts 0 to 5; part 6, a sampler
+/// with an instrument; part 7, a sampler kit with one.
 fn parts(engine: &mut Engine) {
     let lowpass = Chain {
         lowpass: true,
@@ -186,11 +194,14 @@ fn parts(engine: &mut Engine) {
         (4, InstrumentKind::Synth, reverb),
         (5, InstrumentKind::Drums, Chain::NONE),
         (6, InstrumentKind::Sampler, Chain::FULL),
+        (7, InstrumentKind::SamplerKit, Chain::FULL),
     ] {
         engine.create_part_with(part, kind, chain).unwrap();
     }
     let (sfz, files) = common::tone_instrument();
     common::load_sfz(engine, 6, &sfz, &files);
+    let (sfz, files) = common::kit_instrument();
+    common::load_sfz(engine, 7, &sfz, &files);
 }
 
 #[test]

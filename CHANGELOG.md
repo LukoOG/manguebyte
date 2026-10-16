@@ -378,6 +378,14 @@ display, and no editor has been opened inside a real host yet.
   mean what they did, so the ABI version stays 2; `js/worklet.js` looks
   for them by name. Every instrument Aratu ships loads with no warning
   (`tests/aratu.rs`, when Aratu's samples are on the machine).
+- Sampler kits (`InstrumentKind::SamplerKit`, code 3, `'sampler_kit'`):
+  sampler parts marked as drum kits, which play the synthesized drum for a
+  note of the drum map their SFZ text has no region for (Aratu's kit has
+  no guitar tap, 88), at its velocity, with its accent and through the
+  part's chain, and every drum until their samples arrive. They have the
+  kit's parameters for those drums. The fallback is chosen with the kind
+  of part, not guessed, so that a melodic instrument with a gap in its
+  keys never plays a drum.
 
 ### Hosting
 

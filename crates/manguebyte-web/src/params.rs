@@ -382,6 +382,9 @@ impl PartParams {
                 InstrumentKind::Sampler => {
                     InstrumentParams::Sampler(Box::new(SamplerParams::new(false)))
                 }
+                InstrumentKind::SamplerKit => {
+                    InstrumentParams::Sampler(Box::new(SamplerParams::new(true)))
+                }
             },
             chain: ChainParams::new(),
             stages,

@@ -43,11 +43,16 @@ pub enum InstrumentKind {
     /// Code 2: an SFZ instrument, loaded with
     /// [`Engine::load_instrument`]; silent until one is.
     Sampler,
+    /// Code 3: an SFZ drum kit, loaded the same way, that plays the
+    /// synthesized drum of [`Drums`](Self::Drums) for a note of the drum
+    /// map its SFZ text has no region for, and every drum until it has
+    /// one. It has the kit's parameters as well as the sampler's.
+    SamplerKit,
 }
 
 impl InstrumentKind {
     /// Every kind, in the order of their codes.
-    pub const ALL: [Self; 3] = [Self::Synth, Self::Drums, Self::Sampler];
+    pub const ALL: [Self; 4] = [Self::Synth, Self::Drums, Self::Sampler, Self::SamplerKit];
 
     /// The code the WebAssembly exports use.
     pub const fn code(self) -> u32 {
@@ -55,12 +60,13 @@ impl InstrumentKind {
             Self::Synth => 0,
             Self::Drums => 1,
             Self::Sampler => 2,
+            Self::SamplerKit => 3,
         }
     }
 
     /// Whether parts of this kind play SFZ instruments.
     pub const fn is_sampler(self) -> bool {
-        matches!(self, Self::Sampler)
+        matches!(self, Self::Sampler | Self::SamplerKit)
     }
 
     /// The kind with this code, if there is one.
@@ -69,6 +75,7 @@ impl InstrumentKind {
             0 => Some(Self::Synth),
             1 => Some(Self::Drums),
             2 => Some(Self::Sampler),
+            3 => Some(Self::SamplerKit),
             _ => None,
         }
     }
@@ -314,6 +321,7 @@ impl Part {
         match self.instrument {
             Instrument::Synth(_) => InstrumentKind::Synth,
             Instrument::Drums(_) => InstrumentKind::Drums,
+            Instrument::Sampled(ref sampled) if sampled.is_kit() => InstrumentKind::SamplerKit,
             Instrument::Sampled(_) => InstrumentKind::Sampler,
         }
     }
@@ -420,7 +428,7 @@ impl Part {
                 true
             }
             Instrument::Sampled(sampled) => {
-                sampled.render(stereo);
+                sampled.render(mono, stereo);
                 false
             }
         };

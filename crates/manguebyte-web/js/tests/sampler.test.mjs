@@ -168,3 +168,26 @@ test('a later load of the same part takes over from one under way', { skip: skip
     engine.release();
   }
 });
+
+test('a sampler kit plays the synthesized drums its SFZ has no sample for', { skip: skipWithoutWasm }, async () => {
+  // Until it has samples, a sampler kit is the drum kit.
+  const play = async (kind) => {
+    const context = new FakeContext(0);
+    const engine = await make(context);
+    try {
+      await engine.createPart(0, kind, 'none');
+      engine.noteOn(0, 88, 0.8, undefined, 0, true);
+      const { left } = await context.run(20);
+      const params = (await engine.params(0)).map((param) => param.id);
+      await engine.close();
+      return { left, params };
+    } finally {
+      engine.release();
+    }
+  };
+  const kit = await play('sampler_kit');
+  const drums = await play('drums');
+  assert.ok(peak(kit.left) > 0.05);
+  assert.deepEqual(kit.left, drums.left);
+  assert.ok(kit.params.includes('guitar_tap.level') && kit.params.includes('sampler.interpolation'));
+});

@@ -209,7 +209,11 @@
 //! [`SAMPLER_LEVEL_DB`] (-6 dB) at full velocity; an accent adds
 //! [`SAMPLER_ACCENT_DB`] (3 dB); choke stops every voice after one more
 //! frame, and all notes off releases every voice in no less than
-//! [`PANIC_FADE_SECONDS`] (8 ms). In a browser, `js/worklet.js` decodes the
+//! [`PANIC_FADE_SECONDS`] (8 ms). A part made as an
+//! [`InstrumentKind::SamplerKit`] is a sampler marked as a drum kit: for a
+//! note of the drum map its SFZ text has no region for, it plays the drum
+//! of [`InstrumentKind::Drums`], at the note's velocity and with its accent,
+//! and it plays every drum that way until it has an instrument. In a browser, `js/worklet.js` decodes the
 //! files between render quanta, a file or so at a time, so that loading
 //! never holds up the sound; the crate's README explains that choice.
 //!

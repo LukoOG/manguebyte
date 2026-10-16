@@ -169,43 +169,9 @@ fn note_off_choke_and_all_notes_off_end_notes() {
     ended(EventRecord::all_notes_off(4_800, 0), 2_400);
 }
 
-/// A kit like Aratu's: GM keys, one-shots, the open hat in group 1 cut off
-/// by group 2, the closed hat; at 32 kHz.
-fn kit() -> (String, Vec<(String, Vec<u8>)>) {
-    let decaying = |frequency: f64, frames: usize| {
-        let mut tone = sine(frequency, 32_000.0, frames, 0.9);
-        for (n, sample) in tone.iter_mut().enumerate() {
-            *sample *= (1.0 - n as f32 / frames as f32).powi(2);
-        }
-        tone
-    };
-    let files = vec![
-        (
-            "kick.wav".to_owned(),
-            wav16(&decaying(60.0, 16_000), 32_000),
-        ),
-        ("snare.wav".to_owned(), wav16(&noise(8_000, 0.8, 3), 32_000)),
-        (
-            "closed-hat.wav".to_owned(),
-            wav16(&noise(2_000, 0.6, 5), 32_000),
-        ),
-        (
-            "open-hat.wav".to_owned(),
-            wav16(&noise(32_000, 0.6, 7), 32_000),
-        ),
-    ];
-    let sfz = "<control> default_path=./
-        <group> loop_mode=one_shot
-        <region> sample=kick.wav key=36
-        <region> sample=snare.wav key=38
-        <region> sample=closed-hat.wav key=42 group=2
-        <region> sample=open-hat.wav key=46 group=1 off_by=2";
-    (sfz.to_owned(), files)
-}
-
 #[test]
 fn a_closed_hat_cuts_the_open_one_off() {
-    let (sfz, files) = kit();
+    let (sfz, files) = kit_instrument();
     let play = |records: &[EventRecord]| {
         let mut engine = sampler_engine(&sfz, &files);
         push_all(&mut engine, records);
@@ -235,7 +201,7 @@ fn a_closed_hat_cuts_the_open_one_off() {
 
 #[test]
 fn one_shots_ignore_note_off_and_fade_on_all_notes_off() {
-    let (sfz, files) = kit();
+    let (sfz, files) = kit_instrument();
     let mut engine = sampler_engine(&sfz, &files);
     engine.push(EventRecord::note_on(0, 0, 46, 1.0));
     engine.push(EventRecord::note_off(100, 0, 46));
@@ -254,10 +220,10 @@ fn one_shots_ignore_note_off_and_fade_on_all_notes_off() {
 /// part, with a synth and the drums beside it.
 fn scenario() -> Engine {
     let (sfz, files) = tone_instrument();
-    let (kit_sfz, kit_files) = kit();
+    let (kit_sfz, kit_files) = kit_instrument();
     let mut engine = engine();
     engine.create_part(0, InstrumentKind::Sampler).unwrap();
-    engine.create_part(1, InstrumentKind::Sampler).unwrap();
+    engine.create_part(1, InstrumentKind::SamplerKit).unwrap();
     engine.create_part(2, InstrumentKind::Synth).unwrap();
     engine.create_part(3, InstrumentKind::Drums).unwrap();
     load_sfz(&mut engine, 0, &sfz, &files);
@@ -272,7 +238,8 @@ fn scenario() -> Engine {
         let key = [57u8, 64, 69, 72, 76, 81, 84][step as usize % 7];
         records.push(EventRecord::note_on(frame, 0, key, 0.6).with_accent(step % 3 == 0));
         records.push(EventRecord::note_off(frame + 1_500, 0, key));
-        let drum = [36u8, 42, 38, 46][step as usize % 4];
+        // Sampled, and from the kit: the tap and a tom.
+        let drum = [36u8, 42, 88, 38, 46, 50][step as usize % 6];
         records.push(EventRecord::note_on(frame + 3, 1, drum, 0.9).with_accent(step % 5 == 0));
         records.push(EventRecord::note_on(
             frame + 11,
@@ -310,7 +277,7 @@ fn the_quanta_do_not_change_the_samples() {
 #[test]
 fn a_new_instrument_leaves_the_sounding_notes_alone() {
     let (sfz, files) = tone_instrument();
-    let (kit_sfz, kit_files) = kit();
+    let (kit_sfz, kit_files) = kit_instrument();
     let start = |engine: &mut Engine| {
         engine.push(EventRecord::note_on(0, 0, 69, 1.0));
         engine.push(EventRecord::note_on(0, 0, 72, 1.0));
@@ -389,4 +356,134 @@ fn loads_say_what_is_wrong() {
     assert_eq!(load.missing().collect::<Vec<_>>(), ["a5.wav"]);
     let error = load.finish().unwrap_err();
     assert!(error.to_string().contains("a5.wav"), "{error}");
+}
+
+/// A sampler kit with the fixture kit, or with no instrument.
+fn kit_engine(loaded: bool) -> Engine {
+    let mut engine = engine_with(InstrumentKind::SamplerKit, Chain::FULL);
+    if loaded {
+        let (sfz, files) = kit_instrument();
+        load_sfz(&mut engine, 0, &sfz, &files);
+    }
+    engine
+}
+
+/// What the synthesized drum kit plays for `records`, through the full
+/// chain.
+fn drums_alone(records: &[EventRecord]) -> (Vec<f32>, Vec<f32>) {
+    let mut engine = engine_with(InstrumentKind::Drums, Chain::FULL);
+    push_all(&mut engine, records);
+    render(&mut engine, 24_000, 128)
+}
+
+#[test]
+fn a_sampler_kit_plays_the_synthesized_drum_its_sfz_lacks() {
+    // The fixture kit, like Aratu's, has no guitar tap (88) and no toms:
+    // those come from the drum kit, at their velocity, with their accent,
+    // through the part's chain and gain.
+    let records = [
+        EventRecord::param(0, 0, id(ids::GAIN), -4.0),
+        EventRecord::param(0, 0, id(ids::REVERB_MIX), 0.4),
+        EventRecord::note_on(100, 0, 88, 0.7).with_accent(true),
+        EventRecord::note_on(5_000, 0, 50, 0.9),
+        EventRecord::note_on(9_000, 0, 43, 0.5).with_accent(true),
+    ];
+    let mut engine = kit_engine(true);
+    push_all(&mut engine, &records);
+    let (left, right) = render(&mut engine, 24_000, 128);
+    let (drum_left, drum_right) = drums_alone(&records);
+    assert!(peak(&left) > 0.05);
+    assert_eq!(bits(&left), bits(&drum_left));
+    assert_eq!(bits(&right), bits(&drum_right));
+}
+
+#[test]
+fn a_sampler_kit_plays_its_samples_for_the_notes_it_has() {
+    // A kick and a snare from the samples: the same as a sampler part that
+    // is not a kit, and not the synthesized ones.
+    let records = [
+        EventRecord::note_on(100, 0, 36, 0.9).with_accent(true),
+        EventRecord::note_on(4_000, 0, 38, 0.6),
+    ];
+    let (sfz, files) = kit_instrument();
+    let mut plain = engine_with(InstrumentKind::Sampler, Chain::FULL);
+    load_sfz(&mut plain, 0, &sfz, &files);
+    push_all(&mut plain, &records);
+    let mut engine = kit_engine(true);
+    push_all(&mut engine, &records);
+    let (left, _) = render(&mut engine, 24_000, 128);
+    let (sampled, _) = render(&mut plain, 24_000, 128);
+    assert_eq!(bits(&left), bits(&sampled));
+    let (drums, _) = drums_alone(&records);
+    assert_ne!(bits(&left), bits(&drums));
+}
+
+#[test]
+fn a_sampler_kit_is_the_drum_kit_until_it_has_samples() {
+    let records: Vec<EventRecord> = manguebyte_web::DRUM_MAP
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            EventRecord::note_on(index as u64 * 1_500, 0, entry.note, 0.8)
+                .with_accent(index % 2 == 0)
+        })
+        .collect();
+    let mut engine = kit_engine(false);
+    push_all(&mut engine, &records);
+    let (left, right) = render(&mut engine, 24_000, 128);
+    let (drum_left, drum_right) = drums_alone(&records);
+    assert_eq!(bits(&left), bits(&drum_left));
+    assert_eq!(bits(&right), bits(&drum_right));
+}
+
+#[test]
+fn only_a_sampler_kit_falls_back_and_only_on_drum_notes() {
+    // A melodic sampler part plays nothing for a key it has no region for,
+    // drum map or not; a kit plays nothing for a key outside the drum map.
+    let (kit_sfz, kit_files) = kit_instrument();
+    let mut melodic = engine_with(InstrumentKind::Sampler, Chain::NONE);
+    load_sfz(&mut melodic, 0, &kit_sfz, &kit_files);
+    melodic.push(EventRecord::note_on(0, 0, 88, 1.0));
+    melodic.push(EventRecord::note_on(0, 0, 50, 1.0));
+    let (left, _) = render(&mut melodic, 4_800, 128);
+    assert!(left.iter().all(|&sample| sample == 0.0));
+    let mut kit = kit_engine(true);
+    kit.push(EventRecord::note_on(0, 0, 60, 1.0));
+    let (left, _) = render(&mut kit, 4_800, 128);
+    assert!(left.iter().all(|&sample| sample == 0.0));
+}
+
+#[test]
+fn a_sampler_kit_has_the_kit_parameters_for_its_drums() {
+    let records = [
+        EventRecord::param(0, 0, id(ids::GUITAR_TAP_LEVEL), 0.3),
+        EventRecord::param(0, 0, id(ids::KIT_TUNE), -5.0),
+        EventRecord::note_on(10, 0, 88, 1.0),
+    ];
+    let mut engine = kit_engine(true);
+    push_all(&mut engine, &records);
+    let (left, _) = render(&mut engine, 24_000, 128);
+    assert_eq!(bits(&left), bits(&drums_alone(&records).0));
+    let level = engine.param_value(0, ids::GUITAR_TAP_LEVEL).unwrap();
+    assert!((level - 0.3).abs() < 1e-6, "{level}");
+    assert_eq!(engine.part_kind(0), Some(InstrumentKind::SamplerKit));
+    // Choke and all notes off reach both halves.
+    for stop in [
+        EventRecord::choke(2_000, 0),
+        EventRecord::all_notes_off(2_000, 0),
+    ] {
+        let mut engine = kit_engine(true);
+        push_all(
+            &mut engine,
+            &[
+                EventRecord::note_on(0, 0, 88, 1.0),
+                EventRecord::note_on(0, 0, 46, 1.0),
+                stop,
+            ],
+        );
+        render(&mut engine, 1_900, 128);
+        assert_eq!(engine.active_voices(0), Some(2), "{stop:?}");
+        render(&mut engine, 2_400 + 100, 128);
+        assert_eq!(engine.active_voices(0), Some(0), "{stop:?}");
+    }
 }

@@ -162,6 +162,31 @@ installs the result.
 - 32 voices (`SAMPLER_VOICES`), a voice per region sounding, and a quarter
   as many again for voices fading out after being cut short.
 
+### Sampler kits
+
+A sampler kit (`InstrumentKind::SamplerKit`, code 3, `'sampler_kit'`) is
+a sampler part marked as a drum kit. For a note of the drum map that its
+SFZ text has no region for, such as the guitar tap (88) of Aratu's kit, it
+plays the synthesized drum of a `drums` part instead: at the note's
+velocity, with its accent, through the part's chain, gain and pan. Until
+it has an instrument it plays every drum that way, so a kit sounds while
+its samples load. It has the kit's parameters (`kit.tune`, `kit.decay`,
+`guitar_tap.level` and the rest) for those drums, beside
+`sampler.interpolation`. Choke stops both halves; all notes off releases
+the samples as above and fades the synthesized drums over 50 ms
+(`DAMP_SECONDS`). A closed hat chokes an open hat of its own half: a
+sampled one through the SFZ text's `group` and `off_by`, a synthesized one
+as the drum kit does.
+
+The fallback is chosen when the part is made, not decided from the notes.
+Done for every sampler part, a melodic instrument whose regions leave a
+gap, say a glockenspiel whose lowest key is 79, would answer a low note
+with a kick drum; a part marked as a kit makes the intent plain, and has
+the kit's parameters to control the drums it borrows. What counts as
+missing is a key no region with an `attack`, `first` or `legato` trigger
+covers (`Instrument::covers_key`), whatever its velocities, so a kit with a
+region for a key at some velocities only plays nothing at the others.
+
 Every opcode Aratu's instruments use is played: `sample`, `default_path`,
 `lokey`, `hikey`, `key`, `pitch_keycenter`, `loop_mode`, `loop_start`,
 `loop_end`, `ampeg_release`, `group` and `off_by`, with `<control>`,
