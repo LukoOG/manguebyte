@@ -468,7 +468,10 @@ unsafe fn input(engine: *mut WebEngine, bytes: &[u8]) {
 
 /// A short 16-bit WAV file of a sine at 24 kHz.
 fn small_wav() -> Vec<u8> {
-    let frames = if cfg!(miri) { 64 } else { 2_400 };
+    // Under Miri the sample is short, but it must outlast the master's
+    // look-ahead: parts render that far ahead of the output, so a note
+    // shorter than it has already ended when the voices are counted.
+    let frames = if cfg!(miri) { 256 } else { 2_400 };
     let mut buffer = manguebyte_core::AudioBuffer::<f32>::new(1, frames);
     for (n, sample) in buffer.channel_mut(0).iter_mut().enumerate() {
         *sample = (core::f64::consts::TAU * 375.0 * n as f64 / 24_000.0).sin() as f32 * 0.5;
