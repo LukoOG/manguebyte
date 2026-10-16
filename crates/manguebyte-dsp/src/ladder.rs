@@ -232,7 +232,7 @@ impl Motion {
 /// -1 and 1. A negative `a` is the mirror image. An `a` that is not a
 /// number counts as zero.
 #[inline]
-fn saturated(a: f64, b: f64) -> f64 {
+pub(crate) fn saturated(a: f64, b: f64) -> f64 {
     solve_loop(a, b).0
 }
 

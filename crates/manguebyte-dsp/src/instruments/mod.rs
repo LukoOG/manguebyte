@@ -8,6 +8,7 @@
 //! | [`OrganVoice`] | a tonewheel organ: drawbars, percussion, key click | [jazz](OrganParams::jazz), [gospel](OrganParams::gospel), [full](OrganParams::full), [ballad](OrganParams::ballad), any [registration](OrganParams::registration) |
 //! | [`AnalogKitVoice`] | sixteen drums of a classic analogue drum machine, on the General MIDI keys | one [setting](DrumSettings) per drum |
 //! | [`KickBassVoice`] | that machine's long kick played as a bass, with slides | [the classic](KickBassParams::default) |
+//! | [`AcidVoice`] | the acid bass: an oscillator, a diode ladder and envelopes, with accent and slide | [classic](AcidParams::classic), [squelch](AcidParams::squelch), [square](AcidParams::square) |
 //!
 //! [`RotarySpeaker`] is not a voice but a [`Processor`](crate::Processor)
 //! to put after the organ: the rotating horn and drum it is usually heard
@@ -77,6 +78,7 @@
 //! Every source of noise is seeded by the note it belongs to, so a note
 //! sounds the same every time it is played, whatever was played before it.
 
+mod acid;
 mod analog_drums;
 mod common;
 mod fm;
@@ -86,6 +88,7 @@ mod organ;
 mod rotary;
 mod string;
 
+pub use acid::{AcidParams, AcidVoice, AcidWave};
 pub use analog_drums::{
     AnalogDrum, AnalogKitParams, AnalogKitVoice, ChokeGroup, DrumSettings, KickBassParams,
     KickBassVoice, METAL_HZ,
