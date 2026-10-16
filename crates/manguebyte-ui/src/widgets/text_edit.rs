@@ -334,6 +334,8 @@ impl TextEdit {
         if range.is_empty() {
             return false;
         }
+        // A selection the pointer is making is of the text as it was.
+        self.select = None;
         self.text.replace_range(range.clone(), "");
         self.caret = range.start;
         self.anchor = range.start;
@@ -356,6 +358,7 @@ impl TextEdit {
         if accepted.is_empty() {
             return deleted;
         }
+        self.select = None;
         self.text.insert_str(self.caret, &accepted);
         self.caret += accepted.len();
         self.anchor = self.caret;
@@ -375,6 +378,7 @@ impl TextEdit {
         if from == self.caret {
             return false;
         }
+        self.select = None;
         self.text.replace_range(from..self.caret, "");
         self.caret = from;
         self.anchor = from;
@@ -394,6 +398,7 @@ impl TextEdit {
         if to == self.caret {
             return false;
         }
+        self.select = None;
         self.text.replace_range(self.caret..to, "");
         true
     }
@@ -891,6 +896,24 @@ mod tests {
         );
         assert!(e.type_char('7'));
         assert_eq!(e.text(), "7");
+    }
+
+    /// Found by the menus' fuzz test: text typed while the pointer drags a
+    /// word selection left the selection's words pointing past the end.
+    #[test]
+    fn an_edit_ends_the_selection_the_pointer_is_making() {
+        let mut e = edit("one two");
+        e.select = Some(Select::Words { start: 4, end: 7 });
+        e.anchor = 4;
+        e.type_char('x');
+        assert_eq!(e.text(), "one x");
+        assert_eq!(e.select, None, "a drag now moves nothing");
+        e.select = Some(Select::Words { start: 0, end: 3 });
+        e.key(
+            press(Key::Backspace, Modifiers::NONE),
+            &MemoryClipboard::new(),
+        );
+        assert_eq!(e.select, None);
     }
 
     #[test]
