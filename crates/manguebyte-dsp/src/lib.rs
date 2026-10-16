@@ -43,6 +43,7 @@ mod fir_filter;
 mod follower;
 mod gain;
 pub mod iir;
+pub mod instruments;
 mod ladder;
 mod limiter;
 mod mix;
