@@ -1,6 +1,6 @@
 # manguebyte-dsp
 
-Signal processing for the Manguebyte Audio Framework: oscillators, wavetables, filters, EQ, dynamics with sidechain, delay, modulation, reverb, convolution, FIR, oversampling, a polyphonic synth and zero-cost processor chains.
+Signal processing for the Manguebyte Audio Framework: oscillators, wavetables, filters, EQ, dynamics with sidechain, delay, modulation, reverb, convolution, FIR, oversampling, a polyphonic synth with instrument voices (plucked strings, FM, tonewheel organ, analogue drums, acid bass) and zero-cost processor chains.
 
 Part of the [Manguebyte Audio Framework](https://github.com/alessonqueirozdev-hub/manguebyte). Most projects depend on
 [`manguebyte`](https://crates.io/crates/manguebyte), which gathers every part

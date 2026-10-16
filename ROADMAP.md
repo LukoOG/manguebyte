@@ -83,7 +83,12 @@ Everything a standalone audio application needs, short of a user interface.
   instruments Parabolic exports. Samples are loaded whole, not streamed
   from disk; filters, LFOs, modulation by controllers and keyswitches are
   not started
-- ✅ Polyphonic voice allocation with per-note expression and modulation
+- ✅ Polyphonic voice allocation with per-note expression and modulation,
+  accents and legato slides
+- ✅ Instruments: physically modelled plucked strings (guitars and basses),
+  four-operator FM, a tonewheel organ with a rotary speaker, the drums and
+  kick bass of the classic analogue drum machine, and an acid bass; each a
+  `Voice` with presets, measured for tuning, decay, velocity and accent
 - ✅ Metering: loudness to ITU-R BS.1770 and EBU R 128 (checked against the
   EBU's test signals), true peak, peak, RMS, VU, PPM, stereo correlation
 - ✅ Pitch detection (YIN and the McLeod method) with note naming

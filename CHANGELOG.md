@@ -573,6 +573,18 @@ display, and no editor has been opened inside a real host yet.
   without a reset, gives the same output bit for bit. `note_on` and
   `note_off` hold the velocity to 0 to 1 and take a velocity that is not
   finite as 0.
+- `Synth::note_on_accented` and `Voice::note_on_accented`: an accent,
+  a second dimension of how hard a note is played (a drum machine's or a
+  step sequencer's, or a note Aratu writes in capitals), passed as an
+  argument of the note so that it can never be left over for the next.
+  The event stream has no accent; a voice that does not implement the
+  method hears a plain `note_on`.
+- `Synth::set_legato` and `Voice::legato`: with legato on, a note that
+  starts while a key is held on its channel takes over the newest held
+  note's voice and slurs from it, and releasing the replaced note's key
+  changes nothing. A voice that does not implement `legato` is struck
+  again in place. Both additions have defaults, so every existing voice
+  works unchanged.
 - `Processor::latency_samples`, summed by chains.
 - `ParamId`: a stable 32-bit hash of a parameter's text identifier.
 
@@ -691,6 +703,57 @@ display, and no editor has been opened inside a real host yet.
   and the reverb's RT60 against impulse responses rendered offline (see
   `ReverbDecay` for how close). The `response_curves` example writes them
   all as SVG and CSV.
+
+### Instruments
+
+- `manguebyte_dsp::instruments`: voices for `Synth` that sound like the
+  instruments they are named after, built from the crate's own delay
+  lines, filters and oscillators. Each has a settings struct with presets
+  whose values are limited so that no setting can make it put out
+  anything but finite numbers, answers velocity with level and timbre,
+  takes accents, hands a sounding note it is taken from to a 4 ms fade
+  instead of cutting it, never touches the heap while it plays (in the
+  counting-allocator test) and gives the same samples whatever the block
+  size. `cargo run -p manguebyte-dsp --example instrument_wavs --
+  <directory>` renders a phrase on every preset to WAV files.
+- `PluckedString`: Karplus-Strong with the Jaffe-Smith extensions. The
+  loop's delay at the fundamental, its filters included, is solved exactly
+  and an all-pass tuned at the fundamental supplies the last fraction of a
+  sample: the worst error measured from 33 Hz to 2.6 kHz is 0.003 cents. A
+  loss filter designed per note from the decay of the fundamental and of
+  3 kHz (the decays measured are the ones set), the string's shape as it
+  is let go (a triangle for a pull, a step for a strike) with the pluck
+  position, pick noise, a velocity low-pass, stiffness all-passes, a
+  pickup comb, body resonances and a fret barrier for slaps. Presets:
+  nylon and steel guitar, finger and slap bass, whose accent is a pop.
+- `FmVoice`: four operators in six algorithms, envelopes even in decibels
+  that run faster up the keyboard, keyboard level scaling, velocity per
+  operator, feedback, and an accent on carriers and indices. Each note
+  limits its indices so that its sidebands stay under 0.45 of the sample
+  rate: a held stack of full indices with feedback at C5 has -13.5 dB of
+  inharmonic energy without the limit and -92 dB with it. Presets:
+  electric piano (tine and tone bar), tubular bell, FM bass.
+- `OrganVoice`: nine drawbars on tempered tonewheels folded back at the
+  generator's ends, key click from contacts that close at different
+  moments, percussion (second or third, fast or slow, soft or normal)
+  single-triggered across voices through an `OrganManual`, leakage, and
+  drawbars that glide. Presets jazz, gospel, full and ballad, and any
+  registration written as digits. `RotarySpeaker`, a processor: a horn and
+  a drum behind a Linkwitz-Riley crossover, each accelerating at its own
+  pace, with Doppler, tremolo and the horn dulling as it turns away, heard
+  by two microphones.
+- `AnalogKitVoice`: sixteen drums in the manner of the 808 on the General
+  MIDI keys, modelled on the published descriptions of its circuits
+  (bridged-T resonators, filtered noise, the bank of six square
+  oscillators), each with level, tune, decay, tone and snap; the closed
+  hi-hat chokes the open one through a `ChokeGroup`. `KickBassVoice`: the
+  long kick played as a bass, with an antiderivative-anti-aliased
+  saturator and slides on legato.
+- `AcidVoice`: the 303-style bass: a diode ladder (each capacitor loaded
+  by the next) solved per sample at twice the rate, a resonance whose
+  height at the cut-off is set in decibels, the accent's short decay and
+  sweep that builds over consecutive accents, and a constant-time slide
+  on legato that does not strike the envelopes again.
 
 ### Parameters
 

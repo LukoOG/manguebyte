@@ -45,7 +45,7 @@ nothing beside or above it.
 | `manguebyte-core` | `AudioBuffer`, `Sample`, smoothing, atomics, wait-free queue, real-time log | nothing |
 | `manguebyte-midi` | MIDI 1.0 and 2.0 messages, translation, MPE, MIDI files, sample-accurate event buffers | nothing |
 | `manguebyte-params` | Parameters, ranges, smoothing, saved state, descriptions as data and JSON | core |
-| `manguebyte-dsp` | `Processor`, events, transport, synth, filters, effects, dynamics with sidechain keying, convolution, FIR filtering, wavetable oscillator, FFT | core, midi |
+| `manguebyte-dsp` | `Processor`, events, transport, synth, filters, effects, dynamics with sidechain keying, convolution, FIR filtering, wavetable oscillator, FFT, instrument voices | core, midi |
 | `manguebyte-formats` | Audio files: whole or streamed, read and written, with play and record bridges | core |
 | `manguebyte-osc` | Open Sound Control, with a real-time bridge | core |
 | `manguebyte-analysis` | Loudness, true peak, level meters, spectrum, pitch | core, dsp |
