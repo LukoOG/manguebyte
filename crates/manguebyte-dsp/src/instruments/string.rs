@@ -32,7 +32,7 @@ const HIGH_HZ: f64 = 3_000.0;
 
 /// The level of a pluck at full velocity before the loop: the RMS of its
 /// lowest harmonics over a period, and the peak it may not pass.
-const EXCITATION_RMS: f64 = 0.05;
+const EXCITATION_RMS: f64 = 0.25;
 const EXCITATION_PEAK: f64 = 2.0;
 
 /// The settings of a [`PluckedString`].
@@ -74,10 +74,15 @@ pub struct StringParams {
     /// sharper than whole multiples of its fundamental, which wound bass
     /// strings and steel strings are, and nylon hardly at all.
     pub stiffness: f64,
-    /// How much of the pluck is a hard strike rather than a pick or a
-    /// finger, 0 to 1: a short pulse instead of a burst of noise, as when
-    /// the thumb slaps a bass string.
+    /// How much of the pluck is a strike rather than a pull, 0 to 1. A
+    /// string pulled aside and let go starts as a triangle, whose overtones
+    /// fall quickly; a string struck, as the thumb slaps a bass string,
+    /// starts moving from one point, and its overtones fall half as fast in
+    /// decibels. A pick does some of each.
     pub strike: f64,
+    /// How much noise the pluck carries, 0 to 1: the scrape of a pick or a
+    /// nail on the string's winding.
+    pub pluck_noise: f64,
     /// The resonances of the instrument's body, added to the string.
     pub body: [BodyMode; 4],
     /// How much of the body is heard, 0 to 1. An electric instrument has
@@ -148,9 +153,10 @@ impl StringParams {
             pluck_position: 0.16,
             pluck_brightness: 2_800.0,
             velocity_darkening: 1.8,
-            velocity_range_db: 28.0,
+            velocity_range_db: 20.0,
             stiffness: 0.02,
-            strike: 0.0,
+            strike: 0.15,
+            pluck_noise: 0.12,
             body: [
                 BodyMode::new(100.0, 10.0, 0.9),
                 BodyMode::new(205.0, 14.0, 0.7),
@@ -166,7 +172,7 @@ impl StringParams {
             accent_db: 3.0,
             accent_brightness: 0.8,
             accent_buzz: 0.0,
-            level: 0.5,
+            level: 0.9,
         }
     }
 
@@ -181,9 +187,10 @@ impl StringParams {
             pluck_position: 0.12,
             pluck_brightness: 6_500.0,
             velocity_darkening: 2.2,
-            velocity_range_db: 30.0,
+            velocity_range_db: 22.0,
             stiffness: 0.12,
-            strike: 0.1,
+            strike: 0.35,
+            pluck_noise: 0.25,
             body: [
                 BodyMode::new(115.0, 10.0, 0.7),
                 BodyMode::new(225.0, 14.0, 0.6),
@@ -199,7 +206,7 @@ impl StringParams {
             accent_db: 3.0,
             accent_brightness: 0.6,
             accent_buzz: 0.0,
-            level: 0.45,
+            level: 0.2,
         }
     }
 
@@ -210,14 +217,15 @@ impl StringParams {
         Self {
             decay: 6.0,
             decay_per_octave: 1.4,
-            high_decay: 0.07,
+            high_decay: 0.05,
             release: 0.12,
             pluck_position: 0.2,
             pluck_brightness: 1_600.0,
             velocity_darkening: 1.5,
             velocity_range_db: 24.0,
             stiffness: 0.3,
-            strike: 0.15,
+            strike: 0.3,
+            pluck_noise: 0.08,
             body: [BodyMode::NONE; 4],
             body_mix: 0.0,
             pickup_position: 0.2,
@@ -241,14 +249,15 @@ impl StringParams {
         Self {
             decay: 5.0,
             decay_per_octave: 1.4,
-            high_decay: 0.1,
+            high_decay: 0.02,
             release: 0.1,
             pluck_position: 0.28,
             pluck_brightness: 9_000.0,
-            velocity_darkening: 1.2,
+            velocity_darkening: 2.0,
             velocity_range_db: 22.0,
             stiffness: 0.35,
             strike: 0.9,
+            pluck_noise: 0.1,
             body: [BodyMode::NONE; 4],
             body_mix: 0.0,
             pickup_position: 0.1,
@@ -259,7 +268,7 @@ impl StringParams {
             accent_db: 4.0,
             accent_brightness: 0.7,
             accent_buzz: 0.35,
-            level: 0.5,
+            level: 0.55,
         }
     }
 
@@ -293,6 +302,7 @@ impl StringParams {
             ),
             stiffness: setting(self.stiffness, 0.0, 1.0, default.stiffness),
             strike: setting(self.strike, 0.0, 1.0, default.strike),
+            pluck_noise: setting(self.pluck_noise, 0.0, 1.0, default.pluck_noise),
             body: self.body.map(|mode| BodyMode {
                 frequency: setting(mode.frequency, 20.0, 10_000.0, body_default.frequency),
                 q: setting(mode.q, 0.5, 50.0, body_default.q),
@@ -632,25 +642,20 @@ impl StringTone {
         }
         let brightness = brightness.clamp(f0.min(0.45 * rate), 0.45 * rate);
 
-        // A burst of a period of noise, or a short pulse for a strike.
+        // A period of the pluck: the grain of the pick first, a period of
+        // noise through the comb of the pluck position (Jaffe and Smith): the
+        // wave leaves both ways, and the half that goes to the nut comes
+        // back inverted `p` of a period later.
         let room = self.scratch.len();
-        let burst = (period.ceil() as usize).min(room / 2);
-        let offset = ((params.pluck_position * period).round() as usize).clamp(1, burst.max(1));
-        let width = (2.0 * rate / brightness).clamp(2.0, (0.5 * period).max(2.0));
+        let burst = (period.round() as usize).clamp(1, (room / 2).max(1));
+        let offset = ((params.pluck_position * period).round() as usize).clamp(1, burst);
         let mut noise = seed;
         let scratch = &mut self.scratch;
         scratch.fill(0.0);
-        for (n, slot) in scratch.iter_mut().take(burst).enumerate() {
-            let t = n as f64;
-            let pulse = if t < width {
-                (PI * t / width).sin()
-            } else {
-                0.0
-            };
-            *slot = (1.0 - params.strike) * noise.next() + params.strike * pulse;
+        let grain = 0.5 * params.pluck_noise;
+        for slot in scratch.iter_mut().take(burst) {
+            *slot = grain * noise.next();
         }
-        // The pluck position: the wave leaves both ways, and the half that
-        // goes to the nut comes back inverted `p` of a period later.
         let combed = (burst + offset).min(room);
         for n in (0..combed).rev() {
             let earlier = if n >= offset {
@@ -659,6 +664,23 @@ impl StringTone {
                 0.0
             };
             scratch[n] -= earlier;
+        }
+        // Then the string's own shape as it is let go, over one period of
+        // the loop: plucked, a triangle with its apex at the pluck position,
+        // whose harmonics fall as sin(nπp) / n²; struck, the step its
+        // velocity makes, whose harmonics fall as sin(nπp) / n. Both are
+        // started where the triangle crosses zero, so the note starts with
+        // no step of its own but the strike's.
+        let apex = params.pluck_position;
+        for (n, slot) in scratch.iter_mut().take(burst).enumerate() {
+            let x = ((n as f64 + 0.5) / burst as f64 + 0.5 * apex).fract();
+            let triangle = if x < apex {
+                x / apex
+            } else {
+                (1.0 - x) / (1.0 - apex)
+            } - 0.5;
+            let step = if x < apex { 1.0 - apex } else { -apex };
+            *slot += (1.0 - params.strike) * triangle + 2.0 * params.strike * step;
         }
         // The pluck's own brightness and the velocity's darkening, as one
         // low-pass: the dynamic level filter of Jaffe and Smith.
@@ -686,8 +708,8 @@ impl StringTone {
         // Every pluck carries the same energy in its lowest harmonics
         // before its gain, so that velocity and accent change the level by
         // what they say and a brighter pluck adds overtones on top. A
-        // strike, whose energy is all in a moment, is held to a peak
-        // instead.
+        // pluck with so little in its lowest harmonics that this would make
+        // it huge is held to a peak instead.
         let rms = (energy / period.max(1.0)).sqrt();
         let scale = if loudest > 0.0 && rms > 0.0 {
             gain * (EXCITATION_RMS / rms).min(EXCITATION_PEAK / loudest)
@@ -819,8 +841,8 @@ impl Tone for StringTone {
 /// of the Karplus-Strong plucked-string algorithm" (same journal, 1983):
 ///
 /// ```text
-///  pluck: noise or pulse -> pick-position comb -> dynamic low-pass --+
-///                                                                     v
+///  pluck: shape at release + combed noise -> dynamic low-pass ---------------+
+///                                                                            v
 ///   +--[delay N]--[loss filter]--[stiffness all-passes]--[tuning all-pass]--(+)--+--> pickup comb
 ///   |                                                                       |  -> body resonances
 ///   +-----------------------------------------------------------------------+  -> tone low-pass
@@ -837,10 +859,14 @@ impl Tone for StringTone {
 ///   fundamental's ([`StringParams::decay`], shorter the higher the note)
 ///   and that at 3 kHz ([`StringParams::high_decay`]), so low notes ring
 ///   longer and every note darkens as it fades.
-/// - **The pluck.** A period of noise, or a short pulse for a strike, goes
-///   through a comb that removes the harmonics with a node at the pluck
-///   position and a low-pass whose cut-off falls with the velocity (the
-///   dynamic level filter): a soft note is quieter and darker.
+/// - **The pluck.** One period of the string's shape as it is let go goes
+///   into the loop: a triangle with its apex at the pluck position for a
+///   string pulled aside, the step of its velocity for one struck, or a
+///   mix ([`StringParams::strike`]), both of which lack the harmonics with
+///   a node there, and a little noise for the grain of the pick, through a
+///   comb that removes the same harmonics. A low-pass whose cut-off falls
+///   with the velocity (the dynamic level filter) follows: a soft note is
+///   quieter and darker.
 /// - **Stiffness.** All-passes make the overtones of a stiff string sharp.
 /// - **The instrument.** A pickup comb for an electric instrument, a few
 ///   resonant band-passes for an acoustic body, and a final low-pass.
@@ -1097,7 +1123,8 @@ mod tests {
             let soft = note(voice(params), on(45, 0.4), 1.0, 0.5);
             let difference = decibels(rms(&loud) / rms(&soft));
             let expected = params.velocity_range_db * 0.6;
-            let (bright, dark) = (centroid(&loud, 8_192), centroid(&soft, 8_192));
+            // Over the pluck, where its brightness is heard.
+            let (bright, dark) = (centroid(&loud, 4_096), centroid(&soft, 4_096));
             println!("{name}: {difference:.1} dB, centroid {bright:.0} Hz against {dark:.0} Hz");
             assert!(
                 (difference - expected).abs() < 2.0,
@@ -1204,6 +1231,7 @@ mod tests {
                 velocity_range_db: -5.0,
                 stiffness: 1e9,
                 strike: f64::NAN,
+                pluck_noise: f64::INFINITY,
                 body: [BodyMode::new(f64::NAN, f64::INFINITY, 1e9); 4],
                 body_mix: 1e9,
                 pickup_position: 1e9,
