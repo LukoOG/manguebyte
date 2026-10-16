@@ -98,6 +98,7 @@ use std::path::Path;
 use manguebyte_core::AudioBuffer;
 
 use crate::pcm::read_up_to;
+use crate::window::Window;
 
 mod bits;
 mod encode;
@@ -902,123 +903,9 @@ fn decode_residual(
     Ok(())
 }
 
-/// How many bytes are asked of the file at a time.
-const READ_CHUNK: usize = 32 * 1024;
-
 /// A guess at the size of a frame, used until the stream has shown how large
 /// its frames are.
 const FIRST_FRAME_GUESS: usize = 16 * 1024;
-
-/// The stretch of the file that frames are decoded from.
-///
-/// It holds the bytes not decoded yet and is refilled as they run out, so
-/// its size follows the size of a frame and not the length of the file.
-struct Window {
-    bytes: Vec<u8>,
-    /// Offset in the file of `bytes[0]`.
-    offset: u64,
-    /// Where in `bytes` the next frame starts.
-    position: usize,
-    /// Whether the file has nothing after the bytes held.
-    exhausted: bool,
-    /// Length of the file.
-    end: u64,
-    /// Whether the reader stands right after the bytes held, so that what
-    /// is read next continues them. It does not after the window has been
-    /// moved, and a read that fails may leave the reader anywhere. The
-    /// reader is put back in step when bytes are next needed.
-    in_step: bool,
-}
-
-impl Window {
-    /// An empty window at `offset` in a file of `end` bytes.
-    fn new(offset: u64, end: u64) -> Self {
-        Self {
-            bytes: Vec::new(),
-            offset,
-            position: 0,
-            exhausted: false,
-            end,
-            in_step: false,
-        }
-    }
-
-    /// Moves to `offset`. Nothing is read, and nothing is asked of the
-    /// reader, until bytes are needed; if the bytes held reach as far as
-    /// `offset`, they are kept and none may be needed at all.
-    fn move_to(&mut self, offset: u64) {
-        let within = offset
-            .checked_sub(self.offset)
-            .filter(|&within| within <= self.bytes.len() as u64);
-        match within {
-            Some(within) => self.position = within as usize,
-            None => {
-                self.bytes.clear();
-                self.offset = offset;
-                self.position = 0;
-                self.exhausted = false;
-                self.in_step = false;
-            }
-        }
-    }
-
-    /// Offset in the file of the next frame.
-    fn file_position(&self) -> u64 {
-        self.offset + self.position as u64
-    }
-
-    fn available(&self) -> &[u8] {
-        &self.bytes[self.position..]
-    }
-
-    /// Makes at least `need` bytes available, unless the file ends first.
-    fn fill<R: Read + Seek>(&mut self, reader: &mut R, need: usize) -> io::Result<()> {
-        if self.exhausted || self.bytes.len() - self.position >= need {
-            return Ok(());
-        }
-        // What has been decoded is dropped, so that the window holds about
-        // one frame however long the file is.
-        self.bytes.drain(..self.position);
-        self.offset += self.position as u64;
-        self.position = 0;
-
-        let mut have = self.bytes.len();
-        if !self.in_step {
-            reader.seek(SeekFrom::Start(self.offset + have as u64))?;
-            self.in_step = true;
-        }
-
-        // No more room is made than the file has bytes left: a damaged
-        // header may speak of frames far larger than the whole file.
-        let left = self.end.saturating_sub(self.offset + have as u64);
-        let target = need
-            .max(READ_CHUNK)
-            .min(have.saturating_add(usize::try_from(left).unwrap_or(usize::MAX)));
-        self.bytes.reserve_exact(target - have);
-        self.bytes.resize(target, 0);
-        let mut result = Ok(());
-        while have < need.min(target) {
-            match reader.read(&mut self.bytes[have..]) {
-                Ok(0) => break,
-                Ok(count) => have += count,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(error) => {
-                    // Where a failed read leaves the reader is not defined.
-                    self.in_step = false;
-                    result = Err(error);
-                    break;
-                }
-            }
-        }
-        self.bytes.truncate(have);
-        // The end was reached, or a read came back empty before it because
-        // the file is shorter than it was when it was opened.
-        let reached_end = self.offset + have as u64 >= self.end;
-        let came_up_short = result.is_ok() && have < need.min(target);
-        self.exhausted = reached_end || came_up_short;
-        result
-    }
-}
 
 /// How the frames of a stream are numbered, learned from its first frame.
 #[derive(Debug, Clone, Copy)]

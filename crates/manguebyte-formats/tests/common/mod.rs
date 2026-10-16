@@ -10,6 +10,9 @@ use std::sync::{Arc, Mutex};
 
 use manguebyte_core::AudioBuffer;
 
+pub mod lossy;
+pub mod vorbis;
+
 /// A small deterministic random number generator (xorshift64*), so that
 /// "random" block sizes and seeks are the same on every run.
 pub struct Rng(u64);
@@ -377,6 +380,142 @@ pub fn crc16(bytes: &[u8]) -> u16 {
         }
     }
     crc
+}
+
+/// The checksum of an Ogg page, bit by bit: CRC-32 with polynomial
+/// 0x04C11DB7, from zero, as RFC 3533 has it. The page's own checksum field
+/// must be zero.
+pub fn ogg_crc(bytes: &[u8]) -> u32 {
+    let mut crc = 0u32;
+    for &byte in bytes {
+        crc ^= u32::from(byte) << 24;
+        for _ in 0..8 {
+            crc = if crc & 0x8000_0000 != 0 {
+                (crc << 1) ^ 0x04C1_1DB7
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
+}
+
+/// The pages of an Ogg stream: where each starts and ends.
+pub fn ogg_pages(bytes: &[u8]) -> Vec<std::ops::Range<usize>> {
+    let mut pages = Vec::new();
+    let mut at = 0;
+    while at + 27 <= bytes.len() && &bytes[at..at + 4] == b"OggS" {
+        let segments = usize::from(bytes[at + 26]);
+        let body: usize = bytes[at + 27..at + 27 + segments]
+            .iter()
+            .map(|&lacing| usize::from(lacing))
+            .sum();
+        let end = at + 27 + segments + body;
+        pages.push(at..end);
+        at = end;
+    }
+    pages
+}
+
+/// Repeats the audio of an Ogg Vorbis stream that libvorbis wrote `times`
+/// over, as one longer stream: its headers, the pages of audio before the
+/// last `times` times, and the last page once.
+///
+/// Each page gets its number in the new stream, its checksum worked out
+/// again, and a granule position carried on from the round before. Where
+/// one round meets the next, the first packet of a round no longer starts
+/// the stream, so it finishes samples it did not finish before: a quarter
+/// of each of its block and the block before it. The granule positions are
+/// worked out from the block size of every packet, which libvorbis gives
+/// as its first mode bit, mode 0 being the short block and mode 1 the long;
+/// that this reproduces the granule positions of the stream it is given
+/// is checked.
+pub fn repeat_vorbis(bytes: &[u8], times: usize) -> Vec<u8> {
+    let pages = ogg_pages(bytes);
+    assert_eq!(pages.last().unwrap().end, bytes.len());
+    let lacing = |page: &std::ops::Range<usize>| {
+        let segments = usize::from(bytes[page.start + 26]);
+        &bytes[page.start + 27..page.start + 27 + segments]
+    };
+    let granule = |page: &std::ops::Range<usize>| {
+        i64::from_le_bytes(bytes[page.start + 6..page.start + 14].try_into().unwrap())
+    };
+
+    // The packets of the stream, each with the page it ends on and its
+    // first byte.
+    let mut packets: Vec<(usize, u8)> = Vec::new();
+    let mut first_byte = None;
+    for (index, page) in pages.iter().enumerate() {
+        let mut offset = page.start + 27 + lacing(page).len();
+        for &value in lacing(page) {
+            if first_byte.is_none() && value > 0 {
+                first_byte = Some(bytes[offset]);
+            }
+            offset += usize::from(value);
+            if value < 255 {
+                packets.push((index, first_byte.take().unwrap_or(0)));
+            }
+        }
+    }
+    let identification = &bytes[pages[0].start + 27 + lacing(&pages[0]).len()..];
+    let sizes = [
+        1i64 << (identification[28] & 0x0F),
+        1i64 << (identification[28] >> 4),
+    ];
+    let audio_start = packets[2].0 + 1;
+    let audio: Vec<(usize, i64)> = packets[3..]
+        .iter()
+        .map(|&(page, first)| (page, sizes[usize::from((first >> 1) & 1)]))
+        .collect();
+
+    // The granule position after each packet, from the start.
+    let mut after = vec![0i64; audio.len()];
+    for index in 1..audio.len() {
+        after[index] = after[index - 1] + audio[index - 1].1 / 4 + audio[index].1 / 4;
+    }
+    let last = pages.len() - 1;
+    for (index, &(page, _)) in audio.iter().enumerate() {
+        let is_last_on_page = audio.get(index + 1).is_none_or(|next| next.0 != page);
+        if is_last_on_page && page != last {
+            assert_eq!(after[index], granule(&pages[page]), "page {page}");
+        }
+    }
+    // The rounds end with the page before the last, which must end with a
+    // packet.
+    assert!(*lacing(&pages[last - 1]).last().unwrap() < 255);
+    let round_packets = audio.iter().filter(|(page, _)| *page < last).count();
+    let junction = audio[round_packets - 1].1 / 4 + audio[0].1 / 4;
+    let round = after[round_packets - 1] + junction;
+
+    let mut out = Vec::new();
+    let mut sequence = 0u32;
+    let mut put = |page: &std::ops::Range<usize>, granule: i64, out: &mut Vec<u8>| {
+        let mut page = bytes[page.clone()].to_vec();
+        // A page on which no packet ends says so with -1, whatever round.
+        if i64::from_le_bytes(page[6..14].try_into().unwrap()) != -1 {
+            page[6..14].copy_from_slice(&granule.to_le_bytes());
+        }
+        page[18..22].copy_from_slice(&sequence.to_le_bytes());
+        page[22..26].fill(0);
+        let crc = ogg_crc(&page);
+        page[22..26].copy_from_slice(&crc.to_le_bytes());
+        out.extend_from_slice(&page);
+        sequence += 1;
+    };
+    for page in &pages[..audio_start] {
+        put(page, granule(page), &mut out);
+    }
+    for time in 0..times as i64 {
+        for page in &pages[audio_start..last] {
+            put(page, granule(page) + time * round, &mut out);
+        }
+    }
+    put(
+        &pages[last],
+        granule(&pages[last]) + (times as i64 - 1) * round,
+        &mut out,
+    );
+    out
 }
 
 /// The start of a FLAC stream of 48 kHz audio with blocks of `block`

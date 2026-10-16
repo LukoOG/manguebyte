@@ -5,6 +5,7 @@
 //! | [`wav`] | 8 to 32-bit PCM, 32 and 64-bit float, RF64 | 16 and 24-bit PCM, 32-bit float; RF64 past 4 GiB when streaming |
 //! | [`aiff`] | 1 to 32-bit PCM, either byte order, 32 and 64-bit float | 16 and 24-bit PCM, 32-bit float |
 //! | [`flac`] | everything the format defines | 4 to 32 bits, 1 to 8 channels, levels 0 to 8 |
+//! | [`vorbis`] | Ogg Vorbis: every stream but those with floors of type 0, 1 to 255 channels | no |
 //!
 //! [`read_file`] and [`decode`] work out which format they have been given,
 //! so a program that only wants the audio does not need to care:
@@ -37,11 +38,14 @@
 
 pub mod aiff;
 pub mod flac;
+mod ogg;
 mod pcm;
 mod player;
 mod reader;
 mod recorder;
+pub mod vorbis;
 pub mod wav;
+mod window;
 mod writer;
 
 pub use player::{PlayerConfig, PlayerThread, PlayerWorker, StreamingPlayer};
@@ -64,6 +68,8 @@ pub enum FileFormat {
     Aiff,
     /// FLAC.
     Flac,
+    /// Vorbis in an Ogg container.
+    OggVorbis,
 }
 
 impl FileFormat {
@@ -73,10 +79,16 @@ impl FileFormat {
             b"RIFF" | b"RF64" => Some(Self::Wav),
             b"FORM" => Some(Self::Aiff),
             b"fLaC" => Some(Self::Flac),
+            b"OggS" => Some(Self::OggVorbis),
             _ => None,
         }
     }
 }
+
+/// What [`AudioFile::bits_per_sample`] and [`AudioReader::bits_per_sample`]
+/// say for a lossy format. It stores no samples, only what they are made
+/// back from, and its decoder works out each one as a 32-bit float.
+const LOSSY_BITS: u16 = 32;
 
 /// An audio file of any supported format, decoded.
 #[derive(Debug, Clone, PartialEq)]
@@ -85,7 +97,9 @@ pub struct AudioFile {
     pub buffer: AudioBuffer<f32>,
     /// Sample rate in hertz.
     pub sample_rate: u32,
-    /// Bit depth the samples were stored with.
+    /// Bit depth the samples were stored with. A lossy format stores no
+    /// samples; for it this is 32, the depth of the floating-point samples
+    /// its decoder gives.
     pub bits_per_sample: u16,
     /// The format the file was in.
     pub format: FileFormat,
@@ -111,6 +125,8 @@ pub enum FormatError {
     Aiff(aiff::AiffError),
     /// The file is a FLAC file with a problem.
     Flac(flac::FlacError),
+    /// The file is an Ogg file with a problem, or one that holds no Vorbis.
+    Vorbis(vorbis::VorbisError),
 }
 
 impl fmt::Display for FormatError {
@@ -121,6 +137,7 @@ impl fmt::Display for FormatError {
             Self::Wav(error) => write!(f, "{error}"),
             Self::Aiff(error) => write!(f, "{error}"),
             Self::Flac(error) => write!(f, "{error}"),
+            Self::Vorbis(error) => write!(f, "{error}"),
         }
     }
 }
@@ -133,6 +150,7 @@ impl std::error::Error for FormatError {
             Self::Wav(error) => Some(error),
             Self::Aiff(error) => Some(error),
             Self::Flac(error) => Some(error),
+            Self::Vorbis(error) => Some(error),
         }
     }
 }
@@ -158,6 +176,10 @@ pub fn decode(bytes: &[u8]) -> Result<AudioFile, FormatError> {
         FileFormat::Flac => {
             let file = flac::read(bytes).map_err(FormatError::Flac)?;
             (file.buffer, file.sample_rate, file.bits_per_sample)
+        }
+        FileFormat::OggVorbis => {
+            let file = vorbis::read(bytes).map_err(FormatError::Vorbis)?;
+            (file.buffer, file.sample_rate, LOSSY_BITS)
         }
     };
     Ok(AudioFile {

@@ -643,3 +643,95 @@ fn a_flac_writer_allocates_when_it_is_made_and_never_again() {
         assert_eq!(file.buffer.num_frames(), expected);
     }
 }
+
+/// Opens `bytes`, reads all of it in blocks of 4096 frames and then seeks
+/// all over it, and reports the most memory the reader took and the frames
+/// it read.
+fn read_and_seek(bytes: &[u8]) -> (u64, usize) {
+    let (frames, heap_use) = watch(|| {
+        let mut reader = AudioReader::new(Cursor::new(bytes)).unwrap();
+        let mut block = AudioBuffer::<f32>::new(reader.num_channels(), 4_096);
+        let mut frames = 0u64;
+        loop {
+            let got = reader.read(&mut block).unwrap();
+            if got == 0 {
+                break;
+            }
+            frames += got as u64;
+        }
+        let mut rng = Rng::new(3);
+        for _ in 0..50 {
+            reader.seek(rng.below(frames)).unwrap();
+            reader.read(&mut block).unwrap();
+        }
+        frames
+    });
+    (frames, heap_use.most_held)
+}
+
+#[test]
+fn a_vorbis_reader_holds_the_same_memory_however_long_the_file() {
+    let (_, stereo) = read_and_seek(include_bytes!("data/vorbis-2ch-44100-q3.ogg"));
+    println!("Vorbis, 44.1 kHz stereo at quality 3: {stereo} bytes");
+    // Files longer than the stretch of the file the reader reads at a time,
+    // which is less for a shorter file.
+    let file = include_bytes!("data/vorbis-1ch-8000-q5.ogg").as_slice();
+    let mut held = Vec::new();
+    for times in [12, 36] {
+        let bytes = common::repeat_vorbis(file, times);
+        let (frames, most) = read_and_seek(&bytes);
+        println!(
+            "Vorbis of {} bytes, {frames} frames: the reader held at most {most} bytes",
+            bytes.len()
+        );
+        held.push(most);
+    }
+    // Three times the audio, the same memory: the codebooks, a window of
+    // the file, a block per channel and the packets at hand. Which packets
+    // the seeks land on, and so how much room was made for the longest of
+    // them, is all that differs.
+    assert!(held[0].abs_diff(held[1]) < 4_096, "{held:?}");
+    assert!(held[0] < 512 * 1_024, "{} bytes", held[0]);
+}
+
+#[test]
+fn a_vorbis_header_cannot_ask_for_memory_without_bound() {
+    use common::vorbis::{Coding, headers_with_setup, setup_with_large_codebook, stream};
+
+    // 255 channels and blocks of 8192 samples, the most the format has:
+    // what that takes is set by the format, and is the most a Vorbis
+    // stream can ask for.
+    let silence = vec![vec![vec![0; 4_096]; 255]; 3];
+    let bytes = stream(
+        255,
+        &silence,
+        Coding::Residue {
+            kind: 1,
+            listed: false,
+        },
+    );
+    let held = memory_for(&bytes).unwrap();
+    println!("Vorbis of 255 channels and blocks of 8192: {held} bytes");
+    assert!(held < 14 << 20, "{held} bytes");
+
+    // A codebook of sixteen million entries in a few bytes is refused
+    // before anything is made of it.
+    let bytes = headers_with_setup(&setup_with_large_codebook(0xFF_FFFF, 24));
+    let (refused, opening) = watch(|| AudioReader::new(Cursor::new(bytes.as_slice())).is_err());
+    assert!(refused);
+    println!(
+        "Vorbis with a codebook of 2^24 entries: {} bytes",
+        opening.most_held
+    );
+    assert!(opening.most_held < 256 * 1_024);
+
+    // One of 262144 entries of 18 bits, a whole code and the most entries
+    // allowed, takes the most while the setup is read.
+    let bytes = headers_with_setup(&setup_with_large_codebook(1 << 18, 18));
+    let (_, opening) = watch(|| AudioReader::new(Cursor::new(bytes.as_slice())).is_err());
+    println!(
+        "Vorbis with a codebook of 2^18 entries: {} bytes",
+        opening.most_held
+    );
+    assert!(opening.most_held < 8 << 20);
+}

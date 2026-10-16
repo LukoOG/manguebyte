@@ -9,15 +9,16 @@ use manguebyte_core::AudioBuffer;
 use crate::aiff::{self, AiffDecoder};
 use crate::flac::FlacReader;
 use crate::pcm::{PcmReader, read_up_to};
+use crate::vorbis::VorbisReader;
 use crate::wav::{self, WavDecoder};
-use crate::{FileFormat, FormatError};
+use crate::{FileFormat, FormatError, LOSSY_BITS};
 
 /// Reads an audio file a block at a time, from any position.
 ///
 /// Where [`read_file`](crate::read_file) loads a whole file, this keeps only
 /// the block being read: a recording of an hour costs the same memory as one
-/// of a second. It reads WAV (RF64 included), AIFF, AIFF-C and FLAC, and
-/// works out which one it has been given from the contents.
+/// of a second. It reads WAV (RF64 included), AIFF, AIFF-C, FLAC and Ogg
+/// Vorbis, and works out which one it has been given from the contents.
 ///
 /// ```
 /// use std::io::Cursor;
@@ -64,6 +65,11 @@ use crate::{FileFormat, FormatError};
 /// grows with the length of the file, and none of it is sized by what a
 /// header claims beyond the limits of the format.
 ///
+/// For Ogg Vorbis it holds the codebooks of the stream, a stretch of the
+/// file of a page or two, and for each channel a block and the half block
+/// that overlaps the next; a stereo stream as libvorbis writes it takes
+/// about 300 KB. The [`vorbis`](crate::vorbis) module gives the limits.
+///
 /// # Threads
 ///
 /// Reading does I/O, so it does not belong on the audio thread. To play a
@@ -105,6 +111,7 @@ enum Inner<R> {
     Aiff(PcmReader<R, AiffDecoder>),
     // Boxed because a FLAC decoder's state is much larger than the others'.
     Flac(Box<FlacReader<R>>),
+    Vorbis(Box<VorbisReader<R>>),
 }
 
 impl AudioReader<File> {
@@ -158,6 +165,16 @@ impl<R: Read + Seek> AudioReader<R> {
                     inner: Inner::Flac(Box::new(stream)),
                 }
             }
+            FileFormat::OggVorbis => {
+                let stream = VorbisReader::new(reader).map_err(FormatError::Vorbis)?;
+                Self {
+                    format,
+                    sample_rate: stream.sample_rate(),
+                    bits_per_sample: LOSSY_BITS,
+                    is_float: true,
+                    inner: Inner::Vorbis(Box::new(stream)),
+                }
+            }
         })
     }
 
@@ -177,6 +194,7 @@ impl<R: Read + Seek> AudioReader<R> {
             Inner::Wav(stream) => stream.num_channels(),
             Inner::Aiff(stream) => stream.num_channels(),
             Inner::Flac(stream) => stream.num_channels(),
+            Inner::Vorbis(stream) => stream.num_channels(),
         }
     }
 
@@ -192,15 +210,17 @@ impl<R: Read + Seek> AudioReader<R> {
 
     /// Length of the audio in frames, when the file says.
     ///
-    /// WAV and AIFF always do. A FLAC stream written by an encoder that
-    /// could not go back to fill in its header does not; its length is then
-    /// what [`seek`](Self::seek) returns for a frame past any end, such as
+    /// WAV and AIFF always do, and Ogg Vorbis does in the granule position
+    /// of its last page. A FLAC stream written by an encoder that could not
+    /// go back to fill in its header does not; the length is then what
+    /// [`seek`](Self::seek) returns for a frame past any end, such as
     /// `u64::MAX`.
     pub fn len_frames(&self) -> Option<u64> {
         match &self.inner {
             Inner::Wav(stream) => Some(stream.frames()),
             Inner::Aiff(stream) => Some(stream.frames()),
             Inner::Flac(stream) => stream.frames(),
+            Inner::Vorbis(stream) => stream.frames(),
         }
     }
 
@@ -210,6 +230,7 @@ impl<R: Read + Seek> AudioReader<R> {
             Inner::Wav(stream) => stream.position(),
             Inner::Aiff(stream) => stream.position(),
             Inner::Flac(stream) => stream.position(),
+            Inner::Vorbis(stream) => stream.position(),
         }
     }
 
@@ -244,6 +265,7 @@ impl<R: Read + Seek> AudioReader<R> {
             Inner::Wav(stream) => Ok(stream.read(buffer)?),
             Inner::Aiff(stream) => Ok(stream.read(buffer)?),
             Inner::Flac(stream) => stream.read(buffer).map_err(FormatError::Flac),
+            Inner::Vorbis(stream) => stream.read(buffer).map_err(FormatError::Vorbis),
         }
     }
 
@@ -271,12 +293,23 @@ impl<R: Read + Seek> AudioReader<R> {
     /// halving of the file: some thirty for half an hour of digital
     /// silence, which is the case with the most frames to the byte.
     ///
+    /// In Ogg Vorbis the search is a bisection over the pages, which say
+    /// how many samples are finished by their end; from the page found,
+    /// the block sizes of the packets after it lead to the packet that
+    /// holds the frame wanted, and that packet and the one before it, whose
+    /// overlap it needs, are all that is decoded. A damaged page on the way
+    /// is stepped over.
+    ///
+    /// Whatever the format, what is read after a seek is, bit for bit, what
+    /// reading from the start gives at that place.
+    ///
     /// If this fails, the position is unchanged.
     pub fn seek(&mut self, frame: u64) -> Result<u64, FormatError> {
         match &mut self.inner {
             Inner::Wav(stream) => Ok(stream.seek(frame)),
             Inner::Aiff(stream) => Ok(stream.seek(frame)),
             Inner::Flac(stream) => stream.seek(frame).map_err(FormatError::Flac),
+            Inner::Vorbis(stream) => stream.seek(frame).map_err(FormatError::Vorbis),
         }
     }
 
@@ -286,6 +319,7 @@ impl<R: Read + Seek> AudioReader<R> {
             Inner::Wav(stream) => stream.into_inner(),
             Inner::Aiff(stream) => stream.into_inner(),
             Inner::Flac(stream) => stream.into_inner(),
+            Inner::Vorbis(stream) => stream.into_inner(),
         }
     }
 }

@@ -173,3 +173,56 @@ This encoder's levels 1 and 2 differ only in how the stereo coding of each
 block is chosen: level 2 codes all four and keeps the smallest, level 1
 picks one from an estimate. The estimate costs level 1 the 12 bytes between
 them here; the same test checks that level 2 is never the larger.
+
+## Lossy files
+
+The Ogg Vorbis and MP3 files were encoded from audio the tests make: the
+functions of `tests/common/lossy.rs` (`lossy_signal`, `lossy_tones` and
+`lossy_bursts`), at the lengths `source` there gives. The ignored test
+`write_the_sources_of_the_lossy_files` writes them as 32-bit float WAV:
+
+```bash
+MANGUEBYTE_DUMP_DIR=/some/dir cargo test -p manguebyte-formats --test lossy -- --ignored
+```
+
+- `signal-*`: three partials of a tone, a sweep from 40 Hz to three tenths
+  of the sample rate, silence, white noise, then clicks over a quiet tone;
+  each channel at its own pitch with its own noise. The lengths are odd:
+  110257 frames at 44.1 kHz, 44111 at 22.05 kHz, 57601 at 48 kHz, 12007 at
+  8 kHz, 48013 at 96 kHz, 40003 at 32 kHz, 30011 at 24 kHz, 20021 at
+  16 kHz, 16005 at 11.025 kHz and 15013 at 12 kHz.
+- `tones-*`: a chord of three steady tones per channel, one second long, or
+  100 frames for `tones-2ch-44100-short`.
+- `bursts-1ch-8000`: 150 seconds of silence broken every quarter of a
+  second by a burst of 40 ms whose pitch climbs, 1200005 frames.
+
+### Ogg Vorbis
+
+Each was encoded with FFmpeg 7.1 and its libvorbis:
+
+```bash
+ffmpeg -i signal-2ch-44100.wav -map_metadata -1 -bitexact -c:a libvorbis -q:a 3 -metadata TITLE="Test signal" -metadata ARTIST="Manguebyte" vorbis-2ch-44100-q3.ogg
+ffmpeg -i signal-1ch-22050.wav -map_metadata -1 -bitexact -c:a libvorbis -q:a 0 vorbis-1ch-22050-q0.ogg
+ffmpeg -i signal-6ch-48000.wav -map_metadata -1 -bitexact -c:a libvorbis -q:a 2 vorbis-6ch-48000-q2.ogg
+ffmpeg -i signal-1ch-8000.wav -map_metadata -1 -bitexact -c:a libvorbis -q:a 5 vorbis-1ch-8000-q5.ogg
+ffmpeg -i signal-2ch-96000.wav -map_metadata -1 -bitexact -c:a libvorbis -q:a 4 vorbis-2ch-96000-q4.ogg
+ffmpeg -i tones-2ch-48000.wav -map_metadata -1 -bitexact -c:a libvorbis -q:a 10 vorbis-tones-2ch-48000-q10.ogg
+ffmpeg -i tones-2ch-44100-short.wav -map_metadata -1 -bitexact -c:a libvorbis -q:a 4 vorbis-2ch-44100-100frames.ogg
+ffmpeg -i bursts-1ch-8000.wav -map_metadata -1 -bitexact -c:a libvorbis -q:a 0 vorbis-1ch-8000-bursts.ogg
+```
+
+FFmpeg read the six-channel WAV, which has no channel mask, as 5.1, and
+handed libvorbis its channels in the Vorbis order, so the file holds them
+as Vorbis defines 5.1. With `-bitexact`, FFmpeg writes `ffmpeg` as the
+vendor of the comment header and adds a comment `encoder=Lavc libvorbis`.
+
+What the tests found, and hold the decoder to with a margin, is in
+`tests/vorbis.rs`. Two things there are the encoder's and not the
+decoder's: libvorbis gives steady tones back up to 1 % louder than it was
+given them, and in 5.1 it codes the LFE channel only up to about 280 Hz.
+
+The files here have residues of type 1 and 2 only, and codebooks whose
+vectors come from a lattice. `tests/vorbis_streams.rs` writes streams of
+its own for the rest (residues of type 0, codebooks that list their
+vectors, floors of type 0, 255 channels), as `tests/common/vorbis.rs`
+says.

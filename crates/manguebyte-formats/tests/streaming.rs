@@ -22,6 +22,7 @@ use common::{
 use manguebyte_core::AudioBuffer;
 use manguebyte_formats::aiff::{self, AiffError, AiffFormat};
 use manguebyte_formats::flac::{self, FlacError};
+use manguebyte_formats::vorbis::VorbisError;
 use manguebyte_formats::wav::{self, WavError, WavFormat};
 use manguebyte_formats::{AudioReader, AudioWriter, FileFormat, FormatError, decode};
 
@@ -1589,17 +1590,18 @@ fn a_disk_that_fails_now_and_then_never_puts_a_flac_reader_out_of_place() {
 
 #[test]
 fn what_is_not_audio_is_refused() {
-    for bytes in [
-        &b""[..],
-        b"fLa",
-        b"ID3\x04 not audio we know",
-        b"OggS\0\x02",
-    ] {
+    for bytes in [&b""[..], b"fLa", b"ID3\x04 not audio we know", b"MThd"] {
         assert!(matches!(
             AudioReader::new(Cursor::new(bytes)),
             Err(FormatError::Unrecognized)
         ));
     }
+    // The start of an Ogg page is taken for Ogg Vorbis, as RIFF is taken
+    // for WAV: the file is then refused for what it lacks.
+    assert!(matches!(
+        AudioReader::new(Cursor::new(&b"OggS\0\x02"[..])),
+        Err(FormatError::Vorbis(VorbisError::Truncated))
+    ));
     assert!(matches!(
         AudioReader::new(Cursor::new(&b"RIFF\0\0\0\0AVI "[..])),
         Err(FormatError::Wav(WavError::NotWav))
