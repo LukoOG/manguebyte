@@ -127,6 +127,47 @@ keep their places; new drums are added after them.
 `cargo run -p manguebyte-web --example drum_wavs -- <directory>` writes
 every drum, plain and accented, and a short groove to WAV files.
 
+### Percussion keys
+
+Aratu also writes lines for Brazilian percussion and a few other hand
+instruments. Their keys are fixed here, so a sampler kit that has them
+(`sampler_kit`) is played the same way whoever made it. Where General MIDI
+or General MIDI 2 already names the instrument, its key is used; the rest
+take free keys after the guitar tap. The engine has no synthesized version
+of these yet, so a kit without a region for one of them stays silent on it.
+
+| Stroke | Name | Key | Source of the key |
+|--------|------|-----|-------------------|
+| hand clap | `clap` | 39 | General MIDI |
+| agogô, high bell | `agogo-high` | 67 | General MIDI (High Agogo) |
+| agogô, low bell | `agogo-low` | 68 | General MIDI (Low Agogo) |
+| shaker | `shaker` | 82 | General MIDI 2 (Shaker) |
+| cuíca, high | `cuica-high` | 78 | General MIDI (Mute Cuica, the high squeak) |
+| cuíca, low | `cuica-low` | 79 | General MIDI (Open Cuica, the low groan) |
+| triangle, closed | `triangle-closed` | 80 | General MIDI (Mute Triangle) |
+| triangle, open | `triangle-open` | 81 | General MIDI (Open Triangle) |
+| surdo, muted | `surdo-muted` | 86 | General MIDI 2 (Mute Surdo) |
+| surdo, open | `surdo-open` | 87 | General MIDI 2 (Open Surdo) |
+| pandeiro, thumb | `pandeiro-thumb` | 89 | Manguebyte |
+| pandeiro, fingertips | `pandeiro-fingers` | 90 | Manguebyte |
+| pandeiro, slap | `pandeiro-slap` | 91 | Manguebyte |
+| pandeiro, muted | `pandeiro-muted` | 92 | Manguebyte |
+| zabumba, open | `zabumba-open` | 93 | Manguebyte |
+| zabumba, muted | `zabumba-muted` | 94 | Manguebyte |
+| zabumba, stick (bacalhau) | `zabumba-stick` | 95 | Manguebyte |
+| tamborim, open | `tamborim-open` | 96 | Manguebyte |
+| tamborim, muted | `tamborim-muted` | 97 | Manguebyte |
+| alfaia, open | `alfaia-open` | 98 | Manguebyte |
+| alfaia, muted | `alfaia-muted` | 99 | Manguebyte |
+| gonguê, open | `gongue-open` | 100 | Manguebyte |
+| gonguê, muted | `gongue-muted` | 101 | Manguebyte |
+| cajón, bass | `cajon-bass` | 102 | Manguebyte |
+| cajón, slap | `cajon-slap` | 103 | Manguebyte |
+
+Where a player damps a ringing instrument with the hand (triangle, surdo,
+gonguê), a kit can let the muted stroke cut the open one with `group` and
+`off_by`, as it does for the hi-hats.
+
 ## Playing live
 
 **Cancel** (kind 6, `engine.cancel(part, time)`, `EventRecord::cancel`).
