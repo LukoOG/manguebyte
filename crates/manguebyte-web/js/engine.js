@@ -42,7 +42,7 @@ import { EventRing, KIND, RECORD_SIZE, encodeRecord, paramId } from './ring.js';
 export { FLAG, KIND, RECORD_SIZE, paramId } from './ring.js';
 
 /** Instrument codes, as `InstrumentKind::code` gives them. */
-export const INSTRUMENT = Object.freeze({ synth: 0, drums: 1 });
+export const INSTRUMENT = Object.freeze({ synth: 0, drums: 1, sampler: 2 });
 
 /** Chain bits, as `Chain::bits` gives them. */
 export const CHAIN = Object.freeze({ none: 0, lowpass: 1, reverb: 2, full: 3 });
@@ -78,6 +78,14 @@ export const STATUS = Object.freeze({
   [-5]: 'every part slot is taken',
   [-6]: 'no such part',
   [-7]: 'configuration out of range',
+  [-8]: 'the part is not a sampler',
+  [-9]: 'no SFZ instrument is being loaded for the part',
+  [-10]: 'the SFZ text is not valid',
+  [-11]: 'a sample could not be loaded',
+  [-12]: 'the input is too large',
+  [-13]: 'the part has instruments it has not taken yet',
+  [-100]: 'a later load of the same part took over',
+  [-101]: 'the module has no sampler parts',
 });
 
 const PROCESSOR_NAME = 'manguebyte-engine';
@@ -210,12 +218,12 @@ export class ManguebyteEngine {
     }
   }
 
-  request(type, fields = {}) {
+  request(type, fields = {}, transfer = []) {
     if (this.closed) return Promise.reject(new Error('the engine is closed'));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       this.waiting.set(id, { resolve, reject });
-      this.node.port.postMessage({ type, id, ...fields });
+      this.node.port.postMessage({ type, id, ...fields }, transfer);
     });
   }
 
@@ -333,9 +341,73 @@ export class ManguebyteEngine {
     return this.schedule({ frame: this.frameFor(time), kind: KIND.choke, part });
   }
 
-  /** Makes part `part` a 'synth' or 'drums' with `chain` ('full', 'none', bits or {lowpass, reverb}). */
+  /**
+   * Makes part `part` a 'synth', 'drums' or 'sampler' (silent until loadSfz
+   * gives it an instrument) with `chain` ('full', 'none', bits or {lowpass,
+   * reverb}).
+   */
   createPart(part, kind = 'synth', chain = 'full') {
     return this.control('createPart', { part, kind: instrumentCode(kind), chain: chainBits(chain) });
+  }
+
+  /**
+   * Loads an SFZ instrument into sampler part `part` (made with
+   * createPart(part, 'sampler')) and resolves once the part plays it: notes
+   * scheduled from then on use it, while the notes of the instrument it
+   * replaces ring on to their end. Resolves with a summary,
+   * `{ regions, samples, sample_bytes, warnings }`, `warnings` being what
+   * the parser had to say about opcodes it ignored.
+   *
+   * The text is fetched from `url`; the worklet parses it and names the
+   * sample files, which are fetched relative to `url` and handed over as
+   * they arrive; the worklet decodes them a few at a time between render
+   * quanta, so loading never interrupts the sound (see worklet.js). Options:
+   *
+   *   fetch    the function that fetches a URL (default: the global fetch)
+   *   base     what a relative `url` is resolved against (default: the
+   *            page's address)
+   *
+   * Rejects, naming the file, if a fetch fails or a file is not valid SFZ,
+   * WAV, AIFF or FLAC; the part keeps the instrument it had.
+   */
+  async loadSfz(part, url, options = {}) {
+    if (this.closed) throw new Error('the engine is closed');
+    const get = options.fetch ?? globalThis.fetch;
+    if (typeof get !== 'function') throw new TypeError('loadSfz needs fetch, or options.fetch');
+    const base = new URL(url, options.base ?? globalThis.location?.href);
+    const bytesOf = async (address) => {
+      const response = await get(address.href);
+      if (!response.ok) throw new Error(`loadSfz: could not fetch ${address.href}: ${response.status}`);
+      return response.arrayBuffer();
+    };
+    const failure = (result) => {
+      const detail = result.error ? new TextDecoder().decode(result.error) : (STATUS[result.status] ?? `status ${result.status}`);
+      return new Error(`loadSfz ${base.href}: ${detail}`);
+    };
+    const text = await bytesOf(base);
+    const token = this.nextId++;
+    const begun = await this.request('sfzBegin', { part, token, text }, [text]);
+    if (begun.status !== 0) throw failure(begun);
+    const paths = JSON.parse(new TextDecoder().decode(begun.files));
+    // Not running, the context does not call process(), which works through
+    // the files: the worklet decodes them as they come instead.
+    const now = () => this.context.state !== 'running';
+    try {
+      await Promise.all(
+        paths.map(async (path) => {
+          const bytes = await bytesOf(new URL(path, base));
+          const encoded = new TextEncoder().encode(path);
+          const fields = { type: 'sfzFile', part, token, path: encoded.buffer, bytes, now: now() };
+          if (!this.closed) this.node.port.postMessage(fields, [encoded.buffer, bytes]);
+        }),
+      );
+    } catch (error) {
+      if (!this.closed) this.node.port.postMessage({ type: 'sfzAbandon', part, token });
+      throw error;
+    }
+    const finished = await this.request('sfzFinish', { part, token, now: now() });
+    if (finished.status !== 0) throw failure(finished);
+    return JSON.parse(new TextDecoder().decode(finished.summary));
   }
 
   /** Removes a part. */

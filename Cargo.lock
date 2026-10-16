@@ -772,7 +772,9 @@ version = "0.1.0"
 dependencies = [
  "manguebyte-core",
  "manguebyte-dsp",
+ "manguebyte-formats",
  "manguebyte-params",
+ "manguebyte-sampler",
 ]
 
 [[package]]

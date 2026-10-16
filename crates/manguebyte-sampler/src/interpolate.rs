@@ -1,5 +1,7 @@
 //! Reading a sample between its frames.
 
+use std::sync::{Arc, OnceLock};
+
 use manguebyte_dsp::fir::{kaiser_beta, sinc};
 
 /// How a voice reads its sample between frames, which is what changing a
@@ -186,6 +188,13 @@ impl SincTable {
             })
             .collect();
         Self { points, phases }
+    }
+
+    /// The table every instrument reads, made the first time it is asked
+    /// for and kept until the program ends.
+    pub(crate) fn shared() -> Arc<Self> {
+        static SHARED: OnceLock<Arc<SincTable>> = OnceLock::new();
+        Arc::clone(SHARED.get_or_init(|| Arc::new(Self::new())))
     }
 
     /// The kernel at `scaled` table points from its centre, `scaled >= 0`.

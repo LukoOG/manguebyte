@@ -1,11 +1,11 @@
 # manguebyte-web
 
 A Manguebyte engine for the browser, that also builds, runs and is tested
-natively. The engine holds numbered parts; each plays the eight-voice synth
-or the drum kit through an optional low-pass filter, an optional reverb,
-then gain and pan. Events are 32-byte records that land on the exact frame
-they name, and the output is the same, bit for bit, whatever the size of
-the quanta it is rendered in.
+natively. The engine holds numbered parts; each plays the eight-voice
+synth, the drum kit or an SFZ instrument through an optional low-pass
+filter, an optional reverb, then gain and pan. Events are 32-byte records
+that land on the exact frame they name, and the output is the same, bit
+for bit, whatever the size of the quanta it is rendered in.
 
 Built for `wasm32-unknown-unknown`, the crate is a WebAssembly module with
 plain `extern "C"` exports (`src/ffi.rs`) and no imports. `js/worklet.js` is
@@ -118,6 +118,93 @@ keep their places; new drums are added after them.
 
 `cargo run -p manguebyte-web --example drum_wavs -- <directory>` writes
 every drum, plain and accented, and a short groove to WAV files.
+
+## Sampler parts
+
+A sampler part (`InstrumentKind::Sampler`, code 2, `'sampler'` in
+`js/engine.js`) plays an SFZ instrument through `manguebyte-sampler`. It
+is silent until it has one:
+
+```js
+await engine.createPart(4, 'sampler');
+const { regions, warnings } = await engine.loadSfz(4, 'samples/piano.grand/voice.sfz');
+engine.noteOn(4, 60, 0.8, context.currentTime + 0.05);
+```
+
+`loadSfz` resolves once the part plays the instrument: a note scheduled
+after that uses it, while the notes of the instrument it replaces ring on
+with that one to their end. It rejects, naming the file, if a fetch fails
+or a file is not valid SFZ, WAV, AIFF or FLAC, and the part keeps what it
+had. Natively, `SfzLoad` does the same work and `Engine::load_instrument`
+installs the result.
+
+- A sample plays at its own rate, read at the ratio of that rate to the
+  context's: a 24 kHz sample in a 48 kHz context is read at half speed,
+  so nothing is resampled while loading. The reading between frames is
+  cubic, or a windowed sinc with `sampler.interpolation` set to 1 (cleaner
+  far up the spectrum, about 3.6 times the cost; see below).
+- A sample that peaks at full scale peaks at -6 dB (`SAMPLER_LEVEL_DB`) at
+  full velocity, which follows the SFZ square law (`amp_veltrack=100`).
+  An accented note is 3 dB louder (`SAMPLER_ACCENT_DB`), and only that
+  note: an earlier one on the same key, still ringing, is not.
+- Note off releases a note as its region says; one-shots ignore it. Choke
+  stops every voice after one more frame. All notes off releases every
+  voice, but never in less than 8 ms (`PANIC_FADE_SECONDS`): a one-shot,
+  or a voice whose `ampeg_release` is shorter, fades out in a straight
+  line over 8 ms instead, so it never clicks.
+- `loop_mode=loop_continuous` with `loop_start` and `loop_end` loops
+  through the interpolator, so the seam adds nothing: a loop of whole
+  periods meets itself with no step larger than the wave's own
+  (`tests/sampler.rs` measures 0.023080 at the seams against 0.023091
+  before the first). `group` and `off_by` choke: the open hat
+  (`group=1 off_by=2`) fades out over 6 ms when the closed hat (`group=2`)
+  is struck.
+- 32 voices (`SAMPLER_VOICES`), a voice per region sounding, and a quarter
+  as many again for voices fading out after being cut short.
+
+Every opcode Aratu's instruments use is played: `sample`, `default_path`,
+`lokey`, `hikey`, `key`, `pitch_keycenter`, `loop_mode`, `loop_start`,
+`loop_end`, `ampeg_release`, `group` and `off_by`, with `<control>`,
+`<global>`, `<group>` and `<region>`; `tests/aratu.rs` loads all fifteen
+voices with no warning and plays every region when Aratu's samples are on
+the machine (set `ARATU_SAMPLES` to their folder). The text cannot
+`#include` other files.
+
+### How an instrument is loaded
+
+The page fetches `voice.sfz` and hands it to the worklet, which parses it
+at once and answers with the sample files it names; the page fetches them,
+relative to the SFZ file, and transfers each to the worklet as it arrives.
+Decoding is the costly part, so the worklet keeps the files in a queue and,
+after each render quantum, decodes up to 64 KiB of them
+(`LOAD_BYTES_PER_QUANTUM`, always at least one file). When the last is in,
+it makes the instrument and hands it to the part through the sampler's
+lock-free single-producer single-consumer loader, which the sampler reads
+when it next renders; the instrument it replaces goes back the same way
+and is freed by `mb_collect`, which the worklet calls between quanta. The
+render call never allocates, frees or waits.
+
+The alternative was to decode on the main thread, in a second instance of
+the module, and send the finished instrument over. But a worklet's
+WebAssembly memory is its own: the decoded samples would have to be copied
+into it all the same, on the audio thread, and copying 32-bit samples
+costs about as much as decoding 16-bit ones, so the audio thread would do
+the same work, twice the bytes would cross between threads, and the
+instrument would need a format of its own to cross in. Decoding in place,
+a step at a time, keeps one copy and one code path, and its price is that
+the audio thread allocates between quanta (the module's allocator is
+single-threaded and never locks) and that a load takes a quantum per file:
+Aratu's grand piano, 20 files, is in after 20 quanta, 53 ms at 48 kHz.
+While the context is not running, process() is not called, so the page
+marks its messages and the worklet decodes everything at once.
+
+In a release build, on a busy laptop in Node.js (not an AudioWorklet),
+decoding Aratu's largest file (192 KB, 96 000 frames) took 0.4 to 0.9 ms,
+parsing an SFZ file and finishing an instrument a few hundredths of a
+millisecond, against 2.7 ms for a quantum at 48 kHz. Making the first
+engine makes the sinc table every instrument shares, about 11 ms, once.
+Eight piano voices took 0.09 ms a quantum with cubic interpolation and
+0.32 ms with the sinc; 32 voices 0.21 ms with cubic.
 
 ## Licence
 

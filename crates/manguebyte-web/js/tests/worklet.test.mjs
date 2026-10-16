@@ -1,95 +1,11 @@
-// The worklet and the main-thread helper together, in Node.js.
-//
-// Node has no AudioWorklet, so this file stands in for the browser's part:
-// it defines AudioWorkletProcessor, registerProcessor, sampleRate and
-// currentFrame, connects the node and the processor with a MessageChannel,
-// and calls process() itself, one render quantum at a time, the way the
-// audio thread would.
+// The worklet and the main-thread helper together, in Node.js, with the
+// stand-ins of audio-thread.js for the browser's worklet globals.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { skipWithoutWasm, wasmBytes } from './wasm.js';
-
-const RATE = 48000;
-const QUANTUM = 128;
-
-const registered = new Map();
-let portForNextProcessor = null;
-globalThis.registerProcessor = (name, processor) => registered.set(name, processor);
-globalThis.sampleRate = RATE;
-globalThis.currentFrame = 0;
-globalThis.AudioWorkletProcessor = class {
-  constructor() {
-    this.port = portForNextProcessor;
-  }
-};
-
-const { DRUM_NOTES, DRUM_SYMBOLS, ManguebyteEngine } = await import('../engine.js');
-await import('../worklet.js');
-
-/** A stand-in for an AudioContext and its audio thread. */
-class FakeContext {
-  constructor(startFrame = 0) {
-    this.sampleRate = RATE;
-    this.frame = startFrame;
-    this.processors = [];
-    this.audioWorklet = { addModule: async () => {} };
-    const context = this;
-    this.AudioWorkletNode = class {
-      constructor(_context, name, options) {
-        const channel = new MessageChannel();
-        this.port = channel.port1;
-        portForNextProcessor = channel.port2;
-        globalThis.currentFrame = context.frame;
-        this.processor = new (registered.get(name))(options);
-        context.processors.push(this.processor);
-      }
-    };
-  }
-
-  get currentTime() {
-    return this.frame / RATE;
-  }
-
-  /** Lets messages between the threads go through. */
-  async settle() {
-    for (let i = 0; i < 3; i++) await new Promise((resolve) => setImmediate(resolve));
-  }
-
-  /**
-   * Renders `quanta` quanta and returns the left and right samples with the
-   * context frame of the first one. `skip` quanta pass without process().
-   */
-  async run(quanta, { skip = 0 } = {}) {
-    this.frame += skip * QUANTUM;
-    const start = this.frame;
-    const left = new Float32Array(quanta * QUANTUM);
-    const right = new Float32Array(quanta * QUANTUM);
-    for (let q = 0; q < quanta; q++) {
-      await this.settle();
-      globalThis.currentFrame = this.frame;
-      const output = [new Float32Array(QUANTUM), new Float32Array(QUANTUM)];
-      // A processor that returns false is finished, as in a browser.
-      this.processors = this.processors.filter((processor) => processor.process([], [output], {}));
-      left.set(output[0], q * QUANTUM);
-      right.set(output[1], q * QUANTUM);
-      this.frame += QUANTUM;
-    }
-    await this.settle();
-    return { start, left, right };
-  }
-}
-
-async function make(context, options = {}) {
-  return ManguebyteEngine.create(context, {
-    wasm: wasmBytes(),
-    AudioWorkletNode: context.AudioWorkletNode,
-    ...options,
-  });
-}
-
-const firstSound = (samples) => samples.findIndex((sample) => sample !== 0);
+import { skipWithoutWasm } from './wasm.js';
+import { DRUM_NOTES, DRUM_SYMBOLS, FakeContext, QUANTUM, RATE, firstSound, make } from './audio-thread.js';
 
 for (const shared of [true, false]) {
   const mode = shared ? 'shared' : 'message';

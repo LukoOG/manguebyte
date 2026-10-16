@@ -308,6 +308,16 @@ display, and no editor has been opened inside a real host yet.
   Node.js, plays notes with no host imports and measures their pitch
   within 0.0003 cents; `examples/sampler_bench.rs` and
   `examples/wasm_bench.rs` time it natively and in WebAssembly.
+- `InstrumentBuilder` loads an instrument one sample at a time (`paths`,
+  `load`, `finish`), for threads that may only work in short steps, and
+  gives what `Instrument::load` gives. `Instrument::covers_key` says
+  whether a key starts a region. `Sampler::release_all(shortest)` lets go
+  of every note as all-notes-off would, but never faster than `shortest`
+  (one-shots and short releases fade in a straight line instead), and
+  `Sampler::fade_out_all(seconds)` fades every voice; both leave every key
+  and pedal up. The windowed-sinc table is now made once per program and
+  shared by every instrument, instead of once per instrument (a few
+  milliseconds each); `prepare_tables` makes it ahead of time.
 
 ### Web
 
@@ -350,6 +360,24 @@ display, and no editor has been opened inside a real host yet.
   a guitar's air and top resonances with a nail's click. Each has a level
   parameter (`high_tom.level` and so on). The `drum_wavs` example writes
   every drum to a WAV file to listen to.
+- Sampler parts (`InstrumentKind::Sampler`, code 2, `'sampler'` in
+  `js/engine.js`) play SFZ instruments through `manguebyte-sampler`, with
+  velocity, accents (3 dB louder, `SAMPLER_ACCENT_DB`), note off, choke
+  and an all-notes-off that never takes less than 8 ms
+  (`PANIC_FADE_SECONDS`); samples play at their own rate at the right
+  ratio, read with cubic interpolation, or a windowed sinc through the
+  `sampler.interpolation` parameter. `SfzLoad` loads an instrument a file
+  at a time and `Engine::load_instrument` gives it to a part, whose
+  sounding notes ring on with the old one. `await engine.loadSfz(part,
+  url)` fetches the SFZ file and its samples; the worklet decodes them
+  between render quanta, a step of at most about one file at a time, so
+  loading never holds the audio up and `mb_render` never allocates. New
+  exports `mb_text_ptr`, `mb_input_ptr`, `mb_sfz_begin`,
+  `mb_sfz_files_json`, `mb_sfz_add_file`, `mb_sfz_finish`,
+  `mb_sfz_abandon` and `mb_collect` are added beside the old ones, which
+  mean what they did, so the ABI version stays 2; `js/worklet.js` looks
+  for them by name. Every instrument Aratu ships loads with no warning
+  (`tests/aratu.rs`, when Aratu's samples are on the machine).
 
 ### Hosting
 

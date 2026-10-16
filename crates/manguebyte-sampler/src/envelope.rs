@@ -107,6 +107,11 @@ impl Envelope {
         self.elapsed = 0;
     }
 
+    /// How many samples the release takes to fall 90 dB.
+    pub(crate) fn release_samples(&self) -> u64 {
+        self.release
+    }
+
     /// Whether the envelope has reached silence for good.
     pub(crate) fn is_done(&self) -> bool {
         self.stage == Stage::Done

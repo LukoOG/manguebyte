@@ -50,6 +50,8 @@ const KIT: [&str; 13] = [
     ids::GUITAR_TAP_LEVEL,
 ];
 
+const SAMPLER: [&str; 1] = [ids::SAMPLER_INTERPOLATION];
+
 #[test]
 fn the_identifiers_are_the_published_ones() {
     assert_eq!(
@@ -113,7 +115,7 @@ fn the_identifiers_are_the_published_ones() {
 #[test]
 fn the_list_of_every_identifier_is_complete() {
     let mut described = Vec::new();
-    for kind in [InstrumentKind::Synth, InstrumentKind::Drums] {
+    for kind in InstrumentKind::ALL {
         let engine = engine_with(kind, Chain::FULL);
         for id in ids_in(&engine.params_json(0).unwrap()) {
             if !described.contains(&id) {
@@ -134,7 +136,7 @@ fn the_list_of_every_identifier_is_complete() {
 fn every_part_lists_its_instrument_then_its_stages_then_gain_and_pan() {
     let mut engine = engine();
     let mut part = 0;
-    for kind in [InstrumentKind::Synth, InstrumentKind::Drums] {
+    for kind in InstrumentKind::ALL {
         for bits in 0..4 {
             let chain = Chain::from_bits(bits).unwrap();
             engine.create_part_with(part, kind, chain).unwrap();
@@ -142,6 +144,7 @@ fn every_part_lists_its_instrument_then_its_stages_then_gain_and_pan() {
             let mut expected: Vec<&str> = match kind {
                 InstrumentKind::Synth => SYNTH.to_vec(),
                 InstrumentKind::Drums => KIT.to_vec(),
+                InstrumentKind::Sampler => SAMPLER.to_vec(),
             };
             if chain.lowpass {
                 expected.extend([ids::LOWPASS_CUTOFF, ids::LOWPASS_RESONANCE]);

@@ -28,11 +28,40 @@
 // carrying the same id): createPart, removePart, setChain, paramsJson,
 // drumMapJson, paramValue, activeVoices, stats; also `records` (an
 // ArrayBuffer of records, for the message fallback) and `close`.
+//
+// Loading an SFZ instrument (engine.js loadSfz) takes sfzBegin, which
+// parses the text at once and answers with the sample files it names, then
+// one sfzFile per file and an sfzFinish, answered once the instrument has
+// been handed to its part. Decoding the files is the costly part, so the
+// files and the finish wait in a queue, and after each render quantum
+// process() works through it until it has decoded LOAD_BYTES_PER_QUANTUM
+// bytes of files (always at least one step): the audio is never held up by
+// more than about one file's decoding, and mb_render itself never
+// allocates. A message marked `now`, sent while the context is not running
+// and process() is not being called, works through the whole queue at
+// once instead. Each load carries a token; an sfzBegin for the same part
+// makes the steps of an earlier load stale, and they are dropped.
 
 import { EventRing, RECORD_SIZE } from './ring.js';
 
 /** The interface version this file was written for (`ffi::ABI_VERSION`). */
 const ABI_VERSION = 2;
+
+/**
+ * Bytes of sample files decoded after one render quantum, at most, unless
+ * one file is larger. The README gives what that costs.
+ */
+export const LOAD_BYTES_PER_QUANTUM = 64 * 1024;
+
+/** Render quanta between two calls that free the instruments parts are done with. */
+const COLLECT_EVERY = 512;
+
+// Statuses of the load steps: `ffi::status`, and two of this file's own.
+const BAD_INPUT = -12;
+/** A later load of the same part took over. */
+const STALE = -100;
+/** The module predates sampler parts. */
+const UNSUPPORTED = -101;
 
 /** The name the processor is registered under. */
 export const PROCESSOR_NAME = 'manguebyte-engine';
@@ -61,6 +90,10 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
     this.origin = null;
     this.messages = [];
     this.messageOffset = 0;
+    this.jobs = [];
+    this.loadTokens = new Map();
+    this.loadErrors = new Map();
+    this.quanta = 0;
     try {
       const module = o.wasm instanceof WebAssembly.Module ? o.wasm : new WebAssembly.Module(o.wasm);
       this.exports = new WebAssembly.Instance(module, {}).exports;
@@ -114,6 +147,75 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
     return this.heap.slice(start >>> 0, (start >>> 0) + length);
   }
 
+  /** Copies `bytes` (an ArrayBuffer or a typed array) into the input area; false if there is no room. */
+  input(bytes) {
+    const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    const start = this.exports.mb_input_ptr(this.engine, view.length) >>> 0;
+    this.refresh();
+    if (start === 0) return false;
+    this.heap.set(view, start);
+    return true;
+  }
+
+  /** A copy of the engine's text buffer. */
+  textBuffer() {
+    return this.text(this.exports.mb_text_ptr(this.engine));
+  }
+
+  /** Whether `token` is the load of `part` under way. */
+  current(part, token) {
+    return this.loadTokens.get(part) === token;
+  }
+
+  /** One step of a load: decodes a file, or finishes. */
+  step(job) {
+    const x = this.exports;
+    const { part, token } = job;
+    if (!this.current(part, token)) {
+      if (job.type === 'finish') this.reply(job.id, { status: STALE, error: null });
+      return;
+    }
+    if (job.type === 'file') {
+      if (this.loadErrors.has(part)) return;
+      const path = new Uint8Array(job.path);
+      const file = new Uint8Array(job.bytes);
+      const both = new Uint8Array(path.length + file.length);
+      both.set(path, 0);
+      both.set(file, path.length);
+      const status = this.input(both) ? x.mb_sfz_add_file(this.engine, part, path.length, file.length) : BAD_INPUT;
+      if (status !== 0) this.loadErrors.set(part, { status, error: this.textBuffer() });
+      return;
+    }
+    this.loadTokens.delete(part);
+    const failed = this.loadErrors.get(part);
+    this.loadErrors.delete(part);
+    if (failed) {
+      x.mb_sfz_abandon(this.engine, part);
+      this.reply(job.id, failed);
+      return;
+    }
+    const status = x.mb_sfz_finish(this.engine, part);
+    const text = this.textBuffer();
+    this.reply(job.id, status === 0 ? { status, summary: text } : { status, error: text });
+  }
+
+  /** Works through the queued load steps, until `budget` bytes of files are decoded (always one step). */
+  work(budget) {
+    let used = 0;
+    let steps = 0;
+    while (this.jobs.length > 0 && (steps === 0 || used < budget)) {
+      const job = this.jobs.shift();
+      if (job.type === 'file') used += job.bytes.byteLength;
+      this.step(job);
+      steps += 1;
+    }
+    this.refresh();
+  }
+
+  reply(id, result) {
+    if (id !== undefined) this.port.postMessage({ type: 'reply', id, result });
+  }
+
   receive(message) {
     if (this.closed || !message) return;
     const x = this.exports;
@@ -122,6 +224,37 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
     switch (message.type) {
       case 'records':
         this.messages.push(new Uint8Array(message.bytes));
+        return;
+      case 'sfzBegin': {
+        if (typeof x.mb_sfz_begin !== 'function') {
+          result = { status: UNSUPPORTED, error: null };
+          break;
+        }
+        this.loadTokens.set(message.part, message.token);
+        this.loadErrors.delete(message.part);
+        const status = this.input(message.text)
+          ? x.mb_sfz_begin(engine, message.part, message.text.byteLength)
+          : BAD_INPUT;
+        if (status === 0) {
+          result = { status, files: this.text(x.mb_sfz_files_json(engine, message.part)) };
+        } else {
+          this.loadTokens.delete(message.part);
+          // Only the load's own failures write a message.
+          result = { status, error: status <= -10 ? this.textBuffer() : null };
+        }
+        break;
+      }
+      case 'sfzFile':
+      case 'sfzFinish':
+        this.jobs.push({ ...message, type: message.type === 'sfzFile' ? 'file' : 'finish' });
+        if (message.now) this.work(Infinity);
+        return;
+      case 'sfzAbandon':
+        if (this.current(message.part, message.token)) {
+          this.loadTokens.delete(message.part);
+          this.loadErrors.delete(message.part);
+          x.mb_sfz_abandon(engine, message.part);
+        }
         return;
       case 'close':
         this.closed = true;
@@ -160,7 +293,7 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
         result = undefined;
     }
     if (!this.closed) this.refresh();
-    if (message.id !== undefined) this.port.postMessage({ type: 'reply', id: message.id, result });
+    this.reply(message.id, result);
   }
 
   /**
@@ -240,6 +373,12 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
       done += n;
     }
     this.frame += done;
+    if (this.jobs.length > 0) this.work(LOAD_BYTES_PER_QUANTUM);
+    this.quanta += 1;
+    if (this.quanta % COLLECT_EVERY === 0 && typeof x.mb_collect === 'function') {
+      x.mb_collect(this.engine);
+      this.refresh();
+    }
     return true;
   }
 }

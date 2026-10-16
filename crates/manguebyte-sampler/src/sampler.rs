@@ -377,6 +377,52 @@ impl<S: Sample> Sampler<S> {
         }
     }
 
+    /// Lets go of every note on every channel, as all-notes-off would with
+    /// the pedals up, but never in less than `shortest` seconds: a voice is
+    /// released as its key coming up would release it, unless that would
+    /// take less than `shortest` or would not end it at all (a one-shot, or
+    /// a region started by a release, which plays through), and then it
+    /// fades out over `shortest` in a straight line instead. A voice already
+    /// in its release, or fading faster, is left to it. Afterwards every
+    /// key and pedal is up, and no release-triggered region has started.
+    /// Real-time safe.
+    pub fn release_all(&mut self, shortest: f64) {
+        let rate = self.sample_rate;
+        for voice in &mut self.voices {
+            if !voice.player.active {
+                continue;
+            }
+            match self.instruments[voice.slot].as_deref() {
+                Some(instrument) => voice.player.let_go(instrument, shortest, rate),
+                None => voice.player.stop(),
+            }
+        }
+        self.forget_keys();
+    }
+
+    /// Fades every voice out over `seconds` in a straight line, or faster
+    /// if it was already fading faster; at 0 every voice falls silent after
+    /// one more frame. Afterwards every key and pedal is up, and no
+    /// release-triggered region has started. Real-time safe.
+    pub fn fade_out_all(&mut self, seconds: f64) {
+        let rate = self.sample_rate;
+        for voice in &mut self.voices {
+            if voice.player.active {
+                voice.player.fade_out(seconds, rate);
+            }
+        }
+        self.forget_keys();
+    }
+
+    /// Every key and pedal up, with no note held.
+    fn forget_keys(&mut self) {
+        for channel in self.channels.iter_mut() {
+            channel.sustain = false;
+            channel.keys = [KEY_UP; 128];
+        }
+        self.held.clear();
+    }
+
     /// Handles one event now. Real-time safe.
     pub fn handle_event(&mut self, event: &Event) {
         match event.kind {

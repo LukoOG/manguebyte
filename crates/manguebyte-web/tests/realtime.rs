@@ -5,6 +5,8 @@
 //! `crates/manguebyte-dsp/tests/realtime.rs`, and the test fails if
 //! anything allocates, reallocates or frees while the engine runs.
 
+mod common;
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
@@ -138,6 +140,16 @@ fn events(start: u64) -> Vec<EventRecord> {
             0.7,
         ));
     }
+    // The sampler part: notes on both of its regions, accents, releases.
+    for step in 0..24u64 {
+        let key = [57u8, 69, 72, 81, 84, 93][step as usize % 6];
+        let frame = start + 200 + step * 211;
+        records.push(EventRecord::note_on(frame, 6, key, 0.9).with_accent(step % 2 == 0));
+        records.push(EventRecord::note_off(frame + 400, 6, key));
+    }
+    records.push(EventRecord::choke(start + 4_000, 6));
+    records.push(EventRecord::note_on(start + 4_100, 6, 69, 1.0));
+    records.push(EventRecord::all_notes_off(start + 5_500, 6));
     // A held key struck again: it glides to its new level.
     records.push(EventRecord::note_on(start + 3_500, 4, 50, 0.2));
     records.push(EventRecord::note_on(start + 3_900, 4, 50, 1.0));
@@ -153,9 +165,10 @@ fn events(start: u64) -> Vec<EventRecord> {
 }
 
 /// How many parts `parts` makes.
-const PARTS: u16 = 6;
+const PARTS: u16 = 7;
 
-/// Both instruments through every chain: parts 0 to 5.
+/// Both instruments through every chain: parts 0 to 5; and part 6, a
+/// sampler with an instrument.
 fn parts(engine: &mut Engine) {
     let lowpass = Chain {
         lowpass: true,
@@ -172,9 +185,12 @@ fn parts(engine: &mut Engine) {
         (3, InstrumentKind::Drums, lowpass),
         (4, InstrumentKind::Synth, reverb),
         (5, InstrumentKind::Drums, Chain::NONE),
+        (6, InstrumentKind::Sampler, Chain::FULL),
     ] {
         engine.create_part_with(part, kind, chain).unwrap();
     }
+    let (sfz, files) = common::tone_instrument();
+    common::load_sfz(engine, 6, &sfz, &files);
 }
 
 #[test]

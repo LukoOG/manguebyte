@@ -73,8 +73,13 @@ pub mod ids {
     /// Guitar body tap level, 0 to 1.
     pub const GUITAR_TAP_LEVEL: &str = "guitar_tap.level";
 
-    /// Every identifier above: the chain's, the synth's, then the kit's.
-    pub const ALL: [&str; 30] = [
+    /// How a sampler part reads its samples between their frames: 0 cubic,
+    /// 1 sinc.
+    pub const SAMPLER_INTERPOLATION: &str = "sampler.interpolation";
+
+    /// Every identifier above: the chain's, the synth's, the kit's, then
+    /// the sampler's.
+    pub const ALL: [&str; 31] = [
         LOWPASS_CUTOFF,
         LOWPASS_RESONANCE,
         REVERB_MIX,
@@ -105,6 +110,7 @@ pub mod ids {
         FLOOR_TOM_LEVEL,
         SIDE_STICK_LEVEL,
         GUITAR_TAP_LEVEL,
+        SAMPLER_INTERPOLATION,
     ];
 }
 
@@ -143,6 +149,11 @@ pub(crate) const DRUM_LEVELS: [ParamId; 11] = [
     ParamId::from_name(ids::SIDE_STICK_LEVEL),
     ParamId::from_name(ids::GUITAR_TAP_LEVEL),
 ];
+
+pub(crate) const SAMPLER_INTERPOLATION: ParamId = ParamId::from_name(ids::SAMPLER_INTERPOLATION);
+
+/// Names of the sampler's interpolations, in the order of their values.
+pub(crate) const INTERPOLATION_NAMES: [&str; 2] = ["Cubic", "Sinc"];
 
 /// Names of the synth waveforms, in the order of their values.
 pub(crate) const WAVE_NAMES: [&str; 4] = ["Saw", "Square", "Triangle", "Sine"];
@@ -270,6 +281,34 @@ impl KitParams {
     }
 }
 
+/// A sampler part's own parameters: how it reads its samples. A sampled
+/// kit has the kit's too, for the drums its SFZ text leaves out.
+pub(crate) struct SamplerParams {
+    pub(crate) interpolation: ChoiceParam,
+    pub(crate) kit: Option<KitParams>,
+}
+
+impl SamplerParams {
+    pub(crate) fn new(kit: bool) -> Self {
+        Self {
+            interpolation: ChoiceParam::new(
+                ids::SAMPLER_INTERPOLATION,
+                "Interpolation",
+                &INTERPOLATION_NAMES,
+                0,
+            ),
+            kit: kit.then(KitParams::new),
+        }
+    }
+
+    pub(crate) fn visit<'a>(&'a self, visitor: &mut dyn FnMut(&'a dyn Param)) {
+        visitor(&self.interpolation);
+        if let Some(kit) = &self.kit {
+            kit.visit(visitor);
+        }
+    }
+}
+
 pub(crate) struct ChainParams {
     pub(crate) cutoff: FloatParam,
     pub(crate) resonance: FloatParam,
@@ -323,6 +362,7 @@ impl ChainParams {
 pub(crate) enum InstrumentParams {
     Synth(Box<SynthParams>),
     Drums(Box<KitParams>),
+    Sampler(Box<SamplerParams>),
 }
 
 /// Every parameter of one part: its instrument's, then those of the chain
@@ -339,6 +379,9 @@ impl PartParams {
             instrument: match kind {
                 InstrumentKind::Synth => InstrumentParams::Synth(Box::new(SynthParams::new())),
                 InstrumentKind::Drums => InstrumentParams::Drums(Box::new(KitParams::new())),
+                InstrumentKind::Sampler => {
+                    InstrumentParams::Sampler(Box::new(SamplerParams::new(false)))
+                }
             },
             chain: ChainParams::new(),
             stages,
@@ -351,6 +394,7 @@ impl ParamSet for PartParams {
         match &self.instrument {
             InstrumentParams::Synth(synth) => synth.visit(visitor),
             InstrumentParams::Drums(kit) => kit.visit(visitor),
+            InstrumentParams::Sampler(sampler) => sampler.visit(visitor),
         }
         if self.stages.lowpass {
             visitor(&self.chain.cutoff);

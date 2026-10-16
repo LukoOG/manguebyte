@@ -136,7 +136,11 @@ fn control_calls_report_their_status() {
     // SAFETY: `engine` is live until it is freed at the end.
     unsafe {
         assert_eq!(ffi::mb_create_part(engine, 65_536, 0, 0), status::BAD_PART);
-        assert_eq!(ffi::mb_create_part(engine, 0, 2, 0), status::BAD_INSTRUMENT);
+        let unknown = InstrumentKind::ALL.len() as u32;
+        assert_eq!(
+            ffi::mb_create_part(engine, 0, unknown, 0),
+            status::BAD_INSTRUMENT
+        );
         assert_eq!(ffi::mb_create_part(engine, 0, 0, 4), status::BAD_CHAIN);
         assert_eq!(ffi::mb_create_part(engine, 65_535, 0, 3), status::OK);
         assert_eq!(ffi::mb_create_part(engine, 0, 1, 1), status::OK);
@@ -275,10 +279,10 @@ fn hostile_calls_in_random_orders_never_break_the_engine() {
                 let part = (roll >> 8) as u32 % 9;
                 match roll % 10 {
                     0 => {
-                        let kind = (roll >> 16) as u32 % 3;
+                        let kind = (roll >> 16) as u32 % (InstrumentKind::ALL.len() as u32 + 1);
                         let chain = (roll >> 20) as u32 % 5;
                         let result = ffi::mb_create_part(engine, part, kind, chain);
-                        let expected = if kind > 1 {
+                        let expected = if kind >= InstrumentKind::ALL.len() as u32 {
                             status::BAD_INSTRUMENT
                         } else if chain > 3 {
                             status::BAD_CHAIN
@@ -436,6 +440,128 @@ fn admitting_staged_records_stops_where_a_full_queue_would_drop() {
         assert_eq!(ffi::mb_admit_staged(engine, u32::MAX), 4);
         assert_eq!(ffi::mb_pending_room(engine), 0);
         assert_eq!(stat(7), 2.0);
+        ffi::mb_engine_free(engine);
+    }
+}
+
+/// Copies `bytes` into the input area.
+///
+/// # Safety
+///
+/// `engine` is live.
+unsafe fn input(engine: *mut WebEngine, bytes: &[u8]) {
+    // SAFETY: as the caller promises.
+    let start = unsafe { ffi::mb_input_ptr(engine, bytes.len() as u32) };
+    assert!(!start.is_null());
+    // SAFETY: the input area is now `bytes.len()` long, and nothing else
+    // uses it until the next call.
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), start, bytes.len()) };
+}
+
+/// A short 16-bit WAV file of a sine at 24 kHz.
+fn small_wav() -> Vec<u8> {
+    let frames = if cfg!(miri) { 64 } else { 2_400 };
+    let mut buffer = manguebyte_core::AudioBuffer::<f32>::new(1, frames);
+    for (n, sample) in buffer.channel_mut(0).iter_mut().enumerate() {
+        *sample = (core::f64::consts::TAU * 375.0 * n as f64 / 24_000.0).sin() as f32 * 0.5;
+    }
+    let mut bytes = Vec::new();
+    manguebyte_formats::wav::write(
+        &mut bytes,
+        &buffer,
+        24_000,
+        manguebyte_formats::wav::WavFormat::Int16,
+    )
+    .unwrap();
+    bytes
+}
+
+#[test]
+fn sfz_instruments_load_through_the_exports() {
+    let null = core::ptr::null_mut();
+    let engine = ffi::mb_engine_new(48_000.0, 128, 4, 64, 16);
+    // SAFETY: `engine` is live until it is freed; every pointer read is
+    // read before the call that could move what it points at.
+    unsafe {
+        assert!(ffi::mb_text_ptr(null).is_null());
+        assert!(ffi::mb_input_ptr(null, 4).is_null());
+        assert_eq!(ffi::mb_sfz_begin(null, 0, 0), status::NO_ENGINE);
+        assert!(ffi::mb_sfz_files_json(null, 0).is_null());
+        assert_eq!(ffi::mb_sfz_add_file(null, 0, 0, 0), status::NO_ENGINE);
+        assert_eq!(ffi::mb_sfz_finish(null, 0), status::NO_ENGINE);
+        assert_eq!(ffi::mb_sfz_abandon(null, 0), status::NO_ENGINE);
+        assert_eq!(ffi::mb_collect(null), 0);
+        assert!(ffi::mb_input_ptr(engine, ffi::MAX_INPUT_BYTES + 1).is_null());
+
+        assert_eq!(ffi::mb_create_part(engine, 0, 2, 0), status::OK);
+        assert_eq!(ffi::mb_create_part(engine, 1, 0, 0), status::OK);
+        let sfz = b"<control> default_path=./\n<region> sample=a.wav key=60\n<region> sample=*sine key=61";
+        input(engine, sfz);
+        let length = sfz.len() as u32;
+        assert_eq!(ffi::mb_sfz_begin(engine, 1, length), status::NOT_A_SAMPLER);
+        assert_eq!(ffi::mb_sfz_begin(engine, 7, length), status::NO_SUCH_PART);
+        assert_eq!(ffi::mb_sfz_begin(engine, 70_000, length), status::BAD_PART);
+        assert_eq!(ffi::mb_sfz_begin(engine, 0, length + 1), status::BAD_INPUT);
+        assert!(ffi::mb_sfz_files_json(engine, 0).is_null(), "no load yet");
+
+        input(engine, b"<region> sample=a.wav\n<regio");
+        assert_eq!(ffi::mb_sfz_begin(engine, 0, 28), status::BAD_SFZ);
+        let message = text(engine, ffi::mb_text_ptr(engine));
+        assert!(message.contains("line 2"), "{message}");
+
+        // Finishing with the file missing fails, naming it, and ends the
+        // load.
+        input(engine, sfz);
+        assert_eq!(ffi::mb_sfz_begin(engine, 0, length), status::OK);
+        let files = ffi::mb_sfz_files_json(engine, 0);
+        assert_eq!(text(engine, files), "[\"a.wav\"]");
+        assert_eq!(ffi::mb_sfz_finish(engine, 0), status::BAD_SAMPLE);
+        let message = text(engine, ffi::mb_text_ptr(engine));
+        assert!(message.contains("a.wav"), "{message}");
+        assert_eq!(ffi::mb_sfz_finish(engine, 0), status::NO_LOAD);
+        assert_eq!(ffi::mb_sfz_add_file(engine, 0, 0, 0), status::NO_LOAD);
+        assert_eq!(ffi::mb_sfz_abandon(engine, 0), status::NO_LOAD);
+
+        // A file that is not audio ends the load too.
+        input(engine, sfz);
+        assert_eq!(ffi::mb_sfz_begin(engine, 0, length), status::OK);
+        input(engine, b"a.wavRIFF1234WAVEjunk");
+        assert_eq!(ffi::mb_sfz_add_file(engine, 0, 5, 17), status::BAD_INPUT);
+        assert_eq!(ffi::mb_sfz_add_file(engine, 0, 5, 16), status::BAD_SAMPLE);
+        assert_eq!(ffi::mb_sfz_finish(engine, 0), status::NO_LOAD);
+
+        // Begun twice, abandoned, begun again and loaded.
+        input(engine, sfz);
+        assert_eq!(ffi::mb_sfz_begin(engine, 0, length), status::OK);
+        assert_eq!(ffi::mb_sfz_begin(engine, 0, length), status::OK);
+        assert_eq!(ffi::mb_sfz_abandon(engine, 0), status::OK);
+        assert_eq!(ffi::mb_sfz_begin(engine, 0, length), status::OK);
+        let mut file = b"a.wav".to_vec();
+        file.extend_from_slice(&small_wav());
+        input(engine, &file);
+        let file_bytes = file.len() as u32 - 5;
+        assert_eq!(ffi::mb_sfz_add_file(engine, 0, 5, file_bytes), status::OK);
+        // Again, and a file the text does not name: both ignored.
+        assert_eq!(ffi::mb_sfz_add_file(engine, 0, 5, file_bytes), status::OK);
+        input(engine, b"b.wav");
+        assert_eq!(ffi::mb_sfz_add_file(engine, 0, 5, 0), status::OK);
+        assert_eq!(text(engine, ffi::mb_sfz_files_json(engine, 0)), "[]");
+        assert_eq!(ffi::mb_sfz_finish(engine, 0), status::OK);
+        let summary = text(engine, ffi::mb_text_ptr(engine));
+        assert!(
+            summary.starts_with("{\"regions\":2,\"samples\":2,\"sample_bytes\":"),
+            "{summary}"
+        );
+        assert!(summary.ends_with("\"warnings\":[]}"), "{summary}");
+
+        assert_eq!(push(engine, &[EventRecord::note_on(10, 0, 60, 1.0)]), 1);
+        assert_eq!(ffi::mb_render(engine, 128), 128);
+        let (left, right) = output(engine, 128);
+        assert!(left[..10].iter().all(|&sample| sample == 0.0));
+        assert!(left[11..].iter().any(|&sample| sample != 0.0));
+        assert_eq!(left, right);
+        assert_eq!(ffi::mb_active_voices(engine, 0), 1);
+        assert_eq!(ffi::mb_collect(engine), 0);
         ffi::mb_engine_free(engine);
     }
 }

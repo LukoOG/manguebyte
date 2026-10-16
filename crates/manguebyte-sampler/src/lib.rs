@@ -109,10 +109,24 @@ pub mod sfz;
 mod source;
 mod voice;
 
-pub use instrument::{DEFAULT_SEED, Instrument, InstrumentError, LoadError, MAX_SAMPLE_FRAMES};
+pub use instrument::{
+    DEFAULT_SEED, Instrument, InstrumentBuilder, InstrumentError, LoadError, MAX_SAMPLE_FRAMES,
+};
 pub use interpolate::Interpolation;
 pub use region::{EnvelopeSpec, KeyCenter, LoopMode, OffMode, Region, Trigger};
 pub use sampler::{MAX_HELD_NOTES, MAX_LOADER_CAPACITY, MAX_POLYPHONY, Sampler, SamplerLoader};
 pub use sfz::{Control, Location, Opcode, Sfz, SfzError, SfzErrorKind, Warning, WarningKind};
 pub use source::{FileSource, MemorySource, SampleSource, normalize_path};
 pub use voice::{MAX_LAYERS, SamplerVoice};
+
+/// Makes the tables every instrument shares, if they are not made yet: the
+/// windowed-sinc kernel of [`Interpolation::Sinc`], 512 phases of 64 taps
+/// and the curve they come from, about 256 KiB. They are made once per
+/// program, the first time an instrument is loaded, and kept until it ends;
+/// making them takes a few milliseconds. Call this where that does not
+/// matter, so that no load has to: `manguebyte-web` does when an engine is
+/// made, since it loads instruments on a browser's audio thread, between
+/// render quanta.
+pub fn prepare_tables() {
+    drop(interpolate::SincTable::shared());
+}

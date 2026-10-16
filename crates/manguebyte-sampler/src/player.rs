@@ -221,6 +221,30 @@ impl Player {
         }
     }
 
+    /// Let go of for good, as by an all-notes-off: released as its key
+    /// coming up would release it, pedal or not, unless that would take
+    /// less than `shortest` seconds or not end it at all (a one-shot, or a
+    /// region started by a release, which plays through); then it fades out
+    /// over `shortest` in a straight line instead. A voice already in its
+    /// release is left to it.
+    pub(crate) fn let_go(&mut self, instrument: &Instrument, shortest: f64, sample_rate: f64) {
+        let Some(zone) = instrument.zones.get(self.zone) else {
+            self.stop();
+            return;
+        };
+        if self.envelope.is_released() {
+            return;
+        }
+        let plays_through = zone.one_shot || self.hold == Hold::Released;
+        let shortest_samples = (shortest.max(0.0) * sample_rate).round();
+        if plays_through || (self.envelope.release_samples() as f64) < shortest_samples {
+            self.hold = Hold::Released;
+            self.fade_out(shortest, sample_rate);
+        } else {
+            self.release(instrument);
+        }
+    }
+
     /// Silenced by a choke group, as the region's `off_mode` says.
     pub(crate) fn off(&mut self, instrument: &Instrument, sample_rate: f64) {
         let Some(zone) = instrument.zones.get(self.zone) else {

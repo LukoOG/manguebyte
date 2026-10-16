@@ -90,6 +90,14 @@ test('the module imports nothing and exports the documented functions', { skip: 
     'mb_param_value',
     'mb_active_voices',
     'mb_stat',
+    'mb_text_ptr',
+    'mb_input_ptr',
+    'mb_sfz_begin',
+    'mb_sfz_files_json',
+    'mb_sfz_add_file',
+    'mb_sfz_finish',
+    'mb_sfz_abandon',
+    'mb_collect',
   ]) {
     assert.ok(exported.includes(name), name);
   }

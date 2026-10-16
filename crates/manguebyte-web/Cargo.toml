@@ -1,6 +1,6 @@
 [package]
 name = "manguebyte-web"
-description = "A Manguebyte engine for the browser: parts with a synth or a drum kit and a small effect chain, sample-exact 32-byte event records, a shared-memory event ring, WebAssembly exports and an AudioWorklet."
+description = "A Manguebyte engine for the browser: parts with a synth, a drum kit or an SFZ sampler and a small effect chain, sample-exact 32-byte event records, a shared-memory event ring, WebAssembly exports and an AudioWorklet."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,6 +20,11 @@ crate-type = ["cdylib", "rlib"]
 manguebyte-core.workspace = true
 manguebyte-dsp.workspace = true
 manguebyte-params.workspace = true
+manguebyte-sampler.workspace = true
+
+[dev-dependencies]
+# WAV files for the tests that load sampler parts.
+manguebyte-formats.workspace = true
 
 [lints]
 workspace = true

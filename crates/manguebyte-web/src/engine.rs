@@ -8,10 +8,12 @@ use manguebyte_params::{ParamId, ParamSet};
 
 use crate::chain::ChainDsp;
 use crate::drums::DrumKit;
+use crate::load::SfzInstrument;
 use crate::params::{InstrumentParams, PartParams};
 use crate::queue::{Admitted, Pending};
 use crate::record::{Event, EventRecord, RECORD_SIZE};
 use crate::ring::RingConsumer;
+use crate::sampled::SampledInstrument;
 use crate::synth::{SynthInstrument, choke_synth, new_synth, synth_note_on};
 
 /// The most the output ever reaches: about -0.3 dB below full scale. The
@@ -38,15 +40,27 @@ pub enum InstrumentKind {
     Synth,
     /// Code 1: the drum kit of [`DRUM_MAP`](crate::DRUM_MAP).
     Drums,
+    /// Code 2: an SFZ instrument, loaded with
+    /// [`Engine::load_instrument`]; silent until one is.
+    Sampler,
 }
 
 impl InstrumentKind {
+    /// Every kind, in the order of their codes.
+    pub const ALL: [Self; 3] = [Self::Synth, Self::Drums, Self::Sampler];
+
     /// The code the WebAssembly exports use.
     pub const fn code(self) -> u32 {
         match self {
             Self::Synth => 0,
             Self::Drums => 1,
+            Self::Sampler => 2,
         }
+    }
+
+    /// Whether parts of this kind play SFZ instruments.
+    pub const fn is_sampler(self) -> bool {
+        matches!(self, Self::Sampler)
     }
 
     /// The kind with this code, if there is one.
@@ -54,6 +68,7 @@ impl InstrumentKind {
         match code {
             0 => Some(Self::Synth),
             1 => Some(Self::Drums),
+            2 => Some(Self::Sampler),
             _ => None,
         }
     }
@@ -180,6 +195,11 @@ pub enum EngineError {
     },
     /// There is no part with this number.
     NoSuchPart(u16),
+    /// The part does not play SFZ instruments.
+    NotASampler(u16),
+    /// The part has been given more instruments than it has taken yet;
+    /// render, and try again.
+    LoaderFull(u16),
 }
 
 impl fmt::Display for EngineError {
@@ -188,6 +208,13 @@ impl fmt::Display for EngineError {
             Self::InvalidConfig(field) => write!(f, "the {field} is out of range"),
             Self::TooManyParts { max } => write!(f, "the engine already has {max} parts"),
             Self::NoSuchPart(part) => write!(f, "there is no part {part}"),
+            Self::NotASampler(part) => write!(f, "part {part} is not a sampler"),
+            Self::LoaderFull(part) => {
+                write!(
+                    f,
+                    "part {part} has not taken the instruments it was given yet"
+                )
+            }
         }
     }
 }
@@ -246,6 +273,7 @@ pub struct EngineStats {
 enum Instrument {
     Synth(Box<SynthInstrument>),
     Drums(Box<DrumKit>),
+    Sampled(Box<SampledInstrument>),
 }
 
 struct Part {
@@ -269,6 +297,9 @@ impl Part {
             InstrumentParams::Drums(kit) => {
                 Instrument::Drums(Box::new(DrumKit::new(kit, spec.sample_rate)))
             }
+            InstrumentParams::Sampler(sampler) => {
+                Instrument::Sampled(Box::new(SampledInstrument::new(sampler, spec)))
+            }
         };
         let chain = ChainDsp::new(&params.chain, spec);
         Self {
@@ -283,6 +314,7 @@ impl Part {
         match self.instrument {
             Instrument::Synth(_) => InstrumentKind::Synth,
             Instrument::Drums(_) => InstrumentKind::Drums,
+            Instrument::Sampled(_) => InstrumentKind::Sampler,
         }
     }
 
@@ -305,6 +337,7 @@ impl Part {
                 true
             }
             Instrument::Drums(kit) => kit.set_param(id, plain),
+            Instrument::Sampled(sampled) => sampled.set_param(id, plain),
         }
     }
 
@@ -345,6 +378,21 @@ impl Part {
             (Instrument::Drums(_), Event::NoteOff { .. }) => {}
             (Instrument::Drums(kit), Event::Choke { .. }) => kit.choke(),
             (Instrument::Drums(kit), Event::AllNotesOff { .. }) => kit.damp(),
+            (
+                Instrument::Sampled(sampled),
+                Event::NoteOn {
+                    channel,
+                    note,
+                    velocity,
+                    accent,
+                    ..
+                },
+            ) => sampled.note_on(channel, note, velocity, accent),
+            (Instrument::Sampled(sampled), Event::NoteOff { channel, note, .. }) => {
+                sampled.note_off(channel, note);
+            }
+            (Instrument::Sampled(sampled), Event::Choke { .. }) => sampled.choke(),
+            (Instrument::Sampled(sampled), Event::AllNotesOff { .. }) => sampled.all_notes_off(),
             (_, Event::Param { .. }) => {}
         }
         true
@@ -354,6 +402,7 @@ impl Part {
         match &self.instrument {
             Instrument::Synth(synth) => synth.active_voices(),
             Instrument::Drums(kit) => kit.active_voices(),
+            Instrument::Sampled(sampled) => sampled.active_voices(),
         }
     }
 
@@ -361,12 +410,24 @@ impl Part {
     /// Returns `false`, with `stereo` silent, if a sample was not a finite
     /// number: the part has then been silenced and cleared.
     fn render(&mut self, mono: &mut AudioBuffer<f32>, stereo: &mut AudioBuffer<f32>) -> bool {
-        match &mut self.instrument {
-            Instrument::Synth(synth) => synth.process(mono),
-            Instrument::Drums(kit) => kit.render(mono.channel_mut(0)),
-        }
-        for channel in stereo.iter_channels_mut() {
-            channel.copy_from_slice(mono.channel(0));
+        let mono_sound = match &mut self.instrument {
+            Instrument::Synth(synth) => {
+                synth.process(mono);
+                true
+            }
+            Instrument::Drums(kit) => {
+                kit.render(mono.channel_mut(0));
+                true
+            }
+            Instrument::Sampled(sampled) => {
+                sampled.render(stereo);
+                false
+            }
+        };
+        if mono_sound {
+            for channel in stereo.iter_channels_mut() {
+                channel.copy_from_slice(mono.channel(0));
+            }
         }
         self.chain.process(self.params.stages, stereo);
         let finite = stereo
@@ -385,6 +446,7 @@ impl Part {
         match &mut self.instrument {
             Instrument::Synth(synth) => choke_synth(synth),
             Instrument::Drums(kit) => kit.choke(),
+            Instrument::Sampled(sampled) => sampled.choke(),
         }
         self.chain.recover(&self.params.chain);
     }
@@ -452,13 +514,17 @@ impl fmt::Debug for Engine {
 }
 
 impl Engine {
-    /// Makes an engine with no parts. Allocates.
+    /// Makes an engine with no parts. Allocates, and the first time in a
+    /// program also makes the tables that sampler parts share
+    /// ([`manguebyte_sampler::prepare_tables`]), a few milliseconds of work
+    /// that loading an instrument then does not have to do.
     ///
     /// # Errors
     ///
     /// [`EngineError::InvalidConfig`] if a field of `config` is out of range.
     pub fn new(config: EngineConfig) -> Result<Self, EngineError> {
         config.check()?;
+        manguebyte_sampler::prepare_tables();
         let frames = config.max_quantum;
         Ok(Self {
             config,
@@ -569,6 +635,47 @@ impl Engine {
         }
         part.params.stages = chain;
         Ok(())
+    }
+
+    /// Gives a sampler part an SFZ instrument, made with
+    /// [`SfzLoad`](crate::SfzLoad). New notes play it from the next frame
+    /// rendered; the notes the part's previous instrument had started ring
+    /// on with it to their end, and it is freed by a later control call
+    /// (this one, or [`collect_instruments`](Self::collect_instruments))
+    /// once they have. Allocates, and frees instruments the part is done
+    /// with.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::NoSuchPart`] if there is no such part,
+    /// [`EngineError::NotASampler`] if it plays something else, and
+    /// [`EngineError::LoaderFull`] if it has been given several instruments
+    /// since it last rendered and has taken none of them.
+    pub fn load_instrument(
+        &mut self,
+        part: u16,
+        instrument: SfzInstrument,
+    ) -> Result<(), EngineError> {
+        let index = self.index_of(part)?;
+        let Instrument::Sampled(sampled) = &mut self.parts[index].instrument else {
+            return Err(EngineError::NotASampler(part));
+        };
+        sampled
+            .load(instrument)
+            .map_err(|_| EngineError::LoaderFull(part))
+    }
+
+    /// Frees the SFZ instruments that sampler parts have finished with:
+    /// those replaced by [`load_instrument`](Self::load_instrument) whose
+    /// last note has ended. Returns how many. Not real-time safe: it frees.
+    pub fn collect_instruments(&mut self) -> usize {
+        self.parts
+            .iter_mut()
+            .map(|part| match &mut part.instrument {
+                Instrument::Sampled(sampled) => sampled.collect(),
+                _ => 0,
+            })
+            .sum()
     }
 
     fn index_of(&self, part: u16) -> Result<usize, EngineError> {
@@ -933,10 +1040,14 @@ mod tests {
 
     #[test]
     fn instrument_codes_round_trip() {
-        for kind in [InstrumentKind::Synth, InstrumentKind::Drums] {
+        for (code, kind) in InstrumentKind::ALL.into_iter().enumerate() {
+            assert_eq!(kind.code(), code as u32);
             assert_eq!(InstrumentKind::from_code(kind.code()), Some(kind));
         }
-        assert_eq!(InstrumentKind::from_code(2), None);
+        assert_eq!(
+            InstrumentKind::from_code(InstrumentKind::ALL.len() as u32),
+            None
+        );
         for bits in 0..4 {
             assert_eq!(Chain::from_bits(bits).map(Chain::bits), Some(bits));
         }

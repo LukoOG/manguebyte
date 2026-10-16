@@ -1,10 +1,10 @@
 //! A Manguebyte engine for the browser, that builds and runs natively too.
 //!
 //! The [`Engine`] holds numbered parts. Each part plays an instrument, the
-//! polyphonic synth or the drum kit, through a small chain: a resonant
-//! low-pass filter, a reverb, then gain and pan. Parts are made and
-//! configured with control calls, outside the audio callback; sound is
-//! driven by events, each one landing on the exact frame it names.
+//! polyphonic synth, the drum kit or an SFZ instrument, through a small
+//! chain: a resonant low-pass filter, a reverb, then gain and pan. Parts
+//! are made and configured with control calls, outside the audio callback;
+//! sound is driven by events, each one landing on the exact frame it names.
 //!
 //! # Time and events
 //!
@@ -52,10 +52,11 @@
 //! # Parts and parameters
 //!
 //! A part is a `u16` the caller chooses, made with
-//! [`Engine::create_part`] as an [`InstrumentKind::Synth`] or
-//! [`InstrumentKind::Drums`] and given its stages with
-//! [`Engine::set_chain`]. Its parameters have stable text identifiers,
-//! listed in [`ids`] (`"lowpass.cutoff"`, `"reverb.mix"`, `"gain"`, `"pan"`,
+//! [`Engine::create_part`] as an [`InstrumentKind::Synth`],
+//! [`InstrumentKind::Drums`] or [`InstrumentKind::Sampler`] and given its
+//! stages with [`Engine::set_chain`]. Its parameters have stable text
+//! identifiers, listed in [`ids`] (`"lowpass.cutoff"`, `"reverb.mix"`,
+//! `"gain"`, `"pan"`,
 //! `"synth.cutoff"`, `"kick.level"` and so on); an event names one by its
 //! [`ParamId`], the FNV-1a hash of the identifier. [`Engine::params_json`]
 //! describes a part's parameters as JSON: range, default, unit, the curve a
@@ -196,11 +197,27 @@
 //! new drums are added after them. `tests/kit.rs` measures each drum, and
 //! the `drum_wavs` example writes every one to a WAV file.
 //!
+//! # Sampler parts
+//!
+//! A part made as an [`InstrumentKind::Sampler`] plays an SFZ instrument
+//! through [`manguebyte_sampler`], and is silent until it has one.
+//! [`SfzLoad`] parses the text, lists the sample files it names, decodes them
+//! one at a time and makes the instrument, and [`Engine::load_instrument`]
+//! gives it to the part, whose sounding notes ring on with the instrument
+//! they started with. Samples play at their own rate, read at the ratio of
+//! that rate to the engine's. A sample peaking at full scale peaks at
+//! [`SAMPLER_LEVEL_DB`] (-6 dB) at full velocity; an accent adds
+//! [`SAMPLER_ACCENT_DB`] (3 dB); choke stops every voice after one more
+//! frame, and all notes off releases every voice in no less than
+//! [`PANIC_FADE_SECONDS`] (8 ms). In a browser, `js/worklet.js` decodes the
+//! files between render quanta, a file or so at a time, so that loading
+//! never holds up the sound; the crate's README explains that choice.
+//!
 //! # Real time
 //!
 //! [`Engine::push`], [`Engine::push_bytes`], [`Engine::admit_bytes`],
 //! [`Engine::drain`] and [`Engine::render`] never allocate, lock or panic,
-//! and rendering holds
+//! sampler parts included, and rendering holds
 //! [`NoDenormals`](manguebyte_core::NoDenormals) (which does nothing in
 //! WebAssembly, where the reverb is put to sleep in silence instead).
 //! `tests/realtime.rs` checks the first part of that with a counting
@@ -213,10 +230,12 @@ mod drums;
 mod engine;
 #[allow(unsafe_code)]
 pub mod ffi;
+mod load;
 mod params;
 mod queue;
 pub mod record;
 pub mod ring;
+mod sampled;
 mod synth;
 
 pub use drums::{
@@ -227,10 +246,13 @@ pub use engine::{
     Chain, Engine, EngineConfig, EngineError, EngineStats, InstrumentKind, LIMITER_HOLD_SECONDS,
     LIMITER_RELEASE_SECONDS, OUTPUT_CEILING, Pushed,
 };
+pub use load::{SfzInstrument, SfzLoad};
 pub use manguebyte_params::ParamId;
+pub use manguebyte_sampler;
 pub use params::ids;
 pub use record::{Event, EventRecord, RECORD_SIZE, RecordKind};
 pub use ring::{RingConsumer, RingProducer, event_ring, event_ring_starting_at, ring_bytes};
+pub use sampled::{PANIC_FADE_SECONDS, SAMPLER_ACCENT_DB, SAMPLER_LEVEL_DB, SAMPLER_VOICES};
 pub use synth::{
     RETRIGGER_GLIDE_SECONDS, STEAL_FADE_SECONDS, SYNTH_ACCENT_ATTACK, SYNTH_ACCENT_DB,
     SYNTH_ACCENT_OCTAVES, SYNTH_VOICES,

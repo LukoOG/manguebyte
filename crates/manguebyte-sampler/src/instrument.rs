@@ -274,7 +274,8 @@ pub struct Instrument {
     random: AtomicU64,
     seed: u64,
     pub(crate) note_shift: i32,
-    pub(crate) sinc: SincTable,
+    /// Shared by every instrument: see [`prepare_tables`](crate::prepare_tables).
+    pub(crate) sinc: Arc<SincTable>,
     warnings: Vec<Warning>,
 }
 
@@ -328,23 +329,35 @@ impl Instrument {
     pub fn load(sfz: &Sfz, source: &mut dyn SampleSource) -> Result<Self, LoadError> {
         let mut samples: Vec<SampleData> = Vec::new();
         let mut by_path: HashMap<Arc<str>, Option<usize>> = HashMap::new();
-        let mut zones = Vec::with_capacity(sfz.regions.len());
         for region in &sfz.regions {
-            let index = match by_path.get(&*region.sample) {
-                Some(&index) => index,
-                None => {
-                    let loaded = load_sample(&region.sample, &region.location, source)?;
-                    let index = loaded.map(|data| {
-                        samples.push(data);
-                        samples.len() - 1
-                    });
-                    by_path.insert(Arc::clone(&region.sample), index);
-                    index
-                }
-            };
-            let generated = region.sample.starts_with('*');
-            zones.push(zone(region, index.map(|i| (i, &samples[i])), generated));
+            if !by_path.contains_key(&*region.sample) {
+                let loaded = load_sample(&region.sample, &region.location, source)?;
+                let index = loaded.map(|data| {
+                    samples.push(data);
+                    samples.len() - 1
+                });
+                by_path.insert(Arc::clone(&region.sample), index);
+            }
         }
+        Ok(Self::assemble(sfz, &by_path, samples))
+    }
+
+    /// Resolves every region of `sfz` against its sample, whose place in
+    /// `samples` `by_path` gives (`None` for one with no frames).
+    fn assemble(
+        sfz: &Sfz,
+        by_path: &HashMap<Arc<str>, Option<usize>>,
+        samples: Vec<SampleData>,
+    ) -> Self {
+        let zones: Vec<Zone> = sfz
+            .regions
+            .iter()
+            .map(|region| {
+                let index = by_path.get(&*region.sample).copied().flatten();
+                let generated = region.sample.starts_with('*');
+                zone(region, index.map(|i| (i, &samples[i])), generated)
+            })
+            .collect();
         let mut attack_by_key = vec![Vec::new(); 128];
         let mut release_by_key = vec![Vec::new(); 128];
         for (index, zone) in zones.iter().enumerate() {
@@ -357,7 +370,7 @@ impl Instrument {
             }
         }
         let sequence = zones.iter().map(|_| AtomicU32::new(0)).collect();
-        Ok(Self {
+        Self {
             zones,
             samples,
             attack_by_key,
@@ -366,9 +379,37 @@ impl Instrument {
             random: AtomicU64::new(DEFAULT_SEED),
             seed: DEFAULT_SEED,
             note_shift: sfz.control.note_shift(),
-            sinc: SincTable::new(),
+            sinc: SincTable::shared(),
             warnings: sfz.warnings.clone(),
-        })
+        }
+    }
+
+    /// Whether a note on `key` starts a region when its key goes down: a
+    /// region with an `attack`, `first` or `legato` trigger whose keys,
+    /// after `note_offset` and `octave_offset`, take it in, whatever its
+    /// velocities, channels, random range and round robin. A region that
+    /// never sounds (`*silence`, `end=-1`) counts, since it is there on
+    /// purpose. Real-time safe.
+    ///
+    /// ```
+    /// use manguebyte_sampler::{Instrument, MemorySource};
+    ///
+    /// let instrument = Instrument::from_sfz(
+    ///     "<region> sample=*sine key=36
+    ///      <region> sample=*silence key=38 trigger=release",
+    ///     &mut MemorySource::new(),
+    /// )?;
+    /// assert!(instrument.covers_key(36));
+    /// assert!(!instrument.covers_key(38), "only when it comes up");
+    /// assert!(!instrument.covers_key(88));
+    /// # Ok::<(), manguebyte_sampler::InstrumentError>(())
+    /// ```
+    pub fn covers_key(&self, key: u8) -> bool {
+        let key = i32::from(key.min(127)) + self.note_shift;
+        usize::try_from(key)
+            .ok()
+            .and_then(|key| self.attack_by_key.get(key))
+            .is_some_and(|zones| !zones.is_empty())
     }
 
     /// How many regions it has.
@@ -444,6 +485,148 @@ impl Instrument {
             Ordering::Relaxed,
         );
         count % zone.seq_length.max(1) == zone.seq_position.saturating_sub(1)
+    }
+}
+
+/// An [`Instrument`] loaded one sample at a time, for a thread that may
+/// only work in short steps, such as a browser's audio thread between two
+/// render quanta. [`Instrument::load`] does the same work in one go and
+/// gives the same instrument.
+///
+/// [`paths`](Self::paths) lists the files the instrument needs, each once;
+/// [`load`](Self::load) reads and decodes one of them; and
+/// [`finish`](Self::finish) loads whatever is still missing and resolves the
+/// regions against their samples.
+///
+/// ```
+/// use manguebyte_sampler::{InstrumentBuilder, MemorySource, Sfz};
+/// # use manguebyte_core::AudioBuffer;
+/// # use manguebyte_formats::wav::{self, WavFormat};
+/// # let mut wav_bytes = Vec::new();
+/// # wav::write(&mut wav_bytes, &AudioBuffer::<f32>::new(1, 64), 24_000, WavFormat::Int16).unwrap();
+///
+/// let sfz = Sfz::parse(
+///     "<control> default_path=kit/
+///      <region> sample=kick.wav key=36
+///      <region> sample=kick.wav key=35
+///      <region> sample=*sine key=60",
+/// )?;
+/// let mut builder = InstrumentBuilder::new(sfz);
+/// assert_eq!(builder.paths().collect::<Vec<_>>(), ["kit/kick.wav"]);
+///
+/// // One step: this file, now.
+/// let mut source = MemorySource::new().with("kit/kick.wav", wav_bytes);
+/// assert!(builder.load("kit/kick.wav", &mut source)?);
+/// assert_eq!(builder.missing().count(), 0);
+///
+/// let instrument = builder.finish(&mut source)?;
+/// assert_eq!(instrument.num_samples(), 2, "the file and the sine");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub struct InstrumentBuilder {
+    sfz: Sfz,
+    /// Every different sample the regions name, in the order they first
+    /// name it, with the region that does.
+    order: Vec<(Arc<str>, Location)>,
+    /// The samples loaded so far, by name: their place in `samples`, or
+    /// `None` for one with no frames.
+    by_path: HashMap<Arc<str>, Option<usize>>,
+    samples: Vec<SampleData>,
+}
+
+impl fmt::Debug for InstrumentBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InstrumentBuilder")
+            .field("regions", &self.sfz.regions.len())
+            .field("samples", &self.order.len())
+            .field("loaded", &self.by_path.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl InstrumentBuilder {
+    /// A builder for the parsed instrument `sfz`, with no sample loaded.
+    pub fn new(sfz: Sfz) -> Self {
+        let mut order: Vec<(Arc<str>, Location)> = Vec::new();
+        let mut seen: HashMap<Arc<str>, ()> = HashMap::new();
+        for region in &sfz.regions {
+            if seen.insert(Arc::clone(&region.sample), ()).is_none() {
+                order.push((Arc::clone(&region.sample), region.location.clone()));
+            }
+        }
+        Self {
+            sfz,
+            order,
+            by_path: HashMap::new(),
+            samples: Vec::new(),
+        }
+    }
+
+    /// The parsed instrument.
+    pub fn sfz(&self) -> &Sfz {
+        &self.sfz
+    }
+
+    /// The files the instrument reads, each once, in the order its regions
+    /// first name them, as they are handed to a [`SampleSource`]: after
+    /// `default_path`, normalised by [`normalize_path`](crate::normalize_path).
+    /// Generators such as `*sine` are not files and are left out.
+    pub fn paths(&self) -> impl Iterator<Item = &str> {
+        self.order
+            .iter()
+            .map(|(path, _)| &**path)
+            .filter(|path| !path.starts_with('*'))
+    }
+
+    /// The files of [`paths`](Self::paths) not loaded yet.
+    pub fn missing(&self) -> impl Iterator<Item = &str> {
+        self.paths()
+            .filter(|path| !self.by_path.contains_key(*path))
+    }
+
+    /// Reads the file at `path` from `source` and decodes it, if the
+    /// instrument needs it and it is not loaded yet. Returns whether it
+    /// did.
+    ///
+    /// # Errors
+    ///
+    /// [`LoadError`] if the source cannot supply the file or it is not
+    /// audio this framework decodes.
+    pub fn load(&mut self, path: &str, source: &mut dyn SampleSource) -> Result<bool, LoadError> {
+        if path.starts_with('*') || self.by_path.contains_key(path) {
+            return Ok(false);
+        }
+        let Some(index) = self.order.iter().position(|(name, _)| &**name == path) else {
+            return Ok(false);
+        };
+        self.load_index(index, source)?;
+        Ok(true)
+    }
+
+    fn load_index(&mut self, index: usize, source: &mut dyn SampleSource) -> Result<(), LoadError> {
+        let (path, location) = &self.order[index];
+        let loaded = load_sample(path, location, source)?;
+        let place = loaded.map(|data| {
+            self.samples.push(data);
+            self.samples.len() - 1
+        });
+        self.by_path.insert(Arc::clone(path), place);
+        Ok(())
+    }
+
+    /// Loads every sample still missing (generators included) from
+    /// `source`, and makes the instrument.
+    ///
+    /// # Errors
+    ///
+    /// [`LoadError`] for the first sample that cannot be loaded.
+    pub fn finish(mut self, source: &mut dyn SampleSource) -> Result<Instrument, LoadError> {
+        for index in 0..self.order.len() {
+            if !self.by_path.contains_key(&self.order[index].0) {
+                self.load_index(index, source)?;
+            }
+        }
+        Ok(Instrument::assemble(&self.sfz, &self.by_path, self.samples))
     }
 }
 
