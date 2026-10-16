@@ -22,8 +22,9 @@
 //! Both run the same code for everything but the system calls: damage
 //! merging ([`Damage`]), the back buffer and its pixel conversion, the
 //! conversion from device to logical pixels, pointer capture and click
-//! counting, timers, and the queue that keeps the handler from being
-//! re-entered.
+//! counting, timers, the text caret, and the queue that keeps the handler
+//! from being re-entered. Each has a [`Clipboard`]: the system's on Win32,
+//! one of the window's own when headless.
 //!
 //! # Units
 //!
@@ -87,6 +88,7 @@
 
 #![deny(unsafe_code)]
 
+mod clipboard;
 mod convert;
 mod damage;
 mod dispatch;
@@ -100,6 +102,7 @@ mod window;
 #[allow(unsafe_code)]
 pub mod win32;
 
+pub use clipboard::{Clipboard, MAX_CLIPBOARD_UNITS};
 pub use damage::{Damage, MAX_RECTS};
 pub use dispatch::{MAX_QUEUED, WindowHandler};
 pub use event::{

@@ -52,17 +52,22 @@ use windows_sys::Win32::System::Threading::{
     GR_GDIOBJECTS, GR_USEROBJECTS, GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId,
     GetGuiResources,
 };
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetCapture, GetFocus, SetFocus};
+use windows_sys::Win32::UI::Input::Ime::{
+    COMPOSITIONFORM, ImmGetCompositionWindow, ImmGetContext, ImmReleaseContext,
+};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetCapture, GetFocus, GetKeyboardState, SetFocus, SetKeyboardState,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GW_CHILD, GW_HWNDNEXT,
-    GetClassInfoExW, GetClassNameW, GetClientRect, GetDesktopWindow, GetParent, GetWindow,
-    GetWindowThreadProcessId, IsWindow, MSG, PM_REMOVE, PeekMessageW, SW_SHOWNOACTIVATE,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SendMessageW, SetWindowPos, ShowWindow,
-    TranslateMessage, WM_CAPTURECHANGED, WM_CHAR, WM_DPICHANGED_AFTERPARENT, WM_GETDLGCODE,
-    WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WS_CLIPCHILDREN, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GUITHREADINFO, GW_CHILD,
+    GW_HWNDNEXT, GetClassInfoExW, GetClassNameW, GetClientRect, GetDesktopWindow, GetGUIThreadInfo,
+    GetParent, GetWindow, GetWindowThreadProcessId, IsWindow, MSG, PM_REMOVE, PeekMessageW,
+    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SendMessageW, SetWindowPos,
+    ShowWindow, TranslateMessage, WM_CAPTURECHANGED, WM_CHAR, WM_DPICHANGED_AFTERPARENT,
+    WM_GETDLGCODE, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SETFOCUS, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WS_CLIPCHILDREN,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 #[cfg(not(target_pointer_width = "64"))]
@@ -738,6 +743,93 @@ pub fn focus(handle: usize) -> bool {
         SetFocus(hwnd);
     }
     true
+}
+
+/// The system caret of this thread: the window it belongs to and its
+/// rectangle in that window's client coordinates, or `None` when this
+/// thread has none (`GetGUIThreadInfo`).
+pub fn system_caret() -> Option<(usize, IRect)> {
+    let mut info = GUITHREADINFO {
+        cbSize: mem::size_of::<GUITHREADINFO>() as u32,
+        ..GUITHREADINFO::default()
+    };
+    // SAFETY: this thread's id, and `info` a valid place with its size set.
+    if unsafe { GetGUIThreadInfo(GetCurrentThreadId(), &mut info) } == 0 {
+        return None;
+    }
+    if info.hwndCaret.is_null() {
+        return None;
+    }
+    let r = info.rcCaret;
+    Some((
+        info.hwndCaret.addr(),
+        IRect::from_edges(r.left, r.top, r.right, r.bottom),
+    ))
+}
+
+/// Where the input method of the window `handle` is asked to show its
+/// composition (`ImmGetCompositionWindow`): the style and the point, or
+/// `None` when the window has no input context or is not one of ours.
+pub fn composition_window(handle: usize) -> Option<(u32, PhysicalPoint)> {
+    let hwnd = ours(handle)?;
+    // SAFETY: the input context of our own window, released below.
+    let context = unsafe { ImmGetContext(hwnd) };
+    if context.is_null() {
+        return None;
+    }
+    let mut form = COMPOSITIONFORM::default();
+    // SAFETY: `form` is a valid place; the context is released once.
+    let ok = unsafe {
+        let ok = ImmGetCompositionWindow(context, &mut form);
+        ImmReleaseContext(hwnd, context);
+        ok
+    };
+    (ok != 0).then(|| {
+        (
+            form.dwStyle,
+            PhysicalPoint::new(form.ptCurrentPos.x, form.ptCurrentPos.y),
+        )
+    })
+}
+
+/// Keys held down in this thread's keyboard state, as `GetKeyState` reads
+/// it, until dropped: how a test holds Control or Shift for the messages
+/// it sends, without touching the real keyboard or any other thread
+/// (`SetKeyboardState`).
+#[derive(Debug)]
+pub struct HeldKeys {
+    before: [u8; 256],
+}
+
+impl HeldKeys {
+    /// Holds the virtual keys `vks` (such as `VK_CONTROL`, 0x11) down.
+    pub fn hold(vks: &[u16]) -> HeldKeys {
+        let mut state = [0u8; 256];
+        // SAFETY: `state` has the 256 bytes the call fills.
+        unsafe {
+            GetKeyboardState(state.as_mut_ptr());
+        }
+        let before = state;
+        for &vk in vks {
+            if let Some(key) = state.get_mut(usize::from(vk)) {
+                *key |= 0x80;
+            }
+        }
+        // SAFETY: 256 bytes of key state, for this thread only.
+        unsafe {
+            SetKeyboardState(state.as_ptr());
+        }
+        HeldKeys { before }
+    }
+}
+
+impl Drop for HeldKeys {
+    fn drop(&mut self) {
+        // SAFETY: the 256 bytes of key state this thread had before.
+        unsafe {
+            SetKeyboardState(self.before.as_ptr());
+        }
+    }
 }
 
 /// Whether the system says `handle` has the keyboard.

@@ -903,3 +903,63 @@ fn fuzzed_orders_and_values_keep_every_promise() {
         }
     }
 }
+
+#[test]
+fn the_clipboard_is_the_windows_and_reads_a_bounded_amount() {
+    let (window, headless, _log) = logged(WindowOptions::new(size(10, 10)));
+    assert_eq!(window.read_clipboard_text(), None);
+    window.write_clipboard_text("é 👍").expect("open");
+    assert_eq!(headless.clipboard_text().as_deref(), Some("é 👍"));
+    let clipboard = window.clipboard();
+    assert_eq!(clipboard.read_text().as_deref(), Some("é 👍"));
+    // Another program's huge text is read only up to the limit.
+    let huge = "x".repeat(manguebyte_window::MAX_CLIPBOARD_UNITS * 3);
+    headless.set_clipboard_text(Some(&huge));
+    assert_eq!(
+        clipboard.read_text().map(|text| text.len()),
+        Some(manguebyte_window::MAX_CLIPBOARD_UNITS)
+    );
+    headless.set_clipboard_text(None);
+    assert_eq!(clipboard.read_text(), None);
+    // Once the window is closed or gone, nothing.
+    headless.destroy_parent();
+    assert_eq!(clipboard.write_text("x"), Err(WindowError::Closed));
+    drop(window);
+    assert_eq!(clipboard.read_text(), None);
+    assert_eq!(clipboard.write_text("x"), Err(WindowError::Closed));
+}
+
+#[test]
+fn the_text_caret_is_shown_to_the_system_only_with_the_keyboard() {
+    let (window, headless, log) = logged(WindowOptions::new(size(100, 40)));
+    let caret = IRect::new(12, 8, 2, 20);
+    // Said before the window has the keyboard: kept, not shown.
+    window.set_text_caret(Some(caret));
+    assert_eq!(window.text_caret(), Some(caret));
+    assert_eq!(headless.system_caret(), None);
+    // Asked for, the keyboard comes, and the caret with it.
+    window.take_focus();
+    assert_eq!(headless.focus_requests(), 1);
+    assert!(take(&log).contains(&Event::Focus(true)));
+    assert_eq!(headless.system_caret(), Some(caret));
+    // Asking again while it has it does nothing.
+    window.cx().take_focus();
+    assert_eq!(headless.focus_requests(), 1);
+    // It moves with the text.
+    let moved = IRect::new(30, 8, 2, 20);
+    window.set_text_caret(Some(moved));
+    assert_eq!(headless.system_caret(), Some(moved));
+    // It goes with the keyboard, and comes back with it.
+    headless.input(RawInput::Focus(false));
+    assert_eq!(headless.system_caret(), None);
+    assert_eq!(window.text_caret(), Some(moved));
+    headless.input(RawInput::Focus(true));
+    assert_eq!(headless.system_caret(), Some(moved));
+    window.set_text_caret(None);
+    assert_eq!(headless.system_caret(), None);
+    // A closed window has none.
+    window.set_text_caret(Some(caret));
+    headless.destroy_parent();
+    assert_eq!(window.text_caret(), None);
+    assert_eq!(headless.system_caret(), None);
+}

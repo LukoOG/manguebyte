@@ -191,6 +191,60 @@ macro_rules! window_methods {
         pub fn wants_all_keys(&self) -> bool {
             self.inner().wants_all_keys.get()
         }
+
+        /// Asks the system for the keyboard, as a press does when the
+        /// window takes the keyboard on a click: an editor that starts
+        /// taking text when the host had the keyboard (a key the host
+        /// passed on through the plugin interface) takes it, so that the
+        /// keys that follow come to the window. The handler hears
+        /// [`Event::Focus`] once the system has given it, after this
+        /// returns. Nothing happens if the window has the keyboard
+        /// already, or is closed.
+        pub fn take_focus(&self) {
+            let inner = self.inner();
+            if inner.is_open() && !inner.focused.get() {
+                inner.platform.take_focus(inner);
+            }
+        }
+
+        /// Says where the text caret is, in device pixels, while text is
+        /// being typed into the window, or that none is (`None`).
+        ///
+        /// The window draws nothing for it: the interface draws its own
+        /// caret. On Win32 the window keeps a hidden system caret there
+        /// while it has the keyboard, which screen magnifiers and
+        /// screen readers follow, and asks input methods to show their
+        /// composition at the caret and their candidates below it. A
+        /// caret given while the window does not have the keyboard is
+        /// shown to the system once it does.
+        pub fn set_text_caret(&self, caret: Option<IRect>) {
+            self.inner().set_text_caret(caret);
+        }
+
+        /// Where the text caret was last said to be.
+        pub fn text_caret(&self) -> Option<IRect> {
+            self.inner().caret.get()
+        }
+
+        /// The text on the clipboard, as [`Clipboard::read_text`]
+        /// gives it.
+        ///
+        /// [`Clipboard::read_text`]: crate::Clipboard::read_text
+        pub fn read_clipboard_text(&self) -> Option<String> {
+            self.inner().read_clipboard().ok().flatten()
+        }
+
+        /// Puts `text` on the clipboard, as [`Clipboard::write_text`]
+        /// does.
+        ///
+        /// # Errors
+        ///
+        /// As [`Clipboard::write_text`].
+        ///
+        /// [`Clipboard::write_text`]: crate::Clipboard::write_text
+        pub fn write_clipboard_text(&self, text: &str) -> Result<(), WindowError> {
+            self.inner().write_clipboard(text)
+        }
     };
 }
 
@@ -442,6 +496,35 @@ impl Platform {
             Platform::Win32(p) => p.handle(),
         }
     }
+
+    fn read_clipboard(&self) -> Result<Option<String>, WindowError> {
+        match self {
+            Platform::Headless(p) => Ok(p.read_clipboard()),
+            #[cfg(windows)]
+            Platform::Win32(p) => p.read_clipboard(),
+        }
+    }
+
+    fn write_clipboard(&self, text: &str) -> Result<(), WindowError> {
+        match self {
+            Platform::Headless(p) => {
+                p.write_clipboard(text);
+                Ok(())
+            }
+            #[cfg(windows)]
+            Platform::Win32(p) => p.write_clipboard(text),
+        }
+    }
+
+    /// Shows the system where the caret is (`Some`), or that there is none,
+    /// while the window has the keyboard.
+    fn show_caret(&self, caret: Option<IRect>) {
+        match self {
+            Platform::Headless(p) => p.show_caret(caret),
+            #[cfg(windows)]
+            Platform::Win32(p) => p.show_caret(caret),
+        }
+    }
 }
 
 /// What a window and its backend share.
@@ -461,6 +544,8 @@ pub(crate) struct Inner {
     visible: Cell<bool>,
     focus_on_click: bool,
     pub(crate) wants_all_keys: Cell<bool>,
+    /// Where the text caret is, in device pixels, while text is typed.
+    caret: Cell<Option<IRect>>,
 }
 
 /// Checks the options a window is made with.
@@ -499,6 +584,26 @@ impl Inner {
             visible: Cell::new(options.visible),
             focus_on_click: options.focus_on_click,
             wants_all_keys: Cell::new(false),
+            caret: Cell::new(None),
+        }
+    }
+
+    pub(crate) fn read_clipboard(&self) -> Result<Option<String>, WindowError> {
+        self.check_open()?;
+        self.platform.read_clipboard()
+    }
+
+    pub(crate) fn write_clipboard(&self, text: &str) -> Result<(), WindowError> {
+        self.check_open()?;
+        self.platform.write_clipboard(text)
+    }
+
+    fn set_text_caret(&self, caret: Option<IRect>) {
+        if !self.is_open() || self.caret.replace(caret) == caret {
+            return;
+        }
+        if self.focused.get() {
+            self.platform.show_caret(caret);
         }
     }
 
@@ -847,6 +952,12 @@ impl Inner {
                 if !focused {
                     *self.text.borrow_mut() = Utf16Joiner::default();
                 }
+                // The system's caret is the keyboard's: it goes with it,
+                // and comes back with it.
+                if focused || self.caret.get().is_some() {
+                    self.platform
+                        .show_caret(self.caret.get().filter(|_| focused));
+                }
                 self.dispatch(Event::Focus(focused))
             }
             RawInput::Timer(id) => {
@@ -869,6 +980,7 @@ impl Inner {
         self.timers.borrow_mut().clear();
         self.pointer.borrow_mut().reset();
         self.focused.set(false);
+        self.caret.set(None);
         self.dispatcher.dispatch(&self.cx(), Event::Closed, None);
     }
 }
@@ -987,6 +1099,12 @@ impl Window {
         WindowCx { inner: &self.inner }
     }
 
+    /// A handle on the clipboard through this window, which an interface
+    /// keeps for its copy and paste. It holds the window weakly.
+    pub fn clipboard(&self) -> crate::Clipboard {
+        crate::Clipboard::new(&self.inner)
+    }
+
     /// Whether the handler panicked. The window then delivers nothing more;
     /// its owner should drop it.
     pub fn is_poisoned(&self) -> bool {
@@ -1003,6 +1121,9 @@ impl Window {
 impl Drop for Window {
     fn drop(&mut self) {
         let inner = &self.inner;
+        if inner.is_open() && inner.caret.take().is_some() && inner.focused.get() {
+            inner.platform.show_caret(None);
+        }
         inner.life.set(Life::Dropped);
         inner.timers.borrow_mut().clear();
         inner.platform.destroy();

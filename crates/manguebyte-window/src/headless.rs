@@ -22,6 +22,11 @@ pub(crate) struct HeadlessPlatform {
     leave_requests: Cell<u32>,
     blits: RefCell<Vec<IRect>>,
     invalidations: RefCell<Vec<IRect>>,
+    /// The window's own clipboard.
+    clipboard: RefCell<Option<String>>,
+    /// Where the system would show the caret, while the window has the
+    /// keyboard.
+    caret: Cell<Option<IRect>>,
     /// The events the handler declined that came with a system message.
     #[cfg(test)]
     passed_on: RefCell<Vec<(Origin, Event)>>,
@@ -37,9 +42,30 @@ impl HeadlessPlatform {
             leave_requests: Cell::new(0),
             blits: RefCell::new(Vec::new()),
             invalidations: RefCell::new(Vec::new()),
+            clipboard: RefCell::new(None),
+            caret: Cell::new(None),
             #[cfg(test)]
             passed_on: RefCell::new(Vec::new()),
         }
+    }
+
+    /// The clipboard's text, cut as the system's is read.
+    pub(crate) fn read_clipboard(&self) -> Option<String> {
+        let text = self.clipboard.borrow();
+        let text = text.as_deref()?;
+        let units: Vec<u16> = text
+            .encode_utf16()
+            .take(crate::clipboard::MAX_CLIPBOARD_UNITS)
+            .collect();
+        Some(String::from_utf16_lossy(&units))
+    }
+
+    pub(crate) fn write_clipboard(&self, text: &str) {
+        *self.clipboard.borrow_mut() = Some(text.to_owned());
+    }
+
+    pub(crate) fn show_caret(&self, caret: Option<IRect>) {
+        self.caret.set(caret);
     }
 
     pub(crate) fn blit(&self, rect: IRect) {
@@ -88,6 +114,7 @@ impl HeadlessPlatform {
     pub(crate) fn destroy(&self) {
         self.destroyed.set(true);
         self.captured.set(false);
+        self.caret.set(None);
     }
 }
 
@@ -255,6 +282,25 @@ impl Headless {
     /// How often the window asked for the keyboard.
     pub fn focus_requests(&self) -> u32 {
         self.platform(|p| p.focus_requests.get()).unwrap_or(0)
+    }
+
+    /// What the clipboard holds, as another program would read it.
+    pub fn clipboard_text(&self) -> Option<String> {
+        self.platform(|p| p.clipboard.borrow().clone()).flatten()
+    }
+
+    /// Puts `text` on the clipboard, or empties it, as another program
+    /// would.
+    pub fn set_clipboard_text(&self, text: Option<&str>) {
+        self.platform(|p| *p.clipboard.borrow_mut() = text.map(str::to_owned));
+    }
+
+    /// Where the system is shown the text caret, in device pixels: the
+    /// window's [`text_caret`](crate::Window::text_caret) while it has the
+    /// keyboard, and nothing otherwise, as the system's caret goes with the
+    /// keyboard.
+    pub fn system_caret(&self) -> Option<IRect> {
+        self.platform(|p| p.caret.get()).flatten()
     }
 
     /// How often the window asked to hear when the pointer leaves.

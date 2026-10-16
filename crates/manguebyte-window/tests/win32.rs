@@ -1170,6 +1170,74 @@ fn fuzzed_messages_and_requests_keep_the_window_consistent() {
     assert_eq!(depth.get(), 0);
 }
 
+/// While text is typed the window keeps a hidden system caret where the
+/// interface's caret is, and asks the input method for its composition
+/// there, only while it has the keyboard.
+#[test]
+fn the_system_caret_and_the_input_method_follow_the_text_caret() {
+    let parent = TopLevel::new(200, 100).expect("a desktop");
+    let (window, log) = logged(&parent, WindowOptions::new(size(120, 60)));
+    let hwnd = handle(&window);
+    assert_eq!(testing::system_caret(), None);
+    let caret = IRect::new(17, 9, 2, 18);
+    window.set_text_caret(Some(caret));
+    // Not shown while the window does not have the keyboard.
+    assert_eq!(testing::system_caret(), None);
+    window.take_focus();
+    assert!(testing::has_system_focus(hwnd));
+    assert!(take(&log).contains(&Event::Focus(true)));
+    assert_eq!(testing::system_caret(), Some((hwnd, caret)));
+    // CFS_POINT, at the caret.
+    assert_eq!(
+        testing::composition_window(hwnd),
+        Some((2, PhysicalPoint::new(17, 9)))
+    );
+    let moved = IRect::new(40, 9, 2, 18);
+    window.set_text_caret(Some(moved));
+    assert_eq!(testing::system_caret(), Some((hwnd, moved)));
+    assert_eq!(
+        testing::composition_window(hwnd),
+        Some((2, PhysicalPoint::new(40, 9)))
+    );
+    // The keyboard goes: so does the caret, and it comes back with it.
+    testing::send(hwnd, Message::KillFocus);
+    assert!(!window.has_focus());
+    assert_eq!(testing::system_caret(), None);
+    testing::send(hwnd, Message::SetFocus);
+    assert_eq!(testing::system_caret(), Some((hwnd, moved)));
+    // No more text: no caret.
+    window.set_text_caret(None);
+    assert_eq!(testing::system_caret(), None);
+    window.set_text_caret(Some(caret));
+    drop(window);
+    assert_eq!(testing::system_caret(), None);
+}
+
+/// The system's clipboard, through a window: what is written is read back,
+/// by this window and by the system. It replaces what the person running
+/// the tests had copied, so it is ignored unless asked for; the text that
+/// was there, if any, is put back.
+#[test]
+#[ignore = "replaces the system clipboard; run with --ignored"]
+fn the_system_clipboard_holds_what_a_window_writes() {
+    let parent = TopLevel::new(100, 100).expect("a desktop");
+    let (window, _log) = logged(&parent, WindowOptions::new(size(20, 20)));
+    let saved = window.read_clipboard_text();
+    let text = "Manguebyte clipboard test: é, 👍🏽, 東京";
+    window.write_clipboard_text(text).expect("the clipboard");
+    assert_eq!(window.read_clipboard_text().as_deref(), Some(text));
+    // Through another window's handle, as another program would.
+    let other = logged(&parent, WindowOptions::new(size(20, 20))).0;
+    assert_eq!(other.clipboard().read_text().as_deref(), Some(text));
+    drop(other);
+    window.write_clipboard_text("").expect("the clipboard");
+    assert_eq!(window.read_clipboard_text().as_deref(), Some(""));
+    if let Some(saved) = saved {
+        window.write_clipboard_text(&saved).expect("the clipboard");
+    }
+    drop(window);
+}
+
 #[test]
 fn class_names_carry_this_binary_and_this_copy_of_the_crate() {
     let name = testing::window_class_name();

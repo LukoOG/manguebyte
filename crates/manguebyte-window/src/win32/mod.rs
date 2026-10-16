@@ -45,6 +45,20 @@
 //!   Enter and Escape only while the window
 //!   [wants all keys](crate::Window::set_wants_all_keys), so a host's
 //!   dialog keeps them otherwise.
+//! - Input methods are left to the system: `DefWindowProcW` shows the
+//!   composition in the system's own window and, as the system documents,
+//!   turns what it produces into `WM_CHAR`, which arrives as text. (No
+//!   test has run a real input method yet.) While text is typed the window
+//!   keeps a hidden system caret ([`set_text_caret`](crate::Window::set_text_caret))
+//!   at the interface's caret, made when it has the keyboard and destroyed
+//!   when it loses it, as the system's convention is (the caret belongs to
+//!   the thread), and asks the input method (`ImmSetCompositionWindow`,
+//!   `ImmSetCandidateWindow`) to compose at the caret and list its
+//!   candidates below it.
+//! - The clipboard ([`Clipboard`](crate::Clipboard)) is opened for each
+//!   read or write with the window as its owner and closed before the call
+//!   returns, in the Unicode text format. Opening is tried four times,
+//!   2 ms apart, while another program holds it.
 //! - Timers are `SetTimer` timers on the window's own `HWND`, so they end
 //!   with it.
 //! - Nothing unwinds into the host: a panic in the window procedure is
@@ -62,36 +76,48 @@ use std::rc::Rc;
 
 use manguebyte_gfx::IRect;
 use windows_sys::Win32::Foundation::{
-    ERROR_CANNOT_FIND_WND_CLASS, ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HMODULE,
-    HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+    ERROR_CANNOT_FIND_WND_CLASS, ERROR_CLASS_ALREADY_EXISTS, GetLastError, GlobalFree, HINSTANCE,
+    HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, DIB_RGB_COLORS, EndPaint, GetDC,
     GetDeviceCaps, HBRUSH, HDC, InvalidateRect, LOGPIXELSX, PAINTSTRUCT, ReleaseDC, ScreenToClient,
     SetDIBitsToDevice,
 };
+use windows_sys::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+    SetClipboardData,
+};
 use windows_sys::Win32::System::LibraryLoader::{
     GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
     GetModuleHandleExW, GetModuleHandleW, GetProcAddress,
 };
+use windows_sys::Win32::System::Memory::{
+    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
+};
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+use windows_sys::Win32::UI::Input::Ime::{
+    CANDIDATEFORM, CFS_EXCLUDE, CFS_POINT, COMPOSITIONFORM, ImmGetContext, ImmReleaseContext,
+    ImmSetCandidateWindow, ImmSetCompositionWindow,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetCapture, GetDoubleClickTime, GetKeyState, MAPVK_VK_TO_CHAR, MapVirtualKeyW, ReleaseCapture,
     SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_CONTROL, VK_LWIN,
     VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CREATESTRUCTW, CreateWindowExW, DLGC_WANTALLKEYS, DLGC_WANTARROWS, DLGC_WANTCHARS,
-    DLGC_WANTTAB, DefWindowProcW, DestroyWindow, GetClassInfoExW, GetClientRect, GetParent,
-    GetSystemMetrics, GetWindowThreadProcessId, IDC_ARROW, IsWindow, KillTimer, LoadCursorW,
-    RegisterClassExW, SM_CXDOUBLECLK, SM_CYDOUBLECLK, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOZORDER, SendMessageW, SetTimer, SetWindowPos, ShowWindow, USER_TIMER_MINIMUM,
-    UnregisterClassW, WM_CAPTURECHANGED, WM_CHAR, WM_DPICHANGED_AFTERPARENT, WM_ERASEBKGND,
-    WM_GETDLGCODE, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_PRINTCLIENT, WM_RBUTTONDBLCLK,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
-    WNDCLASSEXW, WNDPROC, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_VISIBLE,
+    CREATESTRUCTW, CreateCaret, CreateWindowExW, DLGC_WANTALLKEYS, DLGC_WANTARROWS, DLGC_WANTCHARS,
+    DLGC_WANTTAB, DefWindowProcW, DestroyCaret, DestroyWindow, GetClassInfoExW, GetClientRect,
+    GetParent, GetSystemMetrics, GetWindowThreadProcessId, IDC_ARROW, IsWindow, KillTimer,
+    LoadCursorW, RegisterClassExW, SM_CXDOUBLECLK, SM_CYDOUBLECLK, SW_HIDE, SW_SHOWNA,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SendMessageW, SetCaretPos, SetTimer, SetWindowPos,
+    ShowWindow, USER_TIMER_MINIMUM, UnregisterClassW, WM_CAPTURECHANGED, WM_CHAR,
+    WM_DPICHANGED_AFTERPARENT, WM_ERASEBKGND, WM_GETDLGCODE, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
+    WM_PRINTCLIENT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SIZE,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WNDPROC, WS_CHILD, WS_CLIPCHILDREN,
+    WS_CLIPSIBLINGS, WS_VISIBLE,
 };
 
 use crate::convert;
@@ -134,6 +160,44 @@ pub(crate) struct Win32Platform {
     /// Whether the last key down went on to the parent: the control
     /// character it typed, which makes no event, follows it.
     key_passed: Cell<bool>,
+    /// The system caret this window made, and where it put it.
+    caret: Cell<Option<IRect>>,
+}
+
+/// The clipboard's Unicode text format, `CF_UNICODETEXT`.
+const CF_UNICODETEXT: u32 = 13;
+
+/// How often the clipboard is tried, a couple of milliseconds apart, when
+/// another program holds it open, as clipboard managers do for a moment
+/// after every copy.
+const CLIPBOARD_TRIES: u32 = 4;
+
+/// The clipboard, opened by a window of ours, closed when dropped.
+struct OpenClipboardGuard;
+
+impl OpenClipboardGuard {
+    fn open(hwnd: HWND) -> Result<OpenClipboardGuard, WindowError> {
+        for attempt in 0..CLIPBOARD_TRIES {
+            // SAFETY: our own window; opening only fails while another
+            // window has the clipboard open.
+            if unsafe { OpenClipboard(hwnd) } != 0 {
+                return Ok(OpenClipboardGuard);
+            }
+            if attempt + 1 < CLIPBOARD_TRIES {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+        Err(last_error("OpenClipboard"))
+    }
+}
+
+impl Drop for OpenClipboardGuard {
+    fn drop(&mut self) {
+        // SAFETY: this thread opened the clipboard and closes it once.
+        unsafe {
+            CloseClipboard();
+        }
+    }
 }
 
 /// The address of this copy of the crate's static.
@@ -344,6 +408,7 @@ pub(crate) fn open(
         created: Cell::new(false),
         passing: Cell::new(false),
         key_passed: Cell::new(false),
+        caret: Cell::new(None),
     };
     let inner = Rc::new(Inner::new(Platform::Win32(platform), options, handler));
     let Platform::Win32(platform) = &inner.platform else {
@@ -935,6 +1000,169 @@ impl Win32Platform {
         // come back to our window procedure.
         unsafe {
             SetFocus(hwnd);
+        }
+    }
+
+    /// The clipboard's text, at most `MAX_CLIPBOARD_UNITS` units of it.
+    pub(crate) fn read_clipboard(&self) -> Result<Option<String>, WindowError> {
+        let hwnd = self.hwnd().ok_or(WindowError::Closed)?;
+        // SAFETY: takes a format number only.
+        if unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT) } == 0 {
+            return Ok(None);
+        }
+        let _open = OpenClipboardGuard::open(hwnd)?;
+        // SAFETY: the clipboard is open; the handle stays the clipboard's
+        // and is only read, until the clipboard is closed.
+        let handle = unsafe { GetClipboardData(CF_UNICODETEXT) };
+        if handle.is_null() {
+            return Ok(None);
+        }
+        // SAFETY: a global memory handle from the clipboard.
+        let bytes = unsafe { GlobalSize(handle) };
+        // SAFETY: as above; locking a clipboard handle gives its memory, or
+        // null.
+        let data = unsafe { GlobalLock(handle) }.cast::<u16>().cast_const();
+        if data.is_null() {
+            return Ok(None);
+        }
+        let units = (bytes / 2).min(crate::clipboard::MAX_CLIPBOARD_UNITS);
+        // SAFETY: the block holds `bytes` bytes, so `units` 16-bit units
+        // from its start are inside it; it stays locked until below, and
+        // the memory of a global block is aligned for any type.
+        let slice = unsafe { std::slice::from_raw_parts(data, units) };
+        let end = slice.iter().position(|&unit| unit == 0).unwrap_or(units);
+        let text = String::from_utf16_lossy(&slice[..end]);
+        // SAFETY: unlocks what was locked above.
+        unsafe {
+            GlobalUnlock(handle);
+        }
+        Ok(Some(text))
+    }
+
+    /// Puts `text` on the clipboard as Unicode text.
+    pub(crate) fn write_clipboard(&self, text: &str) -> Result<(), WindowError> {
+        let hwnd = self.hwnd().ok_or(WindowError::Closed)?;
+        let units: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        let bytes = units.len() * mem::size_of::<u16>();
+        // SAFETY: allocates a movable global block, as the clipboard wants.
+        let memory = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) };
+        if memory.is_null() {
+            return Err(last_error("GlobalAlloc"));
+        }
+        let free = |memory| {
+            // SAFETY: a block this function allocated and still owns.
+            unsafe {
+                GlobalFree(memory);
+            }
+        };
+        // SAFETY: the block just allocated.
+        let target = unsafe { GlobalLock(memory) }.cast::<u16>();
+        if target.is_null() {
+            let error = last_error("GlobalLock");
+            free(memory);
+            return Err(error);
+        }
+        // SAFETY: the block holds `bytes` bytes, exactly `units`, and is
+        // aligned for any type; the two do not overlap.
+        unsafe {
+            ptr::copy_nonoverlapping(units.as_ptr(), target, units.len());
+            GlobalUnlock(memory);
+        }
+        let open = match OpenClipboardGuard::open(hwnd) {
+            Ok(open) => open,
+            Err(error) => {
+                free(memory);
+                return Err(error);
+            }
+        };
+        // SAFETY: the clipboard is open, by this window.
+        if unsafe { EmptyClipboard() } == 0 {
+            let error = last_error("EmptyClipboard");
+            drop(open);
+            free(memory);
+            return Err(error);
+        }
+        // SAFETY: the clipboard is open and empty; on success the system
+        // owns the block.
+        if unsafe { SetClipboardData(CF_UNICODETEXT, memory) }.is_null() {
+            let error = last_error("SetClipboardData");
+            drop(open);
+            free(memory);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Shows the system where the text caret is, or that there is none:
+    /// a hidden system caret of this window's, and the input method's
+    /// composition at the caret with its candidates below. Called only
+    /// while the window has the keyboard, and with `None` as it loses it,
+    /// so the caret this thread has is always this window's.
+    pub(crate) fn show_caret(&self, caret: Option<IRect>) {
+        let Some(hwnd) = self.hwnd() else {
+            self.caret.set(None);
+            return;
+        };
+        let Some(rect) = caret else {
+            if self.caret.take().is_some() {
+                // SAFETY: destroys the caret this window made while it had
+                // the keyboard, which it still has.
+                unsafe {
+                    DestroyCaret();
+                }
+            }
+            return;
+        };
+        let width = rect.width.clamp(1, 64) as i32;
+        let height = rect.height.clamp(1, 1024) as i32;
+        let resized = self
+            .caret
+            .get()
+            .is_none_or(|shown| (shown.width, shown.height) != (rect.width, rect.height));
+        // SAFETY: a plain caret of our own window, on its own thread, which
+        // has the keyboard; it is never shown (no ShowCaret): the
+        // interface draws its own.
+        unsafe {
+            if resized {
+                CreateCaret(hwnd, ptr::null_mut(), width, height);
+            }
+            SetCaretPos(rect.x, rect.y);
+        }
+        self.caret.set(Some(rect));
+        let bottom = rect.y.saturating_add(height);
+        // SAFETY: the input context of our own window, released below.
+        let context = unsafe { ImmGetContext(hwnd) };
+        if !context.is_null() {
+            let at = POINT {
+                x: rect.x,
+                y: rect.y,
+            };
+            let composition = COMPOSITIONFORM {
+                dwStyle: CFS_POINT,
+                ptCurrentPos: at,
+                rcArea: RECT::default(),
+            };
+            let candidates = CANDIDATEFORM {
+                dwIndex: 0,
+                dwStyle: CFS_EXCLUDE,
+                ptCurrentPos: POINT {
+                    x: rect.x,
+                    y: bottom,
+                },
+                rcArea: RECT {
+                    left: rect.x,
+                    top: rect.y,
+                    right: rect.x.saturating_add(width),
+                    bottom,
+                },
+            };
+            // SAFETY: the forms are initialised and outlive the calls; the
+            // context is released once.
+            unsafe {
+                ImmSetCompositionWindow(context, &composition);
+                ImmSetCandidateWindow(context, &candidates);
+                ImmReleaseContext(hwnd, context);
+            }
         }
     }
 
