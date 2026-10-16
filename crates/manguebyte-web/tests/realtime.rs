@@ -77,13 +77,12 @@ fn events(start: u64) -> Vec<EventRecord> {
     for step in 0..32u64 {
         let frame = start + step * 300;
         let drum = Drum::ALL[(step % 6) as usize];
-        records.push(EventRecord::note_on(frame, 0, drum.note(), 0.9));
-        records.push(EventRecord::note_on(
-            frame + 7,
-            1,
-            40 + (step % 12) as u8,
-            0.8,
-        ));
+        // Every third note accented.
+        let accent = step % 3 == 0;
+        records.push(EventRecord::note_on(frame, 0, drum.note(), 0.9).with_accent(accent));
+        records.push(
+            EventRecord::note_on(frame + 7, 1, 40 + (step % 12) as u8, 0.8).with_accent(accent),
+        );
         records.push(EventRecord::note_off(
             frame + 250,
             1,

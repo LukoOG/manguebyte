@@ -11,7 +11,9 @@
 //   bytes  0..8   frame     u64   absolute frame since the engine started
 //   byte   8      kind      u8    1 note_on, 2 note_off, 3 param,
 //                                 4 choke, 5 all_notes_off
-//   byte   9      padding         written as 0
+//   byte   9      flags     u8    bit 0 accent (the note was written in
+//                                 capitals); bits 1 to 7 reserved,
+//                                 written as 0 and ignored
 //   bytes 10..12  part      u16
 //   byte  12      note      u8    MIDI note, 0 to 127
 //   byte  13      channel   u8    MIDI channel, 0 to 15
@@ -19,6 +21,9 @@
 //   bytes 16..20  velocity  f32   0 to 1
 //   bytes 20..24  param     u32   parameter id: FNV-1a of its text id
 //   bytes 24..32  value     f64   in the parameter's own units
+//
+// Only a note on reads the flags. A 0 there, which is what a writer that
+// predates the flags byte put in its padding, means no accent.
 //
 // The engine ignores a record whose kind is unknown or whose fields are out
 // of range. encodeRecord refuses values that do not fit their field at all
@@ -47,6 +52,11 @@ export const KIND = Object.freeze({
   param: 3,
   choke: 4,
   all_notes_off: 5,
+});
+
+/** The bits of the `flags` byte. Bits 1 to 7 are reserved. */
+export const FLAG = Object.freeze({
+  accent: 1,
 });
 
 /** Bytes before the first slot of a ring. */
@@ -118,8 +128,11 @@ function kindCode(kind) {
  *
  * `record` has `frame` (a non-negative integer Number up to 2^53, or a
  * BigInt), `kind` (a code or a key of KIND), `part`, and as the kind needs
- * them `note`, `channel`, `velocity`, `param` (a number, or a text id that
- * is hashed with paramId) and `value`. Missing fields are written as 0.
+ * them `note`, `channel`, `velocity`, `accent` (true for an accented note
+ * on), `param` (a number, or a text id that is hashed with paramId) and
+ * `value`. Missing fields are written as 0. `flags`, the raw byte, is
+ * there for tests: it is combined with `accent`, and a writer leaves its
+ * reserved bits at 0.
  */
 export function encodeRecord(view, offset, record) {
   const frame = record.frame ?? 0;
@@ -133,7 +146,8 @@ export function encodeRecord(view, offset, record) {
   }
   const param = typeof record.param === 'string' ? paramId(record.param) : (record.param ?? 0);
   view.setUint8(offset + 8, kindCode(record.kind));
-  view.setUint8(offset + 9, 0);
+  const flags = integer('flags', record.flags ?? 0, 255) | (record.accent ? FLAG.accent : 0);
+  view.setUint8(offset + 9, flags);
   view.setUint16(offset + 10, integer('part', record.part ?? 0, 65535), true);
   view.setUint8(offset + 12, integer('note', record.note ?? 0, 255));
   view.setUint8(offset + 13, integer('channel', record.channel ?? 0, 255));
@@ -143,11 +157,17 @@ export function encodeRecord(view, offset, record) {
   view.setFloat64(offset + 24, record.value ?? 0, true);
 }
 
-/** Reads the record at `offset` of `view`; the frame comes back as a BigInt. */
+/**
+ * Reads the record at `offset` of `view`; the frame comes back as a BigInt,
+ * the flags byte as `flags` and its accent bit as `accent`.
+ */
 export function decodeRecord(view, offset) {
+  const flags = view.getUint8(offset + 9);
   return {
     frame: view.getBigUint64(offset, true),
     kind: view.getUint8(offset + 8),
+    flags,
+    accent: (flags & FLAG.accent) !== 0,
     part: view.getUint16(offset + 10, true),
     note: view.getUint8(offset + 12),
     channel: view.getUint8(offset + 13),

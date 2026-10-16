@@ -39,7 +39,7 @@
 
 import { EventRing, KIND, RECORD_SIZE, encodeRecord, paramId } from './ring.js';
 
-export { KIND, RECORD_SIZE, paramId } from './ring.js';
+export { FLAG, KIND, RECORD_SIZE, paramId } from './ring.js';
 
 /** Instrument codes, as `InstrumentKind::code` gives them. */
 export const INSTRUMENT = Object.freeze({ synth: 0, drums: 1 });
@@ -298,10 +298,11 @@ export class ManguebyteEngine {
   /**
    * Starts `note` on `part` with `velocity` (0 to 1, default 1) at
    * AudioContext time `time` (default: now). A velocity of 0 is a note off,
-   * as in MIDI.
+   * as in MIDI. An `accent`ed note, what Aratu writes in capitals, plays
+   * louder and brighter.
    */
-  noteOn(part, note, velocity = 1, time = undefined, channel = 0) {
-    return this.schedule({ frame: this.frameFor(time), kind: KIND.note_on, part, note, channel, velocity });
+  noteOn(part, note, velocity = 1, time = undefined, channel = 0, accent = false) {
+    return this.schedule({ frame: this.frameFor(time), kind: KIND.note_on, part, note, channel, velocity, accent });
   }
 
   /** Releases `note` on `part` at `time`. */

@@ -26,8 +26,11 @@ the engine, its parameters and the threads in full.
 ## The contract with Aratu
 
 [Aratu](https://github.com/alessonqueirozdev-hub/aratu) writes records and
-reads the drum map, so these are fixed: a change to any of them is a change
-to `ffi::ABI_VERSION` (now 2) and must be agreed with Aratu.
+reads the drum map, so these are fixed: a change to any of them that an
+existing reader or writer would get wrong is a change to `ffi::ABI_VERSION`
+(now 2) and must be agreed with Aratu. The flags byte was a compatible
+change: it was padding written as 0, which still means no flag, and an
+engine from before it ignores it.
 `tests/record.rs`, `tests/ring.rs` and `js/tests/ring.test.mjs` pin them,
 the last two against the same golden bytes.
 
@@ -39,7 +42,7 @@ the last two against the same golden bytes.
 |--------|------------|------|---------|
 | 0..8   | `frame`    | u64  | the frame the event lands on, counted from the engine's first |
 | 8      | `kind`     | u8   | 1 note on, 2 note off, 3 param, 4 choke, 5 all notes off |
-| 9      | padding    |      | written as 0, never read |
+| 9      | `flags`    | u8   | bit 0 accent (note on); bits 1 to 7 reserved: written as 0, ignored |
 | 10..12 | `part`     | u16  | the part the event is for |
 | 12     | `note`     | u8   | MIDI note, 0 to 127 (note on and note off) |
 | 13     | `channel`  | u8   | MIDI channel, 0 to 15 (note on and note off) |
@@ -47,6 +50,12 @@ the last two against the same golden bytes.
 | 16..20 | `velocity` | f32  | 0 to 1 (note on); 0 is a note off |
 | 20..24 | `param`    | u32  | the parameter: the 32-bit FNV-1a hash of its identifier, such as `"lowpass.cutoff"` (param) |
 | 24..32 | `value`    | f64  | the parameter's new value in its own units, finite (param) |
+
+An accented note on (flag bit 0, a note Aratu writes in capitals) plays
+louder and brighter: a synth note 3.5 dB louder, with its filter envelope
+opening one octave further and an attack twice as fast; a drum 3 dB
+louder, with its high frequencies lifted over the first 30 ms, most at the
+transient. The crate documentation gives the details.
 
 Choke stops every note of the part at once; all notes off releases them.
 Code 0 and codes above 5 are not kinds. A record with an unknown kind, or

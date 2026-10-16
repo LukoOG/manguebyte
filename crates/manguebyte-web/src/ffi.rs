@@ -33,7 +33,10 @@ use manguebyte_params::ParamId;
 /// The version of this interface, from [`mb_abi_version`]. It changes
 /// whenever an export changes meaning or one that `js/worklet.js` needs is
 /// added. Version 2 added [`mb_admit_staged`], [`mb_min_sample_rate`],
-/// [`mb_max_sample_rate`] and counters 6 to 9 of [`mb_stat`].
+/// [`mb_max_sample_rate`] and counters 6 to 9 of [`mb_stat`]. The flags
+/// byte of the record ([`record::flag`](crate::record::flag)) did not
+/// change it: the byte was padding written as 0, a 0 still means no flag,
+/// and every export means what it did.
 pub const ABI_VERSION: u32 = 2;
 
 /// The most records the staging area can hold.

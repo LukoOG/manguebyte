@@ -182,6 +182,21 @@ for (const shared of [true, false]) {
     await engine.close();
   });
 
+  test(`${mode}: an accented note reaches the engine as one`, { skip: skipWithoutWasm }, async () => {
+    const peaks = [];
+    for (const accent of [false, true]) {
+      const context = new FakeContext(0);
+      const engine = await make(context, { shared });
+      await engine.createPart(0, 'drums', 'none');
+      engine.noteOn(0, 38, 0.8, 0, 0, accent);
+      const { left } = await context.run(8);
+      peaks.push(left.reduce((top, sample) => Math.max(top, Math.abs(sample)), 0));
+      await engine.close();
+    }
+    const db = 20 * Math.log10(peaks[1] / peaks[0]);
+    assert.ok(db > 2.5 && db < 6, `the accent added ${db} dB`);
+  });
+
   test(`${mode}: a note whose time has passed plays at the next quantum`, { skip: skipWithoutWasm }, async () => {
     const context = new FakeContext(0);
     const engine = await make(context, { shared });

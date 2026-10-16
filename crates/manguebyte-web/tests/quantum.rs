@@ -35,22 +35,21 @@ fn scenario() -> Engine {
         EventRecord::param(0, 0, id(ids::GAIN), -6.0),
         EventRecord::param(0, 1, id(ids::GAIN), -6.0),
     ];
-    let drums = "b.c.s.cob.c.s.cxbbc.s.crb.cos.c.";
+    // Capitals are accents, as Aratu writes them.
+    let drums = "B.c.S.coB.c.s.cXbbC.s.crB.cOs.c.";
     for (index, symbol) in drums.chars().enumerate() {
-        if let Some(drum) = manguebyte_web::Drum::from_symbol(symbol) {
+        if let Some(drum) = manguebyte_web::Drum::from_symbol(symbol.to_ascii_lowercase()) {
             let velocity = if index % 4 == 0 { 1.0 } else { 0.7 };
-            records.push(EventRecord::note_on(
-                index as u64 * step / 2,
-                0,
-                drum.note(),
-                velocity,
-            ));
+            records.push(
+                EventRecord::note_on(index as u64 * step / 2, 0, drum.note(), velocity)
+                    .with_accent(symbol.is_ascii_uppercase()),
+            );
         }
     }
     let bass = [33u8, 33, 45, 33, 36, 38, 40, 43];
     for (index, &note) in bass.iter().enumerate() {
         let start = index as u64 * step * 2 + 3;
-        records.push(EventRecord::note_on(start, 1, note, 0.9));
+        records.push(EventRecord::note_on(start, 1, note, 0.9).with_accent(index % 3 == 1));
         records.push(EventRecord::note_off(start + step, 1, note));
         records.push(EventRecord::param(
             start + 100,

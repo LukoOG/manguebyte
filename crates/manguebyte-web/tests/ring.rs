@@ -17,10 +17,13 @@ fn golden_records() -> [EventRecord; 6] {
         ),
         EventRecord::choke(77, 65_535),
         EventRecord::all_notes_off(u64::MAX >> 11, 7),
-        EventRecord::note_off(99, 3, 127).with_channel(9),
+        EventRecord::note_on(99, 3, 127, 1.0)
+            .with_channel(9)
+            .with_accent(true),
         EventRecord {
             frame: 5,
             kind: 200,
+            flags: 0xFE,
             part: 1,
             note: 255,
             channel: 255,

@@ -108,6 +108,8 @@ struct Envelope {
     decay_coefficient: f64,
     sustain: f64,
     release_coefficient: f64,
+    /// How many attack steps one frame takes: 1, or more for an accent.
+    attack_speed: f64,
 }
 
 impl Envelope {
@@ -119,6 +121,7 @@ impl Envelope {
             decay_coefficient: 0.0,
             sustain: 1.0,
             release_coefficient: 0.0,
+            attack_speed: 1.0,
         }
     }
 
@@ -133,7 +136,7 @@ impl Envelope {
         match self.stage {
             Stage::Idle => {}
             Stage::Attack => {
-                self.level += self.attack_step;
+                self.level += self.attack_step * self.attack_speed;
                 if self.level >= 1.0 {
                     self.level = 1.0;
                     self.stage = Stage::Decay;
@@ -175,6 +178,20 @@ pub const RETRIGGER_GLIDE_SECONDS: f64 = 0.005;
 /// Scales the sum of the oscillators so that one note at full velocity
 /// peaks around -9 dB, leaving room for chords and other parts.
 const VOICE_LEVEL: f64 = 0.2;
+
+/// How much louder an accented synth note is, in decibels: its level is
+/// multiplied by `10^(SYNTH_ACCENT_DB / 20)`, about 1.5.
+pub const SYNTH_ACCENT_DB: f64 = 3.5;
+
+/// How much further an accented synth note's filter envelope opens the
+/// filter, in octaves, on top of the `synth.env_amount` setting. The extra
+/// opening falls away with the filter envelope, so the accent brightens
+/// the start of the note, whatever the envelope amount is set to.
+pub const SYNTH_ACCENT_OCTAVES: f64 = 1.0;
+
+/// The factor on an accented synth note's attack time: it rises to full
+/// level in half the time the `synth.attack` setting gives.
+pub const SYNTH_ACCENT_ATTACK: f64 = 0.5;
 
 fn resonance_to_q(resonance: f64) -> f64 {
     0.6 * 18f64.powf(resonance.clamp(0.0, 1.0))
@@ -235,7 +252,10 @@ struct Tone {
     filter_envelope: f64,
     key: u8,
     velocity: f64,
-    /// `VOICE_LEVEL × velocity`, gliding when the key is struck again.
+    /// [`SYNTH_ACCENT_OCTAVES`] for an accented note, 0 for another.
+    accent_octaves: f64,
+    /// `VOICE_LEVEL × velocity`, and the accent's gain, gliding when the
+    /// key is struck again.
     gain: Ramp,
 }
 
@@ -257,6 +277,7 @@ impl Tone {
             filter_envelope: 0.0,
             key: 60,
             velocity: 0.0,
+            accent_octaves: 0.0,
             gain: Ramp::at(0.0),
         }
     }
@@ -299,7 +320,9 @@ impl Tone {
     /// Back to the state of a new tone.
     fn reset(&mut self, settings: &SynthSettings) {
         self.amplitude.silence();
+        self.amplitude.attack_speed = 1.0;
         self.filter_envelope = 0.0;
+        self.accent_octaves = 0.0;
         for oscillator in &mut self.oscillators {
             oscillator.reset_phase();
         }
@@ -312,7 +335,7 @@ impl Tone {
     /// One sample of the tone.
     fn next(&mut self, settings: &SynthSettings, coefficients: &Coefficients) -> f64 {
         let tracking = (f64::from(self.key) - 60.0) / 24.0;
-        let depth = settings.env_amount * (0.4 + 0.6 * self.velocity);
+        let depth = settings.env_amount * (0.4 + 0.6 * self.velocity) + self.accent_octaves;
         self.cutoff += (settings.cutoff - self.cutoff) * coefficients.cutoff;
         let octaves = depth * self.filter_envelope + tracking;
         self.filter_envelope *= coefficients.filter;
@@ -355,6 +378,10 @@ pub(crate) struct SynthVoice {
     tail_fade: Ramp,
     steal_frames: u32,
     glide_frames: u32,
+    /// Whether the next note this voice is given is accented. The part
+    /// sets it on every voice before each note on, since only the synth
+    /// knows which voice will take the note.
+    next_accent: bool,
 }
 
 impl SynthVoice {
@@ -372,6 +399,7 @@ impl SynthVoice {
             tail_fade: Ramp::at(0.0),
             steal_frames: 1,
             glide_frames: 1,
+            next_accent: false,
         };
         voice.configure();
         voice
@@ -399,6 +427,10 @@ impl SynthVoice {
     /// Stops the fading note of a voice that was taken over, at once. A
     /// choke of the whole part uses it, since a choke stops every note
     /// without a fade.
+    pub(crate) fn set_next_accent(&mut self, accent: bool) {
+        self.next_accent = accent;
+    }
+
     pub(crate) fn silence_tail(&mut self) {
         self.tail_fade = Ramp::at(0.0);
         self.tail.reset(&self.settings);
@@ -418,7 +450,19 @@ impl Voice for SynthVoice {
         tone.key = note.key.min(127);
         tone.velocity = f64::from(velocity);
         tone.tune(&self.settings);
-        let gain = VOICE_LEVEL * tone.velocity;
+        let accent = self.next_accent;
+        tone.accent_octaves = if accent { SYNTH_ACCENT_OCTAVES } else { 0.0 };
+        tone.amplitude.attack_speed = if accent {
+            1.0 / SYNTH_ACCENT_ATTACK
+        } else {
+            1.0
+        };
+        let accent_gain = if accent {
+            (SYNTH_ACCENT_DB / 20.0 * core::f64::consts::LN_10).exp()
+        } else {
+            1.0
+        };
+        let gain = VOICE_LEVEL * tone.velocity * accent_gain;
         if tone.amplitude.level > 0.0 {
             // Struck again while it sounds: glide to the new level rather
             // than jump to it.
@@ -491,6 +535,19 @@ impl Voice for SynthVoice {
 
 /// A synth part's instrument.
 pub(crate) type SynthInstrument = Synth<SynthVoice>;
+
+/// Starts a note, accented or not.
+pub(crate) fn synth_note_on(
+    synth: &mut SynthInstrument,
+    note: NoteRef,
+    velocity: f32,
+    accent: bool,
+) {
+    for voice in synth.voices_mut() {
+        voice.set_next_accent(accent);
+    }
+    synth.note_on(note, velocity);
+}
 
 pub(crate) fn new_synth(params: &SynthParams, spec: &ProcessSpec) -> SynthInstrument {
     let settings = SynthSettings::from_params(params);

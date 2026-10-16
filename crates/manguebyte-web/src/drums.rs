@@ -181,6 +181,9 @@ struct KitSettings {
     tune: f64,
     /// Factor on every decay time.
     decay: f64,
+    /// Whether this strike is accented. Only a drum whose character an
+    /// accent changes beyond what [`Slot`] does reads it.
+    accent: bool,
 }
 
 /// A level that falls by a fixed factor every sample, from 1.
@@ -294,10 +297,21 @@ fn prepared_filter(
 /// The kick's level after its saturation.
 const KICK_LEVEL: f64 = 0.75;
 
+/// How an accent changes the kick beyond its level and attack: the beater's
+/// click is twice as loud and the pitch starts higher, at 225 Hz rather
+/// than 180 Hz before the tune, the sound of a harder hit.
+const KICK_ACCENT_CLICK: f64 = 2.0;
+const KICK_ACCENT_SWEEP: f64 = 180.0;
+const KICK_SWEEP: f64 = 135.0;
+
 #[derive(Debug, Clone)]
 struct Kick {
     sample_rate: f64,
     tune: f64,
+    /// How far above its resting pitch the kick starts, in hertz.
+    sweep: f64,
+    /// The click's level, relative to the body's.
+    click_level: f64,
     phase: f64,
     pitch: Shot,
     body: Shot,
@@ -312,6 +326,11 @@ impl Sound for Kick {
 
     fn strike(&mut self, kit: &KitSettings) {
         self.tune = kit.tune;
+        (self.sweep, self.click_level) = if kit.accent {
+            (KICK_ACCENT_SWEEP, KICK_ACCENT_CLICK)
+        } else {
+            (KICK_SWEEP, 1.0)
+        };
         self.phase = 0.0;
         self.pitch.start(0.12, self.sample_rate);
         self.body.start(0.6 * kit.decay, self.sample_rate);
@@ -319,10 +338,10 @@ impl Sound for Kick {
     }
 
     fn next(&mut self) -> f64 {
-        let frequency = self.tune * (45.0 + 135.0 * self.pitch.next());
+        let frequency = self.tune * (45.0 + self.sweep * self.pitch.next());
         self.phase = (self.phase + frequency / self.sample_rate).fract();
         let body = (TAU * self.phase).sin() * self.body.next();
-        let click = self.noise.next() * self.click.next();
+        let click = self.noise.next() * self.click.next() * self.click_level;
         // A soft saturation thickens the body; at most 1 in, at most 1 out,
         // then 2.5 dB down, to leave room for the other drums and parts.
         let drive = 2.2;
@@ -503,7 +522,29 @@ impl Sound for Cymbal {
     }
 }
 
-/// A drum and what is common to every drum: velocity, level and fades.
+/// How much louder an accented drum is, in decibels: its level is
+/// multiplied by `10^(DRUM_ACCENT_DB / 20)`, about 1.4.
+pub const DRUM_ACCENT_DB: f64 = 3.0;
+
+/// How hard an accented drum's attack is sharpened. For the first
+/// [`DRUM_ACCENT_SNAP_SECONDS`] the drum's sound `x` becomes
+/// `x[n] + k·(x[n] − x[n−1])`, a lift of the high frequencies that is
+/// strongest on the transient, as when a drum is hit harder; `k` starts at
+/// `DRUM_ACCENT_SNAP` and falls by 60 dB over that time. The hi-hats and
+/// cymbals, whose sound is nearly all high frequencies already, take
+/// [`CYMBAL_ACCENT_SNAP`] instead, so that the lift does not add more to
+/// their peak than the gain does.
+pub const DRUM_ACCENT_SNAP: f64 = 0.5;
+
+/// [`DRUM_ACCENT_SNAP`] for the hi-hats and cymbals.
+pub const CYMBAL_ACCENT_SNAP: f64 = 0.12;
+
+/// How long the sharpened attack of an accented drum lasts. See
+/// [`DRUM_ACCENT_SNAP`].
+pub const DRUM_ACCENT_SNAP_SECONDS: f64 = 0.03;
+
+/// A drum and what is common to every drum: velocity, level, accent and
+/// fades.
 #[derive(Debug, Clone)]
 struct Slot<D> {
     sound: D,
@@ -511,24 +552,43 @@ struct Slot<D> {
     velocity: f64,
     level: f64,
     fade: Fade,
+    /// The accent's gain: 1 for a drum struck without one.
+    accent_gain: f64,
+    /// The accent's high-frequency lift, falling from 1, and how much of
+    /// it there is at the start.
+    snap: Shot,
+    snap_amount: f64,
+    /// The sound's previous sample, for the lift.
+    previous: f64,
 }
 
 impl<D: Sound> Slot<D> {
-    fn new(sound: D) -> Self {
+    fn new(sound: D, snap_amount: f64) -> Self {
         Self {
             sound,
             sounding: false,
             velocity: 0.0,
             level: 1.0,
             fade: Fade::OFF,
+            accent_gain: 1.0,
+            snap: Shot::SILENT,
+            snap_amount,
+            previous: 0.0,
         }
     }
 
-    fn strike(&mut self, velocity: f64, kit: &KitSettings) {
+    fn strike(&mut self, velocity: f64, accent: bool, kit: &KitSettings, sample_rate: f64) {
         self.sound.strike(kit);
         self.sounding = true;
         self.velocity = velocity;
         self.fade = Fade::OFF;
+        if accent {
+            self.accent_gain = (DRUM_ACCENT_DB / 20.0 * core::f64::consts::LN_10).exp();
+            self.snap.start(DRUM_ACCENT_SNAP_SECONDS, sample_rate);
+        } else {
+            self.accent_gain = 1.0;
+            self.snap = Shot::SILENT;
+        }
     }
 
     fn fade_out(&mut self, frames: u32) {
@@ -540,13 +600,24 @@ impl<D: Sound> Slot<D> {
     fn stop(&mut self) {
         self.sounding = false;
         self.fade = Fade::OFF;
+        self.snap = Shot::SILENT;
+        self.previous = 0.0;
     }
 
     fn next(&mut self) -> f64 {
         if !self.sounding {
             return 0.0;
         }
-        let mut value = self.sound.next() * self.velocity * self.level;
+        let raw = self.sound.next();
+        // Past -80 dB the lift is left out, rather than left to fall
+        // into subnormal numbers.
+        let lift = if self.snap.sounding() {
+            self.snap_amount * self.snap.next() * (raw - self.previous)
+        } else {
+            0.0
+        };
+        self.previous = raw;
+        let mut value = (raw + lift) * self.velocity * self.level * self.accent_gain;
         if self.fade.is_on() {
             let (gain, ended) = self.fade.next();
             value *= gain;
@@ -575,6 +646,7 @@ pub const DAMP_SECONDS: f64 = 0.05;
 #[derive(Debug, Clone)]
 pub(crate) struct DrumKit {
     settings: KitSettings,
+    sample_rate: f64,
     kick: Slot<Kick>,
     snare: Slot<Snare>,
     hats: [Slot<Cymbal>; 2],
@@ -593,32 +665,51 @@ impl DrumKit {
             settings: KitSettings {
                 tune: 1.0,
                 decay: 1.0,
+                accent: false,
             },
-            kick: Slot::new(Kick {
-                sample_rate,
-                tune: 1.0,
-                phase: 0.0,
-                pitch: Shot::SILENT,
-                body: Shot::SILENT,
-                click: Shot::SILENT,
-                noise: WhiteNoise(0x9E37_79B9_7F4A_7C15),
-            }),
-            snare: Slot::new(Snare {
-                sample_rate,
-                tune: 1.0,
-                phases: [0.0; 2],
-                tone: Shot::SILENT,
-                rattle: Shot::SILENT,
-                noise: WhiteNoise(0xD1B5_4A32_D192_ED03),
-                highpass: StateVariableFilter::new(SvfMode::Highpass, 1_800.0, 0.7),
-            }),
+            sample_rate,
+            kick: Slot::new(
+                Kick {
+                    sample_rate,
+                    tune: 1.0,
+                    sweep: KICK_SWEEP,
+                    click_level: 1.0,
+                    phase: 0.0,
+                    pitch: Shot::SILENT,
+                    body: Shot::SILENT,
+                    click: Shot::SILENT,
+                    noise: WhiteNoise(0x9E37_79B9_7F4A_7C15),
+                },
+                DRUM_ACCENT_SNAP,
+            ),
+            snare: Slot::new(
+                Snare {
+                    sample_rate,
+                    tune: 1.0,
+                    phases: [0.0; 2],
+                    tone: Shot::SILENT,
+                    rattle: Shot::SILENT,
+                    noise: WhiteNoise(0xD1B5_4A32_D192_ED03),
+                    highpass: StateVariableFilter::new(SvfMode::Highpass, 1_800.0, 0.7),
+                },
+                DRUM_ACCENT_SNAP,
+            ),
             hats: [
-                Slot::new(Cymbal::new(CLOSED_HAT, 0x8CB9_2BA7_2F3D_8DD7)),
-                Slot::new(Cymbal::new(OPEN_HAT, 0xABC9_8388_FB8F_AC03)),
+                Slot::new(
+                    Cymbal::new(CLOSED_HAT, 0x8CB9_2BA7_2F3D_8DD7),
+                    CYMBAL_ACCENT_SNAP,
+                ),
+                Slot::new(
+                    Cymbal::new(OPEN_HAT, 0xABC9_8388_FB8F_AC03),
+                    CYMBAL_ACCENT_SNAP,
+                ),
             ],
             cymbals: [
-                Slot::new(Cymbal::new(RIDE, 0x2545_F491_4F6C_DD1D)),
-                Slot::new(Cymbal::new(CRASH, 0x6A09_E667_F3BC_C909)),
+                Slot::new(Cymbal::new(RIDE, 0x2545_F491_4F6C_DD1D), CYMBAL_ACCENT_SNAP),
+                Slot::new(
+                    Cymbal::new(CRASH, 0x6A09_E667_F3BC_C909),
+                    CYMBAL_ACCENT_SNAP,
+                ),
             ],
             choke_frames: frames_for(HAT_CHOKE_SECONDS, sample_rate),
             damp_frames: frames_for(DAMP_SECONDS, sample_rate),
@@ -634,22 +725,26 @@ impl DrumKit {
         kit
     }
 
-    pub(crate) fn note_on(&mut self, note: u8, velocity: f32) {
+    pub(crate) fn note_on(&mut self, note: u8, velocity: f32, accent: bool) {
         let Some(drum) = Drum::from_note(note) else {
             return;
         };
         let velocity = f64::from(velocity);
-        let kit = self.settings;
+        let kit = KitSettings {
+            accent,
+            ..self.settings
+        };
+        let rate = self.sample_rate;
         match drum {
-            Drum::Kick => self.kick.strike(velocity, &kit),
-            Drum::Snare => self.snare.strike(velocity, &kit),
+            Drum::Kick => self.kick.strike(velocity, accent, &kit, rate),
+            Drum::Snare => self.snare.strike(velocity, accent, &kit, rate),
             Drum::ClosedHat => {
                 self.hats[1].fade_out(self.choke_frames);
-                self.hats[0].strike(velocity, &kit);
+                self.hats[0].strike(velocity, accent, &kit, rate);
             }
-            Drum::OpenHat => self.hats[1].strike(velocity, &kit),
-            Drum::Ride => self.cymbals[0].strike(velocity, &kit),
-            Drum::Crash => self.cymbals[1].strike(velocity, &kit),
+            Drum::OpenHat => self.hats[1].strike(velocity, accent, &kit, rate),
+            Drum::Ride => self.cymbals[0].strike(velocity, accent, &kit, rate),
+            Drum::Crash => self.cymbals[1].strike(velocity, accent, &kit, rate),
         }
     }
 

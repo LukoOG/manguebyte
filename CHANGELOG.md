@@ -328,12 +328,20 @@ display, and no editor has been opened inside a real host yet.
 - Built for `wasm32-unknown-unknown`, it is a module with plain
   `extern "C"` exports (ABI version 2) and no imports. `js/worklet.js` is
   the `AudioWorkletProcessor`, `js/engine.js` the main-thread helper that
-  maps `AudioContext` time to frames, and `js/ring.js` the ring; 35 tests
+  maps `AudioContext` time to frames, and `js/ring.js` the ring; 39 tests
   run them in Node.js against the built module. `examples/web` is a demo
   page with a server that sends the cross-origin isolation headers.
 - The output goes through a limiter with no look-ahead that keeps every
   sample within `OUTPUT_CEILING` (about -0.3 dB). Sample rates from 3 to
   768 kHz are accepted.
+- Accents: byte 9 of a record, which was padding, is now `flags`, and its
+  bit 0 accents a note on, as Aratu marks a note written in capitals; the
+  other bits are reserved. An accented synth note is 3.5 dB louder, opens
+  its filter an octave further and attacks twice as fast; an accented drum
+  is 3 dB louder with its attack sharpened. A 0 there means no accent, so
+  records from older writers play as before and the ABI version stays 2.
+  `EventRecord::with_accent`, `encodeRecord({ accent })` and the sixth
+  argument of `noteOn` in `js/engine.js` write it.
 
 ### Hosting
 

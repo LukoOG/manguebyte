@@ -209,6 +209,23 @@ test('hostile records are ignored and counted', { skip: skipWithoutWasm }, () =>
   x.mb_engine_free(engine);
 });
 
+test('an accented note plays louder than the same note without', { skip: skipWithoutWasm }, () => {
+  const peaks = [false, true].map((accent) => {
+    const { x, engine, push, render } = setUp();
+    assert.equal(x.mb_set_chain(engine, 0, 0), 0);
+    assert.equal(x.mb_set_chain(engine, 1, 0), 0);
+    push([
+      { frame: 0, kind: KIND.note_on, part: 0, note: 38, velocity: 0.8, accent },
+      { frame: 0, kind: KIND.note_on, part: 1, note: 45, velocity: 0.8, accent },
+    ]);
+    const { left } = render(4096, 128);
+    x.mb_engine_free(engine);
+    return left.reduce((peak, sample) => Math.max(peak, Math.abs(sample)), 0);
+  });
+  const db = 20 * Math.log10(peaks[1] / peaks[0]);
+  assert.ok(db > 2.5 && db < 6, `the accent added ${db} dB`);
+});
+
 test('parts are configured by control calls and describe their parameters', { skip: skipWithoutWasm }, () => {
   const { x, engine, text } = setUp();
   const params = JSON.parse(text(x.mb_params_json(engine, 1)));

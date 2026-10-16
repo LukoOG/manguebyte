@@ -1,6 +1,6 @@
 //! The 32-byte event record, byte by byte.
 
-use manguebyte_web::record::offset;
+use manguebyte_web::record::{flag, offset};
 use manguebyte_web::{Event, EventRecord, ParamId, RECORD_SIZE, RecordKind};
 
 /// A record with every field set to a value whose bytes are all different.
@@ -8,6 +8,7 @@ fn every_field() -> EventRecord {
     EventRecord {
         frame: 0x0807_0605_0403_0201,
         kind: 3,
+        flags: 0x09,
         part: 0x0B0A,
         note: 0x0C,
         channel: 0x0D,
@@ -24,7 +25,7 @@ fn the_layout_is_the_agreed_one_byte_by_byte() {
     let expected: [u8; 32] = [
         0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // frame, u64 little endian
         0x03,                                           // kind
-        0x00,                                           // padding
+        0x09,                                           // flags
         0x0A, 0x0B,                                     // part, u16
         0x0C,                                           // note
         0x0D,                                           // channel
@@ -38,6 +39,7 @@ fn the_layout_is_the_agreed_one_byte_by_byte() {
         (
             offset::FRAME,
             offset::KIND,
+            offset::FLAGS,
             offset::PART,
             offset::NOTE,
             offset::CHANNEL,
@@ -45,9 +47,9 @@ fn the_layout_is_the_agreed_one_byte_by_byte() {
             offset::PARAM,
             offset::VALUE
         ),
-        (0, 8, 10, 12, 13, 16, 20, 24)
+        (0, 8, 9, 10, 12, 13, 16, 20, 24)
     );
-    assert_eq!(offset::PADDING, [9, 14, 15]);
+    assert_eq!(offset::PADDING, [14, 15]);
 }
 
 #[test]
@@ -67,7 +69,7 @@ fn typed_values_land_where_the_table_says() {
         &note[..],
         &[
             1, 0, 0, 0, 0, 0, 0, 0, // frame 1
-            1, 0, // note on, padding
+            1, 0, // note on, no flags
             7, 0, // part 7
             60, 9, 0, 0, // note 60, channel 9, padding
             0x00, 0x00, 0x00, 0x3F, // 0.5f32
@@ -110,6 +112,64 @@ fn padding_is_written_as_zero_and_never_read() {
     let read = EventRecord::from_bytes(&bytes);
     assert_eq!(read.to_bytes(), record.to_bytes());
     assert_eq!(read.decode(), record.decode());
+}
+
+#[test]
+fn the_flags_byte_carries_the_accent_and_reserved_bits_are_ignored() {
+    assert_eq!((flag::ACCENT, flag::KNOWN), (1, 1));
+    let plain = EventRecord::note_on(10, 2, 38, 0.75);
+    let accented = plain.with_accent(true);
+    assert_eq!(plain.to_bytes()[offset::FLAGS], 0);
+    assert_eq!(accented.to_bytes()[offset::FLAGS], 1);
+    assert!(accented.accent() && !plain.accent());
+    assert_eq!(accented.with_accent(false), plain);
+    // Every other byte is the same: the accent is only bit 0 of byte 9.
+    let (a, b) = (plain.to_bytes(), accented.to_bytes());
+    let differing: Vec<usize> = (0..RECORD_SIZE).filter(|&i| a[i] != b[i]).collect();
+    assert_eq!(differing, [offset::FLAGS]);
+
+    let event = |flags: u8| EventRecord { flags, ..plain }.decode();
+    let note = |accent| {
+        Some(Event::NoteOn {
+            part: 2,
+            channel: 0,
+            note: 38,
+            velocity: 0.75,
+            accent,
+        })
+    };
+    // A record from a writer that knew nothing of flags has a 0 there.
+    assert_eq!(event(0), note(false));
+    assert_eq!(event(1), note(true));
+    // Reserved bits change nothing, with or without the accent.
+    for flags in 0..=255u8 {
+        assert_eq!(event(flags), note(flags & 1 == 1), "flags {flags:#04x}");
+    }
+    // Only a note on reads the accent; a silent note on is a note off.
+    let silent = EventRecord::note_on(10, 2, 38, 0.0).with_accent(true);
+    assert_eq!(
+        silent.decode(),
+        Some(Event::NoteOff {
+            part: 2,
+            channel: 0,
+            note: 38
+        })
+    );
+    for record in [
+        EventRecord::note_off(1, 2, 38),
+        EventRecord::choke(1, 2),
+        EventRecord::all_notes_off(1, 2),
+        EventRecord::param(1, 2, ParamId(7), 0.5),
+    ] {
+        assert_eq!(
+            EventRecord {
+                flags: 0xFF,
+                ..record
+            }
+            .decode(),
+            record.decode()
+        );
+    }
 }
 
 fn xorshift(state: &mut u64) -> u64 {
@@ -181,7 +241,8 @@ fn decoding_follows_the_rules() {
             part: 4,
             channel: 15,
             note: 127,
-            velocity: 1.0
+            velocity: 1.0,
+            accent: false,
         })
     );
     assert_eq!(on.decode().map(|event| event.part()), Some(4));

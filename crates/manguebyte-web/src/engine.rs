@@ -12,7 +12,7 @@ use crate::params::{InstrumentParams, PartParams};
 use crate::queue::{Admitted, Pending};
 use crate::record::{Event, EventRecord, RECORD_SIZE};
 use crate::ring::RingConsumer;
-use crate::synth::{SynthInstrument, choke_synth, new_synth};
+use crate::synth::{SynthInstrument, choke_synth, new_synth, synth_note_on};
 
 /// The most the output ever reaches: about -0.3 dB below full scale. The
 /// output limiter keeps every sample within `-OUTPUT_CEILING..=OUTPUT_CEILING`.
@@ -319,18 +319,27 @@ impl Part {
                     channel,
                     note,
                     velocity,
+                    accent,
                     ..
                 },
             ) => {
-                synth.note_on(NoteRef::new(channel, note), velocity);
+                synth_note_on(synth, NoteRef::new(channel, note), velocity, accent);
             }
             (Instrument::Synth(synth), Event::NoteOff { channel, note, .. }) => {
                 synth.note_off(NoteRef::new(channel, note), 0.0);
             }
             (Instrument::Synth(synth), Event::Choke { .. }) => choke_synth(synth),
             (Instrument::Synth(synth), Event::AllNotesOff { .. }) => synth.all_notes_off(),
-            (Instrument::Drums(kit), Event::NoteOn { note, velocity, .. }) => {
-                kit.note_on(note, velocity);
+            (
+                Instrument::Drums(kit),
+                Event::NoteOn {
+                    note,
+                    velocity,
+                    accent,
+                    ..
+                },
+            ) => {
+                kit.note_on(note, velocity, accent);
             }
             // Drums are one-shots: letting go of a key changes nothing.
             (Instrument::Drums(_), Event::NoteOff { .. }) => {}

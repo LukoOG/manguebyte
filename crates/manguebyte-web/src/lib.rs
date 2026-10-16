@@ -11,9 +11,10 @@
 //! Time is a frame counter, a `u64` that starts at 0 when the engine is made
 //! and moves on with every frame rendered. An event travels as a 32-byte
 //! [`EventRecord`], laid out as [`record::offset`] describes, little endian:
-//! `frame` u64, `kind` u8, a padding byte, `part` u16, `note` u8, `channel`
-//! u8, two padding bytes, `velocity` f32 (0 to 1), `param` u32 (a
-//! [`ParamId`]) and `value` f64 in the parameter's own units. The kinds are
+//! `frame` u64, `kind` u8, `flags` u8 ([`record::flag`]), `part` u16,
+//! `note` u8, `channel` u8, two padding bytes, `velocity` f32 (0 to 1),
+//! `param` u32 (a [`ParamId`]) and `value` f64 in the parameter's own
+//! units. The kinds are
 //! listed in [`RecordKind`] with their codes: note on 1, note off 2, param 3,
 //! choke 4 (the part's notes stop at once) and all notes off 5 (the part
 //! releases every note). A record with an unknown kind or a field out of
@@ -25,6 +26,28 @@
 //! part works one frame at a time, the output does not depend on the size
 //! of the quanta: one frame at a time or 512 at once gives the same samples,
 //! bit for bit.
+//!
+//! # Accents
+//!
+//! Bit 0 of a note on's `flags` byte, [`record::flag::ACCENT`]
+//! ([`EventRecord::with_accent`]), accents the note, as Aratu marks a note
+//! written in capitals. An accent is part of the note it is on and of no
+//! other, and it is applied on the same frame, so the output stays the
+//! same whatever the quanta.
+//!
+//! - A synth note is [`SYNTH_ACCENT_DB`] (3.5 dB) louder; its filter
+//!   envelope opens the filter [`SYNTH_ACCENT_OCTAVES`] (1 octave) further,
+//!   which falls away with the envelope; and its attack takes
+//!   [`SYNTH_ACCENT_ATTACK`] (half) of the time set.
+//! - A drum is [`DRUM_ACCENT_DB`] (3 dB) louder, and for its first
+//!   [`DRUM_ACCENT_SNAP_SECONDS`] (30 ms) its high frequencies are lifted,
+//!   most at the transient ([`DRUM_ACCENT_SNAP`], [`CYMBAL_ACCENT_SNAP`]
+//!   for the hi-hats and cymbals). An accented kick also starts higher in
+//!   pitch, with a louder click.
+//!
+//! At full velocity the peak rises by 3 to 3.5 dB on the synth and by 3 to
+//! 4.6 dB on the drums, and an accented note or drum alone still stays
+//! below [`OUTPUT_CEILING`]; `tests/accent.rs` measures it.
 //!
 //! # Parts and parameters
 //!
@@ -103,8 +126,11 @@
 //! # The contract with Aratu
 //!
 //! [Aratu](https://github.com/alessonqueirozdev-hub/aratu) writes records
-//! and reads the drum map, so these are fixed: a change to any of them is a
-//! change to [`ffi::ABI_VERSION`] (now 2) and must be agreed with Aratu.
+//! and reads the drum map, so these are fixed: a change to any of them that
+//! an existing reader or writer would get wrong is a change to
+//! [`ffi::ABI_VERSION`] (now 2) and must be agreed with Aratu. The flags
+//! byte was such a compatible change: it was padding written as 0, which
+//! still means no flag, and an engine from before it ignores it.
 //! `tests/record.rs`, `tests/ring.rs` and `js/tests/ring.test.mjs` pin them,
 //! the last two against the same golden bytes.
 //!
@@ -115,7 +141,7 @@
 //! |--------|------------|------|---------|
 //! | 0..8   | `frame`    | u64  | the frame the event lands on, counted from the engine's first |
 //! | 8      | `kind`     | u8   | 1 note on, 2 note off, 3 param, 4 choke, 5 all notes off |
-//! | 9      | padding    |      | written as 0, never read |
+//! | 9      | `flags`    | u8   | bit 0 accent (note on); bits 1 to 7 reserved: written as 0, ignored |
 //! | 10..12 | `part`     | u16  | the part the event is for |
 //! | 12     | `note`     | u8   | MIDI note, 0 to 127 (note on and note off) |
 //! | 13     | `channel`  | u8   | MIDI channel, 0 to 15 (note on and note off) |
@@ -172,7 +198,10 @@ pub mod record;
 pub mod ring;
 mod synth;
 
-pub use drums::{DAMP_SECONDS, DRUM_MAP, Drum, DrumNote, HAT_CHOKE_SECONDS, drum_map_json};
+pub use drums::{
+    CYMBAL_ACCENT_SNAP, DAMP_SECONDS, DRUM_ACCENT_DB, DRUM_ACCENT_SNAP, DRUM_ACCENT_SNAP_SECONDS,
+    DRUM_MAP, Drum, DrumNote, HAT_CHOKE_SECONDS, drum_map_json,
+};
 pub use engine::{
     Chain, Engine, EngineConfig, EngineError, EngineStats, InstrumentKind, LIMITER_HOLD_SECONDS,
     LIMITER_RELEASE_SECONDS, OUTPUT_CEILING, Pushed,
@@ -181,4 +210,7 @@ pub use manguebyte_params::ParamId;
 pub use params::ids;
 pub use record::{Event, EventRecord, RECORD_SIZE, RecordKind};
 pub use ring::{RingConsumer, RingProducer, event_ring, event_ring_starting_at, ring_bytes};
-pub use synth::{RETRIGGER_GLIDE_SECONDS, STEAL_FADE_SECONDS, SYNTH_VOICES};
+pub use synth::{
+    RETRIGGER_GLIDE_SECONDS, STEAL_FADE_SECONDS, SYNTH_ACCENT_ATTACK, SYNTH_ACCENT_DB,
+    SYNTH_ACCENT_OCTAVES, SYNTH_VOICES,
+};

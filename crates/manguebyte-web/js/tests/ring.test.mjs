@@ -9,6 +9,7 @@ import { Worker } from 'node:worker_threads';
 
 import {
   EventRing,
+  FLAG,
   KIND,
   RECORD_SIZE,
   RING_MAGIC,
@@ -29,8 +30,8 @@ const records = [
   { frame: 0x0102030405060708n, kind: KIND.param, part: 513, param: 'lowpass.cutoff', value: 1234.5 },
   { frame: 77, kind: 'choke', part: 65535 },
   { frame: Number.MAX_SAFE_INTEGER - 1 + 1, kind: 'all_notes_off', part: 7 },
-  { frame: 99, kind: 'note_off', part: 3, note: 127, channel: 9 },
-  { frame: 5, kind: 200, part: 1, note: 255, channel: 255, velocity: -1.5, param: 0xdeadbeef, value: -0 },
+  { frame: 99, kind: 'note_on', part: 3, note: 127, channel: 9, velocity: 1, accent: true },
+  { frame: 5, kind: 200, flags: 0xfe, part: 1, note: 255, channel: 255, velocity: -1.5, param: 0xdeadbeef, value: -0 },
 ];
 
 test('the JavaScript ring ends with the same bytes as the Rust ring', () => {
@@ -57,6 +58,7 @@ test('a record is laid out byte by byte as agreed', () => {
   encodeRecord(view, 0, {
     frame: 0x0807060504030201n,
     kind: 3,
+    flags: 0x09,
     part: 0x0b0a,
     note: 0x0c,
     channel: 0x0d,
@@ -66,15 +68,39 @@ test('a record is laid out byte by byte as agreed', () => {
   });
   assert.equal(
     hex(new Uint8Array(view.buffer)),
-    '0102030405060708' + '03' + '00' + '0a0b' + '0c' + '0d' + '0000' + '10111213' + '14151617' + '18191a1b1c1d1e1f',
+    '0102030405060708' + '03' + '09' + '0a0b' + '0c' + '0d' + '0000' + '10111213' + '14151617' + '18191a1b1c1d1e1f',
   );
   const back = decodeRecord(view, 0);
   assert.equal(back.frame, 0x0807060504030201n);
   assert.equal(back.part, 0x0b0a);
   assert.equal(back.param, 0x17161514);
+  assert.equal(back.flags, 0x09);
+  assert.equal(back.accent, true);
   // A frame as a Number is split into two 32-bit halves exactly.
   encodeRecord(view, 0, { frame: 2 ** 40 + 12345, kind: 1 });
   assert.equal(view.getBigUint64(0, true), 2n ** 40n + 12345n);
+});
+
+test('the accent is bit 0 of byte 9, and a record without it has a 0 there', () => {
+  assert.deepEqual({ ...FLAG }, { accent: 1 });
+  const plain = new Uint8Array(RECORD_SIZE);
+  const accented = new Uint8Array(RECORD_SIZE);
+  const note = { frame: 10, kind: 'note_on', part: 2, note: 38, velocity: 0.75 };
+  encodeRecord(new DataView(plain.buffer), 0, note);
+  encodeRecord(new DataView(accented.buffer), 0, { ...note, accent: true });
+  assert.equal(plain[9], 0);
+  assert.equal(accented[9], 1);
+  // Nothing else differs.
+  for (let i = 0; i < RECORD_SIZE; i++) if (i !== 9) assert.equal(plain[i], accented[i], `byte ${i}`);
+  assert.equal(decodeRecord(new DataView(plain.buffer), 0).accent, false);
+  assert.equal(decodeRecord(new DataView(accented.buffer), 0).accent, true);
+  // The raw byte and the accent combine; reserved bits read back as they are.
+  const view = new DataView(new ArrayBuffer(RECORD_SIZE));
+  encodeRecord(view, 0, { ...note, flags: 0xfe, accent: true });
+  assert.equal(view.getUint8(9), 0xff);
+  encodeRecord(view, 0, { ...note, flags: 0xfe });
+  assert.deepEqual([decodeRecord(view, 0).flags, decodeRecord(view, 0).accent], [0xfe, false]);
+  for (const flags of [256, -1, 0.5]) assert.throws(() => encodeRecord(view, 0, { ...note, flags }), RangeError);
 });
 
 test('the kind codes and the parameter hash match the Rust ones', () => {

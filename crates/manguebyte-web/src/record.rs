@@ -7,14 +7,15 @@ pub const RECORD_SIZE: usize = 32;
 
 /// Byte offsets of the fields inside a record.
 ///
-/// Every multi-byte field is little endian. Bytes 9, 14 and 15 are padding:
-/// a writer sets them to zero and a reader ignores them.
+/// Every multi-byte field is little endian. Bytes 14 and 15 are padding: a
+/// writer sets them to zero and a reader ignores them. Byte 9 holds the
+/// [`flag`] bits.
 ///
 /// | Bytes  | Field      | Type |
 /// |--------|------------|------|
 /// | 0..8   | `frame`    | u64  |
 /// | 8      | `kind`     | u8   |
-/// | 9      | padding    |      |
+/// | 9      | `flags`    | u8   |
 /// | 10..12 | `part`     | u16  |
 /// | 12     | `note`     | u8   |
 /// | 13     | `channel`  | u8   |
@@ -27,6 +28,8 @@ pub mod offset {
     pub const FRAME: usize = 0;
     /// The kind code, `u8`. See [`RecordKind`](super::RecordKind).
     pub const KIND: usize = 8;
+    /// The flag bits, `u8`. See [`flag`](super::flag).
+    pub const FLAGS: usize = 9;
     /// The part, `u16`.
     pub const PART: usize = 10;
     /// The MIDI note number, `u8`.
@@ -40,7 +43,22 @@ pub mod offset {
     /// The parameter value in plain units, `f64`.
     pub const VALUE: usize = 24;
     /// The padding bytes, written as zero and never read.
-    pub const PADDING: [usize; 3] = [9, 14, 15];
+    pub const PADDING: [usize; 2] = [14, 15];
+}
+
+/// The bits of the `flags` byte.
+///
+/// Bit 0 is [`ACCENT`](flag::ACCENT); bits 1 to 7 are reserved: a writer sets them to
+/// zero and a reader ignores them. A record whose byte 9 is 0, such as one
+/// written before the byte had flags, which was padding written as zero,
+/// carries no flag.
+pub mod flag {
+    /// Bit 0: the note is accented, as Aratu marks a note written in
+    /// capitals. Read by note on only; an accented note plays louder and
+    /// brighter, as [the crate documentation](crate#accents) says.
+    pub const ACCENT: u8 = 1 << 0;
+    /// Every bit that has a meaning.
+    pub const KNOWN: u8 = ACCENT;
 }
 
 /// What a record asks for, and its numeric code in the `kind` byte.
@@ -103,6 +121,8 @@ pub struct EventRecord {
     pub frame: u64,
     /// The kind code. See [`RecordKind`].
     pub kind: u8,
+    /// The [`flag`] bits. Reserved bits are written as zero and ignored.
+    pub flags: u8,
     /// The part the event is for.
     pub part: u16,
     /// MIDI note number, 0 to 127. Used by note on and note off.
@@ -170,11 +190,37 @@ impl EventRecord {
         self
     }
 
+    /// The same record with the [`ACCENT`](flag::ACCENT) flag set or
+    /// cleared.
+    ///
+    /// ```
+    /// use manguebyte_web::{Event, EventRecord};
+    ///
+    /// let loud = EventRecord::note_on(0, 1, 38, 0.8).with_accent(true);
+    /// assert_eq!(loud.to_bytes()[9], 1);
+    /// assert!(matches!(loud.decode(), Some(Event::NoteOn { accent: true, .. })));
+    /// ```
+    #[must_use]
+    pub fn with_accent(mut self, accent: bool) -> Self {
+        if accent {
+            self.flags |= flag::ACCENT;
+        } else {
+            self.flags &= !flag::ACCENT;
+        }
+        self
+    }
+
+    /// Whether the [`ACCENT`](flag::ACCENT) flag is set.
+    pub fn accent(&self) -> bool {
+        self.flags & flag::ACCENT != 0
+    }
+
     /// The record's 32 bytes, padding set to zero.
     pub fn to_bytes(&self) -> [u8; RECORD_SIZE] {
         let mut bytes = [0u8; RECORD_SIZE];
         bytes[offset::FRAME..offset::FRAME + 8].copy_from_slice(&self.frame.to_le_bytes());
         bytes[offset::KIND] = self.kind;
+        bytes[offset::FLAGS] = self.flags;
         bytes[offset::PART..offset::PART + 2].copy_from_slice(&self.part.to_le_bytes());
         bytes[offset::NOTE] = self.note;
         bytes[offset::CHANNEL] = self.channel;
@@ -198,6 +244,7 @@ impl EventRecord {
         Self {
             frame: u64_at(offset::FRAME),
             kind: bytes[offset::KIND],
+            flags: bytes[offset::FLAGS],
             part: u16_at(offset::PART),
             note: bytes[offset::NOTE],
             channel: bytes[offset::CHANNEL],
@@ -236,7 +283,9 @@ impl EventRecord {
     /// its kind uses is out of range: a note above 127, a channel above 15,
     /// a note-on velocity that is not a number between 0 and 1, or a
     /// parameter value that is not finite. A note on with velocity 0 is a
-    /// note off, as in MIDI. Whether the part and the parameter exist is
+    /// note off, as in MIDI, and its accent is dropped. Only note on reads
+    /// the flags, and only the [`ACCENT`](flag::ACCENT) bit of them; the
+    /// reserved bits never make a record ignored. Whether the part and the parameter exist is
     /// only known when the event is applied.
     ///
     /// ```
@@ -268,6 +317,7 @@ impl EventRecord {
                         channel: self.channel,
                         note: self.note,
                         velocity,
+                        accent: self.accent(),
                     }
                 })
             }
@@ -300,6 +350,8 @@ pub enum Event {
         note: u8,
         /// Above 0, at most 1.
         velocity: f32,
+        /// Whether the note is accented: louder and brighter.
+        accent: bool,
     },
     /// Release a note.
     NoteOff {
