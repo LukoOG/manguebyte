@@ -121,7 +121,9 @@ for (const shared of [true, false]) {
     engine.noteOn(0, 36, 1, 0.001); // long gone
     engine.noteOn(0, 42, 1); // no time: as soon as possible
     const { left } = await context.run(2);
-    assert.equal(firstSound(left), 0);
+    // On the first frame the engine renders, which it renders the master
+    // bus's look-ahead, 111 frames, ahead of the output.
+    assert.equal(firstSound(left), 111);
     assert.equal((await engine.stats()).late, 2);
     await engine.close();
   });
@@ -166,7 +168,7 @@ test('control calls report errors and describe parameters', { skip: skipWithoutW
   assert.throws(() => engine.createPart(0, 'organ'), RangeError);
   const params = await engine.params(3);
   assert.equal(params[0].id, 'synth.wave');
-  assert.equal(params.at(-1).id, 'pan');
+  assert.equal(params.at(-1).id, 'send');
   assert.equal(await engine.paramsJson(8), null);
   const map = JSON.parse(await engine.drumMapJson());
   assert.equal(map.find((entry) => entry.symbol === 'o').note, 46);

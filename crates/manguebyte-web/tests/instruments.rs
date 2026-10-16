@@ -172,8 +172,8 @@ fn the_synth_note_is_rich_and_moves_like_an_analogue_one() {
 }
 
 /// The loudest settings of two parts together, far beyond full scale
-/// before the output limiter: the limiter holds them under
-/// [`OUTPUT_CEILING`] without clipping. Before the limiter, the engine
+/// before the master bus: its limiter holds them under its ceiling, -0.3 dBTP
+/// by default, without clipping. Before there was a limiter, the engine
 /// clamped every sample to full scale and 87 369 of these 96 000 samples
 /// sat at exactly ±1, a square wave; the old version of this test only
 /// checked the clamp.
@@ -202,7 +202,13 @@ fn the_loudest_settings_are_held_under_the_ceiling_not_clipped() {
     push_all(&mut engine, &records);
     let (left, right) = render(&mut engine, 96_000, 128);
     let stats = engine.stats();
-    assert!(peak(&left) > 0.9, "the test is not loud enough");
+    let ceiling = OUTPUT_CEILING;
+    let loudest = peak(&left).max(peak(&right));
+    assert!(
+        loudest > 0.95 * ceiling,
+        "the test is not loud enough: {loudest}"
+    );
+    assert!(loudest <= ceiling, "{loudest}");
     assert!(
         stats.limited > 90_000,
         "the limiter was not needed: {stats:?}"
@@ -211,15 +217,16 @@ fn the_loudest_settings_are_held_under_the_ceiling_not_clipped() {
     for sample in left.iter().chain(&right) {
         assert!(sample.is_finite() && sample.abs() <= OUTPUT_CEILING);
     }
-    // Held under the ceiling, not flattened against it: few samples sit on
-    // it, and never for long, where clipping held 91% of them at full scale
-    // in long flat runs.
+    // Held under the ceiling, not flattened against it: few samples sit
+    // within a hundredth of a decibel of it, and never for long, where
+    // clipping held 91% of them at full scale in long flat runs.
+    let near = ceiling * 0.9989;
     for channel in [&left, &right] {
         let mut pinned = 0;
         let mut run = 0;
         let mut longest = 0;
         for sample in channel.iter() {
-            if sample.abs() == OUTPUT_CEILING {
+            if sample.abs() >= near {
                 pinned += 1;
                 run += 1;
                 longest = longest.max(run);
@@ -253,25 +260,26 @@ fn mix(parts: &[(u16, InstrumentKind)], records: &[EventRecord]) -> (Vec<f32>, E
     (left, engine.stats())
 }
 
-/// Two parts at their default settings: three drums and a three-note chord
-/// struck together at full velocity. Each part alone stays under the
-/// ceiling and is left alone; together they go beyond it, and the limiter
+/// Two parts at their default settings: three drums and a three-note
+/// chord struck together. Each part alone stays under the ceiling and is
+/// left exactly as it is; together they go beyond it, and the limiter
 /// turns them down gently, by at most 6 dB, keeping the shape of the
-/// waveform. Before the limiter, 90 of these samples were clipped.
+/// waveform: the gain is a smooth curve that starts down before the peak
+/// it makes room for, by the look-ahead, and comes back up slowly. Before
+/// the engine had a limiter, 90 of these samples were clipped.
 #[test]
 fn two_parts_at_default_levels_are_limited_gently_not_clipped() {
     let records = [
-        EventRecord::note_on(0, 0, 36, 1.0),
-        EventRecord::note_on(0, 0, 38, 1.0),
-        EventRecord::note_on(0, 0, 49, 1.0),
-        EventRecord::note_on(0, 1, 45, 1.0),
-        EventRecord::note_on(0, 1, 52, 1.0),
-        EventRecord::note_on(0, 1, 57, 1.0),
+        EventRecord::note_on(0, 0, 36, 0.9),
+        EventRecord::note_on(0, 0, 38, 0.9),
+        EventRecord::note_on(0, 0, 49, 0.9),
+        EventRecord::note_on(0, 1, 45, 0.9),
+        EventRecord::note_on(0, 1, 52, 0.9),
+        EventRecord::note_on(0, 1, 57, 0.9),
     ];
     let (drums, drum_stats) = mix(&[(0, InstrumentKind::Drums)], &records);
     let (synth, synth_stats) = mix(&[(1, InstrumentKind::Synth)], &records);
     assert_eq!((drum_stats.limited, synth_stats.limited), (0, 0));
-    assert!(peak(&drums) < OUTPUT_CEILING && peak(&synth) < OUTPUT_CEILING);
 
     let (both, stats) = mix(
         &[(0, InstrumentKind::Drums), (1, InstrumentKind::Synth)],
@@ -280,43 +288,51 @@ fn two_parts_at_default_levels_are_limited_gently_not_clipped() {
     assert!(stats.limited > 0, "the mix did not need the limiter");
     // The most the gain can rise in one frame, as it comes back to 1.
     let release = 1.0 - (-1.0 / (LIMITER_RELEASE_SECONDS * RATE)).exp();
-    let mut lowest_gain = 1.0f64;
-    let mut last_gain: Option<f64> = None;
+    let ceiling = f64::from(OUTPUT_CEILING);
+    let mut gains = Vec::new();
+    let mut first_over = None;
     for (frame, ((&both, &drums), &synth)) in both.iter().zip(&drums).zip(&synth).enumerate() {
-        // The engine adds the parts in this order, so this is exactly what
-        // reached the limiter.
+        // The engine adds the parts in this order, and the master bus
+        // delays them all alike, so this is exactly what reached the
+        // limiter for this frame.
         let sum = 0.0f32 + drums + synth;
         assert!(both.abs() <= OUTPUT_CEILING);
-        assert!(both.abs() < 1.0, "clipped");
+        assert!(f64::from(both.abs()) <= ceiling, "over the ceiling");
+        if f64::from(sum.abs()) > ceiling && first_over.is_none() {
+            first_over = Some(frame);
+        }
         if sum.abs() > 1e-3 {
             let gain = f64::from(both) / f64::from(sum);
             assert!(gain > 0.0 && gain <= 1.0 + 1e-6, "{gain}");
-            // A gain, not a clip: it falls at once but rises only slowly,
-            // where clipping would let it jump back to 1 the moment the
-            // wave falls under the ceiling.
-            if let Some(last) = last_gain {
-                let most = last + (1.0 - last) * release + 1e-5;
-                assert!(
-                    gain <= most,
-                    "frame {frame}: the gain rose from {last} to {gain}"
-                );
-            }
-            last_gain = Some(gain);
-            lowest_gain = lowest_gain.min(gain);
-        } else {
-            last_gain = None;
+            gains.push((frame, gain));
         }
     }
-    let raw_peak = drums
+    // Down before the first peak over the ceiling: the look-ahead.
+    let first_over = first_over.expect("the mix is not loud enough");
+    let before = gains
         .iter()
-        .zip(&synth)
-        .map(|(&drums, &synth)| (drums + synth).abs())
-        .fold(0.0f32, f32::max);
-    assert!(raw_peak > 1.0, "the mix is not loud enough: {raw_peak}");
-    assert!(
-        lowest_gain > 0.5,
-        "turned down by more than 6 dB: {lowest_gain}"
-    );
+        .find(|&&(frame, _)| frame + 1 >= first_over)
+        .unwrap();
+    assert!(before.1 < 1.0, "the gain was not down before the peak");
+    let lowest = gains.iter().map(|&(_, gain)| gain).fold(1.0, f64::min);
+    assert!(lowest > 0.5, "turned down by more than 6 dB: {lowest}");
+    // A gain, not a clip: it moves by small steps, where clipping would
+    // let it jump back to 1 the moment the wave falls under the ceiling;
+    // and it rises no faster than its release.
+    for pair in gains.windows(2) {
+        let [(at, last), (next_at, gain)] = [pair[0], pair[1]];
+        if next_at != at + 1 {
+            continue;
+        }
+        assert!(
+            (gain - last).abs() < 0.01,
+            "frame {next_at}: {last} to {gain}"
+        );
+        assert!(
+            gain <= last + (1.0 - last) * release * 1.5 + 1e-5,
+            "frame {next_at}: the gain rose from {last} to {gain}"
+        );
+    }
 }
 
 #[test]
@@ -355,10 +371,12 @@ fn no_value_an_event_can_carry_makes_a_part_go_wrong() {
         Chain {
             lowpass: true,
             reverb: false,
+            ..Chain::NONE
         },
         Chain {
             lowpass: false,
             reverb: true,
+            ..Chain::NONE
         },
     ];
     let mut seed = 0x6A09_E667_F3BC_C909u64;

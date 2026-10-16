@@ -1,10 +1,12 @@
 //! A Manguebyte engine for the browser, that builds and runs natively too.
 //!
 //! The [`Engine`] holds numbered parts. Each part plays an instrument, the
-//! polyphonic synth, the drum kit or an SFZ instrument, through a small
-//! chain: a resonant low-pass filter, a reverb, then gain and pan. Parts
-//! are made and configured with control calls, outside the audio callback;
-//! sound is driven by events, each one landing on the exact frame it names.
+//! polyphonic synth, the drum kit or an SFZ instrument, through a chain of
+//! effects (see [Effects](#effects)), then gain and pan, into a master bus
+//! with a shared reverb, a glue compressor and a true-peak limiter (see
+//! [The master bus](#the-master-bus)). Parts are made and configured with
+//! control calls, outside the audio callback; sound is driven by events,
+//! each one landing on the exact frame it names.
 //!
 //! # Time and events
 //!
@@ -23,11 +25,16 @@
 //! out of range is ignored, never a panic; [`EventRecord::decode`] gives the
 //! rules.
 //!
-//! When a quantum of frames is rendered, an event whose frame is inside it
-//! lands on that frame; an event whose frame has already passed lands on the
-//! first frame of the quantum; an event further ahead waits. Because every
-//! part works one frame at a time, the output does not depend on the size
-//! of the quanta: one frame at a time or 512 at once gives the same samples,
+//! The engine renders its parts [`Engine::master_latency_frames`] ahead of
+//! its output, the time the master bus's limiter looks ahead, and the bus
+//! delays them by as much, so an event is heard on the frame it names.
+//! When a quantum is rendered, an event whose frame the parts reach in it
+//! lands on that frame; an event whose frame they have already passed
+//! lands on the first frame they render, and is heard that many frames
+//! into the quantum; an event further ahead waits. Every event pushed
+//! before the first render lands on its frame. Because every part and the
+//! bus work one frame at a time, the output does not depend on the size of
+//! the quanta: one frame at a time or 512 at once gives the same samples,
 //! bit for bit.
 //!
 //! # Accents
@@ -59,7 +66,7 @@
 //! [`InstrumentKind::Drums`] or [`InstrumentKind::Sampler`] and given its
 //! stages with [`Engine::set_chain`]. Its parameters have stable text
 //! identifiers, listed in [`ids`] (`"lowpass.cutoff"`, `"reverb.mix"`,
-//! `"gain"`, `"pan"`,
+//! `"gain"`, `"pan"`, `"send"`, `"delay.time"`,
 //! `"synth.cutoff"`, `"kick.level"` and so on); an event names one by its
 //! [`ParamId`], the FNV-1a hash of the identifier. [`Engine::params_json`]
 //! describes a part's parameters as JSON: range, default, unit, the curve a
@@ -96,9 +103,10 @@
 //!   adds 73 to 92%).
 //! - **Latency.** [`Engine::latency_frames`] is how far ahead of
 //!   [`Engine::frame`] an event pushed from another thread must be due to
-//!   be sure of landing on its frame: one render quantum, as the engine has
-//!   no look-ahead of its own. In a browser that is 128 frames;
-//!   `js/engine.js` adds the context's output latency.
+//!   be sure of landing on its frame: one render quantum and the master
+//!   bus's look-ahead ([`Engine::master_latency_frames`], 111 frames at
+//!   48 kHz), which the engine renders its parts ahead by. In a browser
+//!   that is 239 frames; `js/engine.js` adds the context's output latency.
 //!
 //! # Between threads
 //!
@@ -142,19 +150,49 @@
 //! [`ring`], the module driven through its exports, and the worklet with
 //! the helper, in Node.js with stand-ins for the browser's worklet globals.
 //!
+//! # Effects
+//!
+//! A part's [`Chain`] says which [`Effect`]s it has: high-pass, low-pass,
+//! EQ, drive, bitcrush, compressor, chorus, flanger, phaser, tremolo,
+//! auto-pan, delay and reverb, which always run in that order
+//! ([`Effect::PART_ORDER`]). An effect in the chain has its memory and its
+//! parameters (`"delay.time"`, listed in [`ids`]); its switch, a parameter
+//! like any other (`"delay.on"`), switches it on and off on an exact
+//! frame. An effect not in the chain, or switched off and done fading,
+//! is skipped and costs nothing. Switching fades over
+//! [`EFFECT_FADE_SECONDS`] (the delay and the reverb let their echoes and
+//! tails ring on), every setting glides, and nothing clicks. Each effect
+//! names in its parameters' JSON what an editor draws for it, a
+//! [`Visual`], and [`Engine::effect_curve`] gives the points, worked out
+//! from the parameters outside the render call. The crate's README lists
+//! every parameter with its unit, range and default.
+//!
+//! # The master bus
+//!
+//! The parts and the return of a shared reverb, which each part feeds by
+//! its `send`, go through a glue compressor (off until `master.glue.on`),
+//! `master.gain` and a look-ahead limiter, `manguebyte-dsp`'s
+//! [`Limiter`](manguebyte_dsp::Limiter), that is true-peak aware: it is fed
+//! the waveform between the samples, read by interpolating by eight, and
+//! keeps it under `master.limiter.ceiling`, -0.3 dBTP by default, and every
+//! sample within [`OUTPUT_CEILING`] (about -0.3 dB below full scale).
+//! Below the ceiling it leaves the sound exactly as it is: one note or one
+//! drum at full velocity and default settings stays below it (a single note
+//! of the synth peaks around -9 dB, a drum at -4.5 dB or lower); loud
+//! chords and several loud parts together are turned down in a ramp before
+//! their peaks and let back up over [`LIMITER_RELEASE_SECONDS`], never
+//! clipped. [`EngineStats::limited`] counts the frames it turned down. The
+//! look-ahead, [`MASTER_LOOKAHEAD_SECONDS`], and the reading between
+//! samples, [`TRUE_PEAK_DELAY`] frames, make the bus
+//! [`master_latency_frames`] late, which the engine renders its parts ahead
+//! by, so events stay on their frames. `master.tempo` and `master.beat` are
+//! what synced effects follow. A master parameter's record may name any
+//! part; it belongs to none ([`Engine::master_params_json`]).
+//!
 //! # Output level
 //!
-//! The parts are added up and pass through a limiter that keeps every
-//! sample within [`OUTPUT_CEILING`] (about -0.3 dB below full scale): a
-//! frame that would go beyond it is turned down just enough, the level is
-//! held for [`LIMITER_HOLD_SECONDS`] and comes back over
-//! [`LIMITER_RELEASE_SECONDS`]. One note or one drum at full velocity and
-//! default settings stays below the ceiling (a single note of the synth
-//! peaks around -9 dB, a drum at -4.5 dB or lower); loud chords and
-//! several loud parts together are held under it rather than clipped,
-//! though the limiter does not look ahead, so under heavy overload the
-//! tops of rising edges are flattened briefly (see [`Engine::render`]).
-//! [`EngineStats::limited`] counts the frames the limiter turned down.
+//! See [the master bus](#the-master-bus): every sample stays within
+//! [`OUTPUT_CEILING`], whatever the parts do.
 //!
 //! # The contract with Aratu
 //!
@@ -251,20 +289,26 @@
 //!
 //! [`Engine::push`], [`Engine::push_bytes`], [`Engine::admit_bytes`],
 //! [`Engine::drain`] and [`Engine::render`] never allocate, lock or panic,
-//! sampler parts included, and rendering holds
+//! sampler parts and every effect included (an effect's memory is made
+//! when it joins a part's chain, by a control call), and rendering holds
 //! [`NoDenormals`](manguebyte_core::NoDenormals) (which does nothing in
-//! WebAssembly, where the reverb is put to sleep in silence instead).
-//! `tests/realtime.rs` checks the first part of that with a counting
-//! allocator.
+//! WebAssembly, where the reverbs and the delay are put to sleep in
+//! silence instead, and the master bus comes to rest). `tests/realtime.rs`
+//! checks the first part of that with a counting allocator, with every
+//! effect on.
 
 #![deny(unsafe_code)]
 
 mod chain;
+mod curve;
 mod drums;
+mod effect;
 mod engine;
 #[allow(unsafe_code)]
 pub mod ffi;
+mod fx;
 mod load;
+mod master;
 mod params;
 mod queue;
 pub mod record;
@@ -272,17 +316,21 @@ pub mod ring;
 mod sampled;
 mod synth;
 
+pub use curve::{Curve, MAX_CURVE_POINTS};
 pub use drums::{
     CYMBAL_ACCENT_SNAP, DAMP_SECONDS, DRUM_ACCENT_DB, DRUM_ACCENT_SNAP, DRUM_ACCENT_SNAP_SECONDS,
     DRUM_MAP, Drum, DrumNote, HAT_CHOKE_SECONDS, drum_map_json,
 };
+pub use effect::{Effect, Visual};
 pub use engine::{
     CANCEL_FADE_SECONDS, Chain, Engine, EngineConfig, EngineError, EngineStats, InstrumentKind,
-    LIMITER_HOLD_SECONDS, LIMITER_RELEASE_SECONDS, OUTPUT_CEILING, Pushed,
+    LIMITER_RELEASE_SECONDS, OUTPUT_CEILING, Pushed,
 };
+pub use fx::{DELAY_GLIDE_SECONDS, DELAY_MAX_SECONDS, EFFECT_FADE_SECONDS, WAVE_SMOOTHING_SECONDS};
 pub use load::{SfzInstrument, SfzLoad};
 pub use manguebyte_params::ParamId;
 pub use manguebyte_sampler;
+pub use master::{MASTER_LOOKAHEAD_SECONDS, TRUE_PEAK_DELAY, master_latency_frames};
 pub use params::ids;
 pub use record::{Event, EventRecord, RECORD_SIZE, RecordKind};
 pub use ring::{RingConsumer, RingProducer, event_ring, event_ring_starting_at, ring_bytes};

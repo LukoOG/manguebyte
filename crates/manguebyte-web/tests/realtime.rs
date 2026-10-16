@@ -12,7 +12,8 @@ use std::cell::Cell;
 
 use manguebyte_web::ffi;
 use manguebyte_web::{
-    Chain, Drum, Engine, EngineConfig, EventRecord, InstrumentKind, ParamId, event_ring, ids,
+    Chain, Drum, Effect, Engine, EngineConfig, EventRecord, InstrumentKind, ParamId, event_ring,
+    ids,
 };
 
 thread_local! {
@@ -131,6 +132,73 @@ fn events(start: u64) -> Vec<EventRecord> {
             ));
         }
     }
+    // Parts 8 and 9 with every effect switched on, sending to the shared
+    // reverb, through the glue compressor, synced to a tempo; switched
+    // off and on again, and changed while they play.
+    records.push(EventRecord::param(start, 0, id(ids::GLUE_ON), 1.0));
+    records.push(EventRecord::param(start, 0, id(ids::MASTER_TEMPO), 133.0));
+    for part in [8u16, 9] {
+        for effect in Effect::PART_ORDER {
+            let switch = id(&format!("{}.on", effect.name()));
+            records.push(EventRecord::param(start, part, switch, 1.0));
+            records.push(EventRecord::param(start + 4_000, part, switch, 0.0));
+            records.push(EventRecord::param(start + 5_000, part, switch, 1.0));
+        }
+        for (name, value) in [
+            (ids::SEND, 0.6),
+            (ids::TREMOLO_SYNC, 0.5),
+            (ids::DELAY_SYNC, 0.25),
+            (ids::DELAY_PINGPONG, 1.0),
+            (ids::BITCRUSH_RATE, 8_000.0),
+            (ids::EQ_MID_GAIN, 9.0),
+        ] {
+            records.push(EventRecord::param(start + 1, part, id(name), value));
+        }
+        records.push(EventRecord::param(
+            start + 2_000,
+            part,
+            id(ids::DELAY_TIME),
+            0.2,
+        ));
+        records.push(EventRecord::param(
+            start + 2_100,
+            part,
+            id(ids::DRIVE_SHAPE),
+            3.0,
+        ));
+        records.push(EventRecord::param(
+            start + 2_200,
+            part,
+            id(ids::PHASER_STAGES),
+            7.0,
+        ));
+        records.push(EventRecord::param(
+            start + 2_300,
+            part,
+            id(ids::CHORUS_VOICES),
+            8.0,
+        ));
+        for step in 0..16u64 {
+            records.push(EventRecord::note_on(
+                start + 3 + step * 600,
+                part,
+                38 + step as u8,
+                1.0,
+            ));
+        }
+    }
+    records.push(EventRecord::param(
+        start + 3_000,
+        0,
+        id(ids::MASTER_TEMPO),
+        77.0,
+    ));
+    records.push(EventRecord::param(
+        start + 3_000,
+        0,
+        id(ids::MASTER_BEAT),
+        16.0,
+    ));
     // Nine notes on eight voices: a voice is taken over and fades out.
     for note in 0..9u8 {
         records.push(EventRecord::note_on(
@@ -180,7 +248,7 @@ fn events(start: u64) -> Vec<EventRecord> {
 }
 
 /// How many parts `parts` makes.
-const PARTS: u16 = 8;
+const PARTS: u16 = 10;
 
 /// Both instruments through every chain: parts 0 to 5; part 6, a sampler
 /// with an instrument; part 7, a sampler kit with one.
@@ -188,10 +256,12 @@ fn parts(engine: &mut Engine) {
     let lowpass = Chain {
         lowpass: true,
         reverb: false,
+        ..Chain::NONE
     };
     let reverb = Chain {
         lowpass: false,
         reverb: true,
+        ..Chain::NONE
     };
     for (part, kind, chain) in [
         (0, InstrumentKind::Drums, Chain::FULL),
@@ -202,6 +272,8 @@ fn parts(engine: &mut Engine) {
         (5, InstrumentKind::Drums, Chain::NONE),
         (6, InstrumentKind::Sampler, Chain::FULL),
         (7, InstrumentKind::SamplerKit, Chain::FULL),
+        (8, InstrumentKind::Drums, Chain::ALL),
+        (9, InstrumentKind::Synth, Chain::ALL),
     ] {
         engine.create_part_with(part, kind, chain).unwrap();
     }
@@ -213,9 +285,13 @@ fn parts(engine: &mut Engine) {
 
 #[test]
 fn pushing_draining_and_rendering_never_allocate() {
-    let mut engine = Engine::new(EngineConfig::new(48_000.0)).unwrap();
+    let mut engine = Engine::new(EngineConfig {
+        pending_capacity: 16_384,
+        ..EngineConfig::new(48_000.0)
+    })
+    .unwrap();
     parts(&mut engine);
-    let (mut producer, mut consumer) = event_ring(1_024);
+    let (mut producer, mut consumer) = event_ring(4_096);
     let first = events(0);
     let second = events(20_000);
     let mut bytes = Vec::new();

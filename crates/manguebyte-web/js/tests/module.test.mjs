@@ -159,7 +159,7 @@ test('the output is the same for every quantum size', { skip: skipWithoutWasm },
   }
 });
 
-test('a late event lands at the start of the next quantum and a far one waits', { skip: skipWithoutWasm }, () => {
+test('a late event lands on the first frame the engine renders next and a far one waits', { skip: skipWithoutWasm }, () => {
   const { x, engine, push, render } = setUp();
   render(1280, 128);
   push([
@@ -167,7 +167,11 @@ test('a late event lands at the start of the next quantum and a far one waits', 
     { frame: 50000, kind: KIND.note_on, part: 0, note: 38, velocity: 1 },
   ]);
   const { left } = render(128, 128);
-  assert.notEqual(left[0], 0, 'the late kick starts on the first frame');
+  // The engine renders its parts the master bus's look-ahead ahead of the
+  // output: the late kick is heard that far into the quantum.
+  const ahead = x.mb_latency_frames(engine) - 128;
+  assert.equal(ahead, 111);
+  assert.equal(left.findIndex((sample) => sample !== 0), ahead, 'the late kick starts there');
   assert.equal(x.mb_stat(engine, 3), 1, 'one late event');
   assert.equal(x.mb_pending_room(engine), 1023, 'the snare waits');
   x.mb_clear_pending(engine);
@@ -239,7 +243,20 @@ test('parts are configured by control calls and describe their parameters', { sk
   const { x, engine, text } = setUp();
   const params = JSON.parse(text(x.mb_params_json(engine, 1)));
   const ids = params.map((param) => param.id);
-  assert.deepEqual(ids.slice(-6), ['lowpass.cutoff', 'lowpass.resonance', 'reverb.mix', 'reverb.decay', 'gain', 'pan']);
+  assert.deepEqual(ids.slice(-9), [
+    'lowpass.on',
+    'lowpass.cutoff',
+    'lowpass.resonance',
+    'reverb.on',
+    'reverb.mix',
+    'reverb.decay',
+    'gain',
+    'pan',
+    'send',
+  ]);
+  const cutoff = params.find((param) => param.id === 'lowpass.cutoff');
+  assert.deepEqual([cutoff.effect, cutoff.visual], ['lowpass', 'filter_curve']);
+  assert.equal(params.find((param) => param.id === 'gain').effect, undefined);
   assert.equal(ids[0], 'synth.wave');
   for (const param of params) assert.equal(param.param_id, paramId(param.id), param.id);
   const gain = params.find((param) => param.id === 'gain');
@@ -263,6 +280,7 @@ test('parts are configured by control calls and describe their parameters', { sk
     'guitar_tap.level',
     'gain',
     'pan',
+    'send',
   ]);
   const map = JSON.parse(text(x.mb_drum_map_json(engine)));
   assert.deepEqual(

@@ -30,6 +30,16 @@
 //! A load that fails writes why into the text buffer ([`mb_text_ptr`],
 //! [`mb_text_len`]).
 //!
+//! Effects: [`mb_set_chain`] (or [`mb_create_part`]) puts them in a part's
+//! chain, which is where their memory is made; their switches and settings
+//! are parameters, sent in records like any other. [`mb_part_chain`] reads
+//! a chain back, [`mb_effect_curve`] and [`mb_curve_ptr`] give the points
+//! an editor draws for an effect, [`mb_effect_running`] whether it is doing
+//! work. The master bus's parameters are records too, whatever part they
+//! name; [`mb_master_params_json`] describes them and
+//! [`mb_master_param_value`] reads them, and [`mb_limiter_reduction_db`]
+//! feeds a meter.
+//!
 //! The staging area and the output buffers never move, but any call that
 //! allocates (making parts, describing parameters) may grow the memory, and
 //! a grown memory has a new `ArrayBuffer`: views made on the old one must
@@ -39,6 +49,7 @@
 //! does nothing, returning 0, a null pointer, [`status::NO_ENGINE`] or NaN.
 
 use crate::drums::drum_map_json;
+use crate::effect::Effect;
 use crate::engine::{Chain, Engine, EngineConfig, EngineError, InstrumentKind};
 use crate::load::{SfzLoad, summary_json};
 use crate::record::RECORD_SIZE;
@@ -61,7 +72,28 @@ use manguebyte_params::ParamId;
 /// without them and says, when asked to load, that it has no sampler parts.
 /// Kind 6 was a code an engine ignored and counted; a writer that sends it
 /// to an older engine gets that, and no writer sent it before.
+///
+/// The effects and the master bus did not change it either. What they add
+/// is added beside what was there, and nothing that was there means
+/// anything else: chain bits 2 to 12 (an older engine refuses them with
+/// [`status::BAD_CHAIN`], so a page knows), parameter ids it routes where
+/// an older engine counts them as unrouted, the exports
+/// [`mb_master_params_json`], [`mb_master_param_value`],
+/// [`mb_effect_curve`], [`mb_curve_ptr`], [`mb_part_chain`],
+/// [`mb_effect_running`] and [`mb_limiter_reduction_db`], which
+/// `js/engine.js` only calls for what the new API asks, and status
+/// [`status::NO_SUCH_EFFECT`]. The record, the ring and the drum map are
+/// untouched. Two things are different and are not changes of meaning: a
+/// part's description has more entries (each effect's switch, the send,
+/// and `"effect"` and `"visual"` fields), which a reader that looks
+/// parameters up by id reads as before; and [`mb_latency_frames`] is
+/// larger by the master bus's look-ahead, which is what it is for: an
+/// event scheduled that far ahead lands on its frame, exactly as before.
 pub const ABI_VERSION: u32 = 2;
+
+/// The part number [`mb_effect_curve`] and [`mb_effect_running`] take for
+/// the master bus: above every part, -1 from JavaScript.
+pub const MASTER: u32 = u32::MAX;
 
 /// The most records the staging area can hold.
 pub const MAX_STAGING_RECORDS: u32 = 65_536;
@@ -99,6 +131,10 @@ pub mod status {
     /// The part has been given instruments it has not taken yet: render,
     /// and try again.
     pub const LOADER_FULL: i32 = -13;
+    /// The effect code is not one of
+    /// [`Effect::code`](crate::Effect::code), or the part or the master bus
+    /// cannot have that effect.
+    pub const NO_SUCH_EFFECT: i32 = -14;
 }
 
 /// The largest input area [`mb_input_ptr`] makes, in bytes: 256 MiB.
@@ -113,6 +149,8 @@ pub struct WebEngine {
     input: Vec<u8>,
     /// The SFZ instruments being loaded, by part.
     loads: Vec<(u16, SfzLoad)>,
+    /// The points of the last curve, `x` and `y` in turn.
+    curve: Vec<f32>,
 }
 
 impl WebEngine {
@@ -201,6 +239,7 @@ pub extern "C" fn mb_engine_new(
             text: String::new(),
             input: Vec::new(),
             loads: Vec::new(),
+            curve: Vec::new(),
         })),
         Err(_) => core::ptr::null_mut(),
     }
@@ -554,8 +593,9 @@ pub unsafe extern "C" fn mb_stat(engine: *mut WebEngine, index: u32) -> f64 {
 /// The engine's latency in frames
 /// ([`Engine::latency_frames`](crate::Engine::latency_frames)): one render
 /// quantum, the size of the last [`mb_render`], or the maximum quantum
-/// before the first. The engine has no look-ahead; the device's output
-/// latency comes on top.
+/// before the first, and the master bus's look-ahead
+/// ([`master_latency_frames`](crate::master_latency_frames), 111 frames at
+/// 48 kHz). The device's output latency comes on top.
 ///
 /// # Safety
 ///
@@ -802,4 +842,174 @@ pub unsafe extern "C" fn mb_sfz_abandon(engine: *mut WebEngine, part: u32) -> i3
 pub unsafe extern "C" fn mb_collect(engine: *mut WebEngine) -> u32 {
     // SAFETY: as the caller promises.
     unsafe { web(engine) }.map_or(0, |web| web.engine.collect_instruments() as u32)
+}
+
+/// The stages in a part's chain ([`Chain::bits`](crate::Chain::bits)), or
+/// a [`status`]: [`status::NO_SUCH_PART`], [`status::BAD_PART`].
+///
+/// # Safety
+///
+/// `engine` is null or a live pointer from [`mb_engine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mb_part_chain(engine: *mut WebEngine, part: u32) -> i32 {
+    // SAFETY: as the caller promises.
+    let Some(web) = (unsafe { web(engine) }) else {
+        return status::NO_ENGINE;
+    };
+    match part_number(part) {
+        Ok(part) => web
+            .engine
+            .part_chain(part)
+            .map_or(status::NO_SUCH_PART, |chain| chain.bits() as i32),
+        Err(status) => status,
+    }
+}
+
+/// Writes the master bus's parameters as JSON
+/// ([`Engine::master_params_json`](crate::Engine::master_params_json)) into
+/// the text buffer and returns where it starts; see [`mb_params_json`].
+/// Allocates.
+///
+/// # Safety
+///
+/// `engine` is null or a live pointer from [`mb_engine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mb_master_params_json(engine: *mut WebEngine) -> *const u8 {
+    // SAFETY: as the caller promises.
+    let Some(web) = (unsafe { web(engine) }) else {
+        return core::ptr::null();
+    };
+    web.text = web.engine.master_params_json();
+    web.text.as_ptr()
+}
+
+/// The value a parameter of the master bus holds, or NaN if there is no
+/// such parameter. `param` is a [`ParamId`].
+///
+/// # Safety
+///
+/// `engine` is null or a live pointer from [`mb_engine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mb_master_param_value(engine: *mut WebEngine, param: u32) -> f64 {
+    // SAFETY: as the caller promises.
+    unsafe { web(engine) }.map_or(f64::NAN, |web| {
+        web.engine
+            .master_param_value_by_id(ParamId(param))
+            .unwrap_or(f64::NAN)
+    })
+}
+
+/// Works out the curve an editor draws for effect `effect`
+/// ([`Effect::code`](crate::Effect::code)) of part `part`, or of the master
+/// bus when `part` is [`MASTER`], with `points` points (2 to
+/// [`MAX_CURVE_POINTS`](crate::MAX_CURVE_POINTS)), from the values its
+/// parameters hold ([`Engine::effect_curve`](crate::Engine::effect_curve)).
+/// Returns how many points it wrote, at [`mb_curve_ptr`], each an `x` and
+/// a `y` as `f32`s in the axes of the effect's
+/// [`Visual`](crate::Visual), or a [`status`]: [`status::NO_SUCH_PART`],
+/// [`status::BAD_PART`], [`status::NO_SUCH_EFFECT`]. It reads the
+/// parameters only, never what the render call works on, and allocates,
+/// so it belongs between render calls, which is where the worklet's
+/// messages are handled.
+///
+/// # Safety
+///
+/// `engine` is null or a live pointer from [`mb_engine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mb_effect_curve(
+    engine: *mut WebEngine,
+    part: u32,
+    effect: u32,
+    points: u32,
+) -> i32 {
+    // SAFETY: as the caller promises.
+    let Some(web) = (unsafe { web(engine) }) else {
+        return status::NO_ENGINE;
+    };
+    let Some(effect) = Effect::from_code(effect) else {
+        return status::NO_SUCH_EFFECT;
+    };
+    let curve = if part == MASTER {
+        web.engine.master_curve(effect, points as usize)
+    } else {
+        let number = match part_number(part) {
+            Ok(number) => number,
+            Err(status) => return status,
+        };
+        if web.engine.part_kind(number).is_none() {
+            return status::NO_SUCH_PART;
+        }
+        web.engine.effect_curve(number, effect, points as usize)
+    };
+    let Some(curve) = curve else {
+        return status::NO_SUCH_EFFECT;
+    };
+    web.curve.clear();
+    web.curve.extend(curve.points.iter().flatten());
+    curve.points.len() as i32
+}
+
+/// Where the points of the last [`mb_effect_curve`] start: `x` and `y` in
+/// turn, as `f32`s. They stay until the next curve.
+///
+/// # Safety
+///
+/// `engine` is null or a live pointer from [`mb_engine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mb_curve_ptr(engine: *mut WebEngine) -> *const f32 {
+    // SAFETY: as the caller promises.
+    match unsafe { web(engine) } {
+        Some(web) => web.curve.as_ptr(),
+        None => core::ptr::null(),
+    }
+}
+
+/// Whether effect `effect` of part `part` has work to do
+/// ([`Engine::effect_running`](crate::Engine::effect_running)): 1 if it
+/// is on, fading, or ringing, 0 if it is skipped, or a [`status`]. With
+/// `part` [`MASTER`], whether the glue compressor ([`Effect::Glue`]) is in
+/// or the shared reverb ([`Effect::Reverb`]) is awake.
+///
+/// # Safety
+///
+/// `engine` is null or a live pointer from [`mb_engine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mb_effect_running(engine: *mut WebEngine, part: u32, effect: u32) -> i32 {
+    // SAFETY: as the caller promises.
+    let Some(web) = (unsafe { web(engine) }) else {
+        return status::NO_ENGINE;
+    };
+    let Some(effect) = Effect::from_code(effect) else {
+        return status::NO_SUCH_EFFECT;
+    };
+    if part == MASTER {
+        return match effect {
+            Effect::Glue => i32::from(web.engine.glue_running()),
+            Effect::Reverb => i32::from(!web.engine.master_reverb_asleep()),
+            Effect::Limiter => 1,
+            _ => status::NO_SUCH_EFFECT,
+        };
+    }
+    if !effect.is_part_effect() {
+        return status::NO_SUCH_EFFECT;
+    }
+    match part_number(part) {
+        Ok(number) => web
+            .engine
+            .effect_running(number, effect)
+            .map_or(status::NO_SUCH_PART, i32::from),
+        Err(status) => status,
+    }
+}
+
+/// How far the master limiter turned the level down on the last frame
+/// rendered, in decibels, as a positive number; NaN without an engine.
+///
+/// # Safety
+///
+/// `engine` is null or a live pointer from [`mb_engine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mb_limiter_reduction_db(engine: *mut WebEngine) -> f64 {
+    // SAFETY: as the caller promises.
+    unsafe { web(engine) }.map_or(f64::NAN, |web| web.engine.limiter_reduction_db())
 }

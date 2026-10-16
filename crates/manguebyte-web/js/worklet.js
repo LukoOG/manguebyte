@@ -26,8 +26,12 @@
 //
 // Messages from the main thread (each with an `id`, answered by a `reply`
 // carrying the same id): createPart, removePart, setChain, paramsJson,
-// drumMapJson, paramValue, activeVoices, stats, latency; also `records` (an
-// ArrayBuffer of records, for the message fallback) and `close`.
+// drumMapJson, paramValue, activeVoices, stats, latency, partChain,
+// masterParamsJson, masterParamValue, effectCurve, effectRunning,
+// limiterReduction; also `records` (an ArrayBuffer of records, for the
+// message fallback) and `close`. Messages are handled between render
+// quanta, so the curves the effectCurve message works out read the
+// parameters as the last quantum left them, never while it renders.
 //
 // Loading an SFZ instrument (engine.js loadSfz) takes sfzBegin, which
 // parses the text at once and answers with the sample files it names, then
@@ -62,6 +66,8 @@ const BAD_INPUT = -12;
 const STALE = -100;
 /** The module predates sampler parts. */
 const UNSUPPORTED = -101;
+/** The module predates the effects (`ffi::status::NO_SUCH_EFFECT`). */
+const NO_EFFECTS = -14;
 
 /** The name the processor is registered under. */
 export const PROCESSOR_NAME = 'manguebyte-engine';
@@ -293,6 +299,42 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
       case 'latency':
         // A module without the export: the quantum this processor renders.
         result = typeof x.mb_latency_frames === 'function' ? x.mb_latency_frames(engine) : this.maxQuantum;
+        break;
+      // The effects and the master bus. A module that predates them has
+      // none of these exports, and answers as an engine without the part
+      // or the effect would.
+      case 'partChain':
+        result = typeof x.mb_part_chain === 'function' ? x.mb_part_chain(engine, message.part) : NO_EFFECTS;
+        break;
+      case 'masterParamsJson':
+        result = typeof x.mb_master_params_json === 'function' ? this.text(x.mb_master_params_json(engine)) : null;
+        break;
+      case 'masterParamValue':
+        result = typeof x.mb_master_param_value === 'function' ? x.mb_master_param_value(engine, message.param) : NaN;
+        break;
+      case 'effectCurve': {
+        if (typeof x.mb_effect_curve !== 'function') {
+          result = { status: NO_EFFECTS, points: null };
+          break;
+        }
+        const count = x.mb_effect_curve(engine, message.part, message.effect, message.points);
+        if (count < 0) {
+          result = { status: count, points: null };
+          break;
+        }
+        this.refresh();
+        const start = x.mb_curve_ptr(engine) >>> 0;
+        // A copy, its buffer transferred with the reply.
+        result = { status: 0, points: this.heap.slice(start, start + count * 8).buffer };
+        break;
+      }
+      case 'effectRunning':
+        result = typeof x.mb_effect_running === 'function'
+          ? x.mb_effect_running(engine, message.part, message.effect)
+          : NO_EFFECTS;
+        break;
+      case 'limiterReduction':
+        result = typeof x.mb_limiter_reduction_db === 'function' ? x.mb_limiter_reduction_db(engine) : 0;
         break;
       default:
         result = undefined;

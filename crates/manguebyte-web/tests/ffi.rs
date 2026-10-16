@@ -141,12 +141,15 @@ fn control_calls_report_their_status() {
             ffi::mb_create_part(engine, 0, unknown, 0),
             status::BAD_INSTRUMENT
         );
-        assert_eq!(ffi::mb_create_part(engine, 0, 0, 4), status::BAD_CHAIN);
+        assert_eq!(
+            ffi::mb_create_part(engine, 0, 0, 1 << 13),
+            status::BAD_CHAIN
+        );
         assert_eq!(ffi::mb_create_part(engine, 65_535, 0, 3), status::OK);
         assert_eq!(ffi::mb_create_part(engine, 0, 1, 1), status::OK);
         assert_eq!(ffi::mb_create_part(engine, 1, 1, 1), status::TOO_MANY_PARTS);
         assert_eq!(ffi::mb_create_part(engine, 0, 0, 2), status::OK); // replaces
-        assert_eq!(ffi::mb_set_chain(engine, 0, 8), status::BAD_CHAIN);
+        assert_eq!(ffi::mb_set_chain(engine, 0, 1 << 13), status::BAD_CHAIN);
         assert_eq!(ffi::mb_set_chain(engine, 70_000, 0), status::BAD_PART);
         assert_eq!(ffi::mb_set_chain(engine, 5, 0), status::NO_SUCH_PART);
         assert_eq!(ffi::mb_set_chain(engine, 0, 3), status::OK);
@@ -182,7 +185,8 @@ fn control_calls_report_their_status() {
             assert_eq!(ffi::mb_stat(engine, index), 0.0);
         }
         assert!(ffi::mb_stat(engine, 11).is_nan());
-        assert_eq!(ffi::mb_latency_frames(engine), 128);
+        let ahead = manguebyte_web::master_latency_frames(44_100.0) as u32;
+        assert_eq!(ffi::mb_latency_frames(engine), 128 + ahead);
         assert_eq!(ffi::mb_latency_frames(core::ptr::null_mut()), 0);
         assert!(ffi::mb_output_ptr(engine, 2).is_null());
         assert!(ffi::mb_output_ptr(engine, u32::MAX).is_null());
@@ -223,6 +227,7 @@ fn staged_records_play_exactly_as_pushed_ones() {
         Chain {
             lowpass: true,
             reverb: false,
+            ..Chain::NONE
         },
     )
     .unwrap();
@@ -282,11 +287,12 @@ fn hostile_calls_in_random_orders_never_break_the_engine() {
                 match roll % 10 {
                     0 => {
                         let kind = (roll >> 16) as u32 % (InstrumentKind::ALL.len() as u32 + 1);
-                        let chain = (roll >> 20) as u32 % 5;
+                        let chain =
+                            [0, 1, 2, 3, Chain::ALL_BITS, 1 << 13][(roll >> 20) as usize % 6];
                         let result = ffi::mb_create_part(engine, part, kind, chain);
                         let expected = if kind >= InstrumentKind::ALL.len() as u32 {
                             status::BAD_INSTRUMENT
-                        } else if chain > 3 {
+                        } else if chain > Chain::ALL_BITS {
                             status::BAD_CHAIN
                         } else if !parts.contains(&part) && parts.len() == 6 {
                             status::TOO_MANY_PARTS

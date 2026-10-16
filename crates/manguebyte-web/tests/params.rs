@@ -3,7 +3,7 @@
 mod common;
 
 use common::*;
-use manguebyte_web::{Chain, EventRecord, InstrumentKind, ParamId, ids};
+use manguebyte_web::{Chain, Effect, EventRecord, InstrumentKind, ParamId, ids};
 
 /// The `"id"` of every object in a description, in order.
 fn ids_in(json: &str) -> Vec<String> {
@@ -116,7 +116,7 @@ fn the_identifiers_are_the_published_ones() {
 fn the_list_of_every_identifier_is_complete() {
     let mut described = Vec::new();
     for kind in InstrumentKind::ALL {
-        let engine = engine_with(kind, Chain::FULL);
+        let engine = engine_with(kind, Chain::ALL);
         for id in ids_in(&engine.params_json(0).unwrap()) {
             if !described.contains(&id) {
                 described.push(id);
@@ -132,13 +132,114 @@ fn the_list_of_every_identifier_is_complete() {
     assert_eq!(all, described);
 }
 
+/// The parameters of each effect, its switch first, the rest in the order
+/// a method chain's positional arguments fill them.
+fn effect_ids(effect: Effect) -> Vec<&'static str> {
+    match effect {
+        Effect::Lowpass => vec![ids::LOWPASS_ON, ids::LOWPASS_CUTOFF, ids::LOWPASS_RESONANCE],
+        Effect::Reverb => vec![ids::REVERB_ON, ids::REVERB_MIX, ids::REVERB_DECAY],
+        Effect::Highpass => vec![
+            ids::HIGHPASS_ON,
+            ids::HIGHPASS_CUTOFF,
+            ids::HIGHPASS_RESONANCE,
+        ],
+        Effect::Eq => vec![
+            ids::EQ_ON,
+            ids::EQ_LOW_GAIN,
+            ids::EQ_MID_GAIN,
+            ids::EQ_HIGH_GAIN,
+            ids::EQ_LOW_FREQ,
+            ids::EQ_MID_FREQ,
+            ids::EQ_MID_Q,
+            ids::EQ_HIGH_FREQ,
+        ],
+        Effect::Drive => vec![
+            ids::DRIVE_ON,
+            ids::DRIVE_AMOUNT,
+            ids::DRIVE_OUTPUT,
+            ids::DRIVE_MIX,
+            ids::DRIVE_SHAPE,
+        ],
+        Effect::Bitcrush => vec![
+            ids::BITCRUSH_ON,
+            ids::BITCRUSH_BITS,
+            ids::BITCRUSH_RATE,
+            ids::BITCRUSH_MIX,
+        ],
+        Effect::Compressor => vec![
+            ids::COMPRESSOR_ON,
+            ids::COMPRESSOR_THRESHOLD,
+            ids::COMPRESSOR_RATIO,
+            ids::COMPRESSOR_ATTACK,
+            ids::COMPRESSOR_RELEASE,
+            ids::COMPRESSOR_KNEE,
+            ids::COMPRESSOR_MAKEUP,
+            ids::COMPRESSOR_MIX,
+        ],
+        Effect::Chorus => vec![
+            ids::CHORUS_ON,
+            ids::CHORUS_MIX,
+            ids::CHORUS_RATE,
+            ids::CHORUS_DEPTH,
+            ids::CHORUS_DELAY,
+            ids::CHORUS_VOICES,
+            ids::CHORUS_SPREAD,
+        ],
+        Effect::Flanger => vec![
+            ids::FLANGER_ON,
+            ids::FLANGER_MIX,
+            ids::FLANGER_RATE,
+            ids::FLANGER_DEPTH,
+            ids::FLANGER_FEEDBACK,
+            ids::FLANGER_DELAY,
+        ],
+        Effect::Phaser => vec![
+            ids::PHASER_ON,
+            ids::PHASER_MIX,
+            ids::PHASER_RATE,
+            ids::PHASER_DEPTH,
+            ids::PHASER_CENTER,
+            ids::PHASER_FEEDBACK,
+            ids::PHASER_STAGES,
+            ids::PHASER_SPREAD,
+        ],
+        Effect::Tremolo => vec![
+            ids::TREMOLO_ON,
+            ids::TREMOLO_RATE,
+            ids::TREMOLO_DEPTH,
+            ids::TREMOLO_SHAPE,
+            ids::TREMOLO_SYNC,
+        ],
+        Effect::Autopan => vec![
+            ids::AUTOPAN_ON,
+            ids::AUTOPAN_RATE,
+            ids::AUTOPAN_DEPTH,
+            ids::AUTOPAN_SHAPE,
+            ids::AUTOPAN_SYNC,
+        ],
+        Effect::Delay => vec![
+            ids::DELAY_ON,
+            ids::DELAY_TIME,
+            ids::DELAY_FEEDBACK,
+            ids::DELAY_MIX,
+            ids::DELAY_DAMPING,
+            ids::DELAY_PINGPONG,
+            ids::DELAY_SYNC,
+        ],
+        _ => vec![],
+    }
+}
+
 #[test]
-fn every_part_lists_its_instrument_then_its_stages_then_gain_and_pan() {
+fn every_part_lists_its_instrument_then_its_stages_then_gain_pan_and_send() {
     let mut engine = engine();
     let mut part = 0;
+    let chains = (0..4)
+        .chain([Chain::ALL.bits(), 1 << 12 | 1, 0b1010_1010_1010])
+        .map(|bits| Chain::from_bits(bits).unwrap());
+    let chains: Vec<Chain> = chains.collect();
     for kind in InstrumentKind::ALL {
-        for bits in 0..4 {
-            let chain = Chain::from_bits(bits).unwrap();
+        for &chain in &chains {
             engine.create_part_with(part, kind, chain).unwrap();
             let json = engine.params_json(part).unwrap();
             let mut expected: Vec<&str> = match kind {
@@ -147,21 +248,117 @@ fn every_part_lists_its_instrument_then_its_stages_then_gain_and_pan() {
                 InstrumentKind::Sampler => SAMPLER.to_vec(),
                 InstrumentKind::SamplerKit => SAMPLER.iter().chain(&KIT).copied().collect(),
             };
-            if chain.lowpass {
-                expected.extend([ids::LOWPASS_CUTOFF, ids::LOWPASS_RESONANCE]);
+            for effect in Effect::PART_ORDER {
+                if chain.has(effect) {
+                    expected.extend(effect_ids(effect));
+                }
             }
-            if chain.reverb {
-                expected.extend([ids::REVERB_MIX, ids::REVERB_DECAY]);
-            }
-            expected.extend([ids::GAIN, ids::PAN]);
-            assert_eq!(ids_in(&json), expected, "{kind:?} {bits}");
+            expected.extend([ids::GAIN, ids::PAN, ids::SEND]);
+            assert_eq!(ids_in(&json), expected, "{kind:?} {chain:?}");
             let hashes: Vec<u32> = expected.iter().map(|id| ParamId::from_name(id).0).collect();
             assert_eq!(param_ids_in(&json), hashes);
             assert!(json.starts_with('[') && json.ends_with(']'));
+            // Each effect's parameter names its effect and its picture.
+            for effect in Effect::PART_ORDER.into_iter().filter(|&e| chain.has(e)) {
+                let tag = format!(
+                    r#""effect":"{}","visual":"{}"}}"#,
+                    effect.name(),
+                    effect.visual().name()
+                );
+                assert_eq!(
+                    json.matches(&tag).count(),
+                    effect_ids(effect).len(),
+                    "{effect:?}"
+                );
+            }
+            assert_eq!(
+                json.matches(r#""effect":"#).count(),
+                expected.len()
+                    - 3
+                    - match kind {
+                        InstrumentKind::Synth => SYNTH.len(),
+                        InstrumentKind::Drums => KIT.len(),
+                        InstrumentKind::Sampler => SAMPLER.len(),
+                        InstrumentKind::SamplerKit => SAMPLER.len() + KIT.len(),
+                    }
+            );
             part += 1;
         }
     }
     assert_eq!(engine.params_json(99), None);
+}
+
+/// Every identifier a part or the master bus has hashes to its own
+/// `ParamId`: an event names exactly one.
+#[test]
+fn no_two_identifiers_share_a_param_id() {
+    let mut hashes: Vec<u32> = ids::ALL
+        .iter()
+        .chain(&ids::MASTER)
+        .map(|id| ParamId::from_name(id).0)
+        .collect();
+    let count = hashes.len();
+    hashes.sort_unstable();
+    hashes.dedup();
+    assert_eq!(hashes.len(), count);
+    assert!(ids::MASTER.iter().all(|id| id.starts_with("master.")));
+    assert!(!ids::ALL.iter().any(|id| id.starts_with("master.")));
+}
+
+#[test]
+fn the_master_bus_describes_its_parameters() {
+    let engine = engine();
+    let json = engine.master_params_json();
+    assert_eq!(ids_in(&json), ids::MASTER);
+    for (id, effect) in [
+        (ids::MASTER_REVERB_DECAY, Some(Effect::Reverb)),
+        (ids::GLUE_THRESHOLD, Some(Effect::Glue)),
+        (ids::LIMITER_CEILING, Some(Effect::Limiter)),
+        (ids::MASTER_TEMPO, None),
+    ] {
+        // What follows the flags, which end the fields every parameter has.
+        let start = json.find(&format!(r#"{{"id":"{id}""#)).unwrap();
+        let flags = start + json[start..].find(r#""flags":{"#).unwrap();
+        let rest = &json[flags + json[flags..].find('}').unwrap() + 1..];
+        match effect {
+            Some(effect) => assert!(
+                rest.starts_with(&format!(
+                    r#","effect":"{}","visual":"{}"}}"#,
+                    effect.name(),
+                    effect.visual().name()
+                )),
+                "{id}: {rest:.80}"
+            ),
+            None => assert!(!rest.starts_with(r#","effect""#), "{id}"),
+        }
+    }
+    assert!(json.contains(r#"{"id":"master.limiter.ceiling","param_id":"#));
+    assert!(json.contains(r#""unit":"dBTP","min":-12,"max":-0.3,"default":-0.3,"#));
+    assert_eq!(engine.master_param_value(ids::MASTER_TEMPO), Some(120.0));
+    assert_eq!(engine.master_param_value(ids::GAIN), None);
+}
+
+/// A master parameter reaches the master bus whatever part its record
+/// names, and a part's cancel does not drop it.
+#[test]
+fn master_parameters_belong_to_no_part() {
+    let mut engine = engine();
+    engine.create_part(3, InstrumentKind::Synth).unwrap();
+    push_all(
+        &mut engine,
+        &[
+            EventRecord::param(10, 3, id(ids::MASTER_TEMPO), 90.0),
+            EventRecord::param(20, 999, id(ids::LIMITER_CEILING), -3.0),
+            EventRecord::param(4_000, 3, id(ids::MASTER_GAIN), -6.0),
+            EventRecord::cancel(1_000, 3),
+        ],
+    );
+    render(&mut engine, 8_000, 128);
+    assert_eq!(engine.master_param_value(ids::MASTER_TEMPO), Some(90.0));
+    assert_eq!(engine.master_param_value(ids::LIMITER_CEILING), Some(-3.0));
+    assert_eq!(engine.master_param_value(ids::MASTER_GAIN), Some(-6.0));
+    assert_eq!(engine.stats().cancelled, 0);
+    assert_eq!(engine.stats().unrouted, 0);
 }
 
 #[test]
@@ -180,14 +377,17 @@ fn the_descriptions_are_exact() {
         concat!(
             r#"{"id":"lowpass.cutoff","param_id":3456878227,"name":"Low-pass cutoff","#,
             r#""unit":"Hz","min":20,"max":20000,"default":20000,"scale":{"kind":"log"},"#,
-            r#""smoothing_ms":20,"flags":{"automatable":true,"hidden":false,"bypass":false}}"#
+            r#""smoothing_ms":20,"flags":{"automatable":true,"hidden":false,"bypass":false},"#,
+            r#""effect":"lowpass","visual":"filter_curve"}"#
         ),
         concat!(
             r#"{"id":"reverb.decay","param_id":228043249,"name":"Reverb decay","unit":"s","#,
             r#""min":0.2,"max":10,"default":1.6,"#,
             r#""scale":{"kind":"skew","factor":0.35,"symmetric":false},"#,
-            r#""flags":{"automatable":true,"hidden":false,"bypass":false}}"#
+            r#""flags":{"automatable":true,"hidden":false,"bypass":false},"#,
+            r#""effect":"reverb","visual":"reverb_decay"}"#
         ),
+        r#"{"id":"reverb.on","param_id":"#,
     ] {
         assert!(synth.contains(expected), "{expected}");
         assert!(drums.contains(expected), "{expected}");

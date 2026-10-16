@@ -135,10 +135,16 @@ async function start() {
       engine.setParam(BASS, 'synth.sustain', 0.45);
       engine.setParam(BASS, 'synth.release', 0.09);
       engine.setParam(BASS, 'reverb.mix', 0.06);
+      // A dotted-eighth echo on the bass, synced to the tempo, and some of
+      // the drums in the shared reverb of the master bus.
+      engine.setMaster({ tempo: TEMPO });
+      await engine.setEffect(BASS, 'delay', { sync: 0.75, feedback: 0.35, mix: 0.2, pingpong: 1 });
+      engine.setSend(DRUMS, 0.12);
       const params = await engine.params(BASS);
       const byId = Object.fromEntries(params.map((param) => [param.id, param]));
       addSlider(BASS, { ...byId['synth.cutoff'], default: 420 }, 'Bass cutoff', (hz) => `${Math.round(hz)} Hz`);
       addSlider(BASS, byId['lowpass.cutoff'], 'Bass low-pass', (hz) => `${Math.round(hz)} Hz`);
+      addSlider(BASS, { ...byId['delay.mix'], default: 0.2 }, 'Bass echo', (mix) => `${Math.round(mix * 100)} %`);
       addSlider(DRUMS, { ...byId['reverb.mix'], default: 0.1 }, 'Drum reverb', (mix) => `${Math.round(mix * 100)} %`);
     }
     await context.resume();

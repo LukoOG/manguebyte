@@ -82,8 +82,11 @@ fn a_note_lands_on_its_exact_frame_wherever_it_falls_in_a_quantum() {
     assert_eq!(onset(&left), Some(300));
 }
 
+/// The engine renders its parts the master bus's look-ahead ahead of the
+/// output, so a late event lands on the first frame it renders next, and
+/// is heard that far into the next quantum.
 #[test]
-fn a_late_event_lands_on_the_first_frame_of_the_next_quantum() {
+fn a_late_event_lands_on_the_first_frame_the_engine_renders_next() {
     const FRAMES: usize = 2_048;
     let reference = play(
         InstrumentKind::Drums,
@@ -94,8 +97,10 @@ fn a_late_event_lands_on_the_first_frame_of_the_next_quantum() {
     )
     .0;
     for (quantum, before) in [(128usize, 256usize), (7, 21), (1, 5), (512, 512)] {
-        // Frame 3 has passed, and so has frame `before - 1`.
-        for late in [3, before as u64 - 1] {
+        // Frame 3 has passed, and so has frame `before - 1`, and every
+        // frame up to the look-ahead past it.
+        let ahead = engine().master_latency_frames();
+        for late in [3, before as u64 - 1, (before + ahead - 1) as u64] {
             let mut engine = engine_with(InstrumentKind::Drums, Chain::FULL);
             let (silent, _) = render(&mut engine, before, quantum);
             assert_eq!(
@@ -105,9 +110,19 @@ fn a_late_event_lands_on_the_first_frame_of_the_next_quantum() {
             let (rest, _) = render(&mut engine, FRAMES - before, quantum);
             let mut left = silent;
             left.extend(rest);
-            assert_shifted(&left, &reference, before);
+            assert_shifted(&left, &reference, before + ahead);
             assert_eq!(engine.stats().late, 1);
         }
+        // One due where the engine will render next is on time.
+        let mut engine = engine_with(InstrumentKind::Drums, Chain::FULL);
+        let (silent, _) = render(&mut engine, before, quantum);
+        let due = (before + ahead) as u64;
+        push_one(&mut engine, EventRecord::note_on(due, 0, KICK, 1.0));
+        let (rest, _) = render(&mut engine, FRAMES - before, quantum);
+        let mut left = silent;
+        left.extend(rest);
+        assert_shifted(&left, &reference, before + ahead);
+        assert_eq!(engine.stats().late, 0);
     }
 }
 
@@ -131,10 +146,11 @@ fn an_event_far_ahead_waits_for_its_frame() {
         &mut engine,
         &[EventRecord::note_on(at as u64, 0, KICK, 1.0)],
     );
-    let (before, _) = render(&mut engine, 49_920, 128);
+    // The parts are rendered up to the look-ahead past the output.
+    let (before, _) = render(&mut engine, 49_792, 128);
     assert!(before.iter().all(|&sample| sample == 0.0));
     assert_eq!(engine.pending_len(), 1);
-    let (after, _) = render(&mut engine, 10_080, 128);
+    let (after, _) = render(&mut engine, 10_208, 128);
     assert_eq!(engine.pending_len(), 0);
     let mut left = before;
     left.extend(after);
@@ -478,20 +494,22 @@ fn a_full_queue_drops_what_does_not_fit_and_a_ring_keeps_it() {
     engine.clear_pending();
     assert_eq!(engine.pending_room(), 4);
 
-    // Drained from a ring, what does not fit stays in the ring.
+    // Drained from a ring, what does not fit stays in the ring. The parts
+    // are rendered `ahead` frames ahead of the output.
+    let ahead = engine.master_latency_frames() as u64;
     let (mut producer, mut consumer) = event_ring(16);
     for frame in 0..10 {
         producer
-            .push(EventRecord::note_on(frame * 10, 0, KICK, 1.0))
+            .push(EventRecord::note_on(ahead + frame * 10, 0, KICK, 1.0))
             .unwrap();
     }
     assert_eq!(engine.drain(&mut consumer), 4);
     assert_eq!(consumer.len(), 6);
     assert_eq!(engine.drain(&mut consumer), 0);
-    render(&mut engine, 35, 35); // frames 0, 10, 20 and 30 are applied
+    render(&mut engine, 35, 35); // ahead + 0, 10, 20 and 30 are applied
     assert_eq!(engine.drain(&mut consumer), 4);
     assert_eq!(engine.drain(&mut consumer), 0);
-    render(&mut engine, 40, 40); // frames 35 to 74: 40, 50, 60 and 70
+    render(&mut engine, 40, 40); // ahead + 35 to 74: 40, 50, 60 and 70
     assert_eq!(engine.drain(&mut consumer), 2);
     assert!(consumer.is_empty());
     assert_eq!(engine.stats().dropped, 1);
@@ -562,7 +580,9 @@ fn a_full_queue_keeps_the_earliest_events_whatever_the_order() {
         })
         .unwrap();
         engine.create_part(0, InstrumentKind::Drums).unwrap();
-        let frames: Vec<u64> = (0..30).map(|_| next() % 2_000).collect();
+        // Past the frames the first render renders ahead.
+        let ahead = engine.master_latency_frames() as u64;
+        let frames: Vec<u64> = (0..30).map(|_| ahead + 1 + next() % 2_000).collect();
         for &frame in &frames {
             engine.push(EventRecord::param(frame, 0, id(ids::KIT_TUNE), 1.0));
         }
@@ -571,13 +591,14 @@ fn a_full_queue_keeps_the_earliest_events_whatever_the_order() {
         let mut kept = frames.clone();
         kept.sort_unstable();
         kept.truncate(8);
-        // Render one frame at a time and see which frames had events.
+        // Render one frame at a time and see which frames had events:
+        // rendering output frame `frame` renders the parts' `frame + ahead`.
         let mut applied = Vec::new();
-        for frame in 0..2_000u64 {
+        for frame in 0..2_001u64 {
             let before = engine.stats().applied;
             engine.render(1);
             for _ in before..engine.stats().applied {
-                applied.push(frame);
+                applied.push(frame + ahead);
             }
         }
         assert_eq!(applied, kept);
@@ -648,6 +669,7 @@ fn parts_are_made_replaced_and_removed_by_control_calls() {
             Chain {
                 lowpass: false,
                 reverb: true,
+                ..Chain::NONE
             },
         )
         .unwrap();
@@ -655,7 +677,8 @@ fn parts_are_made_replaced_and_removed_by_control_calls() {
         engine.part_chain(9),
         Some(Chain {
             lowpass: false,
-            reverb: true
+            reverb: true,
+            ..Chain::NONE
         })
     );
     let json = engine.params_json(9).unwrap();

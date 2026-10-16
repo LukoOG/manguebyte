@@ -132,6 +132,54 @@ pub fn tone_instrument() -> (String, Vec<(String, Vec<u8>)>) {
     )
 }
 
+/// The level a sampler part plays a sample at, at full velocity in the
+/// centre: [`manguebyte_web::SAMPLER_LEVEL_DB`] as a gain.
+pub fn sampler_level() -> f32 {
+    10f64.powf(manguebyte_web::SAMPLER_LEVEL_DB / 20.0) as f32
+}
+
+/// An instrument that plays `samples`, at the engine's rate, as they are:
+/// a one-shot on every key, read at its own rate from key 60, stored as
+/// 32-bit floats. With it, a sampler part is a signal generator whose
+/// output is `samples` times [`sampler_level`], frame for frame.
+pub fn signal_instrument(samples: &[f32]) -> (String, Vec<(String, Vec<u8>)>) {
+    let mut buffer = manguebyte_core::AudioBuffer::<f32>::new(1, samples.len());
+    buffer.channel_mut(0).copy_from_slice(samples);
+    let mut bytes = Vec::new();
+    manguebyte_formats::wav::write(
+        &mut bytes,
+        &buffer,
+        RATE as u32,
+        manguebyte_formats::wav::WavFormat::Float32,
+    )
+    .unwrap();
+    let sfz = "<region> sample=signal.wav lokey=0 hikey=127 pitch_keycenter=60 loop_mode=one_shot";
+    (sfz.to_owned(), vec![("signal.wav".to_owned(), bytes)])
+}
+
+/// An engine whose part 0, through `chain`, plays `samples` (see
+/// [`signal_instrument`]) when key 60 is struck.
+pub fn signal_engine(samples: &[f32], chain: Chain) -> Engine {
+    let mut engine = engine_with(InstrumentKind::Sampler, chain);
+    let (sfz, files) = signal_instrument(samples);
+    load_sfz(&mut engine, 0, &sfz, &files);
+    engine
+}
+
+/// The largest step from one sample to the next in `samples`.
+pub fn largest_step(samples: &[f32]) -> f32 {
+    samples
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]).abs())
+        .fold(0.0, f32::max)
+}
+
+/// The root mean square of `samples`.
+pub fn rms(samples: &[f32]) -> f64 {
+    let sum: f64 = samples.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
+    (sum / samples.len().max(1) as f64).sqrt()
+}
+
 /// A kit like Aratu's: GM keys, one-shots, the open hat in group 1 cut off
 /// by group 2, the closed hat; at 32 kHz.
 pub fn kit_instrument() -> (String, Vec<(String, Vec<u8>)>) {

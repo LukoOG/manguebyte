@@ -2,10 +2,12 @@
 
 A Manguebyte engine for the browser, that also builds, runs and is tested
 natively. The engine holds numbered parts; each plays the eight-voice
-synth, the drum kit or an SFZ instrument through an optional low-pass
-filter, an optional reverb, then gain and pan. Events are 32-byte records
-that land on the exact frame they name, and the output is the same, bit
-for bit, whatever the size of the quanta it is rendered in.
+synth, the drum kit or an SFZ instrument through a chain of
+[effects](#effects), then gain and pan, into a [master bus](#the-master-bus)
+with a shared reverb, a glue compressor and a true-peak limiter. Events
+are 32-byte records that land on the exact frame they name, and the output
+is the same, bit for bit, whatever the size of the quanta it is rendered
+in.
 
 Built for `wasm32-unknown-unknown`, the crate is a WebAssembly module with
 plain `extern "C"` exports (`src/ffi.rs`) and no imports. `js/worklet.js` is
@@ -159,14 +161,308 @@ all, while a choke, which cuts, adds 73% (synth) and 92% (sampler).
 ahead of the engine's current frame an event must be due to be sure of
 landing on its frame: one render quantum, the size of the last render
 (the maximum quantum before the first), since the quantum being rendered
-may have begun when the event arrives. The engine has no look-ahead of its
-own; its limiter does not look ahead. `await engine.latency()` gives
-`{ engineFrames, outputFrames, frames, seconds }`: the engine's frames
-(128 in a browser), the context's own output latency (`baseLatency` plus
-`outputLatency`, where the browser gives them), and the two together, for
-Aratu to show and to schedule ahead by. Records sent by message, without
-shared memory, also take the time a message takes to cross, which no
-browser reports.
+may have begun when the event arrives, and the master bus's look-ahead
+(`Engine::master_latency_frames`, see [The master bus](#the-master-bus)):
+111 frames at 48 kHz, 2.3 ms, so 239 frames in a browser. The engine
+renders its parts that far ahead of the output, so an event scheduled
+that far ahead is still heard on its own frame, exactly as before; one
+that comes later lands on the first frame the engine renders next, which
+is heard 111 frames into the next quantum. Every event pushed before the
+first render lands on its frame. `await engine.latency()` gives
+`{ engineFrames, outputFrames, frames, seconds }`: the engine's frames,
+the context's own output latency (`baseLatency` plus `outputLatency`,
+where the browser gives them), and the two together, for Aratu to show
+and to schedule ahead by. Records sent by message, without shared memory,
+also take the time a message takes to cross, which no browser reports.
+
+## Effects
+
+Every part has a chain of effects, which run in a fixed order:
+
+```text
+high-pass → low-pass → EQ → drive → bitcrush → compressor
+  → chorus → flanger → phaser → tremolo → auto-pan → delay → reverb
+  → gain and pan → send to the master bus's reverb
+```
+
+Tone first, so that what is driven and compressed is the sound as it was
+meant; dynamics before modulation, so that the compressor does not pump
+with a sweep; time last, so that each echo and each reflection carries the
+colour of everything before it. The order does not depend on the order of
+a method chain: `.delay(0.25).chorus()` and `.chorus().delay(0.25)` sound
+the same.
+
+An effect is in a part's chain or not (the chain's bits, `1 << code`), and
+in the chain it is switched on or off by its `<effect>.on` parameter. Being
+in the chain is what gives it memory and parameters: a control call puts
+it there (`setChain`, or `setEffect` the first time), which is where the
+memory is allocated (a delay's four seconds of it most of all). The switch
+is an ordinary parameter, so it travels in a record and lands on its exact
+frame, with the settings sent for the same frame before it. An effect not
+in the chain, or switched off and done fading, costs nothing: it is not
+run at all. The low-pass and the reverb start switched on, as they always
+did; every other effect starts off.
+
+Switching never clicks. An effect fades in and out over 10 ms
+(`EFFECT_FADE_SECONDS`), cross-faded with the signal that goes into it; the
+delay and the reverb fade their input instead, so their echoes and tails
+ring on after they are switched off, then fall asleep. A fade only matters
+while sound passes: on a frame that follows a silent one the switch goes
+straight to its end, so an effect switched on together with a note applies
+in full from the note's first frame. Every setting glides: levels and
+mixes over 20 ms in a straight line, frequencies over 20 ms exponentially,
+the chorus's, flanger's and phaser's delays and depths over 50 ms, a delay
+time by cross-fading two read heads over 20 ms (`DELAY_GLIDE_SECONDS`),
+which neither clicks nor bends the pitch of the echoes. A setting sent
+while its effect is off applies at once. `tests/effects.rs` switches every
+effect in, changes it hard and switches it out under a steady tone: no
+step from one sample to the next is larger than the largest step of the
+steady sound around it by more than 2% of the tone's peak.
+
+The signal processing is `manguebyte-dsp`'s: `StateVariableFilter` for the
+filters, `Biquad` designed by `BiquadCoefficients` (Audio EQ Cookbook) for
+the equaliser, `ShaperCurve` for the drive, `Compressor`, `Chorus` for the
+chorus and the flanger, `Phaser`, `Lfo` for the tremolo and the auto-pan,
+`DelayLine` for the delay, `Reverb`, `Limiter`. The bitcrusher, the gain
+stages of the tremolo and auto-pan, and the delay's heads, damping and
+ping-pong routing are this crate's.
+
+### Every effect and parameter
+
+Identifiers are `"<effect>.<parameter>"`; each effect also has
+`"<effect>.on"`, 0 or 1. The parameters are listed in the order positional
+settings fill them (`EFFECT_PARAMS` in `js/engine.js`): `.delay(0.25, 0.5)`
+is a time of 0.25 s and a feedback of 0.5. "log" is a control that moves
+evenly in ratios; the parameter JSON gives every scale exactly.
+
+| Effect, `visual` | Parameter | Unit | Range | Default | Scale |
+|---|---|---|---|---|---|
+| `highpass`, `filter_curve` | `cutoff` | Hz | 20 to 20 000 | 200 | log |
+| | `resonance` | | 0 to 1 | 0 | linear |
+| `lowpass`, `filter_curve` | `cutoff` | Hz | 20 to 20 000 | 20 000 | log |
+| | `resonance` | | 0 to 1 | 0 | linear |
+| `eq`, `eq_curve` | `low_gain`, `mid_gain`, `high_gain` | dB | -24 to 24 | 0 | linear |
+| | `low_freq` (low shelf) | Hz | 20 to 1 000 | 120 | log |
+| | `mid_freq` (peak) | Hz | 100 to 10 000 | 1 000 | log |
+| | `mid_q` | | 0.1 to 10 | 0.7 | log |
+| | `high_freq` (high shelf) | Hz | 1 000 to 20 000 | 8 000 | log |
+| `drive`, `transfer_curve` | `amount` | dB | 0 to 36 | 12 | linear |
+| | `output` | dB | -24 to 12 | -6 | linear |
+| | `mix` | | 0 to 1 | 1 | linear |
+| | `shape` | | 0 tanh, 1 soft clip, 2 hard clip, 3 fold | 0 | choice |
+| `bitcrush`, `bitcrush_steps` | `bits` | bits | 1 to 16 | 8 | linear |
+| | `rate` | Hz | 100 to 48 000 | 48 000 | log |
+| | `mix` | | 0 to 1 | 1 | linear |
+| `compressor`, `transfer_curve` | `threshold` | dB | -60 to 0 | -18 | linear |
+| | `ratio` | | 1 to 20 | 4 | log |
+| | `attack` | ms | 0.1 to 200 | 10 | log |
+| | `release` | ms | 5 to 2 000 | 120 | log |
+| | `knee` | dB | 0 to 24 | 6 | linear |
+| | `makeup` | dB | 0 to 24 | 0 | linear |
+| | `mix` (parallel) | | 0 to 1 | 1 | linear |
+| `chorus`, `lfo_shape` | `mix` | | 0 to 1 | 0.5 | linear |
+| | `rate` | Hz | 0.05 to 10 | 0.8 | log |
+| | `depth` | ms | 0 to 10 | 2.5 | linear |
+| | `delay` | ms | 1 to 40 | 15 | linear |
+| | `voices` | | 1 to 8 | 3 | whole |
+| | `spread` | | 0 to 1 | 1 | linear |
+| `flanger`, `lfo_shape` | `mix` | | 0 to 1 | 0.5 | linear |
+| | `rate` | Hz | 0.02 to 10 | 0.25 | log |
+| | `depth` | ms | 0 to 5 | 1.5 | linear |
+| | `feedback` | | -0.95 to 0.95 | 0.7 | linear |
+| | `delay` | ms | 0.5 to 10 | 2 | linear |
+| `phaser`, `lfo_shape` | `mix` | | 0 to 1 | 0.5 | linear |
+| | `rate` | Hz | 0.02 to 10 | 0.5 | log |
+| | `depth` | oct | 0 to 6 | 2 | linear |
+| | `center` | Hz | 100 to 10 000 | 1 000 | log |
+| | `feedback` | | -0.95 to 0.95 | 0.3 | linear |
+| | `stages` | | 2 to 12 | 4 | whole |
+| | `spread` | | 0 to 1 | 0 | linear |
+| `tremolo`, `lfo_shape` | `rate` | Hz | 0.1 to 30 | 5 | log |
+| | `depth` | | 0 to 1 | 0.5 | linear |
+| | `shape` | | 0 sine, 1 triangle, 2 square, 3 saw up, 4 saw down | 0 | choice |
+| | `sync` | beats | 0 to 16, 0 is off | 0 | linear |
+| `autopan`, `lfo_shape` | `rate` | Hz | 0.05 to 20 | 0.5 | log |
+| | `depth` | | 0 to 1 | 1 | linear |
+| | `shape` | | as the tremolo's | 0 | choice |
+| | `sync` | beats | 0 to 16, 0 is off | 0 | linear |
+| `delay`, `delay_taps` | `time` | s | 0.001 to 4 | 0.375 | skew 0.35 |
+| | `feedback` | | 0 to 0.95 | 0.35 | linear |
+| | `mix` | | 0 to 1 | 0.3 | linear |
+| | `damping` | | 0 to 1 | 0.3 | linear |
+| | `pingpong` | | 0 to 1 | 0 | linear |
+| | `sync` | beats | 0 to 16, 0 is off | 0 | linear |
+| `reverb`, `reverb_decay` | `mix` | | 0 to 1 | 0.15 | linear |
+| | `decay` | s | 0.2 to 10 | 1.6 | skew 0.35 |
+| (every part) | `send` | | 0 to 1 | 0 | linear |
+
+What they do, in short:
+
+- **Filters**: 12 dB per octave, resonance from a Q of 0.71 (flat) to 11.3.
+- **EQ**: a low shelf and a high shelf of Q 0.71 (the steepest without a
+  bump) and a peak between, each a cookbook biquad in double precision.
+  A shelf is half its gain at its corner frequency.
+- **Drive**: gain into the curve, gain out, mixed with the clean signal; a
+  change of curve cross-fades. The curves are odd, so no offset appears;
+  the drive is not oversampled (its aliasing is that of the curve).
+- **Bitcrush**: holds the signal for whole periods of `rate` (a
+  sample-and-hold, aliasing on purpose) and rounds it to steps of
+  `2^(1-bits)`, half-way away from zero: the staircase is odd, so there is
+  no offset and silence stays exact silence, and nothing subnormal is
+  left. Fractional bits give the step sizes in between.
+- **Compressor**: feed-forward, level across both sides, gain computed and
+  smoothed in decibels; `mix` below 1 is parallel compression.
+- **Chorus, flanger**: one to eight voices reading a delay line by cubic
+  interpolation, swept by a sine; the flanger is one voice with feedback.
+- **Phaser**: 2 to 12 first-order all-pass stages swept on a musical
+  scale; one notch per two stages.
+- **Tremolo**: gain from `1 - depth` at the trough of its wave to 1 at the
+  crest. **Auto-pan**: the part's place swung `depth` either side of the
+  centre, at constant power. Both follow their wave through a 1 ms
+  smoother, so the square and saw waves do not click. With `sync` above 0
+  the wave takes `sync` beats per cycle at `master.tempo`, a cycle
+  starting on beat 0 of `master.beat`.
+- **Delay**: a line per side, read at a whole number of frames; feedback
+  through a one-pole low-pass (`damping` 0 is none, then a corner falling
+  from 20 kHz to 500 Hz); `pingpong` 1 sends the input to the left line and
+  crosses the feedback, so the echoes alternate left and right. With
+  `sync` above 0 the time is `sync` beats at `master.tempo`, and follows
+  it. Times are limited to 4 s (`DELAY_MAX_SECONDS`).
+- **Reverb**: the reverb parts always had (an eight-line feedback delay
+  network), sleeping while nothing reaches it.
+
+### Curves
+
+Each effect names in the JSON what an editor draws for it, `"visual"`.
+`Engine::effect_curve(part, effect, points)` and the export
+`mb_effect_curve(engine, part, effect, points)` work the curve out from
+the values the parameters hold, outside the render call (the worklet
+handles the request between quanta), never from what the render call is
+working on; `mb_curve_ptr` then points at `x, y` pairs of `f32`. In
+JavaScript, `await engine.effectCurve(part, 'eq', 256)` gives
+`{ visual, x, y }`. The axes:
+
+| `visual` | `x` | `y` |
+|---|---|---|
+| `filter_curve`, `eq_curve` | frequency, Hz, evenly spaced in octaves from 20 Hz to 20 kHz | gain, dB |
+| `transfer_curve` | input level, dBFS, -60 to 6 (compressor, glue, limiter); input sample, -1 to 1 (drive) | output level, dBFS; output sample |
+| `lfo_shape` | place in one cycle, 0 to 1 | delay, ms (chorus, flanger); frequency, Hz (phaser); gain (tremolo); place, -1 to 1 (auto-pan) |
+| `delay_taps` | time after a sound, s | gain of the echo heard then, the louder side, until -60 dB |
+| `reverb_decay` | time, s, to 1.5 times the decay | level of the tail, dB |
+| `bitcrush_steps` | input sample, -1 to 1 | output sample |
+
+They come from the formulas the effects run: the filters' responses from
+their biquad coefficients (`BiquadCoefficients::magnitude_at`; the
+state-variable filters are the same bilinear transforms), the compressor's
+static curve (`Compressor::static_reduction_db`), one cycle of an `Lfo`.
+`tests/effects.rs` checks them against what is measured through the
+engine: the equaliser's and the filters' curves within 0.1 dB, the
+compressor's within 0.1 dB, the delay's taps exactly. They live in
+`src/curve.rs`, to be replaced by `manguebyte-dsp`'s own response curves
+when it has them: one match arm per effect in `part_curve` and
+`master_curve`.
+
+## The master bus
+
+The parts, added up, and the return of a shared reverb go through:
+
+```text
+parts + shared reverb → glue compressor → master.gain → true-peak limiter → output
+```
+
+- **The shared reverb** takes what each part sends (`send`, after gain and
+  pan) and returns it wet. It sleeps, costing nothing, while nothing is
+  sent. `master.reverb.level` (dB, -60 to 6, 0), `.decay` (s, 0.2 to 10,
+  2.2), `.size` (0 to 1, 0.7), `.damping` (0 to 1, 0.5).
+- **The glue compressor**, `manguebyte-dsp`'s `Compressor`, gentle by
+  default and off until `master.glue.on`: `.threshold` (dB, -40 to 0,
+  -12), `.ratio` (1 to 10, 2), `.attack` (ms, 0.1 to 100, 20), `.release`
+  (ms, 10 to 2 000, 250), `.knee` (dB, 0 to 24, 6), `.makeup` (dB, 0 to
+  18, 0). It fades in and out like a part's effects.
+- **`master.gain`** (dB, -60 to 12, 0): the level into the limiter.
+- **The limiter**, `manguebyte-dsp`'s `Limiter`, looking 2 ms ahead
+  (`MASTER_LOOKAHEAD_SECONDS`), keeps the waveform under
+  `master.limiter.ceiling` (dBTP, -12 to -0.3, -0.3) and every sample
+  within `OUTPUT_CEILING`, so that a live set never clips;
+  `master.limiter.release` (ms, 10 to 1 000, 150). It is true-peak aware:
+  beside the audio it is fed a key channel, the largest magnitude of the
+  waveform between each pair of samples, read by interpolating by eight
+  with a 257-tap windowed sinc (as ITU-R BS.1770-4 measures true peak), so
+  that it turns the level down for the peaks between samples too. Below
+  the ceiling it leaves the sound exactly as it is. `tests/master.rs` plays
+  a set of four loud parts, driven and with their highs boosted 12 dB, at
+  ceilings of -0.3, -1 and -6 dBTP: the samples peak at the ceiling, and
+  a true-peak meter of `manguebyte-analysis`, sixteen times oversampled,
+  reads the waveform at most 0.08 dB above it (the filter rolls off above
+  0.44 of the sample rate, and eight points a sample can miss a crest by
+  up to 0.17 dB at half of it). The default ceiling is
+  the level the engine always kept its samples under; a set streamed
+  through a lossy codec wants -1, as EBU R 128 asks.
+- **`master.tempo`** (bpm, 20 to 400, 120) and **`master.beat`** (the beat
+  at the frame it is set on; the engine counts on from it) are what synced
+  effects follow.
+
+A master parameter's record may name any part: it belongs to no part, and
+a part's cancel leaves it. `Engine::master_params_json` and the export
+`mb_master_params_json` describe them, in the format of a part's.
+
+**Latency.** Reading between samples takes 16 frames (`TRUE_PEAK_DELAY`)
+and the limiter's look-ahead 2 ms less a frame, so the bus delays the
+sound by `master_latency_frames(rate)`: 111 frames at 48 kHz (2.31 ms), 103
+at 44.1 kHz. The engine renders its parts that far ahead of the output,
+which keeps every event on its own frame, and counts it in
+`latency_frames`. The bus comes to rest after 200 ms of digital silence
+beyond that, and is skipped until sound returns.
+
+## In JavaScript
+
+```js
+import { ManguebyteEngine, EFFECT_PARAMS } from './engine.js';
+
+await engine.createPart(0, 'synth', 'none');
+// .delay(0.25, 0.5).chorus() on the next bar
+await engine.setEffects(0, { delay: [0.25, 0.5], chorus: [] }, nextBar);
+// one effect, by name, by position or by its first parameter
+await engine.setEffect(0, 'eq', { low_gain: 3, high_gain: -2 }, nextBar);
+await engine.setEffect(0, 'tremolo', [4, 1, 'square'], nextBar);
+await engine.setEffect(0, 'lowpass', 800, nextBar);
+engine.removeEffect(0, 'chorus', nextBar);
+engine.setSend(0, 0.3, nextBar);
+engine.setMaster({ tempo: 128, glue: true, limiter: { ceiling: -1 } }, nextBar);
+const { visual, x, y } = await engine.effectCurve(0, 'eq', 256);
+```
+
+`setEffect(part, name, settings, time)` puts the effect in the part's
+chain the first time (the promise resolves once that is done and the
+records are scheduled, so a `time` at least `latency()` ahead still lands
+on its frame), then schedules the settings and the switch for `time`.
+Settings are an object by name, an array in `EFFECT_PARAMS` order, a
+number for the first parameter, `{}` for the effect as it is set, or
+`false` to switch it off; a `shape` may be a name (`SHAPES`).
+`setEffects(part, effects, time)` makes `effects` the part's effects from
+`time`: the ones it names on, every other one in the chain off, the
+low-pass and the reverb included; that is the shape of a method chain
+once it is evaluated. `removeEffect`, `setSend`, `setMaster`,
+`effectCurve`, `effectRunning`, `masterParams`, `masterParamValue`,
+`partChain` and `limiterReduction` complete it; `EFFECT`, `CHAIN`,
+`EFFECT_ORDER`, `EFFECT_PARAMS`, `VISUAL` and `SHAPES` name everything.
+
+## What did not change in the contract
+
+The record, the ring and the drum map are as they were, and
+`ffi::ABI_VERSION` stays 2: everything here is added beside what was
+there. Chain bits 2 to 12 are new (an older engine refuses them with
+`BAD_CHAIN`); the effects' and the master's parameters are new ids (an
+older engine counts their records as unrouted); the exports
+`mb_part_chain`, `mb_master_params_json`, `mb_master_param_value`,
+`mb_effect_curve`, `mb_curve_ptr`, `mb_effect_running` and
+`mb_limiter_reduction_db` and the status -14 are new, and `js/worklet.js`
+looks for them by name. A part's description lists more parameters (each
+effect's switch, `send`) and gives an effect's parameters two more fields,
+`effect` and `visual`; a reader that looks parameters up by id reads it as
+before. `mb_latency_frames` is larger by the master's look-ahead, which is
+what it is for: an event scheduled that far ahead lands on its frame as
+before, and only an event that arrives late lands later than it did.
 
 ## Sampler parts
 

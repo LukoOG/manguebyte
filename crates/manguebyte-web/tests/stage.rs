@@ -335,22 +335,32 @@ fn a_cancel_is_taken_even_when_the_queue_is_full() {
 }
 
 #[test]
-fn the_latency_is_one_quantum() {
+fn the_latency_is_one_quantum_and_the_master_look_ahead() {
     let mut engine = engine();
-    assert_eq!(engine.latency_frames(), 512, "before any render");
+    // 2 ms of look-ahead and 8 frames to read between samples, at 48 kHz.
+    let ahead = engine.master_latency_frames();
+    assert_eq!(ahead, 111);
+    assert_eq!(
+        ahead,
+        manguebyte_web::TRUE_PEAK_DELAY
+            + (manguebyte_web::MASTER_LOOKAHEAD_SECONDS * RATE) as usize
+            - 1
+    );
+    assert_eq!(engine.latency_frames(), 512 + ahead, "before any render");
     engine.render(128);
-    assert_eq!(engine.latency_frames(), 128);
+    assert_eq!(engine.latency_frames(), 128 + ahead);
     engine.render(7);
-    assert_eq!(engine.latency_frames(), 7);
+    assert_eq!(engine.latency_frames(), 7 + ahead);
     engine.render(0);
     assert_eq!(
         engine.latency_frames(),
-        7,
+        7 + ahead,
         "an empty render changes nothing"
     );
-    // An event due one quantum ahead of the frame the engine is at lands
-    // on its frame even if it arrives while that quantum is rendered: it
-    // is in the next one.
+    // An event due one quantum and the look-ahead ahead of the frame the
+    // engine is at lands on its frame even if it arrives while that
+    // quantum is rendered: the parts render it in the next one, and it is
+    // heard on its own frame.
     engine.create_part(0, InstrumentKind::Drums).unwrap();
     engine.render(128);
     let due = engine.frame() + engine.latency_frames() as u64;
@@ -358,5 +368,7 @@ fn the_latency_is_one_quantum() {
     engine.push(EventRecord::note_on(due, 0, 36, 1.0));
     engine.render(128);
     assert_eq!(engine.stats().late, 0);
-    assert_eq!(onset(engine.output().0), Some(0));
+    let start = engine.frame() - 128;
+    assert_eq!(onset(engine.output().0), Some((due - start) as usize));
+    assert_eq!(due - start, ahead as u64);
 }

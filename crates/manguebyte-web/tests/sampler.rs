@@ -481,9 +481,10 @@ fn a_sampler_kit_has_the_kit_parameters_for_its_drums() {
                 stop,
             ],
         );
-        render(&mut engine, 1_900, 128);
+        // The parts run the master's look-ahead, 111 frames, ahead.
+        render(&mut engine, 1_800, 128);
         assert_eq!(engine.active_voices(0), Some(2), "{stop:?}");
-        render(&mut engine, 2_400 + 100, 128);
+        render(&mut engine, 2_400 + 200, 128);
         assert_eq!(engine.active_voices(0), Some(0), "{stop:?}");
     }
 }

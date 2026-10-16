@@ -4,12 +4,16 @@ use core::fmt;
 
 use manguebyte_core::{AudioBuffer, NoDenormals};
 use manguebyte_dsp::{ProcessSpec, Processor, Voice};
-use manguebyte_params::{ParamId, ParamSet};
+use manguebyte_params::{Param, ParamId, ParamSet};
 
 use crate::chain::ChainDsp;
+use crate::curve::{self, Curve};
 use crate::drums::DrumKit;
+use crate::effect::Effect;
+use crate::fx::Clock;
 use crate::load::SfzInstrument;
-use crate::params::{InstrumentParams, PartParams};
+use crate::master::Master;
+use crate::params::{self, InstrumentParams, PartParams};
 use crate::queue::{Admitted, Pending};
 use crate::record::{Event, EventRecord, RECORD_SIZE};
 use crate::ring::RingConsumer;
@@ -17,19 +21,17 @@ use crate::sampled::SampledInstrument;
 use crate::synth::{SynthInstrument, choke_synth, fade_synth, new_synth, synth_note_on};
 
 /// The most the output ever reaches: about -0.3 dB below full scale. The
-/// output limiter keeps every sample within `-OUTPUT_CEILING..=OUTPUT_CEILING`.
+/// master bus's limiter keeps every sample within
+/// `-OUTPUT_CEILING..=OUTPUT_CEILING`, and the waveform between the
+/// samples under its ceiling, `master.limiter.ceiling`, -0.3 dBTP by
+/// default.
 pub const OUTPUT_CEILING: f32 = 0.966;
 
-/// How fast the output limiter lets the level back up once the peaks that
-/// made it turn the level down have passed: the time constant, in seconds,
-/// of the exponential return to full level.
+/// How fast the master limiter lets the level back up once the peaks that
+/// made it turn the level down have passed, by default
+/// (`master.limiter.release`): the time constant, in seconds, of the
+/// exponential return to full level.
 pub const LIMITER_RELEASE_SECONDS: f64 = 0.15;
-
-/// How long the output limiter holds its level after turning it down,
-/// before letting it back up: longer than a cycle of the lowest notes, so
-/// that the level does not rise between their peaks only to be turned down
-/// again at the next one.
-pub const LIMITER_HOLD_SECONDS: f64 = 0.03;
 
 /// How long a cancel record ([`RecordKind::Cancel`](crate::RecordKind::Cancel))
 /// takes to silence the notes of its part that are sounding on its frame: a
@@ -40,6 +42,12 @@ pub const LIMITER_HOLD_SECONDS: f64 = 0.03;
 pub const CANCEL_FADE_SECONDS: f64 = 0.008;
 
 use manguebyte_dsp::event::NoteRef;
+
+/// Whether `event` sets a parameter of the master bus, which belongs to no
+/// part whatever part its record names.
+fn is_master(event: Event) -> bool {
+    matches!(event, Event::Param { param, .. } if params::is_master(param))
+}
 
 /// What a part plays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -89,55 +97,180 @@ impl InstrumentKind {
     }
 }
 
-/// Which optional stages a part's chain has. The order is fixed:
-/// instrument, low-pass, reverb, then gain and pan, which every part has.
+/// Which optional stages a part's chain has: its [`Effect`]s. The order
+/// they run in is fixed ([`Effect::PART_ORDER`]), and gain, pan and the
+/// send come after them on every part.
+///
+/// A stage in the chain has its memory and its parameters, which the
+/// part's description lists and events reach; it sounds while its switch
+/// (`"lowpass.on"`, `"delay.on"`...) is on. The low-pass and the reverb
+/// start switched on, as they always did; every other stage starts off,
+/// so that putting it in the chain changes nothing until an event
+/// switches it on, on its exact frame. A stage not in the chain costs
+/// nothing, neither memory nor time, until it first joins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Chain {
-    /// The resonant low-pass filter (`lowpass.cutoff`, `lowpass.resonance`).
+    /// The resonant low-pass filter (`lowpass.*`).
     pub lowpass: bool,
-    /// The reverb (`reverb.mix`, `reverb.decay`).
+    /// The reverb (`reverb.*`).
     pub reverb: bool,
+    /// The resonant high-pass filter (`highpass.*`).
+    pub highpass: bool,
+    /// The three-band equaliser (`eq.*`).
+    pub eq: bool,
+    /// The drive (`drive.*`).
+    pub drive: bool,
+    /// The bitcrusher (`bitcrush.*`).
+    pub bitcrush: bool,
+    /// The compressor (`compressor.*`).
+    pub compressor: bool,
+    /// The chorus (`chorus.*`).
+    pub chorus: bool,
+    /// The flanger (`flanger.*`).
+    pub flanger: bool,
+    /// The phaser (`phaser.*`).
+    pub phaser: bool,
+    /// The tremolo (`tremolo.*`).
+    pub tremolo: bool,
+    /// The auto-pan (`autopan.*`).
+    pub autopan: bool,
+    /// The delay (`delay.*`).
+    pub delay: bool,
 }
 
 impl Chain {
-    /// Every stage.
+    /// The chain [`Engine::create_part`] gives a part: the low-pass and the
+    /// reverb, the full chain of the engine before it had other effects.
     pub const FULL: Self = Self {
         lowpass: true,
         reverb: true,
+        ..Self::NONE
     };
     /// Only gain and pan.
     pub const NONE: Self = Self {
         lowpass: false,
         reverb: false,
+        highpass: false,
+        eq: false,
+        drive: false,
+        bitcrush: false,
+        compressor: false,
+        chorus: false,
+        flanger: false,
+        phaser: false,
+        tremolo: false,
+        autopan: false,
+        delay: false,
+    };
+    /// Every stage.
+    pub const ALL: Self = Self {
+        lowpass: true,
+        reverb: true,
+        highpass: true,
+        eq: true,
+        drive: true,
+        bitcrush: true,
+        compressor: true,
+        chorus: true,
+        flanger: true,
+        phaser: true,
+        tremolo: true,
+        autopan: true,
+        delay: true,
     };
     /// The bit of [`bits`](Self::bits) for the low-pass.
     pub const LOWPASS_BIT: u32 = 1;
     /// The bit of [`bits`](Self::bits) for the reverb.
     pub const REVERB_BIT: u32 = 2;
+    /// Every bit [`from_bits`](Self::from_bits) knows: one per effect a
+    /// part can have, `1 << `[`Effect::code`].
+    pub const ALL_BITS: u32 = (1 << 13) - 1;
 
-    /// The chain as bits, as the WebAssembly exports take it.
+    /// The chain as bits, as the WebAssembly exports take it: bit
+    /// [`Effect::code`] for each stage.
     pub const fn bits(self) -> u32 {
-        (if self.lowpass { Self::LOWPASS_BIT } else { 0 })
-            | (if self.reverb { Self::REVERB_BIT } else { 0 })
+        let flags = [
+            self.lowpass,
+            self.reverb,
+            self.highpass,
+            self.eq,
+            self.drive,
+            self.bitcrush,
+            self.compressor,
+            self.chorus,
+            self.flanger,
+            self.phaser,
+            self.tremolo,
+            self.autopan,
+            self.delay,
+        ];
+        let mut bits = 0;
+        let mut code = 0;
+        while code < flags.len() {
+            if flags[code] {
+                bits |= 1 << code;
+            }
+            code += 1;
+        }
+        bits
     }
 
     /// The chain these bits stand for, or `None` if an unknown bit is set.
     ///
     /// ```
-    /// use manguebyte_web::Chain;
+    /// use manguebyte_web::{Chain, Effect};
     ///
     /// assert_eq!(Chain::from_bits(3), Some(Chain::FULL));
     /// assert_eq!(Chain::from_bits(0), Some(Chain::NONE));
-    /// assert_eq!(Chain::from_bits(4), None);
+    /// assert_eq!(Chain::from_bits(1 << 12), Some(Chain::NONE.with(Effect::Delay)));
+    /// assert_eq!(Chain::from_bits(1 << 13), None);
     /// ```
     pub const fn from_bits(bits: u32) -> Option<Self> {
-        if bits & !(Self::LOWPASS_BIT | Self::REVERB_BIT) != 0 {
+        const fn has(bits: u32, code: u32) -> bool {
+            bits & (1 << code) != 0
+        }
+        if bits & !Self::ALL_BITS != 0 {
             return None;
         }
         Some(Self {
-            lowpass: bits & Self::LOWPASS_BIT != 0,
-            reverb: bits & Self::REVERB_BIT != 0,
+            lowpass: has(bits, 0),
+            reverb: has(bits, 1),
+            highpass: has(bits, 2),
+            eq: has(bits, 3),
+            drive: has(bits, 4),
+            bitcrush: has(bits, 5),
+            compressor: has(bits, 6),
+            chorus: has(bits, 7),
+            flanger: has(bits, 8),
+            phaser: has(bits, 9),
+            tremolo: has(bits, 10),
+            autopan: has(bits, 11),
+            delay: has(bits, 12),
         })
+    }
+
+    /// Whether the chain has `effect`. Never for an effect of the master
+    /// bus.
+    pub const fn has(self, effect: Effect) -> bool {
+        self.bits() & effect.bit() != 0
+    }
+
+    /// The chain with `effect` added.
+    #[must_use]
+    pub const fn with(self, effect: Effect) -> Self {
+        match Self::from_bits(self.bits() | effect.bit()) {
+            Some(chain) => chain,
+            None => self,
+        }
+    }
+
+    /// The chain with `effect` taken out.
+    #[must_use]
+    pub const fn without(self, effect: Effect) -> Self {
+        match Self::from_bits(self.bits() & !effect.bit()) {
+            Some(chain) => chain,
+            None => self,
+        }
     }
 }
 
@@ -319,7 +452,7 @@ impl Part {
                 Instrument::Sampled(Box::new(SampledInstrument::new(sampler, spec)))
             }
         };
-        let chain = ChainDsp::new(&params.chain, spec);
+        let chain = ChainDsp::new(&params.chain, stages, spec);
         Self {
             id,
             params,
@@ -345,7 +478,7 @@ impl Part {
         };
         param.set_plain(value);
         let plain = param.plain();
-        if self.chain.set_param(id, plain) {
+        if self.chain.set_param(id, plain, &self.params.chain) {
             return true;
         }
         match &mut self.instrument {
@@ -435,7 +568,12 @@ impl Part {
     /// Renders the part's sound into `stereo`, sized to the frames wanted.
     /// Returns `false`, with `stereo` silent, if a sample was not a finite
     /// number: the part has then been silenced and cleared.
-    fn render(&mut self, mono: &mut AudioBuffer<f32>, stereo: &mut AudioBuffer<f32>) -> bool {
+    fn render(
+        &mut self,
+        mono: &mut AudioBuffer<f32>,
+        stereo: &mut AudioBuffer<f32>,
+        clock: Clock,
+    ) -> bool {
         let mono_sound = match &mut self.instrument {
             Instrument::Synth(synth) => {
                 synth.process(mono);
@@ -455,7 +593,7 @@ impl Part {
                 channel.copy_from_slice(mono.channel(0));
             }
         }
-        self.chain.process(self.params.stages, stereo);
+        self.chain.process(stereo, clock);
         let finite = stereo
             .iter_channels()
             .all(|channel| channel.iter().all(|sample| sample.is_finite()));
@@ -481,11 +619,18 @@ impl Part {
 /// The engine: parts that play sample-exact events into a stereo output.
 ///
 /// Time is a frame counter that starts at 0 and moves on by the number of
-/// frames each [`render`](Self::render) produces. An event lands on the
-/// frame it names when that frame is rendered; an event whose frame has
-/// passed lands on the first frame of the next quantum rendered; an event
-/// further ahead waits, in order, with others on the same frame applied in
-/// the order they were pushed.
+/// frames each [`render`](Self::render) produces. An event is heard on the
+/// frame it names; the engine renders its parts
+/// [`master_latency_frames`](Self::master_latency_frames) ahead of the
+/// output, for the master bus's limiter to look ahead, so an event lands
+/// exactly as long as it arrives that far ahead of the frame being
+/// rendered ([`latency_frames`](Self::latency_frames) says how far, with
+/// the quantum). Before the first render nothing has been rendered ahead,
+/// so every event pushed by then lands exactly. An event further ahead
+/// waits, in order, with others on the same frame applied in the order
+/// they were pushed; one that arrives too late lands on the first frame
+/// the engine renders next, and is heard that many frames into the
+/// quantum.
 ///
 /// Control calls (making parts, setting their chains, describing their
 /// parameters) allocate and belong outside the audio callback. Pushing
@@ -519,14 +664,12 @@ pub struct Engine {
     rendered: usize,
     /// The frames of the last render that produced any, for the latency.
     last_quantum: usize,
-    /// The output limiter's gain, and the factor by which what it has left
-    /// to recover shrinks each frame.
-    limiter_gain: f64,
-    limiter_release: f64,
-    /// Frames left before the gain may start to come back up, and how many
-    /// frames it is held for after each turn down.
-    limiter_hold: u32,
-    limiter_hold_frames: u32,
+    master: Master,
+    /// How far ahead of the output the parts are rendered: the master
+    /// bus's latency.
+    lookahead: usize,
+    /// Whether the first `lookahead` frames have been rendered.
+    primed: bool,
 }
 
 impl fmt::Debug for Engine {
@@ -554,13 +697,18 @@ impl Engine {
         config.check()?;
         manguebyte_sampler::prepare_tables();
         let frames = config.max_quantum;
+        let spec = ProcessSpec {
+            sample_rate: config.sample_rate,
+            max_block_size: frames,
+            num_channels: 2,
+        };
+        let master = Master::new(&spec);
         Ok(Self {
             config,
-            spec: ProcessSpec {
-                sample_rate: config.sample_rate,
-                max_block_size: frames,
-                num_channels: 2,
-            },
+            spec,
+            lookahead: master.latency(),
+            master,
+            primed: false,
             frame: 0,
             parts: Vec::with_capacity(config.max_parts),
             pending: Pending::with_capacity(config.pending_capacity),
@@ -571,10 +719,6 @@ impl Engine {
             right: vec![0.0; frames],
             rendered: 0,
             last_quantum: frames,
-            limiter_gain: 1.0,
-            limiter_release: (-1.0 / (LIMITER_RELEASE_SECONDS * config.sample_rate)).exp(),
-            limiter_hold: 0,
-            limiter_hold_frames: (LIMITER_HOLD_SECONDS * config.sample_rate).round() as u32,
         })
     }
 
@@ -589,21 +733,33 @@ impl Engine {
     /// in quanta like the last one. That is one quantum, the size of the
     /// last [`render`](Self::render) (or
     /// [`max_quantum`](EngineConfig::max_quantum) before the first), since
-    /// the quantum being rendered may have begun when the event arrives.
-    /// The engine adds no look-ahead of its own (its limiter does not look
-    /// ahead), so this is all the latency it has; the device's output
-    /// latency comes after it.
+    /// the quantum being rendered may have begun when the event arrives,
+    /// and the master bus's look-ahead,
+    /// [`master_latency_frames`](Self::master_latency_frames), which the
+    /// parts are rendered ahead by. The device's output latency comes
+    /// after it.
     ///
     /// ```
     /// use manguebyte_web::{Engine, EngineConfig};
     ///
     /// let mut engine = Engine::new(EngineConfig::new(48_000.0)).unwrap();
-    /// assert_eq!(engine.latency_frames(), 512);
+    /// assert_eq!(engine.master_latency_frames(), 111);
+    /// assert_eq!(engine.latency_frames(), 512 + 111);
     /// engine.render(128);
-    /// assert_eq!(engine.latency_frames(), 128);
+    /// assert_eq!(engine.latency_frames(), 128 + 111);
     /// ```
     pub fn latency_frames(&self) -> usize {
-        self.last_quantum
+        self.last_quantum + self.lookahead
+    }
+
+    /// The frames the master bus's limiter looks ahead by, which the
+    /// engine renders its parts ahead of the output by:
+    /// [`master_latency_frames`](crate::master_latency_frames) at the
+    /// engine's rate, 111 at 48 kHz (2.3 ms). An event is heard on its own
+    /// frame all the same, as long as it arrives this far, and a quantum,
+    /// ahead ([`latency_frames`](Self::latency_frames)).
+    pub fn master_latency_frames(&self) -> usize {
+        self.lookahead
     }
 
     /// The frame the next [`render`](Self::render) starts on.
@@ -668,9 +824,18 @@ impl Engine {
     }
 
     /// Changes which optional stages a part's chain has. A stage that is
-    /// added starts with an empty memory; its parameters keep their values.
-    /// The parameters of a stage that is not in the chain are left out of
-    /// the part's description, and events that set them are not routed.
+    /// added for the first time is made now (this is what allocates its
+    /// memory, a delay's four seconds of it most of all); one that is added
+    /// silent starts with an empty memory; its parameters keep their
+    /// values. A stage added with its switch on fades in over
+    /// [`EFFECT_FADE_SECONDS`](crate::EFFECT_FADE_SECONDS) from the next
+    /// frame rendered, and one taken out fades out, the delay and the
+    /// reverb letting their echoes and tails ring on. The parameters of a
+    /// stage that is not in the chain are left out of the part's
+    /// description, and events that set them are not routed.
+    ///
+    /// To switch an effect in or out on an exact frame, put it in the chain
+    /// beforehand and send its switch (`"delay.on"`) as an event.
     ///
     /// # Errors
     ///
@@ -678,13 +843,7 @@ impl Engine {
     pub fn set_chain(&mut self, part: u16, chain: Chain) -> Result<(), EngineError> {
         let index = self.index_of(part)?;
         let part = &mut self.parts[index];
-        let old = part.params.stages;
-        if chain.lowpass && !old.lowpass {
-            part.chain.clear_lowpass();
-        }
-        if chain.reverb && !old.reverb {
-            part.chain.clear_reverb();
-        }
+        part.chain.set_stages(chain, &part.params.chain);
         part.params.stages = chain;
         Ok(())
     }
@@ -782,9 +941,84 @@ impl Engine {
 
     /// The parameters of a part as a JSON array, in the format of
     /// [`ParamSet::descriptions_json`]: the instrument's, then those of the
-    /// chain stages it has, then `gain` and `pan`. Allocates.
+    /// chain stages it has in the order they run, then `gain`, `pan` and
+    /// `send`. The object of an effect's parameter has two more fields,
+    /// `"effect"`, the effect's [name](Effect::name), and `"visual"`, what
+    /// an editor draws for it ([`Visual`](crate::Visual)), as in
+    /// `{"id":"delay.time",...,"flags":{...},"effect":"delay","visual":"delay_taps"}`.
+    /// Allocates.
     pub fn params_json(&self, part: u16) -> Option<String> {
-        self.part(part).map(|part| part.params.descriptions_json())
+        self.part(part).map(|part| part.params.tagged_json())
+    }
+
+    /// The master bus's parameters as JSON, in the format of
+    /// [`params_json`](Self::params_json): `master.tempo`, `master.beat`,
+    /// `master.gain`, then those of the shared reverb, the glue compressor
+    /// and the limiter. Allocates.
+    pub fn master_params_json(&self) -> String {
+        self.master.params.tagged_json()
+    }
+
+    /// The value a parameter of the master bus holds, in its own units.
+    pub fn master_param_value(&self, id: &str) -> Option<f64> {
+        self.master.params.find(id).map(|param| param.plain())
+    }
+
+    /// The value the master parameter with this [`ParamId`] holds.
+    pub fn master_param_value_by_id(&self, id: ParamId) -> Option<f64> {
+        self.master.params.find_param(id).map(|param| param.plain())
+    }
+
+    /// The curve an editor draws for `effect` of a part, worked out from
+    /// the values its parameters hold, with `points` points (2 to
+    /// [`MAX_CURVE_POINTS`](crate::MAX_CURVE_POINTS); a delay gives one per
+    /// echo, until they fall below -60 dB). The effect does not have to be
+    /// in the part's chain. `None` if there is no such part or a part
+    /// cannot have the effect. Allocates; it reads the parameters, never
+    /// the state the render call works on.
+    pub fn effect_curve(&self, part: u16, effect: Effect, points: usize) -> Option<Curve> {
+        let tempo = self.master.params.tempo.plain();
+        let part = self.part(part)?;
+        curve::part_curve(
+            &part.params.chain,
+            effect,
+            self.config.sample_rate,
+            tempo,
+            points,
+        )
+    }
+
+    /// The curve of `effect` of the master bus: [`Effect::Glue`],
+    /// [`Effect::Limiter`] or [`Effect::Reverb`], as
+    /// [`effect_curve`](Self::effect_curve) gives a part's. `None` for any
+    /// other effect.
+    pub fn master_curve(&self, effect: Effect, points: usize) -> Option<Curve> {
+        curve::master_curve(&self.master.params, effect, points)
+    }
+
+    /// Whether `effect` of a part has work to do: switched on, fading, or
+    /// with echoes or a tail still ringing. An effect that is not is
+    /// skipped. `None` if there is no such part.
+    pub fn effect_running(&self, part: u16, effect: Effect) -> Option<bool> {
+        self.part(part)
+            .map(|part| part.chain.effect_running(effect))
+    }
+
+    /// Whether the master bus's shared reverb is asleep: nothing has been
+    /// sent to it for a while, it has been cleared and is skipped.
+    pub fn master_reverb_asleep(&self) -> bool {
+        self.master.reverb_asleep()
+    }
+
+    /// Whether the master bus's glue compressor is in or fading.
+    pub fn glue_running(&self) -> bool {
+        self.master.glue_running()
+    }
+
+    /// How far the master limiter turned the level down on the last frame
+    /// rendered, in decibels, as a positive number. For a meter.
+    pub fn limiter_reduction_db(&self) -> f64 {
+        self.master.reduction_db()
     }
 
     /// The text of the value `plain` for a parameter of a part, with its
@@ -818,10 +1052,11 @@ impl Engine {
         };
         if let Event::Cancel { part } = event {
             let from = record.frame;
-            self.stats.cancelled += self
-                .pending
-                .retain(|waiting| waiting.event.part() != part || waiting.frame < from)
-                as u64;
+            // The master bus's parameters belong to no part, whatever part
+            // their record names: a part's cancel leaves them.
+            self.stats.cancelled += self.pending.retain(|waiting| {
+                waiting.event.part() != part || waiting.frame < from || is_master(waiting.event)
+            }) as u64;
         }
         match self.pending.push(record.frame, event) {
             Admitted::Queued => {
@@ -949,16 +1184,21 @@ impl Engine {
     /// its frame. Returns how many were rendered; [`output`](Self::output)
     /// holds them. Real-time safe.
     ///
-    /// The output is the sum of the parts, in increasing part order,
-    /// through a limiter: when a frame's louder side would go beyond
-    /// [`OUTPUT_CEILING`], both sides are turned down on that frame just
-    /// enough to meet it; the level is held for [`LIMITER_HOLD_SECONDS`]
-    /// and then comes back up with a time constant of
-    /// [`LIMITER_RELEASE_SECONDS`]. No sample ever goes beyond the ceiling.
-    /// The limiter does not look ahead, which would delay the output, so a
-    /// wave that keeps rising after it has reached the ceiling stays on the
-    /// ceiling until it turns: under heavy overload the tops of rising
-    /// edges are flattened for up to a millisecond or two. A part that
+    /// The parts are added up, in increasing part order, with the return
+    /// of the master bus's shared reverb, and go through the master bus:
+    /// the glue compressor when it is on, `master.gain`, and a look-ahead
+    /// limiter, `manguebyte-dsp`'s [`Limiter`](manguebyte_dsp::Limiter),
+    /// that keeps the waveform under `master.limiter.ceiling` (-0.3 dBTP
+    /// by default), reading it between the samples as well as on them, and
+    /// every sample within [`OUTPUT_CEILING`] whatever the ceiling. The
+    /// limiter brings the level down in a ramp over the
+    /// [`MASTER_LOOKAHEAD_SECONDS`](crate::MASTER_LOOKAHEAD_SECONDS) before
+    /// a peak and lets it back up with the release set
+    /// ([`LIMITER_RELEASE_SECONDS`] by default); below the ceiling it leaves
+    /// the sound exactly as it is. To look ahead, the engine renders its
+    /// parts [`master_latency_frames`](Self::master_latency_frames) ahead
+    /// of the output; the first render also renders those frames first, so
+    /// that every event pushed before it is heard on its frame. A part that
     /// produces something that is not a finite number is silenced and
     /// cleared ([`EngineStats::recovered`]).
     ///
@@ -969,10 +1209,38 @@ impl Engine {
     pub fn render(&mut self, frames: usize) -> usize {
         let frames = frames.min(self.config.max_quantum);
         let _denormals = NoDenormals::new();
-        let start = self.frame;
+        if !self.primed && frames > 0 {
+            // The frames the parts run ahead by: what they put out comes
+            // out of the master bus after this many frames, so nothing of
+            // it is heard yet.
+            self.primed = true;
+            let mut done = 0;
+            while done < self.lookahead {
+                let count = (self.lookahead - done).min(self.config.max_quantum);
+                self.run(done as u64, count);
+                done += count;
+            }
+        }
+        // The parts are `lookahead` frames ahead of the output.
+        let start = self.frame.saturating_add(self.lookahead as u64);
+        self.run(start, frames);
+        self.frame = self.frame.saturating_add(frames as u64);
+        self.rendered = frames;
+        if frames > 0 {
+            self.last_quantum = frames;
+        }
+        frames
+    }
+
+    /// Renders the parts over `frames` frames from `start`, applying the
+    /// events due by then, and puts them through the master bus into the
+    /// first `frames` frames of the output.
+    fn run(&mut self, start: u64, frames: usize) {
         let end = start.saturating_add(frames as u64);
         self.left[..frames].fill(0.0);
         self.right[..frames].fill(0.0);
+        self.master.begin(frames);
+        let limited = self.master.limited();
 
         let mut position = 0;
         while let Some(waiting) = self.pending.pop_before(end) {
@@ -985,69 +1253,25 @@ impl Engine {
                 position = at;
             }
             self.stats.applied += 1;
-            let routed = self
-                .parts
-                .binary_search_by_key(&waiting.event.part(), |part| part.id)
-                .is_ok_and(|index| self.parts[index].apply(waiting.event));
+            let routed = match waiting.event {
+                Event::Param { param, value, .. } if params::is_master(param) => {
+                    self.master.set_param(param, value)
+                }
+                event => self
+                    .parts
+                    .binary_search_by_key(&event.part(), |part| part.id)
+                    .is_ok_and(|index| self.parts[index].apply(event)),
+            };
             if !routed {
                 self.stats.unrouted += 1;
             }
         }
         self.render_span(position, frames);
-        self.limit(frames);
-        self.frame = end;
-        self.rendered = frames;
-        if frames > 0 {
-            self.last_quantum = frames;
-        }
-        frames
+        self.stats.limited += self.master.limited() - limited;
     }
 
-    /// The output limiter, over the first `frames` frames of the output.
-    fn limit(&mut self, frames: usize) {
-        let ceiling = f64::from(OUTPUT_CEILING);
-        let release = self.limiter_release;
-        let mut gain = self.limiter_gain;
-        let mut hold = self.limiter_hold;
-        let mut limited = 0;
-        for (left, right) in self.left[..frames]
-            .iter_mut()
-            .zip(&mut self.right[..frames])
-        {
-            if hold > 0 {
-                hold -= 1;
-            } else {
-                gain = 1.0 - (1.0 - gain) * release;
-                if gain > 1.0 - 1e-6 {
-                    // Within 0.00001 dB of full level: there.
-                    gain = 1.0;
-                }
-            }
-            let peak = f64::from(left.abs().max(right.abs()));
-            if !peak.is_finite() {
-                // Only a sum of parts beyond the range of `f32` could get
-                // here, as every part's own output is finite.
-                *left = 0.0;
-                *right = 0.0;
-                continue;
-            }
-            if peak * gain > ceiling {
-                gain = ceiling / peak;
-                hold = self.limiter_hold_frames;
-            }
-            if gain < 1.0 {
-                limited += 1;
-                *left = (f64::from(*left) * gain) as f32;
-                *right = (f64::from(*right) * gain) as f32;
-            }
-        }
-        self.limiter_gain = gain;
-        self.limiter_hold = hold;
-        self.stats.limited += limited;
-    }
-
-    /// Renders every part over frames `from..to` of the quantum and adds
-    /// them to the output.
+    /// Renders every part over frames `from..to` of the quantum, adds them
+    /// and their sends up, and runs the master bus over them.
     fn render_span(&mut self, from: usize, to: usize) {
         if to <= from {
             return;
@@ -1055,8 +1279,9 @@ impl Engine {
         let frames = to - from;
         self.mono.set_num_frames(frames);
         self.stereo.set_num_frames(frames);
+        let clock = self.master.clock();
         for part in &mut self.parts {
-            if !part.render(&mut self.mono, &mut self.stereo) {
+            if !part.render(&mut self.mono, &mut self.stereo, clock) {
                 self.stats.recovered += 1;
                 continue;
             }
@@ -1068,7 +1293,11 @@ impl Engine {
                     *output += sample;
                 }
             }
+            let (send_left, send_right) = self.master.sends(from, to);
+            part.chain.send_into(&self.stereo, send_left, send_right);
         }
+        self.master
+            .process(&mut self.left, &mut self.right, from, to);
     }
 
     /// The left and right channels of what the last
@@ -1208,8 +1437,8 @@ mod tests {
     #[test]
     fn a_part_that_goes_wrong_is_silenced_cleared_and_left_out() {
         let records = [
-            EventRecord::note_on(0, 0, 45, 1.0),
             // Soft enough that the limiter stays out of the comparison.
+            EventRecord::note_on(0, 0, 45, 0.7),
             EventRecord::note_on(0, 1, 38, 0.5),
         ];
         let mut engine = Engine::new(EngineConfig::new(48_000.0)).unwrap();
@@ -1231,7 +1460,15 @@ mod tests {
         drums.render(128);
         assert_eq!(engine.stats().recovered, 1);
         assert_eq!(engine.active_voices(0), Some(0));
-        assert_eq!(left_bits(&engine), left_bits(&drums), "only the drums");
+        // The parts run ahead of the output by the master's look-ahead:
+        // what the synth played before it went wrong is still coming out.
+        let ahead = engine.master_latency_frames();
+        assert_ne!(left_bits(&engine)[..ahead], left_bits(&drums)[..ahead]);
+        assert_eq!(
+            left_bits(&engine)[ahead..],
+            left_bits(&drums)[ahead..],
+            "only the drums"
+        );
         assert_eq!(engine.stats().limited, 0);
         assert!(engine.output().1.iter().all(|sample| sample.is_finite()));
 

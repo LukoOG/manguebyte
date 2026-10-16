@@ -22,6 +22,7 @@ fn scenario() -> Engine {
             Chain {
                 lowpass: true,
                 reverb: false,
+                ..Chain::NONE
             },
         )
         .unwrap();
@@ -149,6 +150,7 @@ fn note_through_a_wet_reverb(rate: f64, hold: f64) -> (Vec<f32>, usize, Option<b
             Chain {
                 lowpass: false,
                 reverb: true,
+                ..Chain::NONE
             },
         )
         .unwrap();

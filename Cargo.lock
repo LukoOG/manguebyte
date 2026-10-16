@@ -770,6 +770,7 @@ dependencies = [
 name = "manguebyte-web"
 version = "0.1.0"
 dependencies = [
+ "manguebyte-analysis",
  "manguebyte-core",
  "manguebyte-dsp",
  "manguebyte-formats",

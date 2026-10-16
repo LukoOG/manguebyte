@@ -39,7 +39,7 @@ for (const shared of [true, false]) {
   });
 }
 
-test('latency() is a render quantum and the context\'s own latency', { skip: skipWithoutWasm }, async () => {
+test('latency() is a render quantum, the master\'s look-ahead and the context\'s own latency', { skip: skipWithoutWasm }, async () => {
   const context = new FakeContext(0);
   context.baseLatency = 0.005;
   context.outputLatency = 0.02;
@@ -47,13 +47,15 @@ test('latency() is a render quantum and the context\'s own latency', { skip: ski
   try {
     await context.run(2);
     const latency = await engine.latency();
+    // 111 frames of look-ahead at 48 kHz (`master_latency_frames`).
+    const engineFrames = QUANTUM + 111;
     assert.deepEqual(latency, {
-      engineFrames: QUANTUM,
+      engineFrames,
       outputFrames: 1200,
-      frames: QUANTUM + 1200,
-      seconds: (QUANTUM + 1200) / RATE,
+      frames: engineFrames + 1200,
+      seconds: (engineFrames + 1200) / RATE,
     });
-    // An event due one quantum ahead lands on its frame.
+    // An event due that far ahead lands on its frame.
     await engine.createPart(0, 'drums', 'none');
     const due = context.frame + latency.engineFrames;
     engine.noteOn(0, 36, 1, due / RATE);

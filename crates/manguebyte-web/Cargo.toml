@@ -1,6 +1,6 @@
 [package]
 name = "manguebyte-web"
-description = "A Manguebyte engine for the browser: parts with a synth, a drum kit or an SFZ sampler and a small effect chain, sample-exact 32-byte event records, a shared-memory event ring, WebAssembly exports and an AudioWorklet."
+description = "A Manguebyte engine for the browser: parts with a synth, a drum kit or an SFZ sampler through a chain of effects, a master bus with a true-peak limiter, sample-exact 32-byte event records, a shared-memory event ring, WebAssembly exports and an AudioWorklet."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -25,6 +25,9 @@ manguebyte-sampler.workspace = true
 [dev-dependencies]
 # WAV files for the tests that load sampler parts.
 manguebyte-formats.workspace = true
+# A true-peak meter of its own, sixteen times oversampled, to check the
+# master bus's limiter against something it was not built from.
+manguebyte-analysis.workspace = true
 
 [lints]
 workspace = true
