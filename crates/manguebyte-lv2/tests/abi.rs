@@ -173,6 +173,9 @@ manguebyte_lv2::export_lv2!(Level);
 /// the same files as `bundle_files`.
 #[test]
 fn the_exported_bundle_files_are_those_of_bundle_files() {
+    // Describing the plugin creates a `Level`, which replaces LEVEL_PARAMS
+    // under any test holding a host of its own.
+    let _guard = one_at_a_time();
     let files = manguebyte_lv2::bundle_files::<Level>("level.so");
     let exported = __manguebyte_lv2_bundle_files("level.so");
     let expected: Vec<(String, String)> = files

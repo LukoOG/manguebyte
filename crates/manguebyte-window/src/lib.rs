@@ -12,7 +12,8 @@
 //!
 //! - **Win32** ([`Window::open`] with a `Win32` parent, on Windows): a
 //!   `WS_CHILD` window, presenting with `SetDIBitsToDevice`. See
-//!   [`win32`] for what it does and does not do to the process.
+//!   the `win32` module (built on Windows only) for what it does and does
+//!   not do to the process.
 //! - **Headless** ([`Window::headless`], on every system): no system window
 //!   at all. A test drives it through [`Headless`], which injects
 //!   [`RawInput`], exposes, resizes, fires timers and destroys the parent,
