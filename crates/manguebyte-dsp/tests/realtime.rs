@@ -887,3 +887,183 @@ fn swapping_impulse_responses_while_playing_does_not_use_the_heap() {
     assert!(all_finite(&buffer));
     assert!(convolution.engine().is_some());
 }
+
+/// Plays a flood of notes on a synth of instrument voices, with accents,
+/// slides, bends, tuning, settings changes and notes taken over, and fails
+/// if anything touches the heap.
+fn flood<V: Voice>(what: &str, mut synth: Synth<V>, mut change: impl FnMut(&mut Synth<V>, u8)) {
+    synth.prepare(&SPEC);
+    let mut events = EventBuffer::with_capacity(64);
+    let mut buffer = AudioBuffer::<f32>::new(2, 256);
+    let transport = Transport::playing_at(120.0);
+    assert_no_heap_use(what, || {
+        for round in 0..24u8 {
+            synth.set_legato(round % 3 == 0);
+            change(&mut synth, round);
+            // Accented notes go straight to the synth, as a sequencer
+            // would send them.
+            synth.note_on_accented(NoteRef::new(9, 36 + round % 40), 0.9, round % 2 == 0);
+            events.clear();
+            for step in 0..6u8 {
+                let note = NoteRef::new(9, 30 + (round * 7 + step * 5) % 60);
+                let offset = u32::from(step) * 40;
+                let _ = events.push(Event {
+                    offset,
+                    kind: EventKind::NoteOn {
+                        note,
+                        velocity: 0.3 + f32::from(step) * 0.1,
+                    },
+                });
+                let _ = events.push(Event {
+                    offset: offset + 20,
+                    kind: EventKind::NoteExpression {
+                        note,
+                        expression: Expression::Tuning,
+                        value: 0.3,
+                    },
+                });
+                let _ = events.push(Event {
+                    offset: offset + 25,
+                    kind: EventKind::Midi(manguebyte_midi::MidiMessage::PitchBend {
+                        channel: 9,
+                        value: i16::from(step) * 1_000 - 2_000,
+                    }),
+                });
+                if step % 2 == 1 {
+                    let _ = events.push(Event {
+                        offset: offset + 30,
+                        kind: EventKind::NoteOff {
+                            note,
+                            velocity: 0.5,
+                        },
+                    });
+                }
+            }
+            buffer.set_num_frames([256, 64, 1, 200][usize::from(round) % 4]);
+            synth.process_with(&mut buffer, &ProcessContext::new(&events, &transport));
+        }
+        synth.reset();
+        synth.process(&mut buffer);
+    });
+    assert!(all_finite(&buffer));
+}
+
+#[test]
+fn the_instruments_do_not_use_the_heap() {
+    use manguebyte_dsp::instruments::{
+        AcidParams, AcidVoice, AnalogKitParams, AnalogKitVoice, FmParams, FmVoice, KickBassParams,
+        KickBassVoice, OrganParams, OrganVoice, PluckedString, RotaryParams, RotarySpeaker,
+        RotarySpeed, StringParams,
+    };
+
+    let strings = [
+        StringParams::nylon_guitar(),
+        StringParams::steel_guitar(),
+        StringParams::finger_bass(),
+        StringParams::slap_bass(),
+    ];
+    flood(
+        "PluckedString",
+        Synth::with_voices(3, || PluckedString::new(StringParams::nylon_guitar())),
+        |synth, round| {
+            let params = strings[usize::from(round) % strings.len()];
+            synth
+                .voices_mut()
+                .for_each(|voice| voice.set_params(params));
+        },
+    );
+    let fm = [
+        FmParams::electric_piano(),
+        FmParams::tubular_bell(),
+        FmParams::fm_bass(),
+    ];
+    flood(
+        "FmVoice",
+        Synth::with_voices(3, || FmVoice::new(FmParams::electric_piano())),
+        |synth, round| {
+            let params = fm[usize::from(round) % fm.len()];
+            synth
+                .voices_mut()
+                .for_each(|voice| voice.set_params(params));
+        },
+    );
+    let organs = [
+        OrganParams::jazz(),
+        OrganParams::full(),
+        OrganParams::ballad(),
+    ];
+    flood(
+        "OrganVoice",
+        Synth::new(OrganVoice::voices(4, OrganParams::jazz())),
+        |synth, round| {
+            let params = organs[usize::from(round) % organs.len()];
+            synth
+                .voices_mut()
+                .for_each(|voice| voice.set_params(params));
+        },
+    );
+    flood(
+        "AnalogKitVoice",
+        Synth::new(AnalogKitVoice::voices(4, AnalogKitParams::default())),
+        |synth, round| {
+            let mut params = AnalogKitParams::default();
+            params.drums[usize::from(round) % 16].decay = 2.0;
+            synth
+                .voices_mut()
+                .for_each(|voice| voice.set_params(params));
+        },
+    );
+    flood(
+        "KickBassVoice",
+        Synth::with_voices(1, || KickBassVoice::new(KickBassParams::default())),
+        |synth, round| {
+            let params = KickBassParams {
+                drive: f64::from(round) / 24.0,
+                ..KickBassParams::default()
+            };
+            synth
+                .voices_mut()
+                .for_each(|voice| voice.set_params(params));
+        },
+    );
+    let acid = [
+        AcidParams::classic(),
+        AcidParams::squelch(),
+        AcidParams::square(),
+    ];
+    flood(
+        "AcidVoice",
+        Synth::with_voices(1, || AcidVoice::new(AcidParams::classic())),
+        |synth, round| {
+            let params = acid[usize::from(round) % acid.len()];
+            synth
+                .voices_mut()
+                .for_each(|voice| voice.set_params(params));
+        },
+    );
+
+    check(
+        "RotarySpeaker",
+        RotarySpeaker::<f32>::new(RotaryParams::default()),
+    );
+    let mut leslie = RotarySpeaker::<f32>::new(RotaryParams::default());
+    leslie.prepare(&SPEC);
+    let mut buffer = AudioBuffer::<f32>::new(2, 256);
+    assert_no_heap_use("RotarySpeaker, changing speed", || {
+        for (round, speed) in [RotarySpeed::Fast, RotarySpeed::Stop, RotarySpeed::Slow]
+            .into_iter()
+            .cycle()
+            .take(9)
+            .enumerate()
+        {
+            leslie.set_speed(speed);
+            leslie.set_params(RotaryParams {
+                crossover: 600.0 + 100.0 * round as f64,
+                ..RotaryParams::default()
+            });
+            buffer.channel_mut(0).fill(0.25);
+            leslie.process(&mut buffer);
+        }
+    });
+    assert!(all_finite(&buffer));
+}
