@@ -166,6 +166,15 @@ impl SampledInstrument {
         }
     }
 
+    /// Every note fades out in a straight line over `seconds`, from where
+    /// it is, or sooner if it is already fading faster: a cancel.
+    pub(crate) fn fade_out(&mut self, seconds: f64) {
+        self.sampler.fade_out_all(seconds);
+        if let Some(kit) = &mut self.kit {
+            kit.fade_out_all(seconds);
+        }
+    }
+
     pub(crate) fn active_voices(&self) -> usize {
         self.sampler.active_voices() + self.kit.as_ref().map_or(0, |kit| kit.active_voices())
     }

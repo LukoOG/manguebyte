@@ -104,7 +104,7 @@ test('the accent is bit 0 of byte 9, and a record without it has a 0 there', () 
 });
 
 test('the kind codes and the parameter hash match the Rust ones', () => {
-  assert.deepEqual({ ...KIND }, { note_on: 1, note_off: 2, param: 3, choke: 4, all_notes_off: 5 });
+  assert.deepEqual({ ...KIND }, { note_on: 1, note_off: 2, param: 3, choke: 4, all_notes_off: 5, cancel: 6 });
   // FNV-1a test vectors, and the ids Rust checks in tests/params.rs.
   assert.equal(paramId(''), 0x811c9dc5);
   assert.equal(paramId('a'), 0xe40c292c);

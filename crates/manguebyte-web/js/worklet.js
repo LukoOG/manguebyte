@@ -26,7 +26,7 @@
 //
 // Messages from the main thread (each with an `id`, answered by a `reply`
 // carrying the same id): createPart, removePart, setChain, paramsJson,
-// drumMapJson, paramValue, activeVoices, stats; also `records` (an
+// drumMapJson, paramValue, activeVoices, stats, latency; also `records` (an
 // ArrayBuffer of records, for the message fallback) and `close`.
 //
 // Loading an SFZ instrument (engine.js loadSfz) takes sfzBegin, which
@@ -78,6 +78,7 @@ const STAT_NAMES = [
   'stalled',
   'recovered',
   'limited',
+  'cancelled',
 ];
 
 export class ManguebyteProcessor extends AudioWorkletProcessor {
@@ -288,6 +289,10 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
           result[name] = x.mb_stat(engine, index);
         });
         result.frame = x.mb_frame(engine);
+        break;
+      case 'latency':
+        // A module without the export: the quantum this processor renders.
+        result = typeof x.mb_latency_frames === 'function' ? x.mb_latency_frames(engine) : this.maxQuantum;
         break;
       default:
         result = undefined;

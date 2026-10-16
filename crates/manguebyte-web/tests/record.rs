@@ -80,13 +80,14 @@ fn typed_values_land_where_the_table_says() {
 }
 
 #[test]
-fn the_kind_codes_are_one_to_five() {
+fn the_kind_codes_are_one_to_six() {
     let kinds = [
         (RecordKind::NoteOn, 1),
         (RecordKind::NoteOff, 2),
         (RecordKind::Param, 3),
         (RecordKind::Choke, 4),
         (RecordKind::AllNotesOff, 5),
+        (RecordKind::Cancel, 6),
     ];
     for (kind, code) in kinds {
         assert_eq!(kind.code(), code);
@@ -95,9 +96,14 @@ fn the_kind_codes_are_one_to_five() {
     let known: Vec<u8> = (0..=255u8)
         .filter(|&code| RecordKind::from_code(code).is_some())
         .collect();
-    assert_eq!(known, [1, 2, 3, 4, 5]);
+    assert_eq!(known, [1, 2, 3, 4, 5, 6]);
     assert_eq!(EventRecord::choke(5, 6).to_bytes()[8], 4);
     assert_eq!(EventRecord::all_notes_off(5, 6).to_bytes()[8], 5);
+    assert_eq!(EventRecord::cancel(5, 6).to_bytes()[8], 6);
+    assert_eq!(
+        EventRecord::cancel(5, 6).decode(),
+        Some(Event::Cancel { part: 6 })
+    );
     assert_eq!(EventRecord::note_off(5, 6, 1).to_bytes()[8], 2);
 }
 
@@ -182,7 +188,7 @@ fn xorshift(state: &mut u64) -> u64 {
 #[test]
 fn any_32_bytes_read_back_unchanged_and_decode_without_panicking() {
     let mut state = 0x9E37_79B9_7F4A_7C15u64;
-    let mut decoded = [0usize; 6];
+    let mut decoded = [0usize; 7];
     for round in 0..200_000 {
         let mut bytes = [0u8; 32];
         for chunk in bytes.chunks_exact_mut(8) {
@@ -190,7 +196,7 @@ fn any_32_bytes_read_back_unchanged_and_decode_without_panicking() {
         }
         // Make valid kinds and notes common enough to reach every branch.
         if round % 2 == 0 {
-            bytes[8] %= 7;
+            bytes[8] %= 8;
             bytes[12] %= 160;
             bytes[13] %= 20;
         }
@@ -225,6 +231,7 @@ fn any_32_bytes_read_back_unchanged_and_decode_without_panicking() {
             }
             Some(Event::Choke { .. }) => 4,
             Some(Event::AllNotesOff { .. }) => 5,
+            Some(Event::Cancel { .. }) => 6,
         };
         decoded[index] += 1;
     }

@@ -165,6 +165,22 @@ impl Pending {
         self.heap.clear();
     }
 
+    /// Drops every waiting event `keep` refuses and returns how many. The
+    /// others keep their order; nothing is allocated.
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&Waiting) -> bool) -> usize {
+        let before = self.heap.len();
+        self.heap.retain(|waiting| keep(waiting));
+        let dropped = before - self.heap.len();
+        if dropped > 0 {
+            // Rebuilt from the bottom up, as a binary heap is: each subtree
+            // is put in order once both of its children are.
+            for index in (0..self.heap.len() / 2).rev() {
+                self.trickle_down(index);
+            }
+        }
+        dropped
+    }
+
     fn bubble_up(&mut self, index: usize) {
         if index == 0 {
             return;
@@ -321,7 +337,7 @@ mod tests {
                         reference.sort_unstable();
                         sequence += 1;
                     }
-                } else if roll < 9 {
+                } else if roll < 8 {
                     let end = next() % 45;
                     let got = pending.pop_before(end).map(|w| (w.frame, w.sequence));
                     let expected = reference.first().copied().filter(|&(frame, _)| frame < end);
@@ -329,9 +345,19 @@ mod tests {
                         reference.remove(0);
                     }
                     assert_eq!(got, expected);
-                } else {
+                } else if roll < 9 {
                     let got = pending.pop_latest().map(|w| (w.frame, w.sequence));
                     assert_eq!(got, reference.pop());
+                } else {
+                    // The events from a frame on, of one parity of
+                    // arrival, go, as a cancel drops those of one part.
+                    let from = next() % 40;
+                    let parity = next() % 2;
+                    let keep = |frame: u64, sequence: u64| frame < from || sequence % 2 != parity;
+                    let before = reference.len();
+                    reference.retain(|&(frame, sequence)| keep(frame, sequence));
+                    let dropped = pending.retain(|w| keep(w.frame, w.sequence));
+                    assert_eq!(dropped, before - reference.len());
                 }
                 assert_eq!(pending.len(), reference.len());
                 assert_eq!(pending.heap.capacity(), reserved, "the heap grew");

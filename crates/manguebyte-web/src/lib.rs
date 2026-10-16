@@ -16,9 +16,12 @@
 //! `param` u32 (a [`ParamId`]) and `value` f64 in the parameter's own
 //! units. The kinds are
 //! listed in [`RecordKind`] with their codes: note on 1, note off 2, param 3,
-//! choke 4 (the part's notes stop at once) and all notes off 5 (the part
-//! releases every note). A record with an unknown kind or a field out of
-//! range is ignored, never a panic; [`EventRecord::decode`] gives the rules.
+//! choke 4 (the part's notes stop at once), all notes off 5 (the part
+//! releases every note) and cancel 6 (the part's events from the record's
+//! frame on are dropped, and its notes fade out; see
+//! [Playing live](#playing-live)). A record with an unknown kind or a field
+//! out of range is ignored, never a panic; [`EventRecord::decode`] gives the
+//! rules.
 //!
 //! When a quantum of frames is rendered, an event whose frame is inside it
 //! lands on that frame; an event whose frame has already passed lands on the
@@ -69,6 +72,33 @@
 //! `t`, `m`, `f` and `k`, and a guitar body tap on note 88, which has no
 //! symbol ([`DRUM_MAP`], [`drum_map_json`]). Striking the closed hat
 //! chokes the open hat.
+//!
+//! # Playing live
+//!
+//! Three things for a performer changing the music while it plays:
+//!
+//! - **Cancel** ([`RecordKind::Cancel`], code 6, [`EventRecord::cancel`]).
+//!   When it is pushed, every event of its part due on its frame or later
+//!   that was pushed before it is dropped ([`EngineStats::cancelled`]
+//!   counts them); events pushed after it are kept. On its frame, every
+//!   note of the part still sounding fades out in a straight line over
+//!   [`CANCEL_FADE_SECONDS`] (8 ms), on every kind of part; a note started
+//!   on the same frame, after it, plays in full. To replace what is left of
+//!   an edited bar, send a cancel, then the new events. A full queue takes
+//!   a cancel all the same, since it only makes room.
+//! - **All notes off without a click.** All notes off lets every note of a
+//!   part go with a fade: the synth's release (5 ms at the shortest), the
+//!   drums' [`DAMP_SECONDS`] (50 ms), a sampler's own releases but never
+//!   less than [`PANIC_FADE_SECONDS`] (8 ms). `tests/stage.rs` stops a loud
+//!   sound of each kind of part at its loudest frame and checks that no
+//!   step from one sample to the next afterwards is larger than the largest
+//!   step before by more than 2% of its peak (none is larger at all; a cut
+//!   adds 73 to 92%).
+//! - **Latency.** [`Engine::latency_frames`] is how far ahead of
+//!   [`Engine::frame`] an event pushed from another thread must be due to
+//!   be sure of landing on its frame: one render quantum, as the engine has
+//!   no look-ahead of its own. In a browser that is 128 frames;
+//!   `js/engine.js` adds the context's output latency.
 //!
 //! # Between threads
 //!
@@ -143,7 +173,7 @@
 //! | Bytes  | Field      | Type | Meaning |
 //! |--------|------------|------|---------|
 //! | 0..8   | `frame`    | u64  | the frame the event lands on, counted from the engine's first |
-//! | 8      | `kind`     | u8   | 1 note on, 2 note off, 3 param, 4 choke, 5 all notes off |
+//! | 8      | `kind`     | u8   | 1 note on, 2 note off, 3 param, 4 choke, 5 all notes off, 6 cancel |
 //! | 9      | `flags`    | u8   | bit 0 accent (note on); bits 1 to 7 reserved: written as 0, ignored |
 //! | 10..12 | `part`     | u16  | the part the event is for |
 //! | 12     | `note`     | u8   | MIDI note, 0 to 127 (note on and note off) |
@@ -153,7 +183,7 @@
 //! | 20..24 | `param`    | u32  | a [`ParamId`]: the 32-bit FNV-1a hash of the parameter's identifier (param) |
 //! | 24..32 | `value`    | f64  | the parameter's new value in its own units, finite (param) |
 //!
-//! Code 0 and codes above 5 are not kinds. A record with an unknown kind,
+//! Code 0 and codes above 6 are not kinds. A record with an unknown kind,
 //! or with a field its kind uses out of range, is ignored and counted
 //! ([`EventRecord::decode`]); fields a kind does not use may hold anything.
 //!
@@ -247,8 +277,8 @@ pub use drums::{
     DRUM_MAP, Drum, DrumNote, HAT_CHOKE_SECONDS, drum_map_json,
 };
 pub use engine::{
-    Chain, Engine, EngineConfig, EngineError, EngineStats, InstrumentKind, LIMITER_HOLD_SECONDS,
-    LIMITER_RELEASE_SECONDS, OUTPUT_CEILING, Pushed,
+    CANCEL_FADE_SECONDS, Chain, Engine, EngineConfig, EngineError, EngineStats, InstrumentKind,
+    LIMITER_HOLD_SECONDS, LIMITER_RELEASE_SECONDS, OUTPUT_CEILING, Pushed,
 };
 pub use load::{SfzInstrument, SfzLoad};
 pub use manguebyte_params::ParamId;

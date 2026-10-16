@@ -178,10 +178,12 @@ fn control_calls_report_their_status() {
         let map = ffi::mb_drum_map_json(engine);
         assert_eq!(text(engine, map), drum_map_json());
 
-        for index in 0..10 {
+        for index in 0..11 {
             assert_eq!(ffi::mb_stat(engine, index), 0.0);
         }
-        assert!(ffi::mb_stat(engine, 10).is_nan());
+        assert!(ffi::mb_stat(engine, 11).is_nan());
+        assert_eq!(ffi::mb_latency_frames(engine), 128);
+        assert_eq!(ffi::mb_latency_frames(core::ptr::null_mut()), 0);
         assert!(ffi::mb_output_ptr(engine, 2).is_null());
         assert!(ffi::mb_output_ptr(engine, u32::MAX).is_null());
         ffi::mb_engine_free(engine);
@@ -321,7 +323,7 @@ fn hostile_calls_in_random_orders_never_break_the_engine() {
                                 chunk.copy_from_slice(&xorshift(&mut state).to_le_bytes());
                             }
                             if roll & 1 == 0 {
-                                bytes[8] %= 6;
+                                bytes[8] %= 7;
                                 bytes[10] %= 9;
                                 bytes[11] = 0;
                                 bytes[12] =

@@ -1110,7 +1110,16 @@ impl DrumKit {
 
     /// Every drum fades out over [`DAMP_SECONDS`].
     pub(crate) fn damp(&mut self) {
-        let frames = self.damp_frames;
+        self.fade_all(self.damp_frames);
+    }
+
+    /// Every drum fades out over `seconds`, or sooner if it is already
+    /// fading faster.
+    pub(crate) fn fade_out_all(&mut self, seconds: f64) {
+        self.fade_all(frames_for(seconds, self.sample_rate));
+    }
+
+    fn fade_all(&mut self, frames: u32) {
         self.kick.fade_out(frames);
         self.snare.fade_out(frames);
         for slot in self.hats.iter_mut().chain(&mut self.cymbals) {

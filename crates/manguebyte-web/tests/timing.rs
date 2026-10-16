@@ -363,7 +363,7 @@ fn records_out_of_range_are_ignored_and_counted() {
     let good = EventRecord::note_on(0, 0, 60, 0.5);
     let hostile = [
         EventRecord { kind: 0, ..good },
-        EventRecord { kind: 6, ..good },
+        EventRecord { kind: 7, ..good },
         EventRecord { kind: 255, ..good },
         EventRecord { note: 128, ..good },
         EventRecord { note: 255, ..good },

@@ -158,6 +158,13 @@ fn events(start: u64) -> Vec<EventRecord> {
     records.push(EventRecord::choke(start + 3_000, 7));
     records.push(EventRecord::note_on(start + 3_100, 7, 88, 1.0));
     records.push(EventRecord::all_notes_off(start + 4_000, 7));
+    // Cancels: each drops what is left of its part and fades its notes.
+    for part in [0u16, 1, 4, 6, 7] {
+        records.push(EventRecord::cancel(
+            start + 2_500 + u64::from(part) * 31,
+            part,
+        ));
+    }
     // A held key struck again: it glides to its new level.
     records.push(EventRecord::note_on(start + 3_500, 4, 50, 0.2));
     records.push(EventRecord::note_on(start + 3_900, 4, 50, 1.0));
@@ -244,7 +251,8 @@ fn pushing_draining_and_rendering_never_allocate() {
     assert_eq!(calls, 0, "the engine touched the heap {calls} times");
     let stats = engine.stats();
     assert_eq!(stats.dropped, 0);
-    assert!(stats.applied > 1_200, "{stats:?}");
+    assert!(stats.applied > 1_000, "{stats:?}");
+    assert!(stats.cancelled > 0, "{stats:?}");
     assert!(stats.unrouted > 0, "{stats:?}");
     // The extreme values drive the limiter.
     assert!(stats.limited > 0, "{stats:?}");
@@ -330,6 +338,7 @@ fn the_webassembly_exports_never_allocate_while_rendering() {
                 ffi::mb_pending_room(engine);
                 ffi::mb_frame(engine);
                 ffi::mb_stat(engine, 4);
+                ffi::mb_latency_frames(engine);
             }
         });
         assert_eq!(calls, 0, "the exports touched the heap {calls} times");

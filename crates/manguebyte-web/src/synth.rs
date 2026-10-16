@@ -257,6 +257,9 @@ struct Tone {
     /// `VOICE_LEVEL × velocity`, and the accent's gain, gliding when the
     /// key is struck again.
     gain: Ramp,
+    /// The gain is falling to silence for a cancel: the tone ends when it
+    /// gets there.
+    fading: bool,
 }
 
 impl Tone {
@@ -279,6 +282,7 @@ impl Tone {
             velocity: 0.0,
             accent_octaves: 0.0,
             gain: Ramp::at(0.0),
+            fading: false,
         }
     }
 
@@ -330,6 +334,7 @@ impl Tone {
         Processor::<f64>::reset(&mut self.filter);
         self.cutoff = settings.cutoff;
         self.gain = Ramp::at(0.0);
+        self.fading = false;
     }
 
     /// One sample of the tone.
@@ -347,7 +352,12 @@ impl Tone {
             + settings.sub * self.sub.next_sample();
         let filtered = self.filter.process_sample(0, tone);
         let level = self.amplitude.next();
-        filtered * level * self.gain.next()
+        let value = filtered * level * self.gain.next();
+        if self.fading && self.gain.remaining == 0 {
+            self.amplitude.silence();
+            self.fading = false;
+        }
+        value
     }
 }
 
@@ -435,6 +445,18 @@ impl SynthVoice {
         self.tail_fade = Ramp::at(0.0);
         self.tail.reset(&self.settings);
     }
+
+    /// The note fades out in a straight line over `seconds`, from where it
+    /// is, and ends; sooner if it is already fading faster. Struck again
+    /// meanwhile, it glides back up as a note struck while it sounds does.
+    pub(crate) fn fade_out(&mut self, seconds: f64) {
+        let frames = frames_for(seconds, self.sample_rate);
+        let tone = &mut self.tone;
+        if tone.sounding() && (!tone.fading || frames < tone.gain.remaining) {
+            tone.gain.start(0.0, frames);
+            tone.fading = true;
+        }
+    }
 }
 
 impl Voice for SynthVoice {
@@ -472,6 +494,7 @@ impl Voice for SynthVoice {
         }
         tone.amplitude.stage = Stage::Attack;
         tone.filter_envelope = 1.0;
+        tone.fading = false;
     }
 
     fn note_off(&mut self, _velocity: f32) {
@@ -554,6 +577,15 @@ pub(crate) fn new_synth(params: &SynthParams, spec: &ProcessSpec) -> SynthInstru
     let mut synth = Synth::with_voices(SYNTH_VOICES, || SynthVoice::new(settings));
     synth.prepare(spec);
     synth
+}
+
+/// Every note of a synth is released and fades out in a straight line
+/// over `seconds`, from where it is: a cancel.
+pub(crate) fn fade_synth(synth: &mut SynthInstrument, seconds: f64) {
+    synth.all_notes_off();
+    for voice in synth.voices_mut() {
+        voice.fade_out(seconds);
+    }
 }
 
 /// Every note of a synth stops at once, with no fade: a choke.

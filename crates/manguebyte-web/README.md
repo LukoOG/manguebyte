@@ -41,7 +41,7 @@ the last two against the same golden bytes.
 | Bytes  | Field      | Type | Meaning |
 |--------|------------|------|---------|
 | 0..8   | `frame`    | u64  | the frame the event lands on, counted from the engine's first |
-| 8      | `kind`     | u8   | 1 note on, 2 note off, 3 param, 4 choke, 5 all notes off |
+| 8      | `kind`     | u8   | 1 note on, 2 note off, 3 param, 4 choke, 5 all notes off, 6 cancel |
 | 9      | `flags`    | u8   | bit 0 accent (note on); bits 1 to 7 reserved: written as 0, ignored |
 | 10..12 | `part`     | u16  | the part the event is for |
 | 12     | `note`     | u8   | MIDI note, 0 to 127 (note on and note off) |
@@ -57,12 +57,14 @@ opening one octave further and an attack twice as fast; a drum 3 dB
 louder, with its high frequencies lifted over the first 30 ms, most at the
 transient. The crate documentation gives the details.
 
-Choke stops every note of the part at once; all notes off releases them.
-Code 0 and codes above 5 are not kinds. A record with an unknown kind, or
-with a field its kind uses out of range, is ignored and counted; fields a
-kind does not use may hold anything. An event whose frame has passed lands
-on the first frame of the quantum being rendered, and one further ahead
-waits.
+Choke stops every note of the part at once; all notes off releases them,
+never with a click (see [Playing live](#playing-live)); cancel drops the
+part's events due on its frame or later that came before it, and fades its
+notes out there. Code 0 and codes above 6 are not kinds. A record with
+an unknown kind, or with a field its kind uses out of range, is ignored
+and counted; fields a kind does not use may hold anything. An event whose
+frame has passed lands on the first frame of the quantum being rendered,
+and one further ahead waits.
 
 ### Shared ring
 
@@ -118,6 +120,53 @@ keep their places; new drums are added after them.
 
 `cargo run -p manguebyte-web --example drum_wavs -- <directory>` writes
 every drum, plain and accented, and a short groove to WAV files.
+
+## Playing live
+
+**Cancel** (kind 6, `engine.cancel(part, time)`, `EventRecord::cancel`).
+When the engine takes the record, every event of its part due on its
+frame or later that reached the engine before it is dropped (the
+`cancelled` counter, `mb_stat` 10, counts them); events sent after it are
+kept. On its frame every note of the part still sounding fades out in a
+straight line over 8 ms (`CANCEL_FADE_SECONDS`), on every kind of part,
+while a note started on that frame after the cancel plays in full. So when
+the performer edits a part in the middle of a bar, Aratu sends a cancel
+for the first frame it can still reach, then the new events:
+
+```js
+const from = context.currentTime + (await engine.latency()).engineFrames / context.sampleRate;
+engine.cancel(part, from);
+for (const note of newNotes) engine.noteOn(part, note.key, note.velocity, note.time);
+```
+
+A full queue takes a cancel all the same, since what it drops matters more
+than its fade, and it only makes room. The kind was a code every engine
+ignored, and no writer sent it, so the ABI version stays 2: an older
+engine ignores and counts it.
+
+**All notes off never clicks.** It lets every note go with a fade: the
+synth's release (5 ms at the shortest, falling 60 dB), the drums' 50 ms
+(`DAMP_SECONDS`), a sampler's own releases but never less than 8 ms
+(`PANIC_FADE_SECONDS`: one-shots and shorter releases fade in a straight
+line instead). `tests/stage.rs` stops a loud, sustained sound of every kind
+of part (a four-note chord, ringing cymbals and toms, sampled chords
+looping, a sampled hat with synthesized drums) on its loudest frame and
+checks that no step from one sample to the next after it is larger than
+the largest step before it by more than 2% of its peak; none is larger at
+all, while a choke, which cuts, adds 73% (synth) and 92% (sampler).
+
+**Latency.** `mb_latency_frames` (`Engine::latency_frames`) is how far
+ahead of the engine's current frame an event must be due to be sure of
+landing on its frame: one render quantum, the size of the last render
+(the maximum quantum before the first), since the quantum being rendered
+may have begun when the event arrives. The engine has no look-ahead of its
+own; its limiter does not look ahead. `await engine.latency()` gives
+`{ engineFrames, outputFrames, frames, seconds }`: the engine's frames
+(128 in a browser), the context's own output latency (`baseLatency` plus
+`outputLatency`, where the browser gives them), and the two together, for
+Aratu to show and to schedule ahead by. Records sent by message, without
+shared memory, also take the time a message takes to cross, which no
+browser reports.
 
 ## Sampler parts
 

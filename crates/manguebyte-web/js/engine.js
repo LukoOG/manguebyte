@@ -342,6 +342,40 @@ export class ManguebyteEngine {
   }
 
   /**
+   * Cancels what is left of `part` from `time` (default: now): every event
+   * of the part scheduled before this call for `time` or later is dropped,
+   * and at `time` the notes of the part still sounding fade out over 8 ms
+   * (`CANCEL_FADE_SECONDS`). Events scheduled after this call are kept, so
+   * the way to replace the rest of an edited bar is cancel(), then the new
+   * events. Pick `time` at least latency().engineFrames ahead, so that the
+   * cancel lands before the events it is meant to drop start.
+   */
+  cancel(part, time) {
+    return this.schedule({ frame: this.frameFor(time), kind: KIND.cancel, part });
+  }
+
+  /**
+   * The latency between scheduling and hearing, in frames of the context:
+   *
+   *   engineFrames  the engine's own, one render quantum
+   *                 (`Engine::latency_frames`): an event due sooner than
+   *                 that after the current time may land late
+   *   outputFrames  the context's, from baseLatency and outputLatency
+   *                 (0 where the browser does not say)
+   *   frames        the two together, and seconds, the same in seconds
+   *
+   * Records sent by message (without shared memory) also take the time a
+   * message takes to cross, which no browser reports.
+   */
+  async latency() {
+    const engineFrames = await this.request('latency');
+    const outputSeconds = (this.context.baseLatency ?? 0) + (this.context.outputLatency ?? 0);
+    const outputFrames = Math.round(outputSeconds * this.sampleRate);
+    const frames = engineFrames + outputFrames;
+    return { engineFrames, outputFrames, frames, seconds: frames / this.sampleRate };
+  }
+
+  /**
    * Makes part `part` a 'synth', 'drums', 'sampler' (silent until loadSfz
    * gives it an instrument) or 'sampler_kit' (an SFZ drum kit that plays
    * the synthesized drum for a note of the drum map it has no sample for,
@@ -455,7 +489,8 @@ export class ManguebyteEngine {
 
   /**
    * The engine's counters (`EngineStats`: queued, ignored, dropped, late,
-   * applied, unrouted, displaced, stalled, recovered, limited) and its frame.
+   * applied, unrouted, displaced, stalled, recovered, limited, cancelled)
+   * and its frame.
    */
   stats() {
     return this.request('stats');

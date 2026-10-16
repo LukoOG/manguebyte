@@ -54,10 +54,13 @@ use manguebyte_params::ParamId;
 /// what it did. Nor did the exports that load SFZ instruments
 /// ([`mb_text_ptr`], [`mb_input_ptr`], [`mb_sfz_begin`],
 /// [`mb_sfz_files_json`], [`mb_sfz_add_file`], [`mb_sfz_finish`],
-/// [`mb_sfz_abandon`], [`mb_collect`]) and instrument code 2: they are only
-/// added, code that predates them never calls or sends them, and
-/// `js/worklet.js` looks for them by name, so it runs a module without
-/// them and says, when asked to load, that it has no sampler parts.
+/// [`mb_sfz_abandon`], [`mb_collect`]), [`mb_latency_frames`], counter 10
+/// of [`mb_stat`], instrument codes 2 and 3 and record kind 6 (cancel):
+/// they are only added, code that predates them never calls or sends them,
+/// and `js/worklet.js` looks for the exports by name, so it runs a module
+/// without them and says, when asked to load, that it has no sampler parts.
+/// Kind 6 was a code an engine ignored and counted; a writer that sends it
+/// to an older engine gets that, and no writer sent it before.
 pub const ABI_VERSION: u32 = 2;
 
 /// The most records the staging area can hold.
@@ -519,7 +522,7 @@ pub unsafe extern "C" fn mb_active_voices(engine: *mut WebEngine, part: u32) -> 
 /// One of the engine's counters
 /// ([`EngineStats`](crate::EngineStats)): 0 queued, 1 ignored, 2 dropped,
 /// 3 late, 4 applied, 5 unrouted, 6 displaced, 7 stalled, 8 recovered,
-/// 9 limited. NaN for any other index.
+/// 9 limited, 10 cancelled. NaN for any other index.
 ///
 /// # Safety
 ///
@@ -542,9 +545,25 @@ pub unsafe extern "C" fn mb_stat(engine: *mut WebEngine, index: u32) -> f64 {
         7 => stats.stalled,
         8 => stats.recovered,
         9 => stats.limited,
+        10 => stats.cancelled,
         _ => return f64::NAN,
     };
     value as f64
+}
+
+/// The engine's latency in frames
+/// ([`Engine::latency_frames`](crate::Engine::latency_frames)): one render
+/// quantum, the size of the last [`mb_render`], or the maximum quantum
+/// before the first. The engine has no look-ahead; the device's output
+/// latency comes on top.
+///
+/// # Safety
+///
+/// `engine` is null or a live pointer from [`mb_engine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mb_latency_frames(engine: *mut WebEngine) -> u32 {
+    // SAFETY: as the caller promises.
+    unsafe { web(engine) }.map_or(0, |web| web.engine.latency_frames() as u32)
 }
 
 /// Where the text buffer starts: the text the last text call wrote, which

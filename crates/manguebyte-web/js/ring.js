@@ -10,7 +10,7 @@
 //
 //   bytes  0..8   frame     u64   absolute frame since the engine started
 //   byte   8      kind      u8    1 note_on, 2 note_off, 3 param,
-//                                 4 choke, 5 all_notes_off
+//                                 4 choke, 5 all_notes_off, 6 cancel
 //   byte   9      flags     u8    bit 0 accent (the note was written in
 //                                 capitals); bits 1 to 7 reserved,
 //                                 written as 0 and ignored
@@ -52,6 +52,7 @@ export const KIND = Object.freeze({
   param: 3,
   choke: 4,
   all_notes_off: 5,
+  cancel: 6,
 });
 
 /** The bits of the `flags` byte. Bits 1 to 7 are reserved. */

@@ -98,6 +98,7 @@ test('the module imports nothing and exports the documented functions', { skip: 
     'mb_sfz_finish',
     'mb_sfz_abandon',
     'mb_collect',
+    'mb_latency_frames',
   ]) {
     assert.ok(exported.includes(name), name);
   }

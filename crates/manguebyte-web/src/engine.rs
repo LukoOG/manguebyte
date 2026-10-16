@@ -14,7 +14,7 @@ use crate::queue::{Admitted, Pending};
 use crate::record::{Event, EventRecord, RECORD_SIZE};
 use crate::ring::RingConsumer;
 use crate::sampled::SampledInstrument;
-use crate::synth::{SynthInstrument, choke_synth, new_synth, synth_note_on};
+use crate::synth::{SynthInstrument, choke_synth, fade_synth, new_synth, synth_note_on};
 
 /// The most the output ever reaches: about -0.3 dB below full scale. The
 /// output limiter keeps every sample within `-OUTPUT_CEILING..=OUTPUT_CEILING`.
@@ -30,6 +30,14 @@ pub const LIMITER_RELEASE_SECONDS: f64 = 0.15;
 /// that the level does not rise between their peaks only to be turned down
 /// again at the next one.
 pub const LIMITER_HOLD_SECONDS: f64 = 0.03;
+
+/// How long a cancel record ([`RecordKind::Cancel`](crate::RecordKind::Cancel))
+/// takes to silence the notes of its part that are sounding on its frame: a
+/// straight fade over `round(CANCEL_FADE_SECONDS × sample rate)` frames, the
+/// first of them the cancel's own, short enough to clear the way for the
+/// notes that replace them and long enough not to click. A note already
+/// fading faster keeps its own fade.
+pub const CANCEL_FADE_SECONDS: f64 = 0.008;
 
 use manguebyte_dsp::event::NoteRef;
 
@@ -275,6 +283,9 @@ pub struct EngineStats {
     pub recovered: u64,
     /// Frames on which the output limiter held the level below full.
     pub limited: u64,
+    /// Waiting events dropped by a cancel record
+    /// ([`RecordKind::Cancel`](crate::RecordKind::Cancel)).
+    pub cancelled: u64,
 }
 
 enum Instrument {
@@ -401,6 +412,13 @@ impl Part {
             }
             (Instrument::Sampled(sampled), Event::Choke { .. }) => sampled.choke(),
             (Instrument::Sampled(sampled), Event::AllNotesOff { .. }) => sampled.all_notes_off(),
+            (Instrument::Synth(synth), Event::Cancel { .. }) => {
+                fade_synth(synth, CANCEL_FADE_SECONDS);
+            }
+            (Instrument::Drums(kit), Event::Cancel { .. }) => kit.fade_out_all(CANCEL_FADE_SECONDS),
+            (Instrument::Sampled(sampled), Event::Cancel { .. }) => {
+                sampled.fade_out(CANCEL_FADE_SECONDS);
+            }
             (_, Event::Param { .. }) => {}
         }
         true
@@ -499,6 +517,8 @@ pub struct Engine {
     left: Vec<f32>,
     right: Vec<f32>,
     rendered: usize,
+    /// The frames of the last render that produced any, for the latency.
+    last_quantum: usize,
     /// The output limiter's gain, and the factor by which what it has left
     /// to recover shrinks each frame.
     limiter_gain: f64,
@@ -550,6 +570,7 @@ impl Engine {
             left: vec![0.0; frames],
             right: vec![0.0; frames],
             rendered: 0,
+            last_quantum: frames,
             limiter_gain: 1.0,
             limiter_release: (-1.0 / (LIMITER_RELEASE_SECONDS * config.sample_rate)).exp(),
             limiter_hold: 0,
@@ -560,6 +581,29 @@ impl Engine {
     /// The configuration the engine was made with.
     pub fn config(&self) -> &EngineConfig {
         &self.config
+    }
+
+    /// The engine's latency in frames: how far ahead of
+    /// [`frame`](Self::frame) an event pushed from another thread must be
+    /// due to be sure of landing on its frame, while the engine is rendered
+    /// in quanta like the last one. That is one quantum, the size of the
+    /// last [`render`](Self::render) (or
+    /// [`max_quantum`](EngineConfig::max_quantum) before the first), since
+    /// the quantum being rendered may have begun when the event arrives.
+    /// The engine adds no look-ahead of its own (its limiter does not look
+    /// ahead), so this is all the latency it has; the device's output
+    /// latency comes after it.
+    ///
+    /// ```
+    /// use manguebyte_web::{Engine, EngineConfig};
+    ///
+    /// let mut engine = Engine::new(EngineConfig::new(48_000.0)).unwrap();
+    /// assert_eq!(engine.latency_frames(), 512);
+    /// engine.render(128);
+    /// assert_eq!(engine.latency_frames(), 128);
+    /// ```
+    pub fn latency_frames(&self) -> usize {
+        self.last_quantum
     }
 
     /// The frame the next [`render`](Self::render) starts on.
@@ -772,6 +816,13 @@ impl Engine {
             self.stats.ignored += 1;
             return Pushed::Ignored;
         };
+        if let Event::Cancel { part } = event {
+            let from = record.frame;
+            self.stats.cancelled += self
+                .pending
+                .retain(|waiting| waiting.event.part() != part || waiting.frame < from)
+                as u64;
+        }
         match self.pending.push(record.frame, event) {
             Admitted::Queued => {
                 self.stats.queued += 1;
@@ -792,9 +843,14 @@ impl Engine {
 
     /// Whether [`push`](Self::push) would keep this record: it is to be
     /// ignored, or there is room, or it is due before the latest waiting
-    /// event.
+    /// event. A cancel is always taken, since what it drops matters more
+    /// than its own fade, and holding it back would let through the events
+    /// it is meant to drop.
     fn admits(&self, record: &EventRecord) -> bool {
-        record.decode().is_none() || self.pending.admits(record.frame)
+        match record.decode() {
+            None | Some(Event::Cancel { .. }) => true,
+            Some(_) => self.pending.admits(record.frame),
+        }
     }
 
     /// Accepts records laid end to end, 32 bytes each, as a message from
@@ -941,6 +997,9 @@ impl Engine {
         self.limit(frames);
         self.frame = end;
         self.rendered = frames;
+        if frames > 0 {
+            self.last_quantum = frames;
+        }
         frames
     }
 

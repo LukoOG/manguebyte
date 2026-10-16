@@ -63,7 +63,7 @@ pub mod flag {
 
 /// What a record asks for, and its numeric code in the `kind` byte.
 ///
-/// Code 0 and codes above 5 are not kinds: a record that carries one is
+/// Code 0 and codes above 6 are not kinds: a record that carries one is
 /// ignored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -78,6 +78,13 @@ pub enum RecordKind {
     Choke = 4,
     /// Code 5: the part releases every note, as if each key were let go.
     AllNotesOff = 5,
+    /// Code 6: every event of the part due on the record's frame or later
+    /// that reached the engine before this record is dropped, and on that
+    /// frame every note of the part still sounding fades out over
+    /// [`CANCEL_FADE_SECONDS`](crate::CANCEL_FADE_SECONDS). For replacing
+    /// what is left of a bar that has been edited: send this, then the new
+    /// events.
+    Cancel = 6,
 }
 
 impl RecordKind {
@@ -89,6 +96,7 @@ impl RecordKind {
             3 => Some(Self::Param),
             4 => Some(Self::Choke),
             5 => Some(Self::AllNotesOff),
+            6 => Some(Self::Cancel),
             _ => None,
         }
     }
@@ -181,6 +189,13 @@ impl EventRecord {
     /// `part` releases every note.
     pub fn all_notes_off(frame: u64, part: u16) -> Self {
         Self::of_kind(RecordKind::AllNotesOff, frame, part)
+    }
+
+    /// The events of `part` due on `frame` or later that were pushed before
+    /// this record are dropped, and its notes fade out on `frame`. See
+    /// [`RecordKind::Cancel`].
+    pub fn cancel(frame: u64, part: u16) -> Self {
+        Self::of_kind(RecordKind::Cancel, frame, part)
     }
 
     /// The same record on another MIDI channel.
@@ -333,6 +348,7 @@ impl EventRecord {
             }),
             RecordKind::Choke => Some(Event::Choke { part }),
             RecordKind::AllNotesOff => Some(Event::AllNotesOff { part }),
+            RecordKind::Cancel => Some(Event::Cancel { part }),
         }
     }
 }
@@ -381,6 +397,12 @@ pub enum Event {
         /// The part.
         part: u16,
     },
+    /// Fade out every note of the part. Pushed, it has also dropped the
+    /// part's events due on its frame or later that came before it.
+    Cancel {
+        /// The part.
+        part: u16,
+    },
 }
 
 impl Event {
@@ -391,7 +413,8 @@ impl Event {
             | Self::NoteOff { part, .. }
             | Self::Param { part, .. }
             | Self::Choke { part }
-            | Self::AllNotesOff { part } => part,
+            | Self::AllNotesOff { part }
+            | Self::Cancel { part } => part,
         }
     }
 }

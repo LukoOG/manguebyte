@@ -386,6 +386,18 @@ display, and no editor has been opened inside a real host yet.
   kit's parameters for those drums. The fallback is chosen with the kind
   of part, not guessed, so that a melodic instrument with a gap in its
   keys never plays a drum.
+- Playing live. Record kind 6, cancel (`EventRecord::cancel`,
+  `engine.cancel(part, time)`): every event of its part due on its frame
+  or later that reached the engine before it is dropped (counted in
+  `EngineStats::cancelled`, `mb_stat` 10), and on that frame the part's
+  sounding notes fade out over 8 ms (`CANCEL_FADE_SECONDS`), on every kind
+  of part, so an edited bar can be replaced mid-way; the code was one every
+  engine ignored, so the ABI version stays 2. All notes off is shown never
+  to click on any kind of part: the largest step after it is never larger
+  than the largest before (a cut adds 73 to 92% of the peak).
+  `Engine::latency_frames`, `mb_latency_frames` and `engine.latency()` give
+  the engine's latency, one render quantum, and with the context's output
+  latency the whole of it.
 
 ### Hosting
 
