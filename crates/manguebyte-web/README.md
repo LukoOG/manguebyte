@@ -1,13 +1,15 @@
 # manguebyte-web
 
 A Manguebyte engine for the browser, that also builds, runs and is tested
-natively. The engine holds numbered parts; each plays the eight-voice
-synth, the drum kit or an SFZ instrument through a chain of
-[effects](#effects), then gain and pan, into a [master bus](#the-master-bus)
-with a shared reverb, a glue compressor and a true-peak limiter. Events
-are 32-byte records that land on the exact frame they name, and the output
-is the same, bit for bit, whatever the size of the quanta it is rendered
-in.
+natively. The engine holds numbered parts; each plays an
+[instrument](#instruments) (the eight-voice synth, the drum kit, an SFZ
+instrument, or one of `manguebyte-dsp`'s: plucked strings, FM, a tonewheel
+organ through its rotating speaker, an 808-style drum machine, the 808's
+kick bass, an acid bass) through a chain of [effects](#effects), then gain
+and pan, into a [master bus](#the-master-bus) with a shared reverb, a glue
+compressor and a true-peak limiter. Events are 32-byte records that land on
+the exact frame they name, and the output is the same, bit for bit,
+whatever the size of the quanta it is rendered in.
 
 Built for `wasm32-unknown-unknown`, the crate is a WebAssembly module with
 plain `extern "C"` exports (`src/ffi.rs`) and no imports. `js/worklet.js` is
@@ -57,7 +59,9 @@ An accented note on (flag bit 0, a note Aratu writes in capitals) plays
 louder and brighter: a synth note 3.5 dB louder, with its filter envelope
 opening one octave further and an attack twice as fast; a drum 3 dB
 louder, with its high frequencies lifted over the first 30 ms, most at the
-transient. The crate documentation gives the details.
+transient; the instruments of `manguebyte-dsp` as their voices say (see
+[Accents, velocity and slides](#accents-velocity-and-slides)). The crate
+documentation gives the details.
 
 Choke stops every note of the part at once; all notes off releases them,
 never with a click (see [Playing live](#playing-live)); cancel drops the
@@ -150,7 +154,9 @@ engine ignores and counts it.
 synth's release (5 ms at the shortest, falling 60 dB), the drums' 50 ms
 (`DAMP_SECONDS`), a sampler's own releases but never less than 8 ms
 (`PANIC_FADE_SECONDS`: one-shots and shorter releases fade in a straight
-line instead). `tests/stage.rs` stops a loud, sustained sound of every kind
+line instead), and on the instruments of `manguebyte-dsp` their own
+releases, or a fade where theirs would click (see
+[Cancel and all notes off](#cancel-and-all-notes-off)). `tests/stage.rs` stops a loud, sustained sound of every kind
 of part (a four-note chord, ringing cymbals and toms, sampled chords
 looping, a sampled hat with synthesized drums) on its loudest frame and
 checks that no step from one sample to the next after it is larger than
@@ -351,15 +357,29 @@ JavaScript, `await engine.effectCurve(part, 'eq', 256)` gives
 | `reverb_decay` | time, s, to 1.5 times the decay | level of the tail, dB |
 | `bitcrush_steps` | input sample, -1 to 1 | output sample |
 
-They come from the formulas the effects run: the filters' responses from
-their biquad coefficients (`BiquadCoefficients::magnitude_at`; the
-state-variable filters are the same bilinear transforms), the compressor's
-static curve (`Compressor::static_reduction_db`), one cycle of an `Lfo`.
-`tests/effects.rs` checks them against what is measured through the
-engine: the equaliser's and the filters' curves within 0.1 dB, the
-compressor's within 0.1 dB, the delay's taps exactly. They live in
-`src/curve.rs`, to be replaced by `manguebyte-dsp`'s own response curves
-when it has them: one match arm per effect in `part_curve` and
+They are `manguebyte-dsp`'s own response curves (`manguebyte_dsp::curve`),
+made from the settings the parameters hold with the limits the effects
+apply, so what is drawn is what the effect runs:
+
+| Effect | Curve |
+|---|---|
+| high-pass, low-pass | `SvfResponse`, the state-variable filter's own response |
+| EQ | the three bands' `BiquadResponse`s, of the coefficients the equaliser runs, in a row |
+| drive | the `ShaperCurve`, between the drive's gains and its mix |
+| compressor, glue | `CompressorTransfer`, with the make-up and the parallel mix |
+| limiter | `LimiterTransfer`, at the ceiling or `OUTPUT_CEILING`, the lower |
+| chorus, flanger | `ChorusSweep` |
+| phaser | `PhaserSweep` |
+| tremolo, auto-pan | `LfoCycle`, through what the effect does with its wave |
+| delay | `DelayTaps`, with the ping-pong's spread between the sides: echo `k` of the louder side is the tap's gain times `1 - p/2 + p/2·|1-2p|^(k-1)`, `p` the ping-pong |
+| reverb | `ReverbDecay` at 1 kHz, where reverberation times are quoted (a part's reverb has damping 0.45 and size 0.6; the shared one its parameters) |
+
+The bitcrusher is this crate's own, and so is its staircase.
+`tests/effects.rs` checks every curve against the `manguebyte-dsp`
+function, to the precision of an `f32`, and against what is measured
+through the engine: the equaliser's and the filters' curves within 0.1 dB,
+the compressor's within 0.1 dB, the delay's taps exactly. They live in
+`src/curve.rs`, one match arm per effect in `part_curve` and
 `master_curve`.
 
 ## The master bus
@@ -463,6 +483,322 @@ effect's switch, `send`) and gives an effect's parameters two more fields,
 before. `mb_latency_frames` is larger by the master's look-ahead, which is
 what it is for: an event scheduled that far ahead lands on its frame as
 before, and only an event that arrives late lands later than it did.
+
+The [instruments](#instruments) of `manguebyte-dsp` keep it at 2 too.
+Instrument codes 4 to 9 are new (an older engine refuses them with
+`BAD_INSTRUMENT`, -3, so a page knows), their parameters are new ids, and
+the export `mb_set_instrument` is new; `js/worklet.js` looks for it by name
+and answers `BAD_INSTRUMENT` without it. Nothing that was there means
+anything else: the drum map is the same, every kind played the accent bit
+already, and a note on before a note off was already two notes; on the two
+new monophonic kinds it is a slide, which no existing writer sends to them.
+The synth now takes its accent as an argument of the note
+(`Synth::note_on_accented`) instead of a flag set on every voice
+beforehand, which sounds the same.
+
+## Instruments
+
+A part plays one of ten kinds of instrument, named by a code in the
+exports and by a name in `js/engine.js` (`INSTRUMENT`,
+`InstrumentKind::name`):
+
+| Code | Name | `InstrumentKind` | What it plays | Notes at once |
+|---|---|---|---|---|
+| 0 | `synth` | `Synth` | two detuned oscillators and a sub, a resonant low-pass with its envelope | 8 |
+| 1 | `drums` | `Drums` | the synthesized kit of the [drum map](#drum-map) | one of each drum |
+| 2 | `sampler` | `Sampler` | an SFZ instrument ([Sampler parts](#sampler-parts)) | 32 |
+| 3 | `sampler_kit` | `SamplerKit` | an SFZ drum kit that falls back on the synthesized drums | 32 |
+| 4 | `plucked` | `Plucked` | plucked strings by physical modelling: nylon and steel guitar, finger and slap bass | 8 |
+| 5 | `fm` | `Fm` | four-operator FM: electric piano, tubular bell, FM bass | 8 |
+| 6 | `organ` | `Organ` | a tonewheel organ (drawbars, percussion, key click) through a rotating speaker | 16 |
+| 7 | `analog_kit` | `AnalogKit` | an 808-style drum machine on the drum map, with the synthesized ride and guitar tap | 16 |
+| 8 | `kick_bass` | `KickBass` | the 808's long kick played as a bass, sliding | 1 |
+| 9 | `acid` | `Acid` | the acid bass: a saw or square through a diode ladder, with accent and slide | 1 |
+
+Kinds 4 to 9 are the voices of `manguebyte_dsp::instruments`
+(`PluckedString`, `FmVoice`, `OrganVoice` and `RotarySpeaker`,
+`AnalogKitVoice`, `KickBassVoice`, `AcidVoice`) played by a `Synth`, as
+that module recommends: the organ's sixteen voices share one `OrganManual`
+(`OrganVoice::voices`), so its percussion is single-triggered; the drum
+machine's sixteen share one `ChokeGroup` (`AnalogKitVoice::voices`), so the
+closed hat chokes the open one; the two basses are a synth of one voice
+with legato on. Notes reach them through `Synth::note_on_accented`, with
+bit 0 of the record's flags.
+
+```js
+await engine.createPart(1, 'acid', ['delay']);   // a part of a kind
+await engine.setInstrument(2, 'organ');          // another kind, the same chain
+engine.setPreset(1, 'acid', 'squelch', nextBar); // PRESETS.acid
+engine.setRotary(2, 'fast', nextBar);            // ROTARY: stop, slow, fast
+engine.noteOn(1, 45, 0.9, t, 0, true);           // accented, as Aratu writes "A"
+```
+
+**Allocation.** An instrument is made, with all its memory (a plucked
+part's strings, the organ's tonewheels and speaker, every voice), when a
+part is given it: `createPart` (`mb_create_part`, `Engine::create_part`) or
+`setInstrument` (`mb_set_instrument`, `Engine::set_instrument`), control
+calls. `setInstrument` keeps the part's chain, its effects and their
+settings, gain, pan and the send; the new instrument's parameters start at
+their defaults, and the notes of the one it replaces stop. Rendering never
+allocates, whatever the parts play (`tests/realtime.rs`).
+
+**Presets and knobs.** The plucked, FM, organ and acid parts have a
+`<kind>.preset` parameter. A preset is a set of knob positions: setting it
+moves every knob it covers to the preset's position, on the frame it lands
+on, and the parameter JSON and `paramValue` say where they are. So a knob
+set on the same frame after the preset sticks, and one set before it is
+moved. The JSON's defaults are the first preset's positions.
+
+**Levels.** One note at full velocity, accented, stays under the master
+limiter's ceiling on every kind: the dsp presets' levels, set for whole
+phrases, are trimmed by `PLUCKED_LEVEL_DB` (-6 dB), `FM_LEVEL_DB` (-3 dB)
+and `ANALOG_KIT_LEVEL_DB` (+2 dB, the machine's drums as loud as the
+synthesized kit's). Measured at full velocity: a nylon guitar note peaks
+at -8.8 dB (-5.6 accented), the finger bass at -7.4 (-4.3), the electric
+piano at -12.8 (-10.3), the FM bass at -8.7 (-5.6), a five-note jazz organ
+chord at -7.6 (-5.6), the 808 kick at -6.0 (-1.8), the kick bass at -6.9
+(-3.9), the acid at -8.1 (-3.7). Chords of six strings at full velocity
+reach the limiter, which turns them down gently.
+
+### Accents, velocity and slides
+
+Every kind is louder and brighter with velocity and with an accent, by
+amounts its voice's settings say; `tests/voices.rs` measures each: half the
+velocity is 4.5 to 12.5 dB down; an accent adds 2 to 5.7 dB, and for the
+strings, FM and acid a brighter spectrum (the centroid of the first 85 ms
+4 to 72% higher). The organ and the acid bass have no velocity of their own,
+as on the instruments; `organ.velocity` and `acid.velocity` default to 0.5,
+so that Aratu's dynamics are heard on them (half the velocity is 6 and
+4.5 dB down).
+
+**Slides.** On the two monophonic kinds, a note struck while the last one
+is still held slides from it: its pitch glides there (`acid.slide`,
+`kick_bass.glide`: 95% of the way in that time, whatever the interval) and
+neither envelope starts again. Aratu writes a slide by letting the notes
+overlap: the next note's note on comes before the last note's note off,
+either earlier in time or on the same frame and pushed first. A note off
+before the next note on, even on the same frame, strikes the next note
+afresh. Only notes on the same channel slide. The replaced note is
+forgotten, so its late note off changes nothing.
+
+```js
+engine.noteOn(1, 45, 0.9, t);          // A
+engine.noteOn(1, 57, 0.9, t + step);   // slides up to the A above...
+engine.noteOff(1, 45, t + step);       // ...because this comes after it
+engine.noteOff(1, 57, t + 2 * step);
+```
+
+### Cancel and all notes off
+
+The voices of `manguebyte-dsp` have no fade of their own, so each of these
+parts keeps two synths of its voices: the notes go to one, and a cancel
+hands it over to fade out in a straight line over 8 ms while the other,
+clean, takes the notes that follow, so a note on the cancel's frame after
+it plays in full, as on every other kind. (A second cancel within the 8 ms
+of the first cuts the first one's fade short.) All notes off releases the
+strings, the FM voices and the basses as they release; the organ, whose
+contacts open with a click, and the drum machine, whose drums are
+one-shots, fade out instead, over 8 ms (`PANIC_FADE_SECONDS`) and 50 ms
+(`DAMP_SECONDS`). Choke stops everything at once. `tests/stage.rs` checks
+every kind: no step after a cancel or an all-notes-off larger than the
+steps before, and silence once the fade is over; the organ's speaker,
+which hears the organ a millisecond late, rings on below -120 dB within
+5 ms, and is cleared when it falls asleep.
+
+### Plucked strings (`plucked`)
+
+`PluckedString`, a Karplus-Strong string with an exact tuning all-pass,
+a loss filter that makes low notes ring longer and every note darken,
+stiffness, the pluck's shape and position, and a body or a pickup. Eight
+voices: a voice taken over fades its string over 4 ms.
+
+| Parameter | Unit | Range | Default | Scale |
+|---|---|---|---|---|
+| `plucked.preset` | | 0 nylon guitar, 1 steel guitar, 2 finger bass, 3 slap bass | 0 | choice |
+| `plucked.decay` | s | 0.1 to 20, how long middle C rings while held | 3 | skew 0.35 |
+| `plucked.brightness` | Hz | 100 to 20 000, the pluck's low-pass at full velocity | 2 800 | log |
+| `plucked.position` | | 0.02 to 0.5 of the string from the bridge | 0.16 | linear |
+| `plucked.tone` | Hz | 200 to 20 000, the pickup's or the body's low-pass | 6 500 | log |
+| `plucked.release` | s | 0.01 to 2, a released string's fall | 0.18 | skew 0.35 |
+
+| Preset | `decay` | `brightness` | `position` | `tone` | `release` |
+|---|---|---|---|---|---|
+| nylon guitar | 3 | 2 800 | 0.16 | 6 500 | 0.18 |
+| steel guitar | 4.5 | 6 500 | 0.12 | 11 000 | 0.25 |
+| finger bass | 6 | 1 600 | 0.2 | 2 600 | 0.12 |
+| slap bass | 5 | 9 000 | 0.28 | 6 000 | 0.1 |
+
+Velocity plucks softer and darker; an accent louder and brighter, and the
+slap bass's pops. Aratu strums a chord by striking its strings a few
+milliseconds apart (`examples/aratu_song.rs` uses 12 ms).
+
+### FM (`fm`)
+
+`FmVoice`, four sine operators: the electric piano (tine and tone bar),
+the tubular bell, the FM bass. The knobs are factors on the preset, so a
+preset puts them back to 1.
+
+| Parameter | Unit | Range | Default | Scale |
+|---|---|---|---|---|
+| `fm.preset` | | 0 electric piano, 1 tubular bell, 2 FM bass | 0 | choice |
+| `fm.brightness` | x | 0 to 2, on every modulator's index and every feedback | 1 | linear |
+| `fm.decay` | x | 0.25 to 4, on every operator's decay | 1 | log |
+| `fm.release` | x | 0.25 to 4, on every operator's release | 1 | log |
+
+A note played harder or accented is brighter, its modulators' indices
+higher. High notes are less bright than low ones: the voice turns its
+indices down where its sidebands would pass 0.45 of the sample rate.
+
+### Organ (`organ`)
+
+`OrganVoice`, nine drawbars from the tempered tonewheels, single-triggered
+percussion, key click and leakage, sixteen voices on one manual, heard
+through a `RotarySpeaker`. The speaker is part of the organ part, not an
+effect: it is the organ's own cabinet, and its speed is played like a
+switch on the instrument, a parameter that lands on its frame; it takes the
+organ's one channel and makes the stereo pair the chain then works on; and
+an effect would have changed the chain's bits and order, which Aratu's
+method chains name, for one instrument. So the drive, if a part has it,
+comes after the speaker, as a microphone's preamplifier would, not before
+it as the cabinet's own amplifier does; the speaker has no overdrive of its
+own. It is asleep (`Engine::speaker_asleep`) while the organ is silent, and
+wakes with the organ's first sound, its rotors at their resting places
+turning at the speed set.
+
+| Parameter | Unit | Range | Default | Scale |
+|---|---|---|---|---|
+| `organ.preset` | | 0 jazz, 1 gospel, 2 full, 3 ballad | 0 | choice |
+| `organ.drawbar_16`, `_5_1_3`, `_8`, `_4`, `_2_2_3`, `_2`, `_1_3_5`, `_1_1_3`, `_1` | | 0 (in) to 8 (out), 3 dB a step | 8 8 8 0 0 0 0 0 0 | linear |
+| `organ.percussion` | | 0 off, 1 second harmonic fast, 2 second slow, 3 third fast, 4 third slow | 3 | choice |
+| `organ.click` | | 0 to 1 | 0.5 | linear |
+| `organ.leakage` | | 0 to 1 | 0.4 | linear |
+| `organ.velocity` | | 0 to 1: at 1 the lowest velocity is 24 dB down | 0.5 | linear |
+| `organ.rotary` | | 0 stop, 1 slow (chorale), 2 fast (tremolo) | 1 | choice |
+| `organ.speaker` | | 0 (straight) to 1 (all through the speaker) | 1 | linear, 20 ms |
+
+| Preset | Drawbars | Percussion | `click` | `leakage` |
+|---|---|---|---|---|
+| jazz | 888000000 | third, fast | 0.5 | 0.4 |
+| gospel | 888800000 | second, fast | 0.6 | 0.4 |
+| full | 888888888 | off | 0.7 | 0.6 |
+| ballad | 838000000 | off | 0.15 | 0.4 |
+
+A preset leaves the velocity and the speaker alone. The rotors get to a
+new speed at their own pace, the horn in under a second, the drum in
+several: `setRotary(part, 'fast', time)` on the beat is how Aratu plays the
+switch.
+
+### Drum machine (`analog_kit`)
+
+`AnalogKitVoice`, sixteen drums modelled on the 808's circuits. It answers
+the drum map; the two drums the machine does not have come from the
+synthesized kit of `drums`, so a pattern written for one plays on the
+other:
+
+| Drum map | Note | Plays |
+|---|---|---|
+| kick | 36 | the machine's kick |
+| snare | 38 | its snare |
+| closed hat | 42 | its closed hat, which chokes its open hat |
+| open hat | 46 | its open hat |
+| crash | 49 | its cymbal, the machine's one |
+| ride | 51 | the synthesized ride |
+| high, mid, floor tom | 50, 47, 43 | its high, mid and low tom |
+| side stick | 37 | its rimshot |
+| guitar tap | 88 | the synthesized guitar tap |
+
+Every other key the machine's General MIDI map gives a drum plays it: 35
+the kick, 39 the clap, 40 the snare, 41 and 45 and 48 the toms, 44 the
+closed hat, 52, 55, 57 and 59 the cymbal, 56 the cowbell, 62 to 64 the
+congas, 70 the maracas, 75 the claves. Other keys are silent. A drum is a
+one-shot; a note off changes nothing.
+
+It has the kit's parameters, which reach both halves: `kit.tune`
+(semitones, -12 to 12, 0) and `kit.decay` (x, 0.25 to 4, 1) tune and
+stretch every drum, and each drum's level (`kick.level`... 0 to 1, 0.8)
+sets the machine's drum it plays (0.8 is the machine's own level) or the
+synthesized one. Then the machine's own:
+
+| Parameter | Unit | Range | Default | Scale |
+|---|---|---|---|---|
+| `analog.tone` | | 0 to 1: the kick's click, the snare's upper head, the hats' band... | 0.5 | linear |
+| `analog.snap` | | 0 to 1: the kick's drop and click, the snare's wires, the toms' noise... | 0.5 | linear |
+| `analog.kick_decay` | x | 0.25 to 8, on the kick's decay, the machine's long boom | 1 | log |
+
+An accent is 4 dB louder and snappier. All notes off fades every drum out
+over 50 ms.
+
+### Kick bass (`kick_bass`)
+
+`KickBassVoice`, the 808's kick as a bass: a sine that drops from above
+the note, rings for seconds and growls through a saturator. One voice,
+legato: it slides (see above). Its knobs are those of the machine's one
+setting.
+
+| Parameter | Unit | Range | Default | Scale |
+|---|---|---|---|---|
+| `kick_bass.tune` | st | -12 to 12 | 0 | linear |
+| `kick_bass.decay` | s | 0.05 to 20, a held note's fall | 2.5 | skew 0.35 |
+| `kick_bass.sweep` | st | 0 to 48, how far above the note it starts | 12 | linear |
+| `kick_bass.drive` | | 0 to 1 | 0.3 | linear |
+| `kick_bass.glide` | s | 0 to 2, a slide's time | 0.08 | skew 0.35 |
+| `kick_bass.click` | | 0 to 1 | 0.2 | linear |
+
+### Acid bass (`acid`)
+
+`AcidVoice`, the 303's line: a band-limited saw or square through a diode
+ladder and an amplifier, twice oversampled (16 frames late). One voice,
+legato: it slides. Its accent is the machine's: louder, a deeper and
+shorter filter envelope, and a sweep that builds over accents close
+together.
+
+| Parameter | Unit | Range | Default | Scale |
+|---|---|---|---|---|
+| `acid.preset` | | 0 classic, 1 squelch, 2 square | 0 | choice |
+| `acid.wave` | | 0 saw, 1 square | 0 | choice |
+| `acid.cutoff` | Hz | 30 to 8 000, with the envelope closed | 320 | log |
+| `acid.resonance` | | 0 to 1 | 0.72 | linear |
+| `acid.env_mod` | | 0 to 1 (4.5 octaves) | 0.6 | linear |
+| `acid.decay` | s | 0.05 to 4, the filter envelope | 0.5 | skew 0.35 |
+| `acid.accent` | | 0 to 1 | 0.7 | linear |
+| `acid.slide` | s | 0.005 to 1 | 0.06 | skew 0.35 |
+| `acid.drive` | dB | -12 to 24, into the filter | 6 | linear |
+| `acid.velocity` | | 0 to 1: at 1 the lowest velocity is 18 dB down | 0.5 | linear |
+
+| Preset | `wave` | `cutoff` | `resonance` | `env_mod` | `decay` | `accent` | `drive` |
+|---|---|---|---|---|---|---|---|
+| classic | saw | 320 | 0.72 | 0.6 | 0.5 | 0.7 | 6 |
+| squelch | saw | 260 | 0.9 | 0.8 | 0.3 | 0.9 | 9 |
+| square | square | 420 | 0.6 | 0.5 | 0.7 | 0.7 | 6 |
+
+Every preset slides in 0.06 s; a preset leaves the velocity alone.
+
+### The synth, the drums and the samplers
+
+| Parameter | Unit | Range | Default | Scale |
+|---|---|---|---|---|
+| `synth.wave` | | 0 saw, 1 square, 2 triangle, 3 sine | 0 | choice |
+| `synth.detune` | ct | 0 to 50, between the two oscillators | 9 | linear |
+| `synth.sub` | | 0 to 1 | 0.35 | linear |
+| `synth.cutoff` | Hz | 40 to 16 000 | 900 | log, 10 ms |
+| `synth.resonance` | | 0 to 1 | 0.25 | linear |
+| `synth.env_amount` | oct | 0 to 6 | 2.5 | linear |
+| `synth.filter_decay` | s | 0.01 to 4 | 0.35 | skew 0.35 |
+| `synth.attack`, `synth.decay` | s | 0.001 to 4, 0.01 to 8 | 0.003, 0.6 | skew 0.35 |
+| `synth.sustain` | | 0 to 1 | 0.5 | linear |
+| `synth.release` | s | 0.005 to 8 | 0.25 | skew 0.35 |
+| `kit.tune` (drums, sampler kit, drum machine) | st | -12 to 12 | 0 | linear |
+| `kit.decay` | x | 0.25 to 4 | 1 | log |
+| `kick.level`, `snare.level`... `guitar_tap.level` | | 0 to 1 | 0.8 | linear |
+| `sampler.interpolation` | | 0 cubic, 1 sinc | 0 | choice |
+
+### Demo
+
+`cargo run -p manguebyte-web --example aratu_song -- <directory>` writes
+eight bars of an Aratu-like song through the whole engine, the drum
+machine, an acid line with accents and slides, organ chords with the
+speaker sped up and slowed down, and a strummed steel guitar, and each part
+alone.
 
 ## Sampler parts
 
