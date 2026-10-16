@@ -871,7 +871,10 @@ impl Tone for StringTone {
 /// - **The instrument.** A pickup comb for an electric instrument, a few
 ///   resonant band-passes for an acoustic body, and a final low-pass.
 /// - **Fret buzz.** For a slap or a pop the string meets a fret that it
-///   cannot pass, for a moment after it is struck.
+///   cannot pass, for a moment after it is struck. That barrier is a
+///   clipper inside the loop, and the one part of the instrument that is
+///   not band-limited: the rattle it makes is noisy by nature and over in
+///   a tenth of a second.
 ///
 /// Releasing the key damps the string ([`StringParams::release`]). Striking
 /// a sounding key again plucks the string again, on top of what it is

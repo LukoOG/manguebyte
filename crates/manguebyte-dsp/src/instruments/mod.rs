@@ -65,6 +65,13 @@
 //! [`Voice::choke`](crate::Voice::choke) contract asks, so the same notes
 //! give the same output however the timeline is cut into blocks.
 //!
+//! The two monophonic voices, [`KickBassVoice`] and [`AcidVoice`], behave
+//! as the single-oscillator instruments they model: a note that takes a
+//! sounding voice over carries on from its oscillator, filter and
+//! envelopes, rising from where they are, instead of fading the old note
+//! out. Give them a synth of one voice, and turn
+//! [legato](crate::Synth::set_legato) on for slides.
+//!
 //! # Settings
 //!
 //! Every voice takes its settings whole, through a `set_params` method,
