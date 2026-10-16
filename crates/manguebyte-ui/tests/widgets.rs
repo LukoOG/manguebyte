@@ -759,3 +759,28 @@ fn a_knob_can_find_its_parameter_by_id() {
     ui.wheel(drive.center(), 2.0);
     assert!((params.drive.value() - 6.48).abs() < 1e-4);
 }
+
+/// A label laid out at its natural size, which snapping to device pixels
+/// can make up to a pixel narrower, still shows all of its text: the title
+/// of a column aligned to the start used to show "Pre…".
+#[test]
+fn a_label_at_its_natural_size_is_not_cut() {
+    for scale in [1.0, 1.25, 1.5, 1.75, 2.0] {
+        for text in ["Preset", "Mangue Duck", "Wide Willow", "i"] {
+            let view = column((label(text).title(), label(text)))
+                .padding(10.3)
+                .align(manguebyte_ui::layout::Align::Start);
+            let mut ui = Harness::new(view, Size::new(300.0, 100.0), scale);
+            ui.frame();
+            let dump = ui.dump();
+            for line in dump.lines().filter(|line| line.contains("text \"")) {
+                let glyphs = line.matches(',').count() + 1;
+                assert_eq!(
+                    glyphs,
+                    text.chars().count(),
+                    "{text:?} at {scale}: {line}"
+                );
+            }
+        }
+    }
+}

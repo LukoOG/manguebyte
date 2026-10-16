@@ -182,8 +182,16 @@ impl Widget for Label {
     fn measure(&mut self, cx: &MeasureCx<'_>) -> Size {
         let style = self.style_in(cx.theme());
         let size = TextLayout::new(&self.text(), &style, None).size();
-        // An empty label still takes a line.
-        Size::new(size.width, size.height.max(style.metrics().line_height))
+        // Rounded up, and a pixel more: layout snaps a widget's edges to
+        // the nearest device pixels and may take up to a device pixel
+        // from it, which would cut the text with an ellipsis. An empty
+        // label still takes a line.
+        let width = if size.width > 0.0 {
+            size.width.ceil() + 1.0
+        } else {
+            0.0
+        };
+        Size::new(width, size.height.max(style.metrics().line_height))
     }
 
     fn update(&mut self, cx: &mut UpdateCx<'_>) {
