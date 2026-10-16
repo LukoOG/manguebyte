@@ -806,7 +806,16 @@ impl Sound for Modal {
     }
 
     fn next(&mut self) -> f64 {
-        let pitch = self.tune * (1.0 + self.shape.sweep * self.sweep.next());
+        // Whatever has fallen below -80 dB is left out from then on, rather
+        // than left to fall into subnormal numbers while the longest
+        // resonance still rings: slow in WebAssembly, where nothing flushes
+        // them to zero.
+        let sweep = if self.sweep.sounding() {
+            self.shape.sweep * self.sweep.next()
+        } else {
+            0.0
+        };
+        let pitch = self.tune * (1.0 + sweep);
         let mut body = 0.0;
         for ((phase, amplitude), mode) in self
             .phases
@@ -814,6 +823,9 @@ impl Sound for Modal {
             .zip(&mut self.amplitudes)
             .zip(self.shape.modes)
         {
+            if !amplitude.sounding() {
+                continue;
+            }
             let frequency = mode.frequency * pitch;
             *phase = (*phase + frequency / self.sample_rate).fract();
             let level = amplitude.next();
@@ -821,7 +833,11 @@ impl Sound for Modal {
                 body += mode.gain * level * (TAU * *phase).sin();
             }
         }
-        let contact = self.filter.process_sample(0, self.noise.next()) * self.contact.next();
+        let contact = if self.contact.sounding() {
+            self.filter.process_sample(0, self.noise.next()) * self.contact.next()
+        } else {
+            0.0
+        };
         self.attack = (self.attack + self.attack_step).min(1.0);
         // The contact is heard at once; only the resonances take the
         // attack time to build up.
@@ -1250,6 +1266,40 @@ mod tests {
         assert!((fade.next().0 - 0.8).abs() < 1e-12);
         let (gain, ended) = fade.next();
         assert!((gain - 0.4).abs() < 1e-12 && ended);
+    }
+
+    /// At the longest kit decay, no level of a modal drum or of its slot's
+    /// accent ever becomes a subnormal number while the drum sounds.
+    #[test]
+    fn the_modal_drums_never_reach_subnormal_numbers() {
+        let normal_or_zero = |level: f64| level == 0.0 || level.is_normal();
+        let kit = KitSettings {
+            tune: 1.0,
+            decay: 4.0,
+            accent: true,
+        };
+        for shape in [HIGH_TOM, MID_TOM, FLOOR_TOM, SIDE_STICK, GUITAR_TAP] {
+            let mut slot = Slot::new(Modal::new(shape, 1), DRUM_ACCENT_SNAP);
+            slot.sound.prepare(48_000.0);
+            slot.strike(1.0, true, &kit, 48_000.0);
+            let mut frames = 0;
+            while slot.sounding {
+                assert!(slot.next().is_finite());
+                let sound = &slot.sound;
+                let levels = sound
+                    .amplitudes
+                    .iter()
+                    .chain([&sound.sweep, &sound.contact, &slot.snap])
+                    .map(|shot| shot.level);
+                for level in levels {
+                    assert!(normal_or_zero(level), "{level:e} after {frames} frames");
+                }
+                frames += 1;
+            }
+            // It does end: at most the longest resonance's decay, times 4,
+            // to -80 dB.
+            assert!(frames > 0 && frames < (4.0 * 0.8 * 48_000.0 * 4.0 / 3.0) as usize + 2);
+        }
     }
 
     #[test]
