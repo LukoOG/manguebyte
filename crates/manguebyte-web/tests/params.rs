@@ -34,7 +34,7 @@ const SYNTH: [&str; 11] = [
     ids::SYNTH_SUSTAIN,
     ids::SYNTH_RELEASE,
 ];
-const KIT: [&str; 8] = [
+const KIT: [&str; 13] = [
     ids::KIT_TUNE,
     ids::KIT_DECAY,
     ids::KICK_LEVEL,
@@ -43,6 +43,11 @@ const KIT: [&str; 8] = [
     ids::OPEN_HAT_LEVEL,
     ids::RIDE_LEVEL,
     ids::CRASH_LEVEL,
+    ids::HIGH_TOM_LEVEL,
+    ids::MID_TOM_LEVEL,
+    ids::FLOOR_TOM_LEVEL,
+    ids::SIDE_STICK_LEVEL,
+    ids::GUITAR_TAP_LEVEL,
 ];
 
 #[test]
@@ -91,7 +96,12 @@ fn the_identifiers_are_the_published_ones() {
             "closed_hat.level",
             "open_hat.level",
             "ride.level",
-            "crash.level"
+            "crash.level",
+            "high_tom.level",
+            "mid_tom.level",
+            "floor_tom.level",
+            "side_stick.level",
+            "guitar_tap.level"
         ]
     );
     // The hashes events carry, as the JavaScript computes them too.

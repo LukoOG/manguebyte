@@ -25,7 +25,7 @@ globalThis.AudioWorkletProcessor = class {
   }
 };
 
-const { ManguebyteEngine } = await import('../engine.js');
+const { DRUM_NOTES, DRUM_SYMBOLS, ManguebyteEngine } = await import('../engine.js');
 await import('../worklet.js');
 
 /** A stand-in for an AudioContext and its audio thread. */
@@ -254,6 +254,12 @@ test('control calls report errors and describe parameters', { skip: skipWithoutW
   assert.equal(await engine.paramsJson(8), null);
   const map = JSON.parse(await engine.drumMapJson());
   assert.equal(map.find((entry) => entry.symbol === 'o').note, 46);
+  // The helper's tables are the module's map.
+  assert.deepEqual({ ...DRUM_NOTES }, Object.fromEntries(map.map((entry) => [entry.name, entry.note])));
+  assert.deepEqual(
+    { ...DRUM_SYMBOLS },
+    Object.fromEntries(map.filter((entry) => entry.symbol !== null).map((entry) => [entry.symbol, entry.note])),
+  );
   await engine.setChain(3, 'none');
   assert.equal((await engine.params(3)).some((param) => param.id === 'reverb.mix'), false);
   await engine.removePart(3);

@@ -342,6 +342,14 @@ display, and no editor has been opened inside a real host yet.
   records from older writers play as before and the ABI version stays 2.
   `EventRecord::with_accent`, `encodeRecord({ accent })` and the sixth
   argument of `noteOn` in `js/engine.js` write it.
+- Five more drums, after the first six in the drum map: high tom (50,
+  `t`), mid tom (47, `m`), floor tom (43, `f`), side stick (37, `k`) and a
+  guitar body tap (88, `guitar_tap`, no symbol: `null` in the JSON). The
+  toms are tuned membranes that fall in pitch as they settle, with the
+  stick's noise; the side stick a short woody knock; the tap the thump of
+  a guitar's air and top resonances with a nail's click. Each has a level
+  parameter (`high_tom.level` and so on). The `drum_wavs` example writes
+  every drum to a WAV file to listen to.
 
 ### Hosting
 

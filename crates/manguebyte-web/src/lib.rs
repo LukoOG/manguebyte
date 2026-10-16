@@ -63,8 +63,10 @@
 //! [`ParamSet::descriptions_json`](manguebyte_params::ParamSet::descriptions_json).
 //!
 //! The drum kit follows General MIDI: kick 36, snare 38, closed hat 42,
-//! open hat 46, crash 49, ride 51, which Aratu writes `b`, `s`, `c`, `o`,
-//! `x` and `r` ([`DRUM_MAP`], [`drum_map_json`]). Striking the closed hat
+//! open hat 46, crash 49, ride 51, high tom 50, mid tom 47, floor tom 43
+//! and side stick 37, which Aratu writes `b`, `s`, `c`, `o`, `x`, `r`,
+//! `t`, `m`, `f` and `k`, and a guitar body tap on note 88, which has no
+//! symbol ([`DRUM_MAP`], [`drum_map_json`]). Striking the closed hat
 //! chokes the open hat.
 //!
 //! # Between threads
@@ -171,9 +173,28 @@
 //! | open hi-hat | `open_hat` | 46 | `o` |
 //! | crash | `crash` | 49 | `x` |
 //! | ride | `ride` | 51 | `r` |
+//! | high tom | `high_tom` | 50 | `t` |
+//! | mid tom | `mid_tom` | 47 | `m` |
+//! | floor tom | `floor_tom` | 43 | `f` |
+//! | side stick | `side_stick` | 37 | `k` |
+//! | guitar body tap | `guitar_tap` | 88 | none (`null`) |
 //!
-//! A closed hat chokes a sounding open hat, with a fade of
-//! [`HAT_CHOKE_SECONDS`].
+//! The JSON's `symbol` is a one-letter string, or `null` for a drum
+//! Aratu does not write in a drum line. A closed hat chokes a sounding
+//! open hat, with a fade of [`HAT_CHOKE_SECONDS`].
+//!
+//! The toms are tuned membranes, at 165, 123 and 84 Hz before
+//! [`ids::KIT_TUNE`], that start about a third sharp and settle within a
+//! quarter of a second, with the stick's noise; they ring for about 0.5,
+//! 0.6 and 0.8 s (to -60 dB, times [`ids::KIT_DECAY`]). The side stick is a
+//! woody knock of a few resonances between 330 Hz and 3 kHz on a sharp
+//! click, gone within 80 ms. The guitar tap is the thump of a guitar's
+//! body, its air resonance at 100 Hz and its top at 205 and 240 Hz, for
+//! about 0.3 s, under the click of a nail. Note 88 is not a General MIDI
+//! drum and has no symbol in a drum line, so the JSON gives `null` for it;
+//! a part strikes it by its note. The first six rows keep their places;
+//! new drums are added after them. `tests/kit.rs` measures each drum, and
+//! the `drum_wavs` example writes every one to a WAV file.
 //!
 //! # Real time
 //!

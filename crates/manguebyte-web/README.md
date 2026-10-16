@@ -94,10 +94,30 @@ sends the records in messages.
 | open hi-hat | `open_hat` | 46 | `o` |
 | crash | `crash` | 49 | `x` |
 | ride | `ride` | 51 | `r` |
+| high tom | `high_tom` | 50 | `t` |
+| mid tom | `mid_tom` | 47 | `m` |
+| floor tom | `floor_tom` | 43 | `f` |
+| side stick | `side_stick` | 37 | `k` |
+| guitar body tap | `guitar_tap` | 88 | none (`null`) |
 
 The export `mb_drum_map_json` (and `drum_map_json` natively) gives it as
-`[{"name":"kick","note":36,"symbol":"b"},...]`. A closed hat chokes a
-sounding open hat, with a 2 ms fade.
+`[{"name":"kick","note":36,"symbol":"b"},...]`, `symbol` a one-letter
+string or `null`. A closed hat chokes a sounding open hat, with a 2 ms
+fade.
+
+The toms are tuned membranes, at 165, 123 and 84 Hz before `kit.tune`,
+that start about a third sharp and settle within a quarter of a second,
+with the stick's noise; they ring for about 0.5, 0.6 and 0.8 s (to -60 dB,
+times `kit.decay`). The side stick is a woody knock of a few resonances
+between 330 Hz and 3 kHz on a sharp click, gone within 80 ms. The guitar
+tap is the thump of a guitar's body, its air resonance at 100 Hz and its
+top at 205 and 240 Hz, for about 0.3 s, under the click of a nail. Note 88
+is not a General MIDI drum and has no symbol in a drum line, so the JSON
+gives `null` for it; a part strikes it by its note. The first six rows
+keep their places; new drums are added after them.
+
+`cargo run -p manguebyte-web --example drum_wavs -- <directory>` writes
+every drum, plain and accented, and a short groove to WAV files.
 
 ## Licence
 

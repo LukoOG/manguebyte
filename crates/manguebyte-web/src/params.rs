@@ -62,9 +62,19 @@ pub mod ids {
     pub const RIDE_LEVEL: &str = "ride.level";
     /// Crash level, 0 to 1.
     pub const CRASH_LEVEL: &str = "crash.level";
+    /// High tom level, 0 to 1.
+    pub const HIGH_TOM_LEVEL: &str = "high_tom.level";
+    /// Mid tom level, 0 to 1.
+    pub const MID_TOM_LEVEL: &str = "mid_tom.level";
+    /// Floor tom level, 0 to 1.
+    pub const FLOOR_TOM_LEVEL: &str = "floor_tom.level";
+    /// Side stick level, 0 to 1.
+    pub const SIDE_STICK_LEVEL: &str = "side_stick.level";
+    /// Guitar body tap level, 0 to 1.
+    pub const GUITAR_TAP_LEVEL: &str = "guitar_tap.level";
 
     /// Every identifier above: the chain's, the synth's, then the kit's.
-    pub const ALL: [&str; 25] = [
+    pub const ALL: [&str; 30] = [
         LOWPASS_CUTOFF,
         LOWPASS_RESONANCE,
         REVERB_MIX,
@@ -90,6 +100,11 @@ pub mod ids {
         OPEN_HAT_LEVEL,
         RIDE_LEVEL,
         CRASH_LEVEL,
+        HIGH_TOM_LEVEL,
+        MID_TOM_LEVEL,
+        FLOOR_TOM_LEVEL,
+        SIDE_STICK_LEVEL,
+        GUITAR_TAP_LEVEL,
     ];
 }
 
@@ -115,13 +130,18 @@ pub(crate) const SYNTH_RELEASE: ParamId = ParamId::from_name(ids::SYNTH_RELEASE)
 pub(crate) const KIT_TUNE: ParamId = ParamId::from_name(ids::KIT_TUNE);
 pub(crate) const KIT_DECAY: ParamId = ParamId::from_name(ids::KIT_DECAY);
 /// The level parameters of the drums, in [`Drum`](crate::Drum) order.
-pub(crate) const DRUM_LEVELS: [ParamId; 6] = [
+pub(crate) const DRUM_LEVELS: [ParamId; 11] = [
     ParamId::from_name(ids::KICK_LEVEL),
     ParamId::from_name(ids::SNARE_LEVEL),
     ParamId::from_name(ids::CLOSED_HAT_LEVEL),
     ParamId::from_name(ids::OPEN_HAT_LEVEL),
     ParamId::from_name(ids::RIDE_LEVEL),
     ParamId::from_name(ids::CRASH_LEVEL),
+    ParamId::from_name(ids::HIGH_TOM_LEVEL),
+    ParamId::from_name(ids::MID_TOM_LEVEL),
+    ParamId::from_name(ids::FLOOR_TOM_LEVEL),
+    ParamId::from_name(ids::SIDE_STICK_LEVEL),
+    ParamId::from_name(ids::GUITAR_TAP_LEVEL),
 ];
 
 /// Names of the synth waveforms, in the order of their values.
@@ -208,7 +228,7 @@ impl SynthParams {
 pub(crate) struct KitParams {
     pub(crate) tune: FloatParam,
     pub(crate) decay: FloatParam,
-    pub(crate) levels: [FloatParam; 6],
+    pub(crate) levels: [FloatParam; 11],
 }
 
 impl KitParams {
@@ -232,6 +252,11 @@ impl KitParams {
                 unit(ids::OPEN_HAT_LEVEL, "Open hat", 0.8),
                 unit(ids::RIDE_LEVEL, "Ride", 0.8),
                 unit(ids::CRASH_LEVEL, "Crash", 0.8),
+                unit(ids::HIGH_TOM_LEVEL, "High tom", 0.8),
+                unit(ids::MID_TOM_LEVEL, "Mid tom", 0.8),
+                unit(ids::FLOOR_TOM_LEVEL, "Floor tom", 0.8),
+                unit(ids::SIDE_STICK_LEVEL, "Side stick", 0.8),
+                unit(ids::GUITAR_TAP_LEVEL, "Guitar tap", 0.8),
             ],
         }
     }

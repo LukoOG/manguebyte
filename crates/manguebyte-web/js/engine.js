@@ -55,10 +55,18 @@ export const DRUM_NOTES = Object.freeze({
   open_hat: 46,
   crash: 49,
   ride: 51,
+  high_tom: 50,
+  mid_tom: 47,
+  floor_tom: 43,
+  side_stick: 37,
+  guitar_tap: 88,
 });
 
-/** The drum kit's notes by the symbols Aratu writes. */
-export const DRUM_SYMBOLS = Object.freeze({ b: 36, s: 38, c: 42, o: 46, x: 49, r: 51 });
+/**
+ * The drum kit's notes by the symbols Aratu writes in a drum line. The
+ * guitar tap has none: Aratu plays it from a guitar line.
+ */
+export const DRUM_SYMBOLS = Object.freeze({ b: 36, s: 38, c: 42, o: 46, x: 49, r: 51, t: 50, m: 47, f: 43, k: 37 });
 
 /** The status codes of the control calls (`ffi::status`). */
 export const STATUS = Object.freeze({

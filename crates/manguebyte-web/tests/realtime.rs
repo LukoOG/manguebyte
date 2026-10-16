@@ -76,7 +76,7 @@ fn events(start: u64) -> Vec<EventRecord> {
     let mut records = Vec::new();
     for step in 0..32u64 {
         let frame = start + step * 300;
-        let drum = Drum::ALL[(step % 6) as usize];
+        let drum = Drum::ALL[step as usize % Drum::ALL.len()];
         // Every third note accented.
         let accent = step % 3 == 0;
         records.push(EventRecord::note_on(frame, 0, drum.note(), 0.9).with_accent(accent));

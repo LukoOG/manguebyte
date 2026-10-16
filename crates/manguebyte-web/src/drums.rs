@@ -1,4 +1,4 @@
-//! The drum kit: six synthesised drums on the General MIDI note numbers.
+//! The drum kit: eleven synthesised drums on the General MIDI note numbers.
 
 use core::f64::consts::{LN_2, TAU};
 
@@ -23,6 +23,19 @@ pub enum Drum {
     Ride,
     /// Crash cymbal.
     Crash,
+    /// High tom: a tuned membrane that falls a little in pitch, with the
+    /// stick's noise.
+    HighTom,
+    /// Mid tom, a fourth or so below the high tom.
+    MidTom,
+    /// Floor tom, the lowest.
+    FloorTom,
+    /// Side stick (cross-stick): the stick laid on the head, struck on the
+    /// rim, a short woody click.
+    SideStick,
+    /// A tap on the body of an acoustic guitar: the thump of its air and
+    /// top resonances, with the click of the finger or nail.
+    GuitarTap,
 }
 
 /// One row of the published drum map.
@@ -32,8 +45,8 @@ pub struct DrumNote {
     pub drum: Drum,
     /// Its General MIDI note number.
     pub note: u8,
-    /// The symbol Aratu writes for it.
-    pub symbol: char,
+    /// The symbol Aratu writes for it in a drum line, if it has one.
+    pub symbol: Option<char>,
     /// Its name, as in the JSON map.
     pub name: &'static str,
 }
@@ -48,56 +61,100 @@ pub struct DrumNote {
 /// | open hat   | 46   | `o`    |
 /// | crash      | 49   | `x`    |
 /// | ride       | 51   | `r`    |
+/// | high tom   | 50   | `t`    |
+/// | mid tom    | 47   | `m`    |
+/// | floor tom  | 43   | `f`    |
+/// | side stick | 37   | `k`    |
+/// | guitar tap | 88   | none   |
 ///
-/// A drum part ignores every other note.
-pub const DRUM_MAP: [DrumNote; 6] = [
+/// The first six rows are the original kit, in their original order; the
+/// others were added after them, so that a row never moves. Note 88 is not
+/// a General MIDI drum: it is the guitar body tap, which Aratu plays from
+/// its guitar lines rather than a drum line, so it has no symbol. A drum
+/// part ignores every other note.
+pub const DRUM_MAP: [DrumNote; 11] = [
     DrumNote {
         drum: Drum::Kick,
         note: 36,
-        symbol: 'b',
+        symbol: Some('b'),
         name: "kick",
     },
     DrumNote {
         drum: Drum::Snare,
         note: 38,
-        symbol: 's',
+        symbol: Some('s'),
         name: "snare",
     },
     DrumNote {
         drum: Drum::ClosedHat,
         note: 42,
-        symbol: 'c',
+        symbol: Some('c'),
         name: "closed_hat",
     },
     DrumNote {
         drum: Drum::OpenHat,
         note: 46,
-        symbol: 'o',
+        symbol: Some('o'),
         name: "open_hat",
     },
     DrumNote {
         drum: Drum::Crash,
         note: 49,
-        symbol: 'x',
+        symbol: Some('x'),
         name: "crash",
     },
     DrumNote {
         drum: Drum::Ride,
         note: 51,
-        symbol: 'r',
+        symbol: Some('r'),
         name: "ride",
+    },
+    DrumNote {
+        drum: Drum::HighTom,
+        note: 50,
+        symbol: Some('t'),
+        name: "high_tom",
+    },
+    DrumNote {
+        drum: Drum::MidTom,
+        note: 47,
+        symbol: Some('m'),
+        name: "mid_tom",
+    },
+    DrumNote {
+        drum: Drum::FloorTom,
+        note: 43,
+        symbol: Some('f'),
+        name: "floor_tom",
+    },
+    DrumNote {
+        drum: Drum::SideStick,
+        note: 37,
+        symbol: Some('k'),
+        name: "side_stick",
+    },
+    DrumNote {
+        drum: Drum::GuitarTap,
+        note: 88,
+        symbol: None,
+        name: "guitar_tap",
     },
 ];
 
 impl Drum {
     /// Every drum, in the order the kit adds them up.
-    pub const ALL: [Drum; 6] = [
+    pub const ALL: [Drum; 11] = [
         Drum::Kick,
         Drum::Snare,
         Drum::ClosedHat,
         Drum::OpenHat,
         Drum::Ride,
         Drum::Crash,
+        Drum::HighTom,
+        Drum::MidTom,
+        Drum::FloorTom,
+        Drum::SideStick,
+        Drum::GuitarTap,
     ];
 
     fn entry(self) -> &'static DrumNote {
@@ -130,11 +187,12 @@ impl Drum {
     /// use manguebyte_web::Drum;
     ///
     /// assert_eq!(Drum::from_symbol('o').map(Drum::note), Some(46));
+    /// assert_eq!(Drum::from_symbol('t'), Some(Drum::HighTom));
     /// ```
     pub fn from_symbol(symbol: char) -> Option<Self> {
         DRUM_MAP
             .iter()
-            .find(|entry| entry.symbol == symbol)
+            .find(|entry| entry.symbol == Some(symbol))
             .map(|entry| entry.drum)
     }
 
@@ -143,8 +201,8 @@ impl Drum {
         self.entry().note
     }
 
-    /// Aratu's symbol.
-    pub fn symbol(self) -> char {
+    /// Aratu's symbol, if the drum has one.
+    pub fn symbol(self) -> Option<char> {
         self.entry().symbol
     }
 
@@ -155,19 +213,25 @@ impl Drum {
 }
 
 /// [`DRUM_MAP`] as JSON: an array of `{"name", "note", "symbol"}` objects
-/// in the map's order. Allocates.
+/// in the map's order, `symbol` a one-letter string or, for a drum without
+/// one, `null`. Allocates.
 ///
 /// ```
 /// let json = manguebyte_web::drum_map_json();
 /// assert!(json.starts_with(r#"[{"name":"kick","note":36,"symbol":"b"},"#));
+/// assert!(json.ends_with(r#"{"name":"guitar_tap","note":88,"symbol":null}]"#));
 /// ```
 pub fn drum_map_json() -> String {
     let rows: Vec<String> = DRUM_MAP
         .iter()
         .map(|entry| {
+            let symbol = match entry.symbol {
+                Some(symbol) => format!(r#""{symbol}""#),
+                None => "null".to_owned(),
+            };
             format!(
-                r#"{{"name":"{}","note":{},"symbol":"{}"}}"#,
-                entry.name, entry.note, entry.symbol
+                r#"{{"name":"{}","note":{},"symbol":{symbol}}}"#,
+                entry.name, entry.note
             )
         })
         .collect();
@@ -522,6 +586,253 @@ impl Sound for Cymbal {
     }
 }
 
+/// One resonance of a modal drum: a sine that dies away.
+#[derive(Debug, Clone, Copy)]
+struct Mode {
+    /// Frequency at rest, before the tune, in hertz.
+    frequency: f64,
+    /// Level at the strike.
+    gain: f64,
+    /// Seconds to fall by 60 dB, before the kit's decay factor.
+    decay: f64,
+}
+
+impl Mode {
+    const NONE: Self = Self {
+        frequency: 0.0,
+        gain: 0.0,
+        decay: 0.0,
+    };
+
+    const fn new(frequency: f64, gain: f64, decay: f64) -> Self {
+        Self {
+            frequency,
+            gain,
+            decay,
+        }
+    }
+}
+
+/// What makes one modal drum different from another: its resonances, how
+/// far their pitch falls after the strike, and the short burst of filtered
+/// noise of what struck it.
+#[derive(Debug, Clone, Copy)]
+struct ModalShape {
+    modes: [Mode; 4],
+    /// How far above their resting pitch the modes start, as a fraction of
+    /// it: a head struck hard is stretched further and sounds higher, then
+    /// settles.
+    sweep: f64,
+    /// Seconds for that extra pitch to fall by 60 dB.
+    sweep_decay: f64,
+    noise_mode: SvfMode,
+    noise_frequency: f64,
+    noise_q: f64,
+    /// Seconds for the noise to fall by 60 dB. The kit's decay does not
+    /// change it: it is the contact, not the ringing.
+    noise_decay: f64,
+    noise_level: f64,
+    /// Seconds the resonances take to rise to full level: 0 for a stick, a
+    /// little more for the soft contact of a finger.
+    attack: f64,
+    gain: f64,
+}
+
+/// A small rack tom: resonances near the ratios of a stretched membrane
+/// loaded by the air in its shell (about 1, 1.5 and 2.3), the lowest
+/// starting about a third sharp and settling within a quarter of a second,
+/// and the stick's noise around 2 to 3 kHz.
+const HIGH_TOM: ModalShape = ModalShape {
+    modes: [
+        Mode::new(165.0, 1.0, 0.5),
+        Mode::new(251.0, 0.35, 0.22),
+        Mode::new(375.0, 0.12, 0.1),
+        Mode::NONE,
+    ],
+    sweep: 0.35,
+    sweep_decay: 0.3,
+    noise_mode: SvfMode::Bandpass,
+    noise_frequency: 2_600.0,
+    noise_q: 0.8,
+    noise_decay: 0.04,
+    noise_level: 1.5,
+    attack: 0.0,
+    gain: 0.38,
+};
+
+/// A larger rack tom, a fifth or so below the high tom.
+const MID_TOM: ModalShape = ModalShape {
+    modes: [
+        Mode::new(123.0, 1.0, 0.6),
+        Mode::new(187.0, 0.35, 0.26),
+        Mode::new(280.0, 0.12, 0.12),
+        Mode::NONE,
+    ],
+    sweep: 0.32,
+    sweep_decay: 0.32,
+    noise_frequency: 2_200.0,
+    ..HIGH_TOM
+};
+
+/// A floor tom: the lowest and longest.
+const FLOOR_TOM: ModalShape = ModalShape {
+    modes: [
+        Mode::new(84.0, 1.0, 0.8),
+        Mode::new(128.0, 0.38, 0.32),
+        Mode::new(192.0, 0.14, 0.15),
+        Mode::NONE,
+    ],
+    sweep: 0.3,
+    sweep_decay: 0.35,
+    noise_frequency: 1_800.0,
+    gain: 0.4,
+    ..HIGH_TOM
+};
+
+/// The stick laid across the head and struck on the rim: a hollow wooden
+/// knock from the shell and the stick, a few inharmonic resonances that
+/// are gone within 80 ms, on a sharp click.
+const SIDE_STICK: ModalShape = ModalShape {
+    modes: [
+        Mode::new(520.0, 1.0, 0.06),
+        Mode::new(1_750.0, 0.7, 0.045),
+        Mode::new(2_950.0, 0.4, 0.03),
+        Mode::new(330.0, 0.5, 0.08),
+    ],
+    sweep: 0.0,
+    sweep_decay: 0.01,
+    noise_mode: SvfMode::Bandpass,
+    noise_frequency: 3_200.0,
+    noise_q: 1.2,
+    noise_decay: 0.012,
+    noise_level: 1.5,
+    attack: 0.0,
+    gain: 0.3,
+};
+
+/// A knock on the top of an acoustic guitar, near the bridge: the air in
+/// the body at about 100 Hz (the Helmholtz resonance of the sound hole),
+/// the top's first modes at about 205 and 240 Hz and a faint one at
+/// 410 Hz, under a short bright click of the nail. The finger's contact
+/// softens the onset over 1.5 ms.
+const GUITAR_TAP: ModalShape = ModalShape {
+    modes: [
+        Mode::new(100.0, 1.0, 0.3),
+        Mode::new(205.0, 0.6, 0.2),
+        Mode::new(240.0, 0.4, 0.15),
+        Mode::new(410.0, 0.15, 0.07),
+    ],
+    sweep: 0.0,
+    sweep_decay: 0.01,
+    noise_mode: SvfMode::Highpass,
+    noise_frequency: 4_000.0,
+    noise_q: 0.7,
+    noise_decay: 0.012,
+    noise_level: 0.5,
+    attack: 0.0015,
+    gain: 0.4,
+};
+
+/// A drum made of a few decaying sines and a burst of noise: the toms, the
+/// side stick and the guitar tap.
+#[derive(Debug, Clone)]
+struct Modal {
+    shape: ModalShape,
+    sample_rate: f64,
+    tune: f64,
+    /// Modes at or above this frequency are left out, rather than folded
+    /// back below the Nyquist frequency at low sample rates.
+    highest: f64,
+    phases: [f64; 4],
+    amplitudes: [Shot; 4],
+    sweep: Shot,
+    contact: Shot,
+    filter: StateVariableFilter<f64>,
+    noise: WhiteNoise,
+    attack_step: f64,
+    attack: f64,
+}
+
+impl Modal {
+    fn new(shape: ModalShape, seed: u64) -> Self {
+        Self {
+            shape,
+            sample_rate: 48_000.0,
+            tune: 1.0,
+            highest: 48_000.0 * 0.45,
+            phases: [0.0; 4],
+            amplitudes: [Shot::SILENT; 4],
+            sweep: Shot::SILENT,
+            contact: Shot::SILENT,
+            filter: StateVariableFilter::new(
+                shape.noise_mode,
+                shape.noise_frequency,
+                shape.noise_q,
+            ),
+            noise: WhiteNoise(seed),
+            attack_step: 1.0,
+            attack: 1.0,
+        }
+    }
+}
+
+impl Sound for Modal {
+    fn prepare(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+        self.highest = 0.45 * sample_rate;
+        self.filter = prepared_filter(
+            self.shape.noise_mode,
+            self.shape.noise_frequency.min(0.4 * sample_rate),
+            self.shape.noise_q,
+            sample_rate,
+        );
+        self.attack_step = 1.0 / (self.shape.attack * sample_rate).max(1.0);
+    }
+
+    fn strike(&mut self, kit: &KitSettings) {
+        self.tune = kit.tune;
+        self.phases = [0.0; 4];
+        for (amplitude, mode) in self.amplitudes.iter_mut().zip(self.shape.modes) {
+            if mode.gain > 0.0 {
+                amplitude.start(mode.decay * kit.decay, self.sample_rate);
+            } else {
+                *amplitude = Shot::SILENT;
+            }
+        }
+        self.sweep.start(self.shape.sweep_decay, self.sample_rate);
+        self.contact.start(self.shape.noise_decay, self.sample_rate);
+        Processor::<f64>::reset(&mut self.filter);
+        self.attack = 0.0;
+    }
+
+    fn next(&mut self) -> f64 {
+        let pitch = self.tune * (1.0 + self.shape.sweep * self.sweep.next());
+        let mut body = 0.0;
+        for ((phase, amplitude), mode) in self
+            .phases
+            .iter_mut()
+            .zip(&mut self.amplitudes)
+            .zip(self.shape.modes)
+        {
+            let frequency = mode.frequency * pitch;
+            *phase = (*phase + frequency / self.sample_rate).fract();
+            let level = amplitude.next();
+            if frequency < self.highest {
+                body += mode.gain * level * (TAU * *phase).sin();
+            }
+        }
+        let contact = self.filter.process_sample(0, self.noise.next()) * self.contact.next();
+        self.attack = (self.attack + self.attack_step).min(1.0);
+        // The contact is heard at once; only the resonances take the
+        // attack time to build up.
+        (body * self.attack + self.shape.noise_level * contact) * self.shape.gain
+    }
+
+    fn sounding(&self) -> bool {
+        self.amplitudes.iter().any(Shot::sounding) || self.contact.sounding()
+    }
+}
+
 /// How much louder an accented drum is, in decibels: its level is
 /// multiplied by `10^(DRUM_ACCENT_DB / 20)`, about 1.4.
 pub const DRUM_ACCENT_DB: f64 = 3.0;
@@ -651,8 +962,15 @@ pub(crate) struct DrumKit {
     snare: Slot<Snare>,
     hats: [Slot<Cymbal>; 2],
     cymbals: [Slot<Cymbal>; 2],
+    /// The toms, the side stick and the guitar tap, in [`Drum::ALL`] order.
+    modal: [Slot<Modal>; 5],
     choke_frames: u32,
     damp_frames: u32,
+}
+
+/// Where a drum of [`Modal`] sound sits in [`DrumKit::modal`].
+fn modal_index(drum: Drum) -> usize {
+    drum as usize - Drum::HighTom as usize
 }
 
 fn frames_for(seconds: f64, sample_rate: f64) -> u32 {
@@ -711,12 +1029,23 @@ impl DrumKit {
                     CYMBAL_ACCENT_SNAP,
                 ),
             ],
+            modal: [
+                (HIGH_TOM, 0xBB67_AE85_84CA_A73B),
+                (MID_TOM, 0x3C6E_F372_FE94_F82B),
+                (FLOOR_TOM, 0xA54F_F53A_5F1D_36F1),
+                (SIDE_STICK, 0x510E_527F_ADE6_82D1),
+                (GUITAR_TAP, 0x9B05_688C_2B3E_6C1F),
+            ]
+            .map(|(shape, seed)| Slot::new(Modal::new(shape, seed), DRUM_ACCENT_SNAP)),
             choke_frames: frames_for(HAT_CHOKE_SECONDS, sample_rate),
             damp_frames: frames_for(DAMP_SECONDS, sample_rate),
         };
         kit.kick.sound.prepare(sample_rate);
         kit.snare.sound.prepare(sample_rate);
         for slot in kit.hats.iter_mut().chain(&mut kit.cymbals) {
+            slot.sound.prepare(sample_rate);
+        }
+        for slot in &mut kit.modal {
             slot.sound.prepare(sample_rate);
         }
         params.visit(&mut |param| {
@@ -745,6 +1074,9 @@ impl DrumKit {
             Drum::OpenHat => self.hats[1].strike(velocity, accent, &kit, rate),
             Drum::Ride => self.cymbals[0].strike(velocity, accent, &kit, rate),
             Drum::Crash => self.cymbals[1].strike(velocity, accent, &kit, rate),
+            Drum::HighTom | Drum::MidTom | Drum::FloorTom | Drum::SideStick | Drum::GuitarTap => {
+                self.modal[modal_index(drum)].strike(velocity, accent, &kit, rate);
+            }
         }
     }
 
@@ -755,6 +1087,9 @@ impl DrumKit {
         for slot in self.hats.iter_mut().chain(&mut self.cymbals) {
             slot.stop();
         }
+        for slot in &mut self.modal {
+            slot.stop();
+        }
     }
 
     /// Every drum fades out over [`DAMP_SECONDS`].
@@ -763,6 +1098,9 @@ impl DrumKit {
         self.kick.fade_out(frames);
         self.snare.fade_out(frames);
         for slot in self.hats.iter_mut().chain(&mut self.cymbals) {
+            slot.fade_out(frames);
+        }
+        for slot in &mut self.modal {
             slot.fade_out(frames);
         }
     }
@@ -776,6 +1114,7 @@ impl DrumKit {
                 .chain(&self.cymbals)
                 .filter(|slot| slot.sounding)
                 .count()
+            + self.modal.iter().filter(|slot| slot.sounding).count()
     }
 
     /// Takes a new value; `false` if `id` is not a kit parameter.
@@ -795,6 +1134,11 @@ impl DrumKit {
                     Drum::OpenHat => self.hats[1].level = level,
                     Drum::Ride => self.cymbals[0].level = level,
                     Drum::Crash => self.cymbals[1].level = level,
+                    drum @ (Drum::HighTom
+                    | Drum::MidTom
+                    | Drum::FloorTom
+                    | Drum::SideStick
+                    | Drum::GuitarTap) => self.modal[modal_index(drum)].level = level,
                 }
             }
         }
@@ -815,6 +1159,9 @@ impl DrumKit {
             sum += self.hats[1].next();
             sum += self.cymbals[0].next();
             sum += self.cymbals[1].next();
+            for slot in &mut self.modal {
+                sum += slot.next();
+            }
             *sample = sum as f32;
         }
     }
@@ -826,30 +1173,40 @@ mod tests {
 
     #[test]
     fn the_map_is_the_published_one() {
-        let rows: Vec<(u8, char, &str)> = DRUM_MAP
+        let rows: Vec<(u8, Option<char>, &str)> = DRUM_MAP
             .iter()
             .map(|entry| (entry.note, entry.symbol, entry.name))
             .collect();
         assert_eq!(
             rows,
             [
-                (36, 'b', "kick"),
-                (38, 's', "snare"),
-                (42, 'c', "closed_hat"),
-                (46, 'o', "open_hat"),
-                (49, 'x', "crash"),
-                (51, 'r', "ride"),
+                (36, Some('b'), "kick"),
+                (38, Some('s'), "snare"),
+                (42, Some('c'), "closed_hat"),
+                (46, Some('o'), "open_hat"),
+                (49, Some('x'), "crash"),
+                (51, Some('r'), "ride"),
+                (50, Some('t'), "high_tom"),
+                (47, Some('m'), "mid_tom"),
+                (43, Some('f'), "floor_tom"),
+                (37, Some('k'), "side_stick"),
+                (88, None, "guitar_tap"),
             ]
         );
         for drum in Drum::ALL {
             assert_eq!(Drum::from_note(drum.note()), Some(drum));
-            assert_eq!(Drum::from_symbol(drum.symbol()), Some(drum));
+            if let Some(symbol) = drum.symbol() {
+                assert_eq!(Drum::from_symbol(symbol), Some(drum));
+            }
             assert_eq!(Drum::ALL[drum as usize], drum);
+        }
+        for (index, drum) in Drum::ALL[Drum::HighTom as usize..].iter().enumerate() {
+            assert_eq!(modal_index(*drum), index);
         }
         let notes: Vec<u8> = (0..=127)
             .filter(|&n| Drum::from_note(n).is_some())
             .collect();
-        assert_eq!(notes, [36, 38, 42, 46, 49, 51]);
+        assert_eq!(notes, [36, 37, 38, 42, 43, 46, 47, 49, 50, 51, 88]);
         assert_eq!(Drum::from_symbol('q'), None);
     }
 
@@ -863,7 +1220,12 @@ mod tests {
                 r#"{"name":"closed_hat","note":42,"symbol":"c"},"#,
                 r#"{"name":"open_hat","note":46,"symbol":"o"},"#,
                 r#"{"name":"crash","note":49,"symbol":"x"},"#,
-                r#"{"name":"ride","note":51,"symbol":"r"}]"#,
+                r#"{"name":"ride","note":51,"symbol":"r"},"#,
+                r#"{"name":"high_tom","note":50,"symbol":"t"},"#,
+                r#"{"name":"mid_tom","note":47,"symbol":"m"},"#,
+                r#"{"name":"floor_tom","note":43,"symbol":"f"},"#,
+                r#"{"name":"side_stick","note":37,"symbol":"k"},"#,
+                r#"{"name":"guitar_tap","note":88,"symbol":null}]"#,
             )
         );
     }

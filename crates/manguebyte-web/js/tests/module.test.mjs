@@ -247,6 +247,11 @@ test('parts are configured by control calls and describe their parameters', { sk
     'open_hat.level',
     'ride.level',
     'crash.level',
+    'high_tom.level',
+    'mid_tom.level',
+    'floor_tom.level',
+    'side_stick.level',
+    'guitar_tap.level',
     'gain',
     'pan',
   ]);
@@ -260,6 +265,11 @@ test('parts are configured by control calls and describe their parameters', { sk
       ['open_hat', 46, 'o'],
       ['crash', 49, 'x'],
       ['ride', 51, 'r'],
+      ['high_tom', 50, 't'],
+      ['mid_tom', 47, 'm'],
+      ['floor_tom', 43, 'f'],
+      ['side_stick', 37, 'k'],
+      ['guitar_tap', 88, null],
     ],
   );
   assert.equal(x.mb_params_json(engine, 9), 0);
