@@ -5,3 +5,6 @@
 *.aiff binary
 *.aifc binary
 *.ttf binary
+*.ogg binary
+*.mp3 binary
+*.mp2 binary
