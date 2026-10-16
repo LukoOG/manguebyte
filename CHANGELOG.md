@@ -478,6 +478,53 @@ display, and no editor has been opened inside a real host yet.
   `Engine::latency_frames`, `mb_latency_frames` and `engine.latency()` give
   the engine's latency, one render quantum, and with the context's output
   latency the whole of it.
+- Effects. A part's chain can have, beside the low-pass and the reverb, a
+  high-pass, a three-band EQ, drive, a bitcrusher, a compressor, a chorus,
+  a flanger, a phaser, a tremolo, an auto-pan and a delay (time or tempo
+  sync, feedback, damping, ping-pong), always run in that order
+  (`Effect::PART_ORDER`). Putting an effect in the chain (`Chain` bits 2 to
+  12) makes its memory; its switch, `<effect>.on`, is a parameter, so it
+  lands on an exact frame with its settings. An effect off costs nothing,
+  switching fades over 10 ms (the delay and the reverb ring on), every
+  setting glides, and nothing clicks. The signal processing is
+  `manguebyte-dsp`'s filters, `Compressor`, `Chorus`, `Phaser`,
+  `ShaperCurve`, `Lfo`, `DelayLine` and `Reverb`. Every parameter has an id,
+  a range, a unit, a scale and a default in the parameter JSON, which now
+  gives each effect's parameters `"effect"` and `"visual"` (what an editor
+  draws: `filter_curve`, `eq_curve`, `transfer_curve`, `lfo_shape`,
+  `delay_taps`, `reverb_decay`, `bitcrush_steps`); `Engine::effect_curve`
+  and the export `mb_effect_curve` give the points, worked out from the
+  parameters outside the render call. Measured in `tests/effects.rs`: echo
+  times to the frame and feedback exact, chorus and flanger sweeps within
+  0.02 ms of their depth, phaser notches below -40 dB where the formula
+  puts them, EQ gains within 0.1 dB at their centres, compressor gain
+  reduction within 0.1 dB, bitcrusher steps exact, curves within 0.1 dB of
+  what is measured, the same samples in quanta of 1, 7, 128 and 512, and
+  no value that is not a number stuck in any effect.
+- A master bus: the parts and a shared reverb (each part has a `send`)
+  through a glue compressor (off until `master.glue.on`), `master.gain` and
+  `manguebyte-dsp`'s look-ahead `Limiter`, made true-peak aware by a key
+  channel that reads the waveform between samples eight times oversampled:
+  it keeps the output under `master.limiter.ceiling`, -0.3 dBTP by default,
+  and leaves it exactly as it is below. It replaces the limiter that did
+  not look ahead (`LIMITER_HOLD_SECONDS` is gone). The look-ahead, 111
+  frames at 48 kHz (`master_latency_frames`), is counted in
+  `latency_frames`; the engine renders its parts that far ahead of the
+  output, so events are still heard on their frames, and only a late event
+  lands later than before. `master.tempo` and `master.beat` drive
+  tempo-synced effects. Master parameters ride in records naming any part
+  and no cancel drops them; `Engine::master_params_json` and
+  `mb_master_params_json` describe them. The bus is skipped after 200 ms
+  of digital silence, as are the delay and the reverbs while nothing
+  reaches them.
+- `js/engine.js`: `setEffect(part, 'delay', [0.25, 0.5], time)` (settings
+  by name, by position or as one number, which is how a method chain such
+  as `.delay(0.25, 0.5)` maps onto it), `setEffects(part, { delay: [0.25],
+  chorus: [] }, time)` for a whole chain, `removeEffect`, `setSend`,
+  `setMaster`, `effectCurve`, `effectRunning`, `masterParams`,
+  `partChain`, `limiterReduction`, and the lists `EFFECT`, `CHAIN`,
+  `EFFECT_ORDER`, `EFFECT_PARAMS`, `VISUAL` and `SHAPES`. Everything is
+  added beside what was there, so the ABI version stays 2.
 
 ### Hosting
 
