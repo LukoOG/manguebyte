@@ -24,6 +24,39 @@ pub trait Voice<S: Sample = f32> {
     /// key is struck again or when the voice is taken over for a new note.
     fn note_on(&mut self, note: NoteRef, velocity: f32);
 
+    /// Starts a note, accented or not.
+    ///
+    /// An accent is a second dimension of how hard a note is played, beside
+    /// its velocity: the accent of a drum machine or a step sequencer, or a
+    /// note Aratu writes in capitals. What it changes is up to the voice;
+    /// usually the note is louder and brighter. MIDI has no message for it,
+    /// so it arrives only through [`Synth::note_on_accented`]; every other
+    /// way of starting a note calls this with `accent` false.
+    ///
+    /// The default ignores the accent and calls
+    /// [`note_on`](Self::note_on), so a voice that has no use for accents
+    /// need not know they exist. A voice that does implement this should
+    /// make `note_on(note, velocity)` the same as
+    /// `note_on_accented(note, velocity, false)`.
+    fn note_on_accented(&mut self, note: NoteRef, velocity: f32, accent: bool) {
+        let _ = accent;
+        self.note_on(note, velocity);
+    }
+
+    /// A note takes this voice over while the voice's note is still held:
+    /// a slur. Only a [`Synth`] set to [legato](Synth::set_legato) calls
+    /// this, when a note starts on a channel where a key is down.
+    ///
+    /// The voice should move to the new pitch without striking the note
+    /// again: a monophonic synthesiser glides there and keeps its
+    /// envelopes going, as a slide on a bass-line sequencer does. The
+    /// default strikes the note again, as when a sounding key is struck
+    /// again: it calls [`note_on_accented`](Self::note_on_accented),
+    /// without a [`choke`](Self::choke) first.
+    fn legato(&mut self, note: NoteRef, velocity: f32, accent: bool) {
+        self.note_on_accented(note, velocity, accent);
+    }
+
     /// The note was released: begin fading out. A [`Synth`] keeps
     /// `velocity` between 0 and 1, as for [`note_on`](Self::note_on).
     fn note_off(&mut self, velocity: f32);
@@ -141,6 +174,12 @@ struct Slot<V> {
 /// missed least: one that is already fading out if there is one, then one
 /// held only by the pedal, then the oldest held note.
 ///
+/// Two things have no MIDI message and are reached by calling the synth
+/// directly: an accent ([`note_on_accented`](Self::note_on_accented)), and
+/// legato playing ([`set_legato`](Self::set_legato)), in which a note
+/// struck while another is held takes that note's voice over and slurs
+/// from it instead of starting a voice of its own.
+///
 /// The output replaces whatever was in the buffer.
 ///
 /// ```
@@ -188,6 +227,8 @@ pub struct Synth<V, S: Sample = f32> {
     /// Where each controller is, per channel, or [`UNMOVED`].
     controllers: [[u8; 128]; 16],
     bend_range: f64,
+    /// Whether a note struck while another is held slurs from it.
+    legato: bool,
     marker: PhantomData<S>,
 }
 
@@ -209,6 +250,7 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
             bend: [0; 16],
             controllers: [[UNMOVED; 128]; 16],
             bend_range: 2.0,
+            legato: false,
             marker: PhantomData,
         }
     }
@@ -222,6 +264,31 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
     /// The default is 2.
     pub fn set_pitch_bend_range(&mut self, semitones: f64) {
         self.bend_range = semitones;
+    }
+
+    /// Turns legato playing on or off. Off is the default.
+    ///
+    /// With legato on, a note that starts while a key is held on its
+    /// channel does not get a voice of its own: it takes over the voice of
+    /// the newest held note on that channel through [`Voice::legato`], and
+    /// the note it replaces is forgotten, so that releasing that note's key
+    /// later changes nothing. A voice that implements `legato` glides to
+    /// the new pitch without striking again, as a slide does on a
+    /// monophonic bass synthesiser; one that does not strikes the note
+    /// again on the same voice. A note that starts while no key is held on
+    /// its channel (released notes and notes held only by the sustain
+    /// pedal do not count) starts as usual.
+    ///
+    /// Legato makes each channel monophonic while its notes overlap; a
+    /// synth of one voice plays like a monophonic synthesiser. Releasing
+    /// the newest note does not return to an older one still held.
+    pub fn set_legato(&mut self, legato: bool) {
+        self.legato = legato;
+    }
+
+    /// Whether legato playing is on. See [`set_legato`](Self::set_legato).
+    pub fn is_legato(&self) -> bool {
+        self.legato
     }
 
     /// How many notes can sound at once.
@@ -247,9 +314,37 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
     /// The voice is given `velocity` limited to 0..=1, and 0 if it is not a
     /// finite number.
     pub fn note_on(&mut self, note: NoteRef, velocity: f32) {
+        self.note_on_accented(note, velocity, false);
+    }
+
+    /// Starts a note now, accented or not. Real-time safe.
+    ///
+    /// This is [`note_on`](Self::note_on) with an accent, which reaches the
+    /// voice through [`Voice::note_on_accented`] (or [`Voice::legato`]).
+    /// The event stream has no accent: a note started by an event is never
+    /// accented.
+    pub fn note_on_accented(&mut self, note: NoteRef, velocity: f32, accent: bool) {
         let velocity = velocity_in_range(velocity);
         self.reclaim_finished();
         self.clock += 1;
+
+        if self.legato {
+            // The newest note held on this channel, whatever its key.
+            let held = self
+                .slots
+                .iter()
+                .enumerate()
+                .filter(|(_, slot)| slot.stage == Stage::Held && slot.note.channel == note.channel)
+                .max_by_key(|(_, slot)| slot.started)
+                .map(|(index, _)| index);
+            if let Some(index) = held {
+                let slot = &mut self.slots[index];
+                slot.note = note;
+                slot.started = self.clock;
+                slot.voice.legato(note, velocity, accent);
+                return;
+            }
+        }
 
         // The same key struck again restarts its own voice, unless the two
         // notes carry different identifiers and so are meant to overlap.
@@ -286,7 +381,7 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
         slot.note = note;
         slot.stage = Stage::Held;
         slot.started = self.clock;
-        slot.voice.note_on(note, velocity);
+        slot.voice.note_on_accented(note, velocity, accent);
     }
 
     /// Releases a note now. Real-time safe. The velocity is limited as for
@@ -580,6 +675,8 @@ mod tests {
         controller: Option<(u8, u8)>,
         velocity: f32,
         release: f32,
+        accent: bool,
+        legatos: usize,
     }
 
     impl Voice for Probe {
@@ -590,6 +687,17 @@ mod tests {
             self.held = true;
             self.tail = 0;
             self.starts += 1;
+        }
+        fn note_on_accented(&mut self, note: NoteRef, velocity: f32, accent: bool) {
+            self.accent = accent;
+            self.note_on(note, velocity);
+        }
+        fn legato(&mut self, note: NoteRef, velocity: f32, accent: bool) {
+            // Slurs: the pitch changes, nothing is struck again.
+            self.key = f32::from(note.key);
+            self.velocity = velocity;
+            self.accent = accent;
+            self.legatos += 1;
         }
         fn note_off(&mut self, velocity: f32) {
             self.release = velocity;
@@ -1080,5 +1188,119 @@ mod tests {
     fn a_synth_with_no_voices_stays_silent() {
         let mut synth = synth(0);
         assert_eq!(run(&mut synth, 2, &[(0, on(10))]), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn an_accent_reaches_the_voice_and_events_are_never_accented() {
+        let mut synth = synth(2);
+        synth.note_on_accented(NoteRef::new(0, 10), 0.5, true);
+        let voice = synth.voices_mut().next().unwrap();
+        assert!(voice.accent);
+        assert_eq!((voice.key, voice.velocity, voice.starts), (10.0, 0.5, 1));
+
+        // The velocity is limited as for a plain note.
+        synth.note_on_accented(NoteRef::new(0, 20), f32::NAN, true);
+        let voice = synth.voices_mut().nth(1).unwrap();
+        assert!(voice.accent);
+        assert_eq!(voice.velocity, 0.0);
+
+        // A note from the event stream, or a plain note on, is not.
+        run(&mut synth, 2, &[(0, on(10))]);
+        assert!(!synth.voices_mut().next().unwrap().accent);
+        synth.note_on(NoteRef::new(0, 20), 1.0);
+        assert!(!synth.voices_mut().nth(1).unwrap().accent);
+    }
+
+    #[test]
+    fn legato_slurs_overlapping_notes_on_one_voice() {
+        let mut synth = synth(4);
+        synth.set_legato(true);
+        assert!(synth.is_legato());
+        // 20 starts while 10 is held: it takes 10's voice over.
+        let output = run(&mut synth, 4, &[(0, on(10)), (2, on(20))]);
+        assert_eq!(output, [10.0, 10.0, 20.0, 20.0]);
+        assert_eq!(starts(&mut synth), [1, 0, 0, 0]);
+        assert_eq!(synth.voices_mut().next().unwrap().legatos, 1);
+        assert_eq!(synth.active_voices(), 1);
+
+        // Releasing 10 changes nothing: that note was replaced.
+        let output = run(&mut synth, 2, &[(0, off(10))]);
+        assert_eq!(output, [20.0, 20.0]);
+        // An accent travels with the slur.
+        synth.note_on_accented(NoteRef::new(0, 30), 1.0, true);
+        let voice = synth.voices_mut().next().unwrap();
+        assert_eq!((voice.key, voice.accent, voice.legatos), (30.0, true, 2));
+        // Releasing the newest note releases the voice.
+        let output = run(&mut synth, 4, &[(0, off(30))]);
+        assert_eq!(output, [15.0, 15.0, 0.0, 0.0]);
+
+        // With no key down, a note starts as usual, on a fresh voice.
+        run(&mut synth, 2, &[(0, on(40))]);
+        assert_eq!(starts(&mut synth), [2, 0, 0, 0]);
+
+        // Another channel is not slurred into.
+        let elsewhere = EventKind::NoteOn {
+            note: NoteRef::new(1, 50),
+            velocity: 1.0,
+        };
+        run(&mut synth, 2, &[(0, elsewhere)]);
+        assert_eq!(starts(&mut synth), [2, 1, 0, 0]);
+        assert_eq!(synth.active_voices(), 2);
+
+        // A note held only by the pedal is not slurred into either.
+        run(&mut synth, 2, &[(0, controller(64, 127)), (0, off(40))]);
+        run(&mut synth, 2, &[(0, on(60))]);
+        assert_eq!(starts(&mut synth), [2, 1, 1, 0]);
+
+        // Off again, overlapping notes get voices of their own.
+        synth.set_legato(false);
+        run(&mut synth, 2, &[(0, on(70))]);
+        assert_eq!(starts(&mut synth), [2, 1, 1, 1]);
+    }
+
+    #[test]
+    fn a_voice_with_no_legato_of_its_own_is_struck_again_in_place() {
+        /// Counts its starts and chokes, and knows nothing of accents or
+        /// legato.
+        #[derive(Default)]
+        struct Plain {
+            key: f32,
+            starts: usize,
+            chokes: usize,
+        }
+        impl Voice for Plain {
+            fn prepare(&mut self, _: &ProcessSpec) {}
+            fn note_on(&mut self, note: NoteRef, _: f32) {
+                self.key = f32::from(note.key);
+                self.starts += 1;
+            }
+            fn note_off(&mut self, _: f32) {}
+            fn choke(&mut self) {
+                self.chokes += 1;
+            }
+            fn is_active(&self) -> bool {
+                true
+            }
+            fn render(&mut self, _: &mut AudioBuffer) {}
+        }
+
+        let mut synth = Synth::with_voices(2, Plain::default);
+        synth.prepare(&ProcessSpec {
+            sample_rate: 48_000.0,
+            max_block_size: 16,
+            num_channels: 1,
+        });
+        synth.set_legato(true);
+        synth.note_on_accented(NoteRef::new(0, 10), 1.0, true);
+        synth.note_on(NoteRef::new(0, 20), 1.0);
+        let voices: Vec<&mut Plain> = synth.voices_mut().collect();
+        // Both notes went to the first voice, which was choked once by
+        // `prepare` and once before its fresh note, and not before the
+        // slur.
+        assert_eq!(
+            (voices[0].key, voices[0].starts, voices[0].chokes),
+            (20.0, 2, 2)
+        );
+        assert_eq!((voices[1].starts, voices[1].chokes), (0, 1));
     }
 }
