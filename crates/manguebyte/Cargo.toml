@@ -70,3 +70,7 @@ required-features = ["devices"]
 
 [lints]
 workspace = true
+
+# docs.rs documents every module, not only those of the default features.
+[package.metadata.docs.rs]
+all-features = true
