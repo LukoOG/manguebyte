@@ -541,8 +541,7 @@ impl ChainDsp {
             self.send.reset(self.send.target());
         }
         if !self.send.is_smoothing() && self.send.current() == 0.0 {
-            self.send_quiet =
-                from_left[frames - 1] == 0.0 && from_right[frames - 1] == 0.0;
+            self.send_quiet = from_left[frames - 1] == 0.0 && from_right[frames - 1] == 0.0;
             return;
         }
         for frame in 0..frames {

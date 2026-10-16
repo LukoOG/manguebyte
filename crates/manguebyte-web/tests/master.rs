@@ -220,7 +220,8 @@ fn the_bus_is_late_by_its_look_ahead_and_the_engine_counts_it() {
     ] {
         let mut engine = manguebyte_web::Engine::new(EngineConfig::new(rate)).unwrap();
         let ahead = master_latency_frames(rate);
-        let expected = manguebyte_web::TRUE_PEAK_DELAY + ((0.002 * rate).round() as usize).max(1) - 1;
+        let expected =
+            manguebyte_web::TRUE_PEAK_DELAY + ((0.002 * rate).round() as usize).max(1) - 1;
         assert_eq!(ahead, expected, "{rate}");
         assert_eq!(manguebyte_web::TRUE_PEAK_DELAY, 16);
         assert_eq!(engine.master_latency_frames(), ahead);

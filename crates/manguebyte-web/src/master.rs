@@ -494,9 +494,9 @@ impl Master {
             let ceiling = self.ceiling;
             for frame in 0..frames {
                 let gain = f64::from(self.gain.next_value());
-                let [delayed_left, delayed_right, peak] = self
-                    .key
-                    .push(bus_left[frame] * gain, bus_right[frame] * gain, ceiling);
+                let [delayed_left, delayed_right, peak] =
+                    self.key
+                        .push(bus_left[frame] * gain, bus_right[frame] * gain, ceiling);
                 out_left[frame] = delayed_left;
                 out_right[frame] = delayed_right;
                 key[frame] = peak;
