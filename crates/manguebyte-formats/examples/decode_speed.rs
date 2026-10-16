@@ -45,6 +45,11 @@ fn main() -> Result<(), FormatError> {
         data!("vorbis-6ch-48000-q2.ogg"),
         data!("vorbis-tones-2ch-48000-q10.ogg"),
         data!("vorbis-1ch-8000-bursts.ogg"),
+        data!("mp3-2ch-44100-cbr128.mp3"),
+        data!("mp3-2ch-44100-vbr2.mp3"),
+        data!("mp3-tones-2ch-48000-320.mp3"),
+        data!("mp3-1ch-22050-64.mp3"),
+        data!("mp3-1ch-8000-16.mp3"),
     ];
     println!("{:<34} {:>10} {:>12}", "file", "audio (s)", "x real time");
     for (name, bytes) in files {

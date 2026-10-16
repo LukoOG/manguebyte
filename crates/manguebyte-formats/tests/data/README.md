@@ -226,3 +226,50 @@ vectors come from a lattice. `tests/vorbis_streams.rs` writes streams of
 its own for the rest (residues of type 0, codebooks that list their
 vectors, floors of type 0, 255 channels), as `tests/common/vorbis.rs`
 says.
+
+### MP3
+
+From the same sources, with FFmpeg 7.1 and its LAME (`libmp3lame`):
+
+```bash
+ffmpeg -i signal-2ch-44100.wav -map_metadata -1 -bitexact -c:a libmp3lame -b:a 128k mp3-2ch-44100-cbr128.mp3
+ffmpeg -i signal-2ch-44100.wav -map_metadata -1 -bitexact -c:a libmp3lame -q:a 2 mp3-2ch-44100-vbr2.mp3
+ffmpeg -i tones-2ch-48000.wav -map_metadata -1 -bitexact -c:a libmp3lame -b:a 320k mp3-tones-2ch-48000-320.mp3
+ffmpeg -i signal-1ch-22050.wav -map_metadata -1 -bitexact -c:a libmp3lame -b:a 64k mp3-1ch-22050-64.mp3
+ffmpeg -i signal-2ch-24000.wav -map_metadata -1 -bitexact -c:a libmp3lame -q:a 4 mp3-2ch-24000-vbr4.mp3
+ffmpeg -i signal-1ch-16000.wav -map_metadata -1 -bitexact -c:a libmp3lame -b:a 32k mp3-1ch-16000-32.mp3
+ffmpeg -i signal-2ch-11025.wav -map_metadata -1 -bitexact -c:a libmp3lame -b:a 32k mp3-2ch-11025-32.mp3
+ffmpeg -i signal-1ch-12000.wav -map_metadata -1 -bitexact -c:a libmp3lame -b:a 24k mp3-1ch-12000-24.mp3
+ffmpeg -i signal-1ch-8000.wav -map_metadata -1 -bitexact -c:a libmp3lame -b:a 16k mp3-1ch-8000-16.mp3
+ffmpeg -i signal-2ch-32000.wav -map_metadata -1 -bitexact -c:a libmp3lame -b:a 96k -joint_stereo 0 mp3-2ch-32000-stereo96.mp3
+ffmpeg -i signal-2ch-44100.wav -map_metadata -1 -bitexact -c:a libmp3lame -b:a 160k -reservoir 0 -write_xing 0 -write_id3v1 1 mp3-2ch-44100-plain160.mp3
+ffmpeg -i tones-2ch-44100-short.wav -map_metadata -1 -bitexact -c:a libmp3lame -b:a 128k mp3-2ch-44100-100frames.mp3
+ffmpeg -i tones-2ch-44100-short.wav -map_metadata -1 -bitexact -c:a mp2 -b:a 128k -f mp2 mp2-2ch-44100.mp2
+```
+
+These cover MPEG-1 at 32, 44.1 and 48 kHz, MPEG-2 at 16, 22.05 and 24
+kHz, and MPEG-2.5 at 8, 11.025 and 12 kHz; mono, joint stereo (LAME's
+default, which codes bands as mid and side) and plain stereo; constant and
+variable bitrates; short blocks, which LAME switches to at the clicks; and
+the bit reservoir, turned off for `plain160`. Every file starts with the
+ID3v2.4 tag FFmpeg writes, of ten bytes of padding, and all but `plain160`
+with a frame of silence holding a Xing or Info header and a LAME tag that
+says LAME added 576 samples before the audio. `plain160` has neither, and
+no ID3v1 tag either: FFmpeg writes one only when there is something to put
+in it. `mp2-2ch-44100.mp2` is layer II, by FFmpeg's own encoder, to check
+that it is refused.
+
+What the tests found is in `tests/mp3.rs`. Two things there are the
+encoder's and not the decoder's: in constant bitrate up to 160 kbit/s, LAME
+scales what it encodes by 0.95, which the level of the tones shows to four
+places (at 320 kbit/s and in variable bitrate it does not); and the LAME tag
+FFmpeg wrote into the 12 kHz file states 15023 samples, ten more than the
+source has, while it states the length exactly in every other file.
+
+LAME writes no intensity stereo, no mixed blocks and no CRC, and nothing
+here writes a VBRI header. `tests/mp3.rs` makes what it needs of those from
+these files: a CRC added to each frame of `plain160` that has two bytes to
+spare, a VBRI header put in place of an Info frame, bytes that are not
+frames between two frames. Intensity stereo and the reordering of short
+blocks are checked by the unit tests of `src/mp3/layer3.rs`, against the
+formulas of the standard.

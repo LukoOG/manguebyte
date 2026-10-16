@@ -8,6 +8,7 @@ use manguebyte_core::AudioBuffer;
 
 use crate::aiff::{self, AiffDecoder};
 use crate::flac::FlacReader;
+use crate::mp3::Mp3Reader;
 use crate::pcm::{PcmReader, read_up_to};
 use crate::vorbis::VorbisReader;
 use crate::wav::{self, WavDecoder};
@@ -17,8 +18,9 @@ use crate::{FileFormat, FormatError, LOSSY_BITS};
 ///
 /// Where [`read_file`](crate::read_file) loads a whole file, this keeps only
 /// the block being read: a recording of an hour costs the same memory as one
-/// of a second. It reads WAV (RF64 included), AIFF, AIFF-C, FLAC and Ogg
-/// Vorbis, and works out which one it has been given from the contents.
+/// of a second. It reads WAV (RF64 included), AIFF, AIFF-C, FLAC, Ogg
+/// Vorbis and MP3, and works out which one it has been given from the
+/// contents.
 ///
 /// ```
 /// use std::io::Cursor;
@@ -70,6 +72,10 @@ use crate::{FileFormat, FormatError, LOSSY_BITS};
 /// that overlaps the next; a stereo stream as libvorbis writes it takes
 /// about 300 KB. The [`vorbis`](crate::vorbis) module gives the limits.
 ///
+/// For MP3 it holds one frame, the bit reservoir, the decoder's state, and
+/// the place of every so many frames of the stream, at most 16384 of them:
+/// under 100 KB for a stream of any length.
+///
 /// # Threads
 ///
 /// Reading does I/O, so it does not belong on the audio thread. To play a
@@ -112,6 +118,7 @@ enum Inner<R> {
     // Boxed because a FLAC decoder's state is much larger than the others'.
     Flac(Box<FlacReader<R>>),
     Vorbis(Box<VorbisReader<R>>),
+    Mp3(Box<Mp3Reader<R>>),
 }
 
 impl AudioReader<File> {
@@ -131,7 +138,7 @@ impl<R: Read + Seek> AudioReader<R> {
     /// `reader` can be a plain [`File`].
     pub fn new(mut reader: R) -> Result<Self, FormatError> {
         reader.seek(SeekFrom::Start(0))?;
-        let mut magic = [0u8; 4];
+        let mut magic = [0u8; 10];
         let have = read_up_to(&mut reader, &mut magic)?;
         let format = FileFormat::detect(&magic[..have]).ok_or(FormatError::Unrecognized)?;
         Ok(match format {
@@ -175,6 +182,16 @@ impl<R: Read + Seek> AudioReader<R> {
                     inner: Inner::Vorbis(Box::new(stream)),
                 }
             }
+            FileFormat::Mp3 => {
+                let stream = Mp3Reader::new(reader).map_err(FormatError::Mp3)?;
+                Self {
+                    format,
+                    sample_rate: stream.sample_rate(),
+                    bits_per_sample: LOSSY_BITS,
+                    is_float: true,
+                    inner: Inner::Mp3(Box::new(stream)),
+                }
+            }
         })
     }
 
@@ -195,6 +212,7 @@ impl<R: Read + Seek> AudioReader<R> {
             Inner::Aiff(stream) => stream.num_channels(),
             Inner::Flac(stream) => stream.num_channels(),
             Inner::Vorbis(stream) => stream.num_channels(),
+            Inner::Mp3(stream) => stream.num_channels(),
         }
     }
 
@@ -210,10 +228,11 @@ impl<R: Read + Seek> AudioReader<R> {
 
     /// Length of the audio in frames, when the file says.
     ///
-    /// WAV and AIFF always do, and Ogg Vorbis does in the granule position
-    /// of its last page. A FLAC stream written by an encoder that could not
-    /// go back to fill in its header does not; the length is then what
-    /// [`seek`](Self::seek) returns for a frame past any end, such as
+    /// WAV and AIFF always do, Ogg Vorbis in the granule position of its
+    /// last page, and MP3 in a Xing or VBRI header. A FLAC stream written by
+    /// an encoder that could not go back to fill in its header does not,
+    /// and an MP3 stream without such a header does not; the length is then
+    /// what [`seek`](Self::seek) returns for a frame past any end, such as
     /// `u64::MAX`.
     pub fn len_frames(&self) -> Option<u64> {
         match &self.inner {
@@ -221,6 +240,7 @@ impl<R: Read + Seek> AudioReader<R> {
             Inner::Aiff(stream) => Some(stream.frames()),
             Inner::Flac(stream) => stream.frames(),
             Inner::Vorbis(stream) => stream.frames(),
+            Inner::Mp3(stream) => stream.frames(),
         }
     }
 
@@ -231,6 +251,7 @@ impl<R: Read + Seek> AudioReader<R> {
             Inner::Aiff(stream) => stream.position(),
             Inner::Flac(stream) => stream.position(),
             Inner::Vorbis(stream) => stream.position(),
+            Inner::Mp3(stream) => stream.position(),
         }
     }
 
@@ -266,6 +287,7 @@ impl<R: Read + Seek> AudioReader<R> {
             Inner::Aiff(stream) => Ok(stream.read(buffer)?),
             Inner::Flac(stream) => stream.read(buffer).map_err(FormatError::Flac),
             Inner::Vorbis(stream) => stream.read(buffer).map_err(FormatError::Vorbis),
+            Inner::Mp3(stream) => stream.read(buffer).map_err(FormatError::Mp3),
         }
     }
 
@@ -300,6 +322,16 @@ impl<R: Read + Seek> AudioReader<R> {
     /// overlap it needs, are all that is decoded. A damaged page on the way
     /// is stepped over.
     ///
+    /// MP3 frames carry no number, so they are counted: the first time a
+    /// seek goes past a place, by reading the header of each frame on the
+    /// way, four bytes a frame, remembering where every so many frames
+    /// start. From there a seek reads the frames whose main data the bit
+    /// reservoir reaches back into, and decodes the two granules before the
+    /// frame wanted, which leave the decoder as a decode from the start
+    /// would. A stream without a Xing or VBRI header states no length, and
+    /// a seek past the frames counted so far counts on to the end if it
+    /// has to.
+    ///
     /// Whatever the format, what is read after a seek is, bit for bit, what
     /// reading from the start gives at that place.
     ///
@@ -310,6 +342,7 @@ impl<R: Read + Seek> AudioReader<R> {
             Inner::Aiff(stream) => Ok(stream.seek(frame)),
             Inner::Flac(stream) => stream.seek(frame).map_err(FormatError::Flac),
             Inner::Vorbis(stream) => stream.seek(frame).map_err(FormatError::Vorbis),
+            Inner::Mp3(stream) => stream.seek(frame).map_err(FormatError::Mp3),
         }
     }
 
@@ -320,6 +353,7 @@ impl<R: Read + Seek> AudioReader<R> {
             Inner::Aiff(stream) => stream.into_inner(),
             Inner::Flac(stream) => stream.into_inner(),
             Inner::Vorbis(stream) => stream.into_inner(),
+            Inner::Mp3(stream) => stream.into_inner(),
         }
     }
 }

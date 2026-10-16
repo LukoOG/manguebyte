@@ -735,3 +735,55 @@ fn a_vorbis_header_cannot_ask_for_memory_without_bound() {
     );
     assert!(opening.most_held < 8 << 20);
 }
+
+#[test]
+fn an_mp3_reader_holds_little_memory_however_long_the_file() {
+    // The decoder's tables are made once for the whole program, the first
+    // time they are needed: not by the readers measured here.
+    let _ = manguebyte_formats::mp3::read(include_bytes!("data/mp3-1ch-8000-16.mp3").as_slice());
+    let file = include_bytes!("data/mp3-2ch-44100-cbr128.mp3").as_slice();
+    let mut held = Vec::new();
+    for times in [2, 10] {
+        let bytes = common::mp3::repeat_frames(file, times);
+        let (frames, most) = read_and_seek(&bytes);
+        println!(
+            "MP3 of {} bytes, {frames} frames: the reader held at most {most} bytes",
+            bytes.len()
+        );
+        held.push(most);
+    }
+    // Five times the audio: the same decoder, window and reservoir, and the
+    // place of every frame counted, eight bytes each, of which no more than
+    // 16384 are kept.
+    let frames_more = 8 * 97;
+    assert!(held[1] <= held[0] + frames_more * 8 + 4_096, "{held:?}");
+    assert!(held[0] < 256 * 1_024, "{} bytes", held[0]);
+}
+
+#[test]
+fn mp3_headers_cannot_ask_for_memory_without_bound() {
+    let _ = manguebyte_formats::mp3::read(include_bytes!("data/mp3-1ch-8000-16.mp3").as_slice());
+    let file = include_bytes!("data/mp3-2ch-44100-cbr128.mp3").as_slice();
+
+    // A Xing header that claims four thousand million frames.
+    let mut claims = file.to_vec();
+    let info = common::mp3::frames(file)[0].start;
+    claims[info + 44..info + 48].copy_from_slice(&u32::MAX.to_be_bytes());
+    let held = memory_for(&claims).unwrap();
+    println!("MP3 that claims 2^32 frames: {held} bytes");
+    assert!(held < 256 * 1_024, "{held} bytes");
+    // The whole-file reader trusts the claim as far as the data could hold
+    // it: twelve samples a byte at 44.1 kHz, the most a frame holds.
+    let (_, whole) = watch(|| manguebyte_formats::mp3::read(claims.as_slice()).unwrap());
+    println!("the whole-file reader: {} bytes", whole.most_held);
+    let most = claims.len() * 12 * 2 * 4;
+    assert!(
+        whole.most_held < most + (1 << 20),
+        "{} bytes",
+        whole.most_held
+    );
+
+    // An ID3v2 tag that claims 256 megabytes, with nothing after it.
+    let tag = b"ID3\x04\x00\x00\x7F\x7F\x7F\x7F and then nothing";
+    assert_eq!(memory_for(tag), None);
+}

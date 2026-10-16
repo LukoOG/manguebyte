@@ -44,6 +44,8 @@ fn decoding_is_faster_than_real_time() {
     for (name, bytes) in [
         ("Vorbis, 44.1 kHz stereo", data!("vorbis-2ch-44100-q3.ogg")),
         ("Vorbis, 48 kHz 5.1", data!("vorbis-6ch-48000-q2.ogg")),
+        ("MP3, 44.1 kHz stereo", data!("mp3-2ch-44100-cbr128.mp3")),
+        ("MP3, 22.05 kHz mono", data!("mp3-1ch-22050-64.mp3")),
     ] {
         let started = Instant::now();
         let file = decode(bytes).unwrap();

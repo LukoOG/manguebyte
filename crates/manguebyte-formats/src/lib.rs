@@ -6,6 +6,7 @@
 //! | [`aiff`] | 1 to 32-bit PCM, either byte order, 32 and 64-bit float | 16 and 24-bit PCM, 32-bit float |
 //! | [`flac`] | everything the format defines | 4 to 32 bits, 1 to 8 channels, levels 0 to 8 |
 //! | [`vorbis`] | Ogg Vorbis: every stream but those with floors of type 0, 1 to 255 channels | no |
+//! | [`mp3`] | MPEG-1, 2 and 2.5 layer III, every rate and stereo coding, gapless with a LAME tag | no |
 //!
 //! [`read_file`] and [`decode`] work out which format they have been given,
 //! so a program that only wants the audio does not need to care:
@@ -38,6 +39,7 @@
 
 pub mod aiff;
 pub mod flac;
+pub mod mp3;
 mod ogg;
 mod pcm;
 mod player;
@@ -70,16 +72,28 @@ pub enum FileFormat {
     Flac,
     /// Vorbis in an Ogg container.
     OggVorbis,
+    /// MPEG audio layer III.
+    Mp3,
 }
 
 impl FileFormat {
-    /// Recognises a format from the first bytes of a file.
+    /// Recognises a format from the first bytes of a file. Ten bytes are
+    /// enough for every format.
+    ///
+    /// MP3 has no marker of its own. A file is taken for one if it starts
+    /// with an ID3v2 tag, which is how most MP3 files start, or with the
+    /// header of an MPEG audio frame.
     pub fn detect(bytes: &[u8]) -> Option<Self> {
         match bytes.get(..4)? {
             b"RIFF" | b"RF64" => Some(Self::Wav),
             b"FORM" => Some(Self::Aiff),
             b"fLaC" => Some(Self::Flac),
             b"OggS" => Some(Self::OggVorbis),
+            &[a, b, c, d] => {
+                let mp3 = mp3::id3v2_len(bytes).is_some()
+                    || mp3::FrameHeader::parse([a, b, c, d]).is_some();
+                mp3.then_some(Self::Mp3)
+            }
             _ => None,
         }
     }
@@ -127,6 +141,8 @@ pub enum FormatError {
     Flac(flac::FlacError),
     /// The file is an Ogg file with a problem, or one that holds no Vorbis.
     Vorbis(vorbis::VorbisError),
+    /// The file is an MP3 file with a problem.
+    Mp3(mp3::Mp3Error),
 }
 
 impl fmt::Display for FormatError {
@@ -138,6 +154,7 @@ impl fmt::Display for FormatError {
             Self::Aiff(error) => write!(f, "{error}"),
             Self::Flac(error) => write!(f, "{error}"),
             Self::Vorbis(error) => write!(f, "{error}"),
+            Self::Mp3(error) => write!(f, "{error}"),
         }
     }
 }
@@ -151,6 +168,7 @@ impl std::error::Error for FormatError {
             Self::Aiff(error) => Some(error),
             Self::Flac(error) => Some(error),
             Self::Vorbis(error) => Some(error),
+            Self::Mp3(error) => Some(error),
         }
     }
 }
@@ -179,6 +197,10 @@ pub fn decode(bytes: &[u8]) -> Result<AudioFile, FormatError> {
         }
         FileFormat::OggVorbis => {
             let file = vorbis::read(bytes).map_err(FormatError::Vorbis)?;
+            (file.buffer, file.sample_rate, LOSSY_BITS)
+        }
+        FileFormat::Mp3 => {
+            let file = mp3::read(bytes).map_err(FormatError::Mp3)?;
             (file.buffer, file.sample_rate, LOSSY_BITS)
         }
     };
