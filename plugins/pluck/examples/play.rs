@@ -5,14 +5,15 @@
 //! cargo run -p mangue-pluck --features standalone --example play -- -20 hold
 //! ```
 //!
-//! The first argument is the output level in decibels. With `hold`, the
+//! The first argument is the output level in decibels, which is otherwise
+//! the plugin's default, `mangue_pluck::DEFAULT_LEVEL_DB`. With `hold`, the
 //! program keeps running after its own phrase so that a connected MIDI
 //! keyboard can be played, until Enter is pressed.
 
 use std::thread::sleep;
 use std::time::Duration;
 
-use mangue_pluck::Pluck;
+use mangue_pluck::{DEFAULT_LEVEL_DB, Pluck};
 use manguebyte::midi::MidiMessage;
 use manguebyte::standalone::{Standalone, StandaloneOptions};
 
@@ -20,7 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = std::env::args().skip(1);
     let level: f32 = match arguments.next() {
         Some(text) => text.parse()?,
-        None => -12.0,
+        None => DEFAULT_LEVEL_DB,
     };
     let hold = arguments.next().as_deref() == Some("hold");
 
