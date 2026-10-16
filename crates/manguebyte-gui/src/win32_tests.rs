@@ -23,6 +23,10 @@ use manguebyte_ui::{AtomicSource, IntoView, ParamHandle, Role, column, knob, lab
 use manguebyte_window::win32::testing::{self, Message, ReadBack, TopLevel};
 use manguebyte_window::{Button, PhysicalPoint};
 
+/// `DLGC_WANTALLKEYS` and `DLGC_WANTTAB`, in a window's answer to
+/// `WM_GETDLGCODE`: it wants Tab, Enter and Escape from a dialog.
+const WANTS_ALL_KEYS: isize = 0x0004 | 0x0002;
+
 use crate::Editor;
 use crate::open::{Backend, Opened, open_window};
 
@@ -196,6 +200,58 @@ fn an_editor_lives_inside_a_real_win32_parent() {
         params.gain.value()
     );
 
+    // --- A value typed into the knob, as the system delivers it: a double
+    // click (two presses with the same message time), then key and
+    // character messages, then Enter.
+    for _ in 0..2 {
+        testing::send(
+            child,
+            Message::ButtonDown {
+                button: Button::Primary,
+                at: device(x, y, scale),
+                shift: false,
+                control: false,
+            },
+        );
+        testing::send(
+            child,
+            Message::ButtonUp {
+                button: Button::Primary,
+                at: device(x, y, scale),
+            },
+        );
+    }
+    assert!(pump_frames(&opened, 1));
+    assert!(opened.window.wants_all_keys());
+    let code = testing::send(child, Message::GetDlgCode).expect("ours");
+    assert_eq!(code & WANTS_ALL_KEYS, WANTS_ALL_KEYS);
+    let caret = testing::system_caret().expect("a caret while typing");
+    assert_eq!(caret.0, child);
+    host.take_calls();
+    for (vk, unit) in [(0x30, '0'), (0xBE, '.'), (0x33, '3'), (0x0D, '\r')] {
+        testing::send(
+            child,
+            Message::KeyDown {
+                vk,
+                repeat: false,
+                system: false,
+            },
+        );
+        testing::send(child, Message::Char(unit as u16));
+        testing::send(child, Message::KeyUp { vk });
+    }
+    let calls = host.take_calls();
+    assert_eq!(calls.len(), 3, "{calls:?}");
+    assert!(
+        matches!(calls[1], HostCall::Perform(param, v) if param == id && (v - 0.3).abs() < 1e-6),
+        "{calls:?}"
+    );
+    assert!(!opened.window.wants_all_keys());
+    assert_eq!(testing::system_caret(), None);
+    // Nothing went on to the host's window while typing.
+    let received = parent.take_received();
+    assert!(received.is_empty(), "{received:?}");
+
     // --- A value set from elsewhere and a level the audio side publishes
     // reach the screen through the window's own timer.
     params.gain.set(0.25);
@@ -323,4 +379,82 @@ fn an_editor_lives_inside_a_real_win32_parent() {
     // The last window took the class with it.
     assert!(!testing::class_registered());
     drop(parent);
+}
+
+/// Copy and paste through the system's clipboard, with Control held as
+/// the keyboard state says (`GetKeyState`), in a value typed into the
+/// knob. It replaces what the person running the tests had copied, so it
+/// is ignored unless asked for; the text that was there is put back.
+#[test]
+#[ignore = "replaces the system clipboard; run with --ignored"]
+fn a_typed_value_is_copied_and_pasted_through_the_system_clipboard() {
+    const VK_CONTROL: u16 = 0x11;
+    let parent = TopLevel::new(480, 320).expect("a desktop");
+    let params = params();
+    let spec = spec(&params, &Arc::new(AtomicF32::new(-60.0)));
+    let host = Rc::new(RecordingEditorHost::new().with_params(params.clone()));
+    let (context, link) = EditorContext::attach(host.clone());
+    let mut opened = open_window(&spec, Backend::Native, parent.parent(), Some(1.0), context)
+        .expect("a child window");
+    opened.set_visible(true);
+    assert!(pump_frames(&opened, 1));
+    let child = handle(&opened);
+    let saved = opened.window.read_clipboard_text();
+    let (x, y) = knob_center(&opened);
+    for _ in 0..2 {
+        testing::send(
+            child,
+            Message::ButtonDown {
+                button: Button::Primary,
+                at: device(x, y, 1.0),
+                shift: false,
+                control: false,
+            },
+        );
+        testing::send(
+            child,
+            Message::ButtonUp {
+                button: Button::Primary,
+                at: device(x, y, 1.0),
+            },
+        );
+    }
+    let key = |vk: u16| {
+        testing::send(
+            child,
+            Message::KeyDown {
+                vk,
+                repeat: false,
+                system: false,
+            },
+        );
+        testing::send(child, Message::KeyUp { vk });
+    };
+    {
+        // Control+C copies the value, all selected.
+        let _control = testing::HeldKeys::hold(&[VK_CONTROL]);
+        key(u16::from(b'C'));
+    }
+    assert_eq!(opened.window.read_clipboard_text().as_deref(), Some("0.50"));
+    opened
+        .window
+        .write_clipboard_text("0.75")
+        .expect("the clipboard");
+    {
+        let _control = testing::HeldKeys::hold(&[VK_CONTROL]);
+        key(u16::from(b'V'));
+    }
+    host.take_calls();
+    key(0x0D);
+    let id = params.gain.param_id();
+    let calls = host.take_calls();
+    assert!(
+        matches!(calls.get(1), Some(HostCall::Perform(param, v)) if *param == id && (v - 0.75).abs() < 1e-6),
+        "{calls:?}"
+    );
+    if let Some(saved) = saved {
+        let _ = opened.window.write_clipboard_text(&saved);
+    }
+    drop(opened);
+    drop(link);
 }

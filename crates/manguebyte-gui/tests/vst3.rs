@@ -384,6 +384,15 @@ impl View {
     fn key_down(&self, code: u32) -> tresult {
         unsafe { self.view.onKeyDown(0, code as i16, 0) }
     }
+
+    /// A key that types `c`, down and up, as a host delivers it: the
+    /// character and no virtual key code. Returns what the press got.
+    fn type_char(&self, c: char) -> tresult {
+        let unit = c as u16;
+        let down = unsafe { self.view.onKeyDown(unit, 0, 0) };
+        unsafe { self.view.onKeyUp(unit, 0, 0) };
+        down
+    }
 }
 
 fn knob_center(editor: &HeadlessEditor) -> Point {
@@ -542,6 +551,53 @@ fn keys_the_host_delivers_reach_the_knob() {
     assert_eq!(knob_text(&editor).as_deref(), Some("0.51"));
     let knob = get(&editor, Role::Slider, "Gain");
     assert!(knob.node.state.focused);
+    assert_eq!(view.remove(), kResultOk);
+}
+
+/// A host that keeps the keyboard and delivers keys through the view: a
+/// value typed into the knob reaches the component handler as one edit.
+#[test]
+fn a_value_typed_through_the_hosts_keys_is_one_edit() {
+    use manguebyte_vst3::vst3::Steinberg::VirtualKeyCodes_ as codes;
+
+    let session = Session::new();
+    let view = session.view(None);
+    let editor = view.attach();
+    editor.tick();
+    assert_eq!(view.key_down(codes::KEY_TAB as u32), kResultTrue);
+    // Enter opens the value to be typed; the editor then asks the system
+    // for the keyboard.
+    let requests = editor.window().focus_requests();
+    assert_eq!(view.key_down(codes::KEY_RETURN as u32), kResultTrue);
+    assert_eq!(editor.window().focus_requests(), requests + 1);
+    editor.tick();
+    assert_eq!(
+        get(&editor, Role::TextInput, "Gain").node.value.as_deref(),
+        Some("0.50")
+    );
+    session.host.take();
+    for c in "0.2".chars() {
+        assert_eq!(view.type_char(c), kResultTrue, "{c:?}");
+    }
+    assert_eq!(
+        get(&editor, Role::TextInput, "Gain").node.value.as_deref(),
+        Some("0.2")
+    );
+    assert!(session.host.take().is_empty(), "nothing sent before Enter");
+    assert_eq!(view.key_down(codes::KEY_RETURN as u32), kResultTrue);
+    let id = param_id(GAIN);
+    assert_edits(
+        &session.host.take(),
+        &[
+            HostCall::Begin(id),
+            HostCall::Perform(id, 0.2),
+            HostCall::End(id),
+        ],
+    );
+    editor.tick();
+    assert_eq!(knob_text(&editor).as_deref(), Some("0.20"));
+    // A character no widget takes goes back to the host.
+    assert_eq!(view.type_char('q'), kResultFalse);
     assert_eq!(view.remove(), kResultOk);
 }
 

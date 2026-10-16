@@ -227,11 +227,17 @@ impl HeadlessEditor {
     /// Presses and releases `key`. Returns whether the editor used the
     /// press.
     pub fn key(&self, key: Key) -> bool {
+        self.key_with(key, Modifiers::NONE)
+    }
+
+    /// Presses and releases `key` with `modifiers` held. Returns whether
+    /// the editor used the press.
+    pub fn key_with(&self, key: Key, modifiers: Modifiers) -> bool {
         let send = |pressed| {
             self.window.input(RawInput::Key {
                 key: KeyEvent {
                     key,
-                    modifiers: Modifiers::NONE,
+                    modifiers,
                     pressed,
                 },
                 repeat: false,
@@ -240,6 +246,53 @@ impl HeadlessEditor {
         let used = send(true) == Some(manguebyte_window::Handled::Yes);
         send(false);
         used
+    }
+
+    /// Types `text` as the system delivers a keyboard's typing to the
+    /// window: for each character, its key goes down, the character comes
+    /// as UTF-16 units (two for a character outside the Basic Multilingual
+    /// Plane), and the key comes up. Returns whether every character was
+    /// used.
+    pub fn type_text(&self, text: &str) -> bool {
+        let mut used = true;
+        for c in text.chars() {
+            let modifiers = Modifiers {
+                shift: c.is_uppercase(),
+                ..Modifiers::NONE
+            };
+            let key = Key::Character(c.to_lowercase().next().unwrap_or(c));
+            let send = |pressed| {
+                self.window.input(RawInput::Key {
+                    key: KeyEvent {
+                        key,
+                        modifiers,
+                        pressed,
+                    },
+                    repeat: false,
+                })
+            };
+            send(true);
+            let mut units = [0u16; 2];
+            let mut typed = None;
+            for unit in c.encode_utf16(&mut units) {
+                typed = self.window.input(RawInput::Utf16(*unit));
+            }
+            used &= typed == Some(manguebyte_window::Handled::Yes);
+            send(false);
+        }
+        used
+    }
+
+    /// Two presses and releases of the main button at `at`, close enough
+    /// in time to count as a double click.
+    pub fn double_click(&self, at: Point) {
+        let first = self.press_time.get();
+        self.press(at);
+        self.release(at);
+        self.press_time.set(first.wrapping_add(1));
+        self.press(at);
+        self.release(at);
+        self.press_time.set(first.wrapping_add(2000));
     }
 }
 

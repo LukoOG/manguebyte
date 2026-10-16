@@ -7,8 +7,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use manguebyte_plugin::editor::{
-    EditorContext, EditorError, HostSize, KeyEvent, OpenEditor, ParentWindow, Resize, WindowApi,
-    checked_scale,
+    EditorContext, EditorError, HostSize, Key, KeyEvent, OpenEditor, ParentWindow, Resize,
+    WindowApi, checked_scale,
 };
 use manguebyte_ui::{self as ui, MAX_BUFFER_SIDE, Root};
 use manguebyte_window::{
@@ -93,6 +93,57 @@ pub(crate) struct Shared {
     /// Over all frames: widgets that recorded a new scene, and layouts.
     pub(crate) painted: Cell<u64>,
     pub(crate) layouts: Cell<u64>,
+    /// Whether the interface took typed text after the last input.
+    typing: Cell<bool>,
+    /// The keys and characters given to the interface since the last
+    /// frame, with where they came from and what the interface said, so
+    /// that the same keystroke arriving both ways is taken once.
+    recent: RefCell<Vec<(Path, Typed, Handled)>>,
+}
+
+/// Which way a key reached the editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Path {
+    /// The editor's own window received it from the system.
+    Window,
+    /// The host delivered it through the plugin interface (VST 3's
+    /// `onKeyDown` and `onKeyUp`).
+    Host,
+}
+
+/// A keystroke, as compared between the two paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Typed {
+    Key(KeyEvent),
+    Text(char),
+}
+
+/// The most keystrokes remembered between two frames.
+const RECENT: usize = 32;
+
+/// The interface's clipboard: the system's, through the editor's window.
+struct WindowClipboard(manguebyte_window::Clipboard);
+
+impl ui::Clipboard for WindowClipboard {
+    fn read_text(&self) -> Option<String> {
+        self.0.read_text()
+    }
+
+    fn write_text(&self, text: &str) -> bool {
+        self.0.write_text(text).is_ok()
+    }
+}
+
+/// The character a key the host delivered types, if it types one: VST 3's
+/// `onKeyDown` carries it, and no character message follows. Control (on
+/// its own: Control with Alt is AltGr) and Command make shortcuts, not text.
+fn typed_by(event: KeyEvent) -> Option<char> {
+    let modifiers = event.modifiers;
+    let shortcut = (modifiers.control && !modifiers.alt) || modifiers.meta;
+    match event.key {
+        Key::Character(c) if event.pressed && !shortcut && !c.is_control() => Some(c),
+        _ => None,
+    }
 }
 
 /// `size` with no side larger than the interface can draw
@@ -199,8 +250,16 @@ impl Shared {
     /// presented anything.
     pub(crate) fn frame(&self, window: &WindowCx<'_>) -> bool {
         self.stale.set(false);
-        self.guarded(window, || self.frame_unguarded(window))
-            .unwrap_or(false)
+        // A keystroke that has not come the other way by now is not going
+        // to.
+        self.recent.borrow_mut().clear();
+        let presented = self
+            .guarded(window, || self.frame_unguarded(window))
+            .unwrap_or(false);
+        // The caret is where the frame drew it.
+        let caret = self.read_root(caret_in_device).flatten();
+        window.set_text_caret(caret);
+        presented
     }
 
     fn frame_unguarded(&self, window: &WindowCx<'_>) -> bool {
@@ -228,6 +287,59 @@ impl Shared {
             self.presented.set(self.presented.get().wrapping_add(1));
         }
         presented
+    }
+
+    /// `read` of the interface, if there is one and it is not busy.
+    fn read_root<T>(&self, read: impl FnOnce(&Root) -> T) -> Option<T> {
+        let slot = self.root.try_borrow().ok()?;
+        slot.as_ref().map(read)
+    }
+
+    /// Tells the window what the interface now wants of the keyboard: every
+    /// key while it takes typed text, so that a host's dialog keeps none of
+    /// Tab, Enter and Escape; the keyboard itself when typing starts and
+    /// the window does not have it, so that the keys that follow come to
+    /// the window rather than through the host; and where the caret is.
+    fn follow_typing(&self, window: &WindowCx<'_>) {
+        let Some((wants, caret)) =
+            self.read_root(|root| (root.wants_text(), caret_in_device(root)))
+        else {
+            return;
+        };
+        window.set_wants_all_keys(wants);
+        let started = wants && !self.typing.get();
+        self.typing.set(wants);
+        if started {
+            window.take_focus();
+        }
+        window.set_text_caret(caret);
+    }
+
+    /// Gives a keystroke that came by `path` to the interface, unless the
+    /// same one came the other way since the last frame: then it was taken
+    /// already, and the answer it got then is given again.
+    fn deliver_typed(&self, window: &WindowCx<'_>, path: Path, typed: Typed) -> Handled {
+        let earlier = {
+            let mut recent = self.recent.borrow_mut();
+            let found = recent
+                .iter()
+                .position(|&(from, seen, _)| from != path && seen == typed);
+            found.map(|at| recent.remove(at).2)
+        };
+        if let Some(handled) = earlier {
+            return handled;
+        }
+        let event = match typed {
+            Typed::Key(key) => ui::Event::Key(key),
+            Typed::Text(c) => ui::Event::Text(c),
+        };
+        let handled = self.deliver(window, event);
+        let mut recent = self.recent.borrow_mut();
+        if recent.len() >= RECENT {
+            recent.remove(0);
+        }
+        recent.push((path, typed, handled));
+        handled
     }
 
     /// The window's size or scale changed: a frame now, unless the editor
@@ -264,6 +376,7 @@ impl Shared {
                 _ => Handled::No,
             }
         });
+        self.follow_typing(window);
         handled.unwrap_or(Handled::No)
     }
 
@@ -298,6 +411,13 @@ impl Shared {
             let _ = window.resize(physical(cap(granted)));
         }
     }
+}
+
+/// Where the caret of what is being typed into is, in the window's device
+/// pixels.
+fn caret_in_device(root: &Root) -> Option<IRect> {
+    let caret = root.caret()?;
+    Some(caret.to_device(root.scale())).filter(|rect| !rect.is_empty())
 }
 
 /// What the window calls with every event.
@@ -342,9 +462,10 @@ fn to_ui(event: Event) -> Option<ui::Event> {
             modifiers: pointer.modifiers,
         },
         Event::Key { key, .. } => ui::Event::Key(key),
+        Event::Text(c) => ui::Event::Text(c),
         Event::Focus(gained) => ui::Event::Focus(gained),
-        // Hovering, typed text (no widget takes text yet) and everything
-        // else mean nothing to the interface.
+        // The pointer leaving and everything else mean nothing to the
+        // interface.
         _ => return None,
     })
 }
@@ -378,6 +499,8 @@ impl WindowHandler for Glue {
                 shared.give_up();
                 Handled::Yes
             }
+            Event::Key { key, .. } => shared.deliver_typed(window, Path::Window, Typed::Key(key)),
+            Event::Text(c) => shared.deliver_typed(window, Path::Window, Typed::Text(c)),
             other => match to_ui(other) {
                 Some(event) => shared.deliver(window, event),
                 None => Handled::No,
@@ -484,11 +607,23 @@ impl OpenEditor for Opened {
         }
     }
 
+    /// A key the host delivered through the plugin interface, as VST 3
+    /// hosts may (`onKeyDown`, `onKeyUp`). It goes to the interface as a
+    /// key; and while the interface takes typed text, the character it
+    /// types follows as typed text, since no character message follows a
+    /// key that came this way. A key that also reaches the editor's own
+    /// window before the next frame, as some hosts send both, is taken
+    /// once.
     fn key(&mut self, event: KeyEvent) -> bool {
         self.check();
-        self.shared
-            .deliver(&self.window.cx(), ui::Event::Key(event))
-            == Handled::Yes
+        let window = self.window.cx();
+        let shared = &self.shared;
+        let mut used = shared.deliver_typed(&window, Path::Host, Typed::Key(event)) == Handled::Yes;
+        let wants = shared.read_root(Root::wants_text).unwrap_or(false);
+        if let Some(c) = typed_by(event).filter(|_| wants) {
+            used |= shared.deliver_typed(&window, Path::Host, Typed::Text(c)) == Handled::Yes;
+        }
+        used
     }
 }
 
@@ -564,6 +699,8 @@ pub(crate) fn open_window(
         presented: Cell::new(0),
         painted: Cell::new(0),
         layouts: Cell::new(0),
+        typing: Cell::new(false),
+        recent: RefCell::new(Vec::with_capacity(RECENT)),
     });
     // Hidden, and with no frame timer, until the host shows it: CLAP's
     // `show`, or the VST 3 wrapper once `attached` succeeded. Both reach the
@@ -592,7 +729,8 @@ pub(crate) fn open_window(
         window.scale() as f32,
         context,
     )
-    .with_theme(spec.theme);
+    .with_theme(spec.theme)
+    .with_clipboard(Rc::new(WindowClipboard(window.clipboard())));
     *shared.root.borrow_mut() = Some(root);
 
     // An editor given no scale uses the system's, and asks for its size at
