@@ -40,6 +40,10 @@
 //!   the [`clipboard`], typed characters in the person's layout
 //!   ([`Event::Text`]), input methods' compositions ([`Composition`]),
 //!   filters and validation, Enter to take and Escape to throw away.
+//! - **[Menus](menu)**: popup menus with submenus, drawn by the
+//!   interface over everything else, opened by a widget with
+//!   [`EventCx::open_menu`] or at a point with [`EventCx::open_menu_at`],
+//!   and the [`combo`] box that picks a parameter's value from one.
 //! - **[`Theme`]**: colours, sizes, radii and type as typed data, with no
 //!   inheritance.
 //! - **[Accessibility](access)**: roles, names, values, ranges, states and
@@ -139,6 +143,7 @@ pub mod clipboard;
 mod damage;
 pub mod event;
 pub mod layout;
+pub mod menu;
 mod param;
 mod root;
 pub mod source;
@@ -152,7 +157,8 @@ pub mod widgets;
 pub use access::{AccessEntry, AccessNode, Action, Actions, Role};
 pub use clipboard::{Clipboard, MemoryClipboard};
 pub use damage::MAX_DAMAGE;
-pub use event::{Button, Composition, Event, Handled, Key, KeyEvent, Modifiers};
+pub use event::{Button, Composition, Event, Handled, Key, KeyEvent, MenuEvent, Modifiers};
+pub use menu::{Menu, MenuItem};
 pub use param::{ParamBinding, ParamHandle};
 pub use root::{Frame, MAX_BUFFER_SIDE, Root};
 pub use source::{AtomicSource, Source, State, Watch};
@@ -161,6 +167,6 @@ pub use tree::NodeId;
 pub use view::{Children, IntoView, View, column, filled, panel, row, stack};
 pub use widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
 pub use widgets::{
-    Canvas, CanvasCx, Container, Knob, Label, Meter, Slider, TextField, Toggle, canvas, knob,
-    label, meter, slider, text_field, toggle,
+    Canvas, CanvasCx, ComboBox, Container, Knob, Label, Meter, Slider, TextField, Toggle, canvas,
+    combo, knob, label, meter, slider, text_field, toggle,
 };

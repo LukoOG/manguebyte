@@ -397,13 +397,16 @@ impl Harness {
     /// - every meter has its value as text, and every switch says whether
     ///   it is on;
     /// - every text input has its text as its value and takes the focus;
+    /// - every combo box has its value as text, can be pressed to open,
+    ///   and says whether it is open;
     /// - no two widgets with a name share their role and name within the
     ///   same named group, so a screen reader, and
     ///   [`get`](Harness::get), can tell them apart;
     /// - the theme's text and muted text colours have a contrast of at
     ///   least [`MIN_TEXT_CONTRAST`](crate::access::MIN_TEXT_CONTRAST) on
-    ///   its background and surface colours, and its text colour on the
-    ///   selection of a text input.
+    ///   its background and surface colours, and its text colour on its
+    ///   track colour (a menu's highlighted item) and on the selection of
+    ///   a text input.
     ///
     /// # Panics
     ///

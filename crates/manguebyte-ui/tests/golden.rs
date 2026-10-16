@@ -20,9 +20,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use manguebyte_gfx::Size;
 use manguebyte_gfx::snapshot::Snapshots;
+use manguebyte_params::{ChoiceParam, param_set};
+use manguebyte_ui::layout::Align;
 use manguebyte_ui::testing::Harness;
-use manguebyte_ui::{Action, Role, Theme};
+use manguebyte_ui::{
+    Action, IntoView, Key, Modifiers, ParamHandle, Role, State, Theme, column, combo, knob, label,
+    row, text_field,
+};
 
 use common::{PANEL, levels, panel_view, params};
 
@@ -97,4 +103,94 @@ fn the_panel_shows_what_its_goldens_were_made_from() {
     // 30 pixels up from 1000 Hz is 0.15 of a logarithmic range, which
     // multiplies the frequency by 1000 to the power of 0.15.
     assert_eq!(ui.get(Role::Slider, "Cutoff").value_text(), Some("2818 Hz"));
+}
+
+struct Choices {
+    shape: ChoiceParam,
+}
+param_set!(Choices { shape });
+
+/// A small form: a title, a field being typed into with a word selected,
+/// an empty field showing its placeholder, a combo box and a knob.
+fn form(scale: f32, theme: Theme) -> (Harness, Arc<common::PanelParams>) {
+    let params = params();
+    let choices = Arc::new(Choices {
+        shape: ChoiceParam::new("shape", "Shape", &["Sine", "Saw", "Square", "Noise"], 1),
+    });
+    let view = column((
+        label("Preset").title(),
+        text_field("Name", State::new(String::from("Warm pad"))),
+        text_field("Notes", State::new(String::new())).placeholder("Notes"),
+        row((
+            combo(ParamHandle::new(Arc::clone(&choices), |p| &p.shape)),
+            knob(ParamHandle::new(Arc::clone(&params), |p| &p.cutoff)),
+        ))
+        .spacing(8.0)
+        .align(Align::Start),
+    ))
+    .spacing(6.0)
+    .padding(10.0)
+    .align(Align::Start);
+    let mut ui = Harness::new(view, Size::new(220.0, 240.0), scale);
+    ui.set_theme(theme);
+    ui.frame();
+    (ui, params)
+}
+
+#[test]
+fn text_and_menus_match_their_goldens() {
+    let snapshots = snapshots();
+    let control_shift = Modifiers {
+        control: true,
+        shift: true,
+        ..Modifiers::NONE
+    };
+    for (name, scale, theme) in [
+        ("typing@1x", 1.0, Theme::dark()),
+        ("typing@2x", 2.0, Theme::dark()),
+        ("typing-light@1x", 1.0, Theme::light()),
+    ] {
+        let (mut ui, _) = form(scale, theme);
+        // Tab selects everything; End, then Control+Shift+Left selects the
+        // last word.
+        ui.tab();
+        ui.key(Key::End);
+        ui.key_with(Key::Left, control_shift);
+        ui.advance_ms(16);
+        assert!(ui.pixels() == &ui.render_fresh(), "{name}");
+        if let Err(mismatch) = snapshots.check(name, ui.pixels(), &ui.dump()) {
+            panic!("{mismatch}");
+        }
+    }
+    {
+        // A value being typed into the knob, its caret after "25".
+        let (mut ui, _) = form(1.0, Theme::dark());
+        let cutoff = ui.get(Role::Slider, "Cutoff");
+        ui.double_click(cutoff.center());
+        ui.type_text("25");
+        ui.advance_ms(16);
+        assert_eq!(ui.get(Role::TextInput, "Cutoff").value_text(), Some("25"));
+        assert!(ui.pixels() == &ui.render_fresh());
+        if let Err(mismatch) = snapshots.check("entry@1x", ui.pixels(), &ui.dump()) {
+            panic!("{mismatch}");
+        }
+    }
+    for (name, scale, theme) in [
+        ("menu@1x", 1.0, Theme::dark()),
+        ("menu@2x", 2.0, Theme::dark()),
+        ("menu-light@1x", 1.0, Theme::light()),
+    ] {
+        // The combo box open, with the item after the checked one
+        // highlighted.
+        let (mut ui, _) = form(scale, theme);
+        let shape = ui.get(Role::ComboBox, "Shape");
+        ui.click(shape.center());
+        ui.key(Key::Down);
+        ui.advance_ms(16);
+        assert!(ui.get(Role::MenuItem, "Square").is_focused(), "{name}");
+        assert!(ui.pixels() == &ui.render_fresh(), "{name}");
+        if let Err(mismatch) = snapshots.check(name, ui.pixels(), &ui.dump()) {
+            panic!("{mismatch}");
+        }
+    }
 }

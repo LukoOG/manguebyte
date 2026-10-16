@@ -2,13 +2,16 @@
 
 use std::time::Duration;
 
-use manguebyte_gfx::{Rect, Scene, Size};
+use manguebyte_gfx::{Point, Rect, Scene, Size};
 use manguebyte_plugin::editor::EditorContext;
 
 use crate::access::{AccessNode, Action};
 use crate::clipboard::Clipboard;
 use crate::event::{Event, Handled};
+use crate::menu::Menu;
+use crate::root::{Anchor, MenuRequest};
 use crate::theme::Theme;
+use crate::tree::NodeId;
 
 /// A node of the interface: something that is laid out, drawn, receives
 /// input and describes itself.
@@ -163,7 +166,7 @@ pub trait Widget: 'static {
 }
 
 /// What a widget asked for during a call; the root acts on it afterwards.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct Requests {
     pub(crate) paint: bool,
     pub(crate) layout: bool,
@@ -171,6 +174,8 @@ pub(crate) struct Requests {
     /// `Some(true)` to take the pointer, `Some(false)` to let it go.
     pub(crate) capture: Option<bool>,
     pub(crate) focus: bool,
+    /// A menu to open, hung from the widget or a point.
+    pub(crate) menu: Option<MenuRequest>,
 }
 
 /// What [`Widget::update`] is given.
@@ -321,6 +326,7 @@ pub struct EventCx<'a> {
     pub(crate) now: Duration,
     pub(crate) context: &'a EditorContext,
     pub(crate) clipboard: &'a dyn Clipboard,
+    pub(crate) id: NodeId,
     pub(crate) requests: &'a mut Requests,
 }
 
@@ -397,5 +403,29 @@ impl EventCx<'_> {
     /// the focus once pressed asks for it here.
     pub fn request_focus(&mut self) {
         self.requests.focus = true;
+    }
+
+    /// Opens `menu` below this widget, or above it where there is no room
+    /// below, at least as wide as the widget (see [`crate::menu`]). It
+    /// opens once the widget returns, with the keyboard focus on its
+    /// checked item, or else its first; a menu open already closes first.
+    /// When it closes, with a choice or without, this widget hears it as
+    /// [`Event::Menu`](crate::Event::Menu), and the focus goes back to the
+    /// widget that had it.
+    pub fn open_menu(&mut self, menu: Menu) {
+        self.requests.menu = Some(MenuRequest {
+            menu,
+            anchor: Anchor::Widget(self.id),
+        });
+    }
+
+    /// Opens `menu` at `at`, in logical pixels, as a context menu: its
+    /// top-left corner there, or its bottom-left corner where there is no
+    /// room below. Otherwise as [`open_menu`](Self::open_menu).
+    pub fn open_menu_at(&mut self, menu: Menu, at: Point) {
+        self.requests.menu = Some(MenuRequest {
+            menu,
+            anchor: Anchor::Point(at),
+        });
     }
 }

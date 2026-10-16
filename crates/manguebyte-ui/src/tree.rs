@@ -52,9 +52,16 @@ pub(crate) struct Node {
 }
 
 /// Every widget, in tree order, with the layout tree beside it.
+///
+/// The interface's own widgets come first, `main` of them. What is shown
+/// over them for a while (open menus, a tooltip) is added after them, each
+/// a tree of its own with no parent, and taken away by cutting the arena
+/// back.
 pub(crate) struct Tree {
     pub(crate) nodes: Vec<Node>,
     pub(crate) layout: Vec<LayoutNode>,
+    /// How many of the widgets are the interface's own.
+    pub(crate) main: usize,
 }
 
 impl Tree {
@@ -63,12 +70,24 @@ impl Tree {
         let mut tree = Tree {
             nodes: Vec::new(),
             layout: Vec::new(),
+            main: 0,
         };
         tree.add(view, None);
+        tree.main = tree.nodes.len();
         tree
     }
 
-    fn add(&mut self, view: View, parent: Option<NodeId>) -> NodeId {
+    /// Removes the widgets from `len` on, which must be ones added after
+    /// the interface's own.
+    pub(crate) fn truncate(&mut self, len: usize) {
+        let len = len.max(self.main);
+        self.nodes.truncate(len);
+        self.layout.truncate(len);
+    }
+
+    /// Adds the widgets `view` describes after the others, inside
+    /// `parent`, and returns the outermost.
+    pub(crate) fn add(&mut self, view: View, parent: Option<NodeId>) -> NodeId {
         let id = NodeId::from_index(self.nodes.len());
         let View {
             widget,

@@ -775,11 +775,7 @@ fn a_label_at_its_natural_size_is_not_cut() {
             let dump = ui.dump();
             for line in dump.lines().filter(|line| line.contains("text \"")) {
                 let glyphs = line.matches(',').count() + 1;
-                assert_eq!(
-                    glyphs,
-                    text.chars().count(),
-                    "{text:?} at {scale}: {line}"
-                );
+                assert_eq!(glyphs, text.chars().count(), "{text:?} at {scale}: {line}");
             }
         }
     }

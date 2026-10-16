@@ -8,11 +8,15 @@ use std::time::Duration;
 use manguebyte_gfx::{Color, IRect, Pixmap, Point, Rect, Renderer, Scene, Size};
 use manguebyte_plugin::editor::{EditorContext, MAX_SCALE, MIN_SCALE};
 
+mod menus;
+
+pub(crate) use menus::{Anchor, MenuRequest};
+
 use crate::access::{AccessEntry, Action};
 use crate::clipboard::{Clipboard, MemoryClipboard};
 use crate::damage::{MAX_DAMAGE, tidy};
-use crate::event::{Event, Handled, Key};
-use crate::layout;
+use crate::event::{Event, Handled, Key, MenuEvent};
+use crate::layout::{self, Placement};
 use crate::theme::Theme;
 use crate::tree::{NodeId, Tree};
 use crate::view::IntoView;
@@ -138,6 +142,13 @@ pub struct Root {
     clipboard: Rc<dyn Clipboard>,
     /// Keys whose press a widget used and whose release has not come.
     keys_used: Vec<Key>,
+    /// The menus open over the interface, if any.
+    menus: Option<menus::Menus>,
+    /// The device pixels that widgets taken away since the last frame
+    /// covered (closed menus), drawn again then.
+    removed: Vec<IRect>,
+    /// Where the pointer was last.
+    pointer: Option<Point>,
     /// Set while a widget hears that it gained or lost the focus: what it
     /// asks for the focus then is not done, so that focus cannot bounce.
     notifying: bool,
@@ -212,6 +223,9 @@ impl Root {
             capture: None,
             clipboard: Rc::new(MemoryClipboard::new()),
             keys_used: Vec::with_capacity(MAX_KEYS_HELD),
+            menus: None,
+            removed: Vec::new(),
+            pointer: None,
             notifying: false,
             needs_layout: true,
             full: true,
@@ -395,7 +409,13 @@ impl Root {
             .collect()
     }
 
-    /// The topmost widget at `at`, if any.
+    /// Whether a menu is open over the interface (see [`crate::menu`]): it
+    /// has every key and the pointer until it closes.
+    pub fn has_menu(&self) -> bool {
+        self.menus.is_some()
+    }
+
+    /// The topmost widget at `at`, if any, open menus included.
     pub fn hit(&self, at: Point) -> Option<NodeId> {
         // Later widgets are drawn over earlier ones, and children over
         // their parents.
@@ -408,7 +428,16 @@ impl Root {
     /// Carries out `action` on widget `id`, as assistive technology asks:
     /// only if the widget lists it among its actions. Returns whether it
     /// was done.
+    ///
+    /// While a menu is open, an action on one of its items is the menu's
+    /// (pressing an item chooses it), and an action on anything else first
+    /// closes the menu.
     pub fn act(&mut self, id: NodeId, action: Action) -> bool {
+        if self.menus.is_some() {
+            if let Some(done) = self.menu_act(id, action) {
+                return done;
+            }
+        }
         let Some(entry) = self.access(id) else {
             return false;
         };
@@ -426,6 +455,10 @@ impl Root {
     /// that accepts [`Action::Focus`] can have it; returns whether the
     /// focus is where it was asked to be.
     pub fn set_focus_to(&mut self, id: Option<NodeId>) -> bool {
+        if self.menus.is_some() && id.is_none_or(|id| self.menu_item_of(id).is_none()) {
+            // The focus going out of an open menu closes it.
+            self.close_menus(MenuEvent::Closed);
+        }
         match id {
             Some(id) if !self.focusable(id) => false,
             _ => {
@@ -503,6 +536,7 @@ impl Root {
             now: self.now,
             context: &self.context,
             clipboard: &*self.clipboard,
+            id,
             requests: &mut requests,
         };
         let result = call(&mut *node.widget, &mut cx);
@@ -520,6 +554,11 @@ impl Root {
         }
         if requests.focus && !self.notifying && self.focusable(id) {
             self.set_focus(Some(id));
+        }
+        if let Some(menu) = requests.menu.take() {
+            if !self.notifying {
+                self.open_menu(id, menu);
+            }
         }
         result
     }
@@ -586,10 +625,19 @@ impl Root {
     /// - Typed text and compositions go where keys go.
     /// - Losing the window's focus ends a drag where it is
     ///   ([`Event::PointerCancel`]) and takes the keyboard focus away.
+    /// - While a menu is open, the menu has everything: see
+    ///   [`crate::menu`]. Every event is used then.
+    /// - [`Event::Menu`] is the root's to send, and is not used.
     ///
     /// Positions that are not numbers hit nothing. Nothing is drawn until
     /// the next frame.
     pub fn event(&mut self, event: Event) -> Handled {
+        if let Some(at) = event.position().filter(|at| at.is_finite()) {
+            self.pointer = Some(at);
+        }
+        if self.menus.is_some() {
+            return self.menu_event(event);
+        }
         match event {
             Event::PointerDown { at, .. } => {
                 // A press while a widget still holds the pointer (a second
@@ -657,6 +705,7 @@ impl Root {
                 handled
             }
             Event::Text(_) | Event::Composition(_) => self.offer_to_keyboard(&event),
+            Event::Menu(_) => Handled::No,
             Event::Focus(gained) => {
                 if !gained {
                     if self.capture.is_some() {
@@ -735,25 +784,35 @@ impl Root {
         }
         let area = Rect::new(0.0, 0.0, self.size.width, self.size.height);
         let placed = layout::solve(&self.tree.layout, 0, area, self.scale);
-        let nodes = self.tree.nodes.iter_mut().zip(&self.tree.layout);
-        for ((node, item), placement) in nodes.zip(placed) {
-            // A widget with no children draws inside its padding; a
-            // container's padding is around its children, and it draws
-            // its background across the whole of its rectangle.
-            let content = if item.style.arrange == layout::Arrange::Leaf {
-                placement.inset(item.style.padding, self.scale).rect
-            } else {
-                placement.rect
-            };
-            if node.rect != placement.rect
-                || node.device != placement.device
-                || node.content != content
-            {
-                node.rect = placement.rect;
-                node.device = placement.device;
-                node.content = content;
-                node.paint = true;
-            }
+        // The interface's own widgets; what is over them is placed after.
+        for (index, placement) in placed.into_iter().enumerate().take(self.tree.main) {
+            self.apply_placement(index, placement);
+        }
+        self.place_menus();
+    }
+
+    /// Puts widget `index` where layout placed it, and has it drawn again
+    /// if it moved.
+    fn apply_placement(&mut self, index: usize, placement: Placement) {
+        let (Some(node), Some(item)) =
+            (self.tree.nodes.get_mut(index), self.tree.layout.get(index))
+        else {
+            return;
+        };
+        // A widget with no children draws inside its padding; a
+        // container's padding is around its children, and it draws its
+        // background across the whole of its rectangle.
+        let content = if item.style.arrange == layout::Arrange::Leaf {
+            placement.inset(item.style.padding, self.scale).rect
+        } else {
+            placement.rect
+        };
+        if node.rect != placement.rect || node.device != placement.device || node.content != content
+        {
+            node.rect = placement.rect;
+            node.device = placement.device;
+            node.content = content;
+            node.paint = true;
         }
     }
 
@@ -813,8 +872,12 @@ impl Root {
             }
         }
         if full {
+            self.removed.clear();
             self.damage.push(self.pixels.bounds());
         } else {
+            // What widgets taken away covered is drawn again, from what is
+            // under it.
+            self.damage.append(&mut self.removed);
             tidy(&mut self.damage, self.pixels.bounds(), MAX_DAMAGE);
         }
         painted

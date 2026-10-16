@@ -116,6 +116,26 @@ pub enum Event {
     /// finally produces comes as [`Text`](Event::Text), after or before
     /// [`Composition::End`].
     Composition(Composition),
+    /// A menu this widget opened with [`EventCx::open_menu`] or
+    /// [`EventCx::open_menu_at`] closed: what was chosen in it, if
+    /// anything. Only the widget that opened the menu receives this, once
+    /// per menu.
+    ///
+    /// [`EventCx::open_menu`]: crate::EventCx::open_menu
+    /// [`EventCx::open_menu_at`]: crate::EventCx::open_menu_at
+    Menu(MenuEvent),
+}
+
+/// How a menu ended, as the widget that opened it hears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum MenuEvent {
+    /// The item with this id was chosen, by a click, a key or assistive
+    /// technology. The menu has closed.
+    Chosen(usize),
+    /// The menu closed with nothing chosen: Escape, Tab, a press outside
+    /// it, another menu opening, or the window losing the keyboard.
+    Closed,
 }
 
 /// What an input method says while it composes text (Chinese, Japanese,
@@ -190,7 +210,8 @@ impl Event {
             | Event::Key(_)
             | Event::Focus(_)
             | Event::Text(_)
-            | Event::Composition(_) => None,
+            | Event::Composition(_)
+            | Event::Menu(_) => None,
         }
     }
 }

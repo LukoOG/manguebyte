@@ -7,6 +7,7 @@
 //! | [`Slider`] | [`Slider`](crate::Role::Slider) | a parameter, as a track and as text | the parameter, by dragging sideways, the wheel, the keys and a typed value |
 //! | [`TextField`] | [`TextInput`](crate::Role::TextInput) | one line of text from a [`State`](crate::State) | the text, by typing, the clipboard and input methods |
 //! | [`Toggle`] | [`Switch`](crate::Role::Switch) | a parameter that is on or off | the parameter, by clicking, Space and Enter |
+//! | [`ComboBox`] | [`ComboBox`](crate::Role::ComboBox) | a parameter with a few named values | the parameter, from a menu of its values, the arrows and the wheel |
 //! | [`Meter`] | [`Meter`](crate::Role::Meter) | a level the audio thread publishes, as a bar and as text | nothing |
 //! | [`Canvas`] | [`Image`](crate::Role::Image) | whatever a closure draws | nothing |
 //!
@@ -29,6 +30,7 @@
 
 mod adjust;
 mod canvas;
+mod combo;
 mod container;
 mod knob;
 mod label;
@@ -39,6 +41,7 @@ mod text_field;
 mod toggle;
 
 pub use canvas::{Canvas, CanvasCx, canvas};
+pub use combo::{ComboBox, MAX_CHOICES, combo};
 pub use container::Container;
 pub use knob::{Knob, knob};
 pub use label::{Label, label};

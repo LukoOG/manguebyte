@@ -48,6 +48,14 @@ pub enum Role {
     Image,
     /// One line of text a person types: its value is the text.
     TextInput,
+    /// A value chosen from a list that opens as a menu.
+    ComboBox,
+    /// A list of things to choose from, open over the interface.
+    Menu,
+    /// One thing to choose in a menu.
+    MenuItem,
+    /// A line between groups of items in a menu.
+    Separator,
 }
 
 /// The range of a widget's numeric value.
@@ -79,6 +87,9 @@ pub struct AccessState {
     pub checked: Option<bool>,
     /// Its value is text that a person can change by typing, now.
     pub editable: bool,
+    /// For something that opens a menu (a combo box, an item with a
+    /// submenu), whether the menu is open.
+    pub expanded: Option<bool>,
 }
 
 /// Which [`Action`]s a widget accepts.
@@ -217,6 +228,20 @@ impl AccessNode {
         self
     }
 
+    /// The same node, with the menu it opens open or not.
+    #[must_use]
+    pub fn with_expanded(mut self, expanded: bool) -> Self {
+        self.state.expanded = Some(expanded);
+        self
+    }
+
+    /// The same node, which cannot be used now.
+    #[must_use]
+    pub fn disabled(mut self) -> Self {
+        self.state.disabled = true;
+        self
+    }
+
     /// The same node, accepting `actions`.
     #[must_use]
     pub fn with_actions(mut self, actions: Actions) -> Self {
@@ -307,7 +332,8 @@ fn blend(over: Color, under: Color) -> Color {
 
 /// The first pair of the theme's text and background colours whose
 /// contrast is below [`MIN_TEXT_CONTRAST`], if any: text and muted text,
-/// each on the background and on the surface of panels, and text on the
+/// each on the background and on the surface of panels; text on the track
+/// colour, which marks the highlighted item of a menu; and text on the
 /// selection colour of a text input, over the background.
 fn contrast_problem(theme: &Theme) -> Option<String> {
     let palette = &theme.palette;
@@ -322,6 +348,7 @@ fn contrast_problem(theme: &Theme) -> Option<String> {
             palette.background,
         ),
         ("text_muted", palette.text_muted, "surface", palette.surface),
+        ("text", palette.text, "track", palette.track),
         (
             "text",
             palette.text,
@@ -351,12 +378,15 @@ fn contrast_problem(theme: &Theme) -> Option<String> {
 /// - every meter has its value as text;
 /// - every switch says whether it is on;
 /// - every text input has its text as its value and takes the focus;
+/// - every combo box has its value as text, can be pressed to open, and
+///   says whether it is open;
 /// - no two widgets with a name share their role and name within the same
 ///   named group (groups with no name only arrange their children, and a
 ///   screen reader does not tell them apart);
 /// - the theme's text colours have a contrast of at least
 ///   [`MIN_TEXT_CONTRAST`] on its background and surface colours, and its
-///   text colour on the selection of a text input.
+///   text colour on its track colour (a menu's highlighted item) and on the
+///   selection of a text input.
 pub(crate) fn first_problem(entries: &[AccessEntry], theme: &Theme) -> Option<String> {
     for entry in entries {
         let node = &entry.node;
@@ -400,8 +430,18 @@ pub(crate) fn first_problem(entries: &[AccessEntry], theme: &Theme) -> Option<St
                 node.name
             ));
         }
-        if node.role == Role::TextInput && node.value.is_none() {
-            return Some(format!("text input {:?} has no value as text", node.name));
+        if matches!(node.role, Role::TextInput | Role::ComboBox) && node.value.is_none() {
+            return Some(format!(
+                "{:?} {:?} has no value as text",
+                node.role, node.name
+            ));
+        }
+        if node.role == Role::ComboBox && !(actions.press && node.state.expanded.is_some()) {
+            return Some(format!(
+                "combo box {:?} cannot be opened by assistive technology, or does not say \
+                 whether it is open",
+                node.name
+            ));
         }
         if node.role == Role::TextInput && !actions.focus {
             return Some(format!(

@@ -407,6 +407,35 @@ pub fn solve(nodes: &[LayoutNode], root: usize, area: Rect, scale: f32) -> Vec<P
     placements
 }
 
+/// The size the tree under `root` asks for: its natural size, as [`solve`]
+/// works it out before it divides an area, within the root's own minimum
+/// and maximum. Zero for a root that is out of range.
+///
+/// ```
+/// use manguebyte_gfx::Size;
+/// use manguebyte_ui::layout::{Insets, LayoutNode, Style, natural_size};
+///
+/// // A column with 4 of padding and 2 between two children.
+/// let nodes = vec![
+///     LayoutNode::new(Style::column().with_padding(Insets::all(4.0)).with_spacing(2.0), Size::default(), vec![1, 2]),
+///     LayoutNode::leaf(Style::leaf(), Size::new(40.0, 20.0)),
+///     LayoutNode::leaf(Style::leaf(), Size::new(60.0, 10.0)),
+/// ];
+/// assert_eq!(natural_size(&nodes, 0), Size::new(68.0, 40.0));
+/// assert_eq!(natural_size(&nodes, 9), Size::default());
+/// ```
+pub fn natural_size(nodes: &[LayoutNode], root: usize) -> Size {
+    if root >= nodes.len() {
+        return Size::default();
+    }
+    let order = preorder(nodes, root);
+    let mut natural = vec![Size::default(); nodes.len()];
+    for &index in order.nodes.iter().rev() {
+        natural[index] = measure(nodes, &order, index, &natural);
+    }
+    natural[root]
+}
+
 /// The tree under the root as layout sees it: each node reached once,
 /// parents before children, with the children each node places.
 struct Order {
