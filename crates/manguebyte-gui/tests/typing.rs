@@ -115,6 +115,7 @@ fn a_value_typed_through_the_window_is_one_edit() {
     ui.tick();
     // The window asked for every key and has the keyboard; the system is
     // shown the caret, inside the knob.
+    assert!(ui.window().wants_all_keys());
     let knob = ui.find(Role::TextInput, "Gain").expect("typing");
     assert_eq!(knob.node.value.as_deref(), Some("0.50"));
     let caret = ui.window().system_caret().expect("a caret");
@@ -142,6 +143,7 @@ fn a_value_typed_through_the_window_is_one_edit() {
         None,
         "no caret once typing ends"
     );
+    assert!(!ui.window().wants_all_keys());
     // Keys the knob does not use go back to the host again.
     assert!(!ui.key(Key::Character('q')));
     drop(open.editor);

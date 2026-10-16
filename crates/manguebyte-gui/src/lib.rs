@@ -55,7 +55,8 @@
 //!   host sees none of them. When typing starts while the host has the
 //!   keyboard (a value opened with Enter delivered through `onKeyDown`),
 //!   the editor takes the keyboard for its window, so that the keys that
-//!   follow come to it directly. On Win32 the window keeps a hidden system
+//!   follow come to it directly. An open menu is treated the same way: it
+//!   takes every key until it closes. On Win32 the window keeps a hidden system
 //!   caret where the interface's caret is, which screen magnifiers follow,
 //!   and asks the input method to compose there.
 //!

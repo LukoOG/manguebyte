@@ -284,6 +284,14 @@ impl Headless {
         self.platform(|p| p.focus_requests.get()).unwrap_or(0)
     }
 
+    /// Whether the window asks for every key, Tab, Enter and Escape
+    /// included, as a host's dialog would hear it (see
+    /// [`Window::set_wants_all_keys`](crate::Window::set_wants_all_keys)).
+    pub fn wants_all_keys(&self) -> bool {
+        self.with(|inner| inner.wants_all_keys.get())
+            .unwrap_or(false)
+    }
+
     /// What the clipboard holds, as another program would read it.
     pub fn clipboard_text(&self) -> Option<String> {
         self.platform(|p| p.clipboard.borrow().clone()).flatten()

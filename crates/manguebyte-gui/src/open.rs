@@ -296,13 +296,14 @@ impl Shared {
     }
 
     /// Tells the window what the interface now wants of the keyboard: every
-    /// key while it takes typed text, so that a host's dialog keeps none of
-    /// Tab, Enter and Escape; the keyboard itself when typing starts and
-    /// the window does not have it, so that the keys that follow come to
-    /// the window rather than through the host; and where the caret is.
+    /// key while it takes typed text or a menu is open, so that a host's
+    /// dialog keeps none of Tab, Enter and Escape; the keyboard itself when
+    /// either starts and the window does not have it, so that the keys that
+    /// follow come to the window rather than through the host; and where
+    /// the caret is.
     fn follow_typing(&self, window: &WindowCx<'_>) {
         let Some((wants, caret)) =
-            self.read_root(|root| (root.wants_text(), caret_in_device(root)))
+            self.read_root(|root| (root.wants_text() || root.has_menu(), caret_in_device(root)))
         else {
             return;
         };
