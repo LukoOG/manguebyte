@@ -1029,6 +1029,31 @@ fn a_block_larger_than_promised_and_a_panic_are_errors_not_crashes() {
     assert_eq!(processed.status, CLAP_PROCESS_CONTINUE);
 }
 
+/// A value the host sent in a block the plugin panicked in was stored, but
+/// never reached the plugin, which follows events alone. The next block
+/// gives it every value again, so it does not keep playing the old one.
+#[test]
+fn after_a_panic_the_next_block_gives_the_plugin_every_value() {
+    let (_guard, host) = level_host();
+    level_params().explode.set(true);
+    let processed = host.process(&mut stereo(1.0, 8), None, vec![value(0, LEVEL, 0.5)], None);
+    assert_eq!(processed.status, CLAP_PROCESS_ERROR);
+    assert_eq!(level_params().level.value(), 2.0, "the value was stored");
+
+    level_params().explode.set(false);
+    let processed = host.process(&mut stereo(1.0, 8), None, vec![], None);
+    assert_eq!(processed.status, CLAP_PROCESS_CONTINUE);
+    assert_eq!(
+        processed.output[0],
+        vec![2.0; 8],
+        "the plugin kept the value from before the panic"
+    );
+    // Only once: the block after that announces nothing new.
+    let processed = host.process(&mut stereo(1.0, 8), None, vec![], None);
+    assert_eq!(processed.output[0], vec![2.0; 8]);
+    assert_eq!(processed.heap_calls, 0);
+}
+
 #[test]
 fn note_pan_arrives_in_the_framework_unit() {
     // CLAP's pan runs from 0 (left) through 0.5 (centre) to 1 (right); the

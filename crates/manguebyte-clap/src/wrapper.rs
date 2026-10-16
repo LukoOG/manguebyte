@@ -347,6 +347,7 @@ unsafe extern "C" fn factory_create<P: Plugin>(
                 buffer: AudioBuffer::new(P::LAYOUT.outputs, 0),
                 sidechain: AudioBuffer::new(P::LAYOUT.sidechain, 0),
                 events: EventBuffer::new(),
+                resend_values: false,
             }),
             params,
         }));
@@ -398,6 +399,11 @@ struct Audio<P> {
     /// The editor's gestures on their way to the host, for a plugin with an
     /// editor.
     gestures: Option<Gestures>,
+    /// Whether the plugin panicked in the last block, so that the next one
+    /// starts by announcing every parameter's value: the changes of the
+    /// block it did not finish were stored and remembered as seen, but may
+    /// never have reached it.
+    resend_values: bool,
 }
 
 /// Turns the editor's gesture counts into events, and remembers what the
@@ -694,7 +700,15 @@ unsafe extern "C" fn plugin_process<P: Plugin>(
         if P::LAYOUT.sidechain > 0 {
             context = context.with_sidechain(&audio.sidechain);
         }
-        audio.plugin.process(&mut audio.buffer, &context);
+        let (plugin, buffer) = (&mut audio.plugin, &mut audio.buffer);
+        let finished = catch_unwind(AssertUnwindSafe(|| plugin.process(buffer, &context))).is_ok();
+        if !finished {
+            // The plugin panicked. The host is told the block failed, and
+            // the next block starts with every parameter's value, since the
+            // changes of this one may not have reached the plugin.
+            audio.resend_values = true;
+            return CLAP_PROCESS_ERROR;
+        }
 
         // SAFETY: the output pointers in `process` are valid for this call.
         // Everything was read from the inputs before this point, so writing
@@ -835,8 +849,22 @@ impl<P: Plugin> Instance<P> {
         audio.events.clear();
 
         // Changes the plugin has not seen yet go first, on frame 0. They
-        // stay first: later events on frame 0 go after them.
-        audio.watcher.emit_changes(params, &mut audio.events);
+        // stay first: later events on frame 0 go after them. After a block
+        // the plugin did not finish, that is every value.
+        if audio.resend_values {
+            let events = &mut audio.events;
+            params.visit(&mut |param| {
+                let kind = EventKind::ParamValue {
+                    param: param.param_id(),
+                    value: param.plain(),
+                };
+                let _ = events.push(Event { offset: 0, kind });
+            });
+            audio.watcher.remember(params);
+            audio.resend_values = false;
+        } else {
+            audio.watcher.emit_changes(params, &mut audio.events);
+        }
         let announced = audio.events.len();
 
         // Changes the host has not seen yet are reported to it.
