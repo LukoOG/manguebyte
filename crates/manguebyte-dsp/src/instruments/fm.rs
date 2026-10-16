@@ -256,7 +256,7 @@ impl FmParams {
             ],
             accent_db: 2.5,
             accent_index: 1.5,
-            level: 0.5,
+            level: 0.33,
         }
     }
 
@@ -316,7 +316,7 @@ impl FmParams {
             ],
             accent_db: 3.0,
             accent_index: 1.4,
-            level: 0.5,
+            level: 0.26,
         }
     }
 
@@ -371,7 +371,7 @@ impl FmParams {
             ],
             accent_db: 3.0,
             accent_index: 1.5,
-            level: 0.6,
+            level: 0.75,
         }
     }
 

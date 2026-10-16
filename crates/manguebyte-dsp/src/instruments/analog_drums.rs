@@ -225,7 +225,7 @@ impl Default for AnalogKitParams {
             drums: [DrumSettings::default(); 16],
             velocity_range_db: 24.0,
             accent_db: 4.0,
-            level: 1.0,
+            level: 0.5,
         }
     }
 }
@@ -246,7 +246,7 @@ impl AnalogKitParams {
             drums: self.drums.map(DrumSettings::limited),
             velocity_range_db: setting(self.velocity_range_db, 0.0, 60.0, 24.0),
             accent_db: setting(self.accent_db, 0.0, 24.0, 4.0),
-            level: setting(self.level, 0.0, 4.0, 1.0),
+            level: setting(self.level, 0.0, 4.0, 0.5),
         }
     }
 }
@@ -967,7 +967,7 @@ impl Default for KickBassParams {
             glide: 0.08,
             velocity_range_db: 24.0,
             accent_db: 3.0,
-            level: 0.6,
+            level: 0.45,
         }
     }
 }
@@ -1321,10 +1321,10 @@ mod tests {
                 decibels(rms(between(&signal, 0.0, 0.05))),
                 centroid(&signal, 8_192),
             );
-            // Between -12 and -1 dB at full velocity, so a kit leaves room
+            // Between -18 and -6 dB at full velocity, so a kit leaves room
             // for an accent and for drums struck together.
             assert!(
-                (0.25..0.9).contains(&loudest),
+                (0.125..0.5).contains(&loudest),
                 "{drum:?} peaks at {loudest}"
             );
         }

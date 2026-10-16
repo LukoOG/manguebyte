@@ -33,6 +33,10 @@ const ACCENT_OCTAVES: f64 = 4.0;
 /// at full accent, as a share of its depth.
 const ACCENT_ENVELOPE: f64 = 0.6;
 
+/// The highest the envelope and the accent can open the filter, in hertz:
+/// about where the original's runs out.
+const HIGHEST_CUTOFF_HZ: f64 = 12_000.0;
+
 /// How much resonance an accent adds at its height, at full accent.
 const ACCENT_RESONANCE: f64 = 0.15;
 
@@ -131,7 +135,7 @@ impl AcidParams {
             slide: 0.06,
             drive_db: 6.0,
             velocity: 0.0,
-            level: 0.5,
+            level: 0.28,
         }
     }
 
@@ -144,6 +148,7 @@ impl AcidParams {
             decay: 0.3,
             accent: 0.9,
             drive_db: 9.0,
+            level: 0.2,
             ..Self::classic()
         }
     }
@@ -156,6 +161,7 @@ impl AcidParams {
             resonance: 0.6,
             env_mod: 0.5,
             decay: 0.7,
+            level: 0.22,
             ..Self::classic()
         }
     }
@@ -535,7 +541,8 @@ impl AcidVoice {
         };
         let octaves = params.env_mod * ENVELOPE_OCTAVES * self.envelope * depth
             + params.accent * ACCENT_OCTAVES * self.sweep;
-        let cutoff = (params.cutoff * octaves.exp2()).clamp(20.0, 0.4 * rate);
+        let cutoff =
+            (params.cutoff * octaves.exp2()).clamp(20.0, HIGHEST_CUTOFF_HZ.min(0.4 * rate));
         let g = (PI * cutoff / (2.0 * rate)).tan() / PEAK_RATIO;
         let resonance = params.resonance + ACCENT_RESONANCE * params.accent * self.sweep;
         let k = feedback(resonance);

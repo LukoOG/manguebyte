@@ -125,8 +125,9 @@ pub struct OrganParams {
     /// How much louder an accented note is, in decibels, 0 to 24. An
     /// accented note also clicks harder.
     pub accent_db: f64,
-    /// The output level, as a gain, 0 to 4. A note with three drawbars all
-    /// the way out peaks near 0.5 at the default.
+    /// The output level, as a gain, 0 to 4. At the default of 0.06 a note
+    /// with three drawbars all the way out peaks near -15 dBFS, so that
+    /// chords of five or six notes have room.
     pub level: f64,
 }
 
@@ -147,7 +148,7 @@ impl OrganParams {
             leakage: 0.4,
             velocity: 0.0,
             accent_db: 2.0,
-            level: 0.18,
+            level: 0.06,
         }
     }
 
@@ -184,7 +185,7 @@ impl OrganParams {
         Self {
             click: 0.7,
             leakage: 0.6,
-            level: 0.09,
+            level: 0.03,
             ..Self::registration("888888888")
         }
     }
@@ -205,7 +206,7 @@ impl OrganParams {
             leakage: setting(self.leakage, 0.0, 1.0, 0.4),
             velocity: setting(self.velocity, 0.0, 1.0, 0.0),
             accent_db: setting(self.accent_db, 0.0, 24.0, 2.0),
-            level: setting(self.level, 0.0, 4.0, 0.18),
+            level: setting(self.level, 0.0, 4.0, 0.06),
         }
     }
 
@@ -931,8 +932,8 @@ mod tests {
         let late = third(&signal, 0.31, 0.38, 67);
         let after = third(&signal, 0.71, 0.78, 72);
         println!("percussion: chord {chord:.4}, late {late:.5}, after {after:.4}");
-        assert!(chord > 0.05 && after > 0.05);
-        assert!(late < 1e-3, "{late}");
+        assert!(chord > 0.3 * params.level && after > 0.3 * params.level);
+        assert!(late < 0.01 * params.level, "{late}");
         assert_eq!(synth.voices_mut().next().unwrap().manual().held_keys(), 1);
 
         // Voices on manuals of their own trigger on every note.
@@ -943,7 +944,7 @@ mod tests {
             frame(0.4),
             128,
         );
-        assert!(third(&signal, 0.31, 0.38, 67) > 0.05);
+        assert!(third(&signal, 0.31, 0.38, 67) > 0.3 * params.level);
     }
 
     #[test]
