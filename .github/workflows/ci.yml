@@ -50,6 +50,7 @@ jobs:
           path: |
             target/tmp/golden-failures
             target/tmp/ui-golden-failures
+            target/tmp/gui-golden-failures
           if-no-files-found: ignore
 
   features:
@@ -91,7 +92,25 @@ jobs:
       - run: cargo miri test -p manguebyte-vst3
         env:
           RUSTFLAGS: ""
+      # The LV2 wrapper meets its host through C, like the other two. Its
+      # tests act as a host through the real descriptor; the one that needs
+      # a variadic C function in the test host runs only outside Miri.
+      - run: cargo miri test -p manguebyte-lv2
+        env:
+          RUSTFLAGS: ""
       - run: cargo miri test -p manguebyte-analysis --lib triple_buffer --test triple_buffer
+        env:
+          RUSTFLAGS: ""
+      # The window crate's platform-independent parts: damage, pixel
+      # conversion, pointer state, dispatch and the headless backend. The
+      # Win32 backend calls the system, which Miri cannot run.
+      - run: cargo miri test -p manguebyte-window --lib --test headless
+        env:
+          RUSTFLAGS: ""
+      # The browser engine's WebAssembly exports, called natively: every
+      # one of them is `unsafe extern "C"` on raw pointers from JavaScript.
+      # The tests shorten their loops under Miri.
+      - run: cargo miri test -p manguebyte-web --test ffi
         env:
           RUSTFLAGS: ""
 
@@ -204,7 +223,8 @@ jobs:
           validator="$(find "$RUNNER_TEMP/vst3-validator" -type f -name 'validator*' | head -n 1)"
           for plugin in "Mangue Pluck" "Mangue Duck"; do
             "$validator" -e "target/bundled/$plugin.vst3" > validation.txt || true
-            # The full log lists two thousand hidden controller parameters.
+            # The full log lists every parameter, the hidden ones that stand
+            # for MIDI controllers included, and a line after every test.
             grep -v "Parameter [0-9]* (id=" validation.txt | grep -v "^\[Succeeded\]$" | grep -v "^$" | tail -n 60
             grep -Eq "Result: [1-9][0-9]* tests passed, 0 tests failed" validation.txt
           done
@@ -225,6 +245,122 @@ jobs:
       # Generates a plugin of each kind against this checkout, builds it and
       # bundles it, which on macOS includes the ad-hoc signature.
       - run: cargo test -p cargo-mangue -- --ignored
+
+  wasm:
+    name: WebAssembly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The browser engine and the sampler build for the web with no
+      # system around them.
+      - run: cargo build -p manguebyte-web -p manguebyte-sampler --target wasm32-unknown-unknown
+      # The sampler's module plays notes in Node.js and checks their pitch;
+      # it fails if the module imports anything. A debug build, because its
+      # hostile-file check relies on overflow traps.
+      - run: |
+          cargo build -p manguebyte-sampler --example wasm_smoke --target wasm32-unknown-unknown
+          node crates/manguebyte-sampler/examples/wasm_smoke.mjs \
+            target/wasm32-unknown-unknown/debug/examples/wasm_smoke.wasm
+      # The engine's JavaScript (record encoder, ring, worklet, demo server)
+      # against the module just built. Tests that need the module skip
+      # without it, so a run that skipped any fails.
+      - name: Test the engine's JavaScript
+        env:
+          MANGUEBYTE_WASM: target/wasm32-unknown-unknown/debug/manguebyte_web.wasm
+        run: |
+          test -f "$MANGUEBYTE_WASM"
+          node --test --test-reporter=tap "crates/manguebyte-web/js/tests/*.test.mjs" | tee node-tests.txt
+          grep -Eq "^# fail 0$" node-tests.txt
+          grep -Eq "^# skipped 0$" node-tests.txt
+
+  lv2:
+    name: LV2 bundles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # lv2lint is not in the Ubuntu archive (docs/TECH_DEBT.md). lilv, the
+      # LV2 project's host library, is: its tools find the bundles the way
+      # a host does, from their Turtle files, and read every port.
+      - name: Install lilv
+        run: sudo apt-get update && sudo apt-get install -y lilv-utils lv2-dev
+      - run: cargo run -p cargo-mangue -- mangue bundle -p mangue-pluck --format lv2 --release --out target/lv2
+      - run: cargo run -p cargo-mangue -- mangue bundle -p mangue-duck --format lv2 --release --out target/lv2
+      - name: Load the bundles with lilv
+        run: |
+          export LV2_PATH="$PWD/target/lv2:/usr/lib/lv2"
+          lv2ls | tee plugins.txt
+          for uri in urn:manguebyte:org.manguebyte.pluck urn:manguebyte:org.manguebyte.duck; do
+            grep -Fxq "$uri" plugins.txt
+            lv2info "$uri"
+          done
+
+  window-probe:
+    name: Window probe (Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Opens a child window inside a top-level window, presents a known
+      # pattern and reads the pixels back from the screen (ADR 0007,
+      # decision 8). It exits 0 on PASS, 1 on FAIL and 2 on CANNOT, when the
+      # session cannot read windows back at all. Any of those but PASS fails
+      # the job, so a runner that stops showing windows is noticed. No job
+      # sets MANGUEBYTE_WINDOW_SKIP_READ_BACK: without read-back, the Win32
+      # pixel tests must fail rather than pass.
+      - run: cargo run -p manguebyte-window --example probe
+      # Two plugin binaries in one process, each with its editor open in a
+      # real window (ADR 0007, decision 7), as they ship: release bundles,
+      # without the test features the debug libraries are built with.
+      - run: ./scripts/bundle-clap.sh mangue-duck "Mangue Duck"
+      - run: ./scripts/bundle-clap.sh mangue-pluck "Mangue Pluck"
+      - run: cargo test -p mangue-duck --test two_binaries -- --ignored
+
+  layering:
+    name: Layering
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # No crate that processes audio may depend on an interface crate
+      # (gfx, ui, window, gui), with every feature and target resolved
+      # (ADR 0001, ADR 0007). Only resolves dependencies; builds nothing.
+      - run: bash scripts/check-layering.sh
+      # Cargo puts every package's examples in one folder, so two with one
+      # name overwrite each other (on Windows the second link fails).
+      - name: No two examples share a name
+        run: |
+          cargo metadata --no-deps --format-version 1 | python3 -c '
+          import collections, json, sys
+          names = collections.Counter(
+              target["name"]
+              for package in json.load(sys.stdin)["packages"]
+              for target in package["targets"]
+              if "example" in target["kind"]
+          )
+          shared = sorted(name for name, count in names.items() if count > 1)
+          print("examples:", len(names), "shared names:", shared)
+          sys.exit(1 if shared else 0)
+          '
+
+  licences:
+    name: Licences
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Every dependency's licence against the list in deny.toml.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
 
   msrv:
     name: Minimum supported Rust version
