@@ -193,6 +193,9 @@ Reading recorded so far:
   uses on Windows only: `#![no_std]`, no build script, only types,
   constants and function declarations, linked through `windows-link`'s
   `raw-dylib` macro. No statics, no threads, no operating-system names.
+  The modules turned on later for text entry (`System_DataExchange` and
+  `System_Memory` for the clipboard, `UI_Input_Ime` for placing an input
+  method's windows, from imm32.dll) are the same: declarations only.
 
 How `manguebyte-window` itself keeps the rule on Win32: its window class is
 named after the framework's version, the module handle of the binary it is
@@ -212,7 +215,12 @@ top-level windows, run message loops or set a thread's DPI awareness for
 tests are behind the crate's `testing` feature, which only tests and the
 probe turn on. `manguebyte-gui` has no `unsafe` code, keeps no global
 state and starts no thread; everything it asks of the system goes through
-`manguebyte-window`.
+`manguebyte-window`. The system caret, which input methods and screen
+magnifiers follow, belongs to the thread, not the window: a window makes
+one only while it has the keyboard and text is being typed into it, and
+destroys it when it loses the keyboard, as the system's convention asks,
+so it never takes the caret of a host's own field. The clipboard is
+opened for one read or write and closed before the call returns.
 
 **8. Verification.** A probe job opens a window and reads its pixels back on
 the three CI systems before any backend depends on that. Scenes are checked
@@ -291,6 +299,18 @@ host yet: that is what is left of item 9.
 
 Not in phase 1: macOS and X11 backends, platform accessibility adapters,
 resizing, popups, text entry, GPU code, hot reloading of themes.
+
+Built since, on the same rules: text entry (a text field, values typed
+into knobs and sliders, the clipboard, input methods' committed text),
+popup menus and a combo box, hover and tooltips. Menus and tooltips are
+not windows of their own: the root draws them over the interface, inside
+the editor's window, as ordinary widgets it adds after the interface's
+own and takes away when they close, so they need no second system window,
+no window class and nothing a host would have to embed, and they are
+tested headless like everything else. The price is that a menu cannot
+reach past the editor's window: one taller than the room above and below
+its widget starts at the top and is cut at the bottom, as menus do not
+scroll yet.
 
 ## Consequences
 

@@ -189,7 +189,9 @@ our own, and nothing claimed before its test exists.
   a host by hand
 - 🚧 Layout, styling and a widget set (`manguebyte-ui`): row, column and
   stack layout, theme tokens, label, knob, slider, toggle, meter and canvas
-  done; text entry, menus and popups not started
+  done; text entry (a text field, and values typed into knobs and
+  sliders, with the clipboard), popup menus with submenus, a combo box,
+  hover and tooltips done; drag and drop, scrolling and lists not started
 - ⬜ Audio widgets: waveform, spectrum, keyboard, envelope and EQ editors
 - 🚧 Accessibility: every widget describes itself (the method has no
   default) and the test harness finds widgets only that way; platform

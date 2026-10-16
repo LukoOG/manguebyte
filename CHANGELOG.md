@@ -271,6 +271,86 @@ display, and no editor has been opened inside a real host yet.
     allocator, fuzz the hosts' calls, and compare it with golden images at
     scales 1 and 2. On Windows, a test embeds it in a real window and reads
     its pixels back.
+- Text entry. `manguebyte-ui` has `text_field`, one line of text kept in a
+  `State<String>`: a caret and a selection, by the pointer (click, drag,
+  double and triple click, Shift) and by keys (arrows by cluster, and by
+  word with Control or Option; Home, End, Backspace, Delete, Control with
+  A, C, X and V, and the Insert forms), with a filter hook for characters,
+  a validation hook for the text, a bounded length, Enter to take the edit,
+  Escape to throw it away and losing the focus to take it. Knobs and
+  sliders open their value to be typed on a double click or Enter, read by
+  the parameter's own parser (`ParamHandle::parse`) and sent as one
+  gesture, or not at all if the text was left as it was; a click with Alt,
+  Control or Command now puts the default back,
+  which a double click used to. Typed characters arrive as `Event::Text`,
+  in the person's layout; input methods have a protocol of their own
+  (`Event::Composition`), which the widgets follow and no backend sends
+  yet. Copy and paste go through a `Clipboard` the root is given, a
+  `MemoryClipboard` unless it is given another. Widgets hear focus changes
+  (`Widget::focus_changed`) and give their caret (`Widget::caret`); the
+  root says when the focused widget takes text (`Root::wants_text`), and
+  uses the release of every key whose press it used. Accessibility: the
+  `TextInput` role and an editable state, and `assert_accessible` checks
+  text inputs and the contrast of text on the selection.
+- `manguebyte-window` has the clipboard (`Window::clipboard`, the system's
+  Unicode text on Win32, opened per call; one of the window's own when
+  headless, read and filled through `Headless`), `take_focus`, and
+  `set_text_caret`: on Win32 a hidden system caret, made only while the
+  window has the keyboard, and the input method asked to compose there
+  and list its candidates below. Typed text from input methods arrives as
+  the system turns it into `WM_CHAR`. The `testing` feature adds
+  `system_caret`, `composition_window` and `HeldKeys`, which holds keys in
+  the thread's keyboard state.
+- `manguebyte-gui` gives typed text to the interface, the window's
+  clipboard to its root, and the caret to the window. While the interface
+  takes text the window asks a host's dialog for every key, and the editor
+  takes the keyboard when typing starts while the host has it. Keys a
+  VST 3 host delivers through `onKeyDown` type their characters too, and a
+  keystroke that arrives both through the host and through the window
+  before the next frame is taken once. The crate documents what each
+  format does about the keyboard on Win32.
+- Popup menus and a combo box. A widget opens a `Menu` of `MenuItem`s
+  (choices with ids, check marks, disabled items, separators and submenus)
+  with `EventCx::open_menu`, below or above itself as there is room and at
+  least as wide, or with `EventCx::open_menu_at`, at a point; it hears the
+  result as `Event::Menu` (`MenuEvent::Chosen` or `Closed`). Menus are
+  drawn by the interface's own renderer over everything else, inside the
+  editor's window, as ordinary widgets added after the interface's own;
+  submenus open beside their item, on the left where the right has no
+  room. The pointer hovers, clicks, and chooses by press, drag and
+  release; a press outside closes every menu and does nothing else. Keys:
+  Up, Down, Home, End, Enter, Space, Right and Left for submenus, Escape
+  and Tab, and a typed letter to jump; every key is the menu's while one
+  is open. The keyboard focus is on the highlighted item and comes back
+  to the widget that had it. The window losing the keyboard closes them.
+  `combo` lists a stepped parameter's values in its own words (at most
+  `MAX_CHOICES`), the current one checked, and sends a choice as one
+  gesture; Up and Down and the wheel step through the values while it is
+  closed. Accessibility: the `ComboBox`, `Menu`, `MenuItem` and
+  `Separator` roles, an expanded state, and `assert_accessible` checks
+  combo boxes and text on the track colour that marks a menu's
+  highlighted item. `layout::natural_size` gives a tree's natural size.
+  `manguebyte-gui` asks a host's dialog for every key while a menu is open.
+- Hover and tooltips. The widget under the pointer, while no button is
+  held, is the hovered one: it hears it (`Widget::hover_changed`) and can
+  draw it (`PaintCx::is_hovered`); `Root::hovered` says which it is, and
+  `Event::PointerLeave` (from the window's own) ends it. A view given a
+  `tooltip` shows it in a small panel below the pointer once the pointer
+  has rested on the view, or on a widget inside it, for `TOOLTIP_DELAY`
+  (500 ms) on the frame clock; it goes when the pointer leaves, and with a
+  press, a key, a wheel turn, a menu or the window losing the keyboard,
+  and after a press or a key comes back only once the pointer has been
+  elsewhere. The text is also the view's description for assistive
+  technology (`AccessNode::description`), shown or not, and a shown
+  tooltip has the `Tooltip` role.
+- Labels measure their text rounded up and a pixel more, as the controls
+  do, so a label given just its natural width is no longer cut with an
+  ellipsis.
+- Breaking, in `manguebyte-ui`: `AccessState` gains `editable` and
+  `expanded`, and `AccessNode` gains `description`, so building either
+  with a struct literal needs the new fields (`AccessNode::new` and its
+  `with_` methods are unchanged); a double click on a knob or a slider
+  types a value instead of putting the default back.
 - `Param::stored_plain` says what a parameter would store for a value,
   without storing it.
 
