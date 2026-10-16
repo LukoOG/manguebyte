@@ -438,6 +438,48 @@ fn going_elsewhere_takes_a_value_that_reads_and_drops_one_that_does_not() {
     assert!((value - (3.0 + 24.0 * 0.1)).abs() < 1e-3, "{value}");
 }
 
+/// A value opened and left as it was sends nothing: its text is the value
+/// rounded to the parameter's precision, and reading it back would move
+/// the parameter.
+#[test]
+fn a_value_left_as_it_was_sends_nothing() {
+    let (params, mut ui) = panel();
+    // 1234.6 Hz shows as "1235 Hz", which would read back as 1235.
+    params.cutoff.set(1234.6);
+    let before = params.cutoff.value();
+    ui.frame();
+    let cutoff = ui.get(Role::Slider, "Cutoff");
+    assert_eq!(cutoff.value_text(), Some("1235 Hz"));
+    ui.tab();
+    ui.tab();
+    assert!(ui.key(Key::Enter));
+    ui.frame();
+    assert_eq!(
+        ui.get(Role::TextInput, "Cutoff").value_text(),
+        Some("1235 Hz")
+    );
+    assert!(ui.key(Key::Enter), "Enter takes it, and it was not changed");
+    assert!(ui.take_calls().is_empty());
+    assert_eq!(params.cutoff.value(), before);
+    // Nor does going elsewhere.
+    assert!(ui.key(Key::Enter));
+    ui.click(ui.get(Role::Slider, "Drive").center());
+    assert!(
+        !ui.take_calls()
+            .iter()
+            .any(|call| matches!(call, BeginGesture(id) if *id == params.cutoff.param_id()))
+    );
+    assert_eq!(params.cutoff.value(), before);
+    // Typed and typed back, it is the same text: nothing either.
+    ui.double_click(cutoff.center());
+    ui.take_calls();
+    ui.key(Key::End);
+    ui.type_text("0");
+    ui.key(Key::Backspace);
+    ui.key(Key::Enter);
+    assert!(ui.take_calls().is_empty());
+}
+
 #[test]
 fn the_release_of_a_key_whose_press_was_used_is_used_too() {
     let (_, mut ui) = panel();

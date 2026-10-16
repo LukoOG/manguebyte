@@ -23,6 +23,8 @@ struct Entry {
     edit: TextEdit,
     /// Enter was pressed on text that reads as no value.
     invalid: bool,
+    /// The value's text when typing began.
+    shown: String,
 }
 
 /// The style a value is typed in: the value's, in the text colour, from
@@ -80,9 +82,11 @@ impl Adjust {
     fn open_entry(&mut self, cx: &mut EventCx<'_>) {
         let mut edit = TextEdit::new(ENTRY_CHARS);
         edit.set_text(&self.binding.text());
+        let shown = edit.text().to_owned();
         self.entry = Some(Entry {
             edit,
             invalid: false,
+            shown,
         });
         cx.request_focus();
         cx.request_paint();
@@ -95,6 +99,13 @@ impl Adjust {
             return true;
         };
         cx.request_paint();
+        if entry.edit.text() == entry.shown {
+            // Left as it was: nothing to send. The text is the value shown
+            // rounded to the parameter's precision, and reading it back
+            // could move the value.
+            self.entry = None;
+            return true;
+        }
         match self.binding.handle().parse(entry.edit.text()) {
             Some(value) => {
                 self.entry = None;
