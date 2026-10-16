@@ -792,8 +792,11 @@ mod tests {
         // one instant, it never sees two of the passing keys held within a
         // group, because the writer never holds two. Key 126, held
         // throughout, is there in every read.
+        // The loop checks `done` after reading, so it reads at least once
+        // even when the writer finishes before this thread gets going.
         let mut reads = 0u32;
-        while !done.load(Ordering::Acquire) {
+        loop {
+            let finished = done.load(Ordering::Acquire);
             let sounding = keyboard.sounding(0);
             assert!(sounding.iter().all(|note| note % 2 == 0), "{sounding:?}");
             assert!(sounding.contains(126), "{sounding:?}");
@@ -810,6 +813,9 @@ mod tests {
             assert!(keyboard.is_down(0, 126) && keyboard.is_sounding(0, 126));
             assert_eq!(keyboard.velocity(0, 126), 99);
             reads += 1;
+            if finished {
+                break;
+            }
         }
         writer.join().unwrap();
         assert!(reads > 0);

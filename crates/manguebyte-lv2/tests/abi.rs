@@ -435,22 +435,47 @@ impl Offer {
 
 /// The features and everything they point at, kept in place while the
 /// instance lives.
+///
+/// The plugin holds pointers into every one of them, so each is a `Kept`:
+/// moving a `Box` asserts unique access to what it owns and would
+/// invalidate those pointers (Miri reports it), while moving a `Kept`
+/// moves only a raw pointer.
 struct Features {
-    _map: Box<LV2_URID_Map>,
-    _max_block: Box<i32>,
-    _options: Box<[LV2_Options_Option]>,
-    _log: Box<LV2_Log_Log>,
-    _features: Box<[LV2_Feature]>,
-    list: Box<[*const LV2_Feature]>,
+    _map: Kept<LV2_URID_Map>,
+    _max_block: Kept<i32>,
+    _options: Kept<[LV2_Options_Option]>,
+    _log: Kept<LV2_Log_Log>,
+    _features: Kept<[LV2_Feature]>,
+    list: Kept<[*const LV2_Feature]>,
+}
+
+/// A heap value owned through a raw pointer, freed on drop.
+struct Kept<T: ?Sized>(*mut T);
+
+impl<T: ?Sized> Kept<T> {
+    fn new(value: Box<T>) -> Self {
+        Self(Box::into_raw(value))
+    }
+
+    fn as_ptr(&self) -> *mut T {
+        self.0
+    }
+}
+
+impl<T: ?Sized> Drop for Kept<T> {
+    fn drop(&mut self) {
+        // SAFETY: the pointer came from `Box::into_raw` and is freed once.
+        drop(unsafe { Box::from_raw(self.0) });
+    }
 }
 
 impl Features {
     fn new(offer: Offer) -> Self {
-        let mut map = Box::new(LV2_URID_Map {
+        let map = Kept::new(Box::new(LV2_URID_Map {
             handle: (&raw const MAP_HANDLE).cast_mut().cast(),
             map: Some(map_uri),
-        });
-        let mut max_block = Box::new(offer.max_block.unwrap_or(0));
+        }));
+        let max_block = Kept::new(Box::new(offer.max_block.unwrap_or(0)));
         let mut options = Vec::new();
         if offer.max_block.is_some() {
             options.push(LV2_Options_Option {
@@ -459,7 +484,7 @@ impl Features {
                 key: urid(LV2_BUF_SIZE__maxBlockLength),
                 size: 4,
                 type_: urid(LV2_ATOM__Int),
-                value: (&raw mut *max_block).cast_const().cast(),
+                value: max_block.as_ptr().cast_const().cast(),
             });
         }
         options.push(LV2_Options_Option {
@@ -470,7 +495,7 @@ impl Features {
             type_: 0,
             value: ptr::null(),
         });
-        let mut options = options.into_boxed_slice();
+        let options = Kept::new(options.into_boxed_slice());
         let printf: Option<Printf> = if cfg!(all(target_arch = "x86_64", not(miri))) {
             // SAFETY: see `host_printf`.
             Some(unsafe {
@@ -487,30 +512,34 @@ impl Features {
         } else {
             None
         };
-        let mut log = Box::new(LV2_Log_Log {
+        let log = Kept::new(Box::new(LV2_Log_Log {
             handle: ptr::null_mut(),
             printf,
             vprintf: None,
-        });
+        }));
         let mut features = Vec::new();
         if offer.map {
             features.push(LV2_Feature {
                 URI: LV2_URID__map.as_ptr(),
-                data: (&raw mut *map).cast(),
+                data: map.as_ptr().cast(),
             });
         }
         features.push(LV2_Feature {
             URI: LV2_OPTIONS__options.as_ptr(),
-            data: options.as_mut_ptr().cast(),
+            data: options.as_ptr().cast(),
         });
         if offer.log {
             features.push(LV2_Feature {
                 URI: LV2_LOG__log.as_ptr(),
-                data: (&raw mut *log).cast(),
+                data: log.as_ptr().cast(),
             });
         }
-        let features = features.into_boxed_slice();
-        let mut list: Vec<*const LV2_Feature> = features.iter().map(ptr::from_ref).collect();
+        let count = features.len();
+        let features = Kept::new(features.into_boxed_slice());
+        let first = features.as_ptr().cast::<LV2_Feature>().cast_const();
+        // SAFETY: every index is within the `count` features.
+        let mut list: Vec<*const LV2_Feature> =
+            (0..count).map(|i| unsafe { first.add(i) }).collect();
         list.push(ptr::null());
         Self {
             _map: map,
@@ -518,7 +547,7 @@ impl Features {
             _options: options,
             _log: log,
             _features: features,
-            list: list.into_boxed_slice(),
+            list: Kept::new(list.into_boxed_slice()),
         }
     }
 }
@@ -693,7 +722,11 @@ impl<P: Plugin> Host<P> {
                 descriptor.as_ptr(),
                 offer.sample_rate,
                 c"/nowhere/".as_ptr(),
-                features.list.as_ptr(),
+                features
+                    .list
+                    .as_ptr()
+                    .cast::<*const LV2_Feature>()
+                    .cast_const(),
             )
         };
         if handle.is_null() {
@@ -940,8 +973,16 @@ fn the_exported_descriptor_names_the_plugin_and_its_state_extension() {
     assert!(exported.deactivate.is_some() && exported.cleanup.is_some());
     let features = Features::new(Offer::USUAL);
     unsafe {
-        let handle =
-            exported.instantiate.unwrap()(exported, 44_100.0, c"".as_ptr(), features.list.as_ptr());
+        let handle = exported.instantiate.unwrap()(
+            exported,
+            44_100.0,
+            c"".as_ptr(),
+            features
+                .list
+                .as_ptr()
+                .cast::<*const LV2_Feature>()
+                .cast_const(),
+        );
         assert!(!handle.is_null());
         exported.activate.unwrap()(handle);
         exported.run.unwrap()(handle, 16);
