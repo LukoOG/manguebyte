@@ -1164,6 +1164,53 @@ display, and no editor has been opened inside a real host yet.
 
 ### File formats
 
+- `opus`: an Ogg Opus decoder written from RFC 6716, its updates in RFC
+  8251, and RFC 7845: SILK in fixed point, bit for bit as the reference
+  decodes it, with its stereo prediction and resampler; CELT at every
+  bandwidth and frame size, transients, intensity and dual stereo and the
+  post-filter; hybrid frames; the redundant frames of a change of mode;
+  packets of up to 120 ms; multistream packets of up to 255 channels with
+  the mappings of RFC 7845, handed out in the order of WAV. Pre-skip, end
+  trimming and the output gain are applied: files libopus wrote decode to
+  exactly the length encoded, SILK alone bit for bit as libopus decodes
+  it, CELT within 8e-5 (within 1.1e-6 with the `2^x` approximation of the
+  libopus FFmpeg links). `AudioReader` reads it block by block and seeks
+  exactly within reach of what it has decoded, and with 800 ms of
+  pre-roll elsewhere. Lost and empty packets come out as silence: there is
+  no packet loss concealment. `FileFormat` has the variant `OggOpus` and
+  `FormatError` the variant `Opus`.
+- `vorbis::write` and `AudioWriter::vorbis`: an Ogg Vorbis encoder written
+  from the Vorbis I specification, at a variable bitrate of quality 0 to
+  10 (`VorbisOptions`), 1 to 255 channels at any rate. The forward MDCT
+  with long and short blocks switched at transients, floors of type 1
+  fitted to a masking model (Zwicker's critical bands, Johnston's
+  tonality, Terhardt's threshold in quiet), residues of type 2 for one or
+  two channels and of type 1 for more, square polar stereo coupling, and
+  Huffman codebooks designed from counts of what it codes, sent in the
+  setup header and read back with the decoder's own parser. Comments and
+  pictures (`METADATA_BLOCK_PICTURE`) come from `Metadata`. Lengths are
+  exact through this decoder, FFmpeg's and libvorbis. On the stereo test
+  signal at 44.1 kHz: 77, 124 and 173 kbit/s at qualities 0, 5 and 10,
+  the noise 0.4, 11 and 23 dB under an independent masking measure, 40 to
+  300 times faster than real time.
+- `mp3::write` and `AudioWriter::mp3`: an MP3 encoder written from
+  ISO/IEC 11172-3, MPEG-1 layer III at 32, 44.1 and 48 kHz, mono or
+  stereo, at a constant bitrate of 32 to 320 kbit/s or a variable one of
+  quality 0 to 10 (`Mp3Options`). The polyphase analysis filter bank and
+  MDCT of Annex C with the decoder's tables, short blocks at attacks,
+  mid/side stereo when it is cheaper, quantisation to the masking model,
+  the bit reservoir, Huffman tables and regions chosen for the fewest
+  bits, and a Xing or Info header with a LAME tag of delay and padding, so
+  that this decoder and FFmpeg give back exactly the samples encoded. Tags
+  and pictures go into an ID3v2.4 tag. FFmpeg's floating-point decoder
+  comes within 1.2e-6 of this crate's on what it writes. On the stereo
+  test signal at 44.1 kHz the noise lies 2.8, 7.6 and 14.5 dB under the
+  masking measure at 128, 192 and 320 kbit/s; 25 to 50 times faster than
+  real time in stereo.
+- The masking model and transient detector the two encoders share are
+  in a module of their own; a test helper measures the noise-to-mask
+  ratio of a decode against its source with a model apart from theirs.
+
 - `metadata`: one model for what files say beside their audio, the same
   for every format. Typed fields for title, artist, album, date, track,
   genre, comment, copyright, tempo, key, ISRC, the Broadcast Wave

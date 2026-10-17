@@ -120,9 +120,13 @@ Everything a standalone audio application needs, short of a user interface.
 - ✅ FLAC decoding
 - ✅ Recognising a file's format from its contents
 - ✅ Ogg Vorbis and MP3 decoding, with sample-exact seeking
-- ⬜ Opus decoding
+- ✅ Opus decoding: SILK, CELT, hybrid and multistream, gapless, with
+  seeking
 - ✅ FLAC encoding, checked against FFmpeg
-- ⬜ Ogg Vorbis encoding
+- ✅ Ogg Vorbis encoding, at qualities 0 to 10
+- ✅ MP3 encoding: MPEG-1 layer III, constant and variable bitrate,
+  gapless
+- ⬜ Opus encoding
 - ✅ Metadata, cue points and loop markers: one model for every format,
   read and written where the format allows, unknown chunks kept
 - ✅ MPEG audio layers I and II
