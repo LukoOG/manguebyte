@@ -176,8 +176,10 @@ const SCOOP_SECONDS: f64 = 0.08;
 /// How many times more than the breath its noise wavers.
 const NOISE_WAVER: f64 = 3.0;
 
-/// How long the extra pressure a high note takes moves to a slurred note's.
+/// How long the extra pressure a high note takes moves to a slurred note's,
+/// and the level of a slurred note to its velocity's.
 const LIFT_SECONDS: f64 = 0.01;
+const GAIN_SECONDS: f64 = 0.01;
 
 /// How long after a slur the ear starts to listen again: soon, so that it
 /// has done its work while the note is still speaking.
@@ -725,6 +727,7 @@ struct WindTone {
     jet_scale: f64,
     /// The bell's steepening at high levels (brass).
     steep: DelayLine<f64>,
+    steep_most: f64,
     brassiness: f64,
     /// The radiated sound's tilt with the breath: the cut-offs at no breath
     /// and at full, in hertz, and the low-pass's memory.
@@ -734,7 +737,11 @@ struct WindTone {
     tone: StateVariableFilter<f64>,
     out_dc: DcBlock,
     level: f64,
+    /// The level the velocity and an accent give, and the one it moves to
+    /// at a slur, smoothly: a step would be a click.
     gain: f64,
+    gain_target: f64,
+    gain_follow: f64,
     follower: f64,
     follower_fall: f64,
     sounding: bool,
@@ -818,6 +825,7 @@ impl WindTone {
             jet_last: 0.0,
             jet_scale: 1.0,
             steep: DelayLine::new(16),
+            steep_most: 0.0,
             brassiness: 0.0,
             tilt: (0.0, 0.0),
             tilt_memory: 0.0,
@@ -826,6 +834,8 @@ impl WindTone {
             out_dc: DcBlock::default(),
             level: 0.0,
             gain: 1.0,
+            gain_target: 1.0,
+            gain_follow: 1.0,
             follower: 0.0,
             follower_fall: 0.0,
             sounding: false,
@@ -855,6 +865,7 @@ impl WindTone {
         self.onset_rise = 1.0 - (-1.0 / (CHIFF_RISE * rate)).exp();
         self.scoop_fall = t60_factor(SCOOP_SECONDS, rate);
         self.lift_follow = 1.0 - (-1.0 / (LIFT_SECONDS * rate)).exp();
+        self.gain_follow = 1.0 - (-1.0 / (GAIN_SECONDS * rate)).exp();
         self.jet_follow = 1.0 - (-1.0 / (JET_FOLLOW_SECONDS * rate)).exp();
         self.noise_low_pole = (-TAU * BREATH_LOW / rate).exp();
         self.ear_wait = (EAR_WAIT * rate) as u32;
@@ -1048,6 +1059,7 @@ impl WindTone {
             self.gap.stop();
             self.aim(params, key);
             self.lift = self.lift_target;
+            self.steep_most = (STEEPENING * rate / key_hz(key + self.bend)).min(STEEP_MOST);
             self.jet_period = rate / key_hz(key + self.bend).clamp(LOWEST_HZ, HIGHEST_RATIO * rate);
             self.ear_wait = (EAR_WAIT * rate) as u32;
         } else {
@@ -1155,6 +1167,7 @@ impl WindTone {
         let chiff = fade * CHIFF_GAIN * self.chiff * self.onset;
         let air = self.noise_level * level * (envelope + chiff) * waver;
         self.lift += (self.lift_target - self.lift) * self.lift_follow;
+        self.gain += (self.gain_target - self.gain) * self.gain_follow;
 
         let bore_delay = (self.length(period * self.ear) + self.bore_offset).max(1.0);
         let mut inc = self.bore.read_cubic(bore_delay);
@@ -1325,12 +1338,11 @@ impl WindTone {
         }
         self.heard_last = pressure;
 
+        // The radiation's first pole; a brass bell's second is taken after
+        // the steepening, which bends the wave as it travels and would
+        // otherwise let the slow swell of its own asymmetry out as a thump.
         let mut out = match self.kind {
-            WindKind::Brass => {
-                let [first, second] = &mut self.radiation;
-                second.step(first.step(out))
-            }
-            WindKind::Saxophone => self.radiation[0].step(out),
+            WindKind::Brass | WindKind::Saxophone => self.radiation[0].step(out),
             WindKind::Clarinet | WindKind::Flute => out,
         };
         if self.tilt.1 > 0.0 {
@@ -1354,10 +1366,18 @@ impl WindTone {
             // JASA 99, 1996): a delay that is shorter for the crests.
             // The crests run ahead by up to a fraction of the period: the
             // bore is about as long as a period's travel.
+            // How far the crests can run ahead follows the period smoothly:
+            // a jump at a slur would read the line from another moment, a
+            // click.
             let most = (STEEPENING * period).min(STEEP_MOST);
+            self.steep_most += (most - self.steep_most) * self.lift_follow;
+            let most = self.steep_most;
             self.steep.push(out);
             let lead = self.brassiness * most * (BLARE_SCALE * out).tanh();
             out = self.steep.read_cubic(most + 2.0 - lead);
+        }
+        if self.kind == WindKind::Brass {
+            out = self.radiation[1].step(out);
         }
         let out = self.out_dc.step(self.tone.process_sample(0, out + heard));
         // A tongued note is heard louder at its start.
@@ -1626,9 +1646,10 @@ impl<S: Sample> Voice<S> for WindVoice {
         let tone = &mut self.tones.now;
         if !tone.sounding {
             tone.kind = params.kind;
+            tone.gain = gain;
         }
         tone.bend = bend;
-        tone.gain = gain;
+        tone.gain_target = gain;
         tone.start(
             &params,
             f64::from(self.key),
@@ -1646,7 +1667,7 @@ impl<S: Sample> Voice<S> for WindVoice {
         }
         let params = self.params;
         self.key = note.key.min(127);
-        self.tones.now.gain = self.gain(velocity, accent);
+        self.tones.now.gain_target = self.gain(velocity, accent);
         self.tones
             .now
             .slur(&params, f64::from(self.key), Self::breath(velocity, accent));
@@ -2120,11 +2141,32 @@ mod tests {
         // no 2 ms window above 8 kHz is more than 10 dB over the notes' own
         // level there (the air of the slur is a few decibels), and nothing
         // below half the lower note (a thump) comes within 20 dB of the
-        // tone.
+        // tone. Also for a slur down a fifth onto a louder, accented note,
+        // whose level the slur takes over 10 ms.
         for (name, params, low, high) in presets() {
             let middle = (low + high) / 2;
-            for (first, second) in [(middle, middle + 2), (middle, middle - 5)] {
-                let signal = slurred(still(params), first, second, 0.8);
+            for (first, second, accent) in [
+                (middle, middle + 2, false),
+                (middle, middle - 5, false),
+                (middle, middle - 7, true),
+            ] {
+                let signal = if accent {
+                    let mut synth = synth_of(voice(still(params)));
+                    synth.set_legato(true);
+                    let at = (1.0 * RATE) as usize;
+                    play(
+                        &mut synth,
+                        &[
+                            (0, on(first, 0.6)),
+                            (at, accented(second, 0.9)),
+                            (at + 10, off(first)),
+                        ],
+                        (2.0 * RATE) as usize,
+                        256,
+                    )
+                } else {
+                    slurred(still(params), first, second, 0.8)
+                };
                 let steps = largest_jump(between(&signal, 0.6, 0.98))
                     .max(largest_jump(between(&signal, 1.3, 1.9)));
                 let change = largest_jump(between(&signal, 0.995, 1.06));
