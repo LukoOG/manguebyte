@@ -951,9 +951,9 @@ fn flood<V: Voice>(what: &str, mut synth: Synth<V>, mut change: impl FnMut(&mut 
 #[test]
 fn the_instruments_do_not_use_the_heap() {
     use manguebyte_dsp::instruments::{
-        AcidParams, AcidVoice, AnalogKitParams, AnalogKitVoice, FmParams, FmVoice, KickBassParams,
-        KickBassVoice, OrganParams, OrganVoice, PluckedString, RotaryParams, RotarySpeaker,
-        RotarySpeed, StringParams,
+        AcidParams, AcidVoice, AnalogKitParams, AnalogKitVoice, DrumKit, DrumKitVoice, FmParams,
+        FmVoice, KickBassParams, KickBassVoice, OrganParams, OrganVoice, PluckedString,
+        RotaryParams, RotarySpeaker, RotarySpeed, StringParams,
     };
 
     let strings = [
@@ -1011,6 +1011,21 @@ fn the_instruments_do_not_use_the_heap() {
             synth
                 .voices_mut()
                 .for_each(|voice| voice.set_params(params));
+        },
+    );
+    let kits = [
+        DrumKit::acoustic(),
+        DrumKit::techno(),
+        DrumKit::lo_fi(),
+        DrumKit::style_cr78(),
+        DrumKit::trap(),
+    ];
+    flood(
+        "DrumKitVoice",
+        Synth::new(DrumKitVoice::voices(6, DrumKit::acoustic())),
+        |synth, round| {
+            let kit = kits[usize::from(round) % kits.len()];
+            synth.voices_mut().for_each(|voice| voice.set_params(kit));
         },
     );
     flood(
