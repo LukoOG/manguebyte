@@ -24,11 +24,26 @@
 //! [`NORMALIZE_PEAK_DB`], and never more than [`NORMALIZE_RANGE_DB`]
 //! either way.
 //!
+//! The probe measures a clone of the instrument
+//! ([`Instrument`]'s clones share its samples), so the part can play the
+//! instrument while it is measured, and neither hears the other's notes in
+//! its round robins and random choices: what the part plays does not
+//! depend on how far the measurement has got. Until it is done, the part
+//! plays at an estimate the probe makes as it starts, which costs almost
+//! nothing: the energy each note of the phrase reads from the samples
+//! ([`Instrument::note_energy`]), as loud as that much energy over the
+//! phrase's two bars would be. It hears the regions' gains, layers,
+//! velocity tracking, loops and pitch, but not their envelopes, the
+//! K-weighting of the meter nor its gating, and it does not hold the
+//! make-up back for the peaks.
+//!
 //! The measurement allocates (its meter, its voices) and renders a few
 //! seconds of sound, so it never runs in the render call: a control call
 //! does it, [`Engine::load_instrument`](crate::Engine::load_instrument) at
-//! once, or `js/worklet.js` between render quanta, [`PROBE_STEP_FRAMES`]
-//! frames a quantum, through `mb_sfz_measure`.
+//! once, [`Engine::measure_instrument`](crate::Engine::measure_instrument)
+//! a step at a time, or `js/worklet.js` between render quanta,
+//! [`PROBE_STEP_FRAMES`] frames a quantum, through `mb_sampler_measure`
+//! (or `mb_sfz_measure`, before the instrument plays).
 
 #[cfg(doc)]
 use crate::engine::InstrumentKind;
@@ -65,6 +80,11 @@ pub const PROBE_STEP_FRAMES: usize = 8_192;
 /// The block the voices render in.
 const BLOCK: usize = 512;
 
+/// How long each drum of a kit's phrase counts for in the estimate, in
+/// seconds: a beat, by when a drum has given most of its energy and the
+/// next one has been struck.
+const DRUM_ESTIMATE_SECONDS: f64 = 60.0 / Phrase::TEMPO;
+
 /// A note starting or ending, on a frame from the start of the phrase.
 #[derive(Debug, Clone, Copy)]
 struct Step {
@@ -89,6 +109,8 @@ struct Measurement {
 /// An SFZ instrument being measured for a sampler part's loudness
 /// normalisation. Made, stepped and finished by control calls.
 pub(crate) struct LoudnessProbe {
+    /// The probe's own clone of the instrument, which the part does not
+    /// play.
     instrument: Arc<Instrument>,
     kit: bool,
     sample_rate: f64,
@@ -96,13 +118,16 @@ pub(crate) struct LoudnessProbe {
     /// Whether it measures at all: a part that does not normalise leaves
     /// the instrument unmeasured.
     measures: bool,
+    /// The make-up estimated as the measurement began.
+    estimate_db: Option<f64>,
     make_up_db: Option<f64>,
 }
 
 impl LoudnessProbe {
-    /// Starts measuring `instrument` as a sampler part plays it, a kit if
-    /// `kit`, at `sample_rate`; or, if not `measure`, does nothing with it.
-    /// Allocates.
+    /// Starts measuring `instrument`, a clone of the one the part plays, as
+    /// a sampler part plays it, a kit if `kit`, at `sample_rate`, and
+    /// estimates the make-up the measurement will find; or, if not
+    /// `measure`, does nothing with it. Allocates.
     pub(crate) fn new(instrument: Instrument, kit: bool, sample_rate: f64, measure: bool) -> Self {
         let instrument = Arc::new(instrument);
         let mut probe = Self {
@@ -111,16 +136,19 @@ impl LoudnessProbe {
             sample_rate,
             measuring: None,
             measures: measure,
+            estimate_db: None,
             make_up_db: None,
         };
         if !measure {
             return probe;
         }
-        let steps = phrase_steps(&probe.instrument, kit, sample_rate);
-        if steps.is_empty() {
+        let notes = phrase_notes(&probe.instrument, kit);
+        if notes.is_empty() {
             // No key to play: nothing to measure.
             return probe;
         }
+        probe.estimate_db = estimate_make_up_db(&probe.instrument, &notes, kit);
+        let steps = phrase_steps(&notes, sample_rate);
         let spec = ProcessSpec {
             sample_rate,
             max_block_size: BLOCK,
@@ -150,11 +178,6 @@ impl LoudnessProbe {
         probe
     }
 
-    /// The instrument being measured.
-    pub(crate) fn instrument(&self) -> &Instrument {
-        &self.instrument
-    }
-
     /// Whether it was made for a part of this kind, and measures if the
     /// part normalises: if not, the part measures the instrument again.
     pub(crate) fn fits(&self, kit: bool, normalize: bool) -> bool {
@@ -164,6 +187,20 @@ impl LoudnessProbe {
     /// Whether the measurement is over, or was never begun.
     pub(crate) fn is_done(&self) -> bool {
         self.measuring.is_none()
+    }
+
+    /// The make-up estimated as the measurement began, for the part to
+    /// play at until it is over: `None` if it does not measure, or the
+    /// instrument plays nothing.
+    pub(crate) fn estimate_db(&self) -> Option<f64> {
+        self.estimate_db
+    }
+
+    /// The make-up measured, once [`step`](Self::step) has said the
+    /// measurement is over: `None` until then, if it did not measure, or if
+    /// the instrument played nothing.
+    pub(crate) fn make_up_db(&self) -> Option<f64> {
+        self.make_up_db
     }
 
     /// Renders up to `frames` more frames of the phrase. Returns whether
@@ -195,29 +232,22 @@ impl LoudnessProbe {
         true
     }
 
-    /// Finishes the measurement, all at once, and gives the instrument back
-    /// with the make-up gain it measured: `None` if it did not measure, or
-    /// the instrument played nothing.
-    pub(crate) fn finish(mut self) -> (Instrument, Option<f64>) {
+    /// Finishes the measurement, all at once, and gives the make-up gain it
+    /// measured: `None` if it did not measure, or the instrument played
+    /// nothing.
+    pub(crate) fn finish(mut self) -> Option<f64> {
         while !self.step(usize::MAX) {}
-        let make_up = self.make_up_db;
-        (self.into_instrument(), make_up)
+        self.make_up_db
     }
 
     /// The same instrument, measured again from the start for a part of
     /// another kind, or one that normalises.
-    pub(crate) fn again(self, kit: bool, measure: bool) -> Self {
-        let sample_rate = self.sample_rate;
-        Self::new(self.into_instrument(), kit, sample_rate, measure)
-    }
-
-    fn into_instrument(mut self) -> Instrument {
+    pub(crate) fn again(mut self, kit: bool, measure: bool) -> Self {
+        // Dropping the voices lets go of their hold on the instrument.
         self.measuring = None;
-        match Arc::try_unwrap(self.instrument) {
-            Ok(instrument) => instrument,
-            // Only the voices, just dropped, ever held it besides.
-            Err(_) => unreachable!("the probe's voices are gone"),
-        }
+        let instrument =
+            Arc::try_unwrap(self.instrument).unwrap_or_else(|shared| Instrument::clone(&shared));
+        Self::new(instrument, kit, self.sample_rate, measure)
     }
 }
 
@@ -273,36 +303,85 @@ fn make_up_db(loudness: f64, peak: f32) -> Option<f64> {
     Some(make_up.clamp(-NORMALIZE_RANGE_DB, NORMALIZE_RANGE_DB))
 }
 
-/// The notes an instrument is measured with, as steps sorted by frame (an
-/// end before a start on the same frame).
+/// The make-up gain, in decibels, that a quick estimate of how loud the
+/// instrument plays `notes`, its phrase, asks for, at a sampler part's
+/// level and within the range allowed: `None` if they read no sound.
+///
+/// The estimate is the energy each note reads from the samples, held for
+/// its length (a kit's drums for [`DRUM_ESTIMATE_SECONDS`], as one-shots
+/// ring on), spread over the phrase's two bars, taken as loud as a signal
+/// of that power in two channels is by BS.1770 with its K-weighting flat:
+/// `-0.691 + 10·log10(power)` LUFS. It costs a pass over the frames the
+/// phrase's distinct notes read, a small part of the measurement.
+fn estimate_make_up_db(instrument: &Instrument, notes: &[PhraseNote], kit: bool) -> Option<f64> {
+    // The phrase strikes a few keys many times: each distinct note once.
+    let mut read: Vec<(u8, f64, f64)> = Vec::new();
+    let mut energy = 0.0;
+    for note in notes {
+        let seconds = if kit {
+            DRUM_ESTIMATE_SECONDS
+        } else {
+            note.length
+        };
+        let known = read
+            .iter()
+            .find(|&&(key, held, _)| key == note.key && held == seconds);
+        energy += match known {
+            Some(&(_, _, energy)) => energy,
+            None => {
+                let energy = instrument.note_energy(note.key, note.velocity, seconds);
+                read.push((note.key, seconds, energy));
+                energy
+            }
+        };
+    }
+    let power = energy / (8.0 * 60.0 / Phrase::TEMPO);
+    if !power.is_finite() || power <= 0.0 {
+        return None;
+    }
+    let loudness = -0.691 + 10.0 * power.log10() + SAMPLER_LEVEL_DB;
+    Some((LOUDNESS_TARGET_LUFS - loudness).clamp(-NORMALIZE_RANGE_DB, NORMALIZE_RANGE_DB))
+}
+
+/// `notes` as steps, sorted by frame (an end before a start on the same
+/// frame).
+fn phrase_steps(notes: &[PhraseNote], sample_rate: f64) -> Vec<Step> {
+    let frames = |seconds: f64| (seconds * sample_rate).round() as u64;
+    let mut steps = Vec::with_capacity(2 * notes.len());
+    for note in notes {
+        let on = frames(note.start);
+        steps.push(Step {
+            frame: on,
+            key: note.key,
+            on: true,
+        });
+        steps.push(Step {
+            frame: on + frames(note.length),
+            key: note.key,
+            on: false,
+        });
+    }
+    steps.sort_by_key(|step| (step.frame, step.on));
+    steps
+}
+
+/// The notes an instrument is measured with, in the order they start,
+/// each with the key it is played on.
 ///
 /// A melodic instrument plays the melody, moved by whole octaves to where
 /// it has the most of its notes, each note it has no region for played on
 /// the nearest key it has. A kit plays the groove on the drums of it that
 /// it has; one with none of them plays its own keys in turn, one on each
 /// eighth note of the groove.
-fn phrase_steps(instrument: &Instrument, kit: bool, sample_rate: f64) -> Vec<Step> {
+fn phrase_notes(instrument: &Instrument, kit: bool) -> Vec<PhraseNote> {
     let covered: Vec<u8> = (0..=127)
         .filter(|&key| instrument.covers_key(key))
         .collect();
     if covered.is_empty() {
         return Vec::new();
     }
-    let mut steps = Vec::new();
-    let frames = |seconds: f64| (seconds * sample_rate).round() as u64;
-    let mut play = |note: &PhraseNote, key: u8| {
-        let on = frames(note.start);
-        steps.push(Step {
-            frame: on,
-            key,
-            on: true,
-        });
-        steps.push(Step {
-            frame: on + frames(note.length),
-            key,
-            on: false,
-        });
-    };
+    let mut notes = Vec::new();
+    let mut play = |note: &PhraseNote, key: u8| notes.push(PhraseNote { key, ..*note });
     if kit {
         let groove = Phrase::Groove.notes();
         let its_drums: Vec<&PhraseNote> = groove
@@ -349,8 +428,7 @@ fn phrase_steps(instrument: &Instrument, kit: bool, sample_rate: f64) -> Vec<Ste
             play(note, nearest);
         }
     }
-    steps.sort_by_key(|step| (step.frame, step.on));
-    steps
+    notes
 }
 
 #[cfg(test)]
@@ -360,6 +438,11 @@ mod tests {
 
     fn instrument(text: &str) -> Instrument {
         Instrument::from_sfz(text, &mut MemorySource::new()).unwrap()
+    }
+
+    /// The steps `instrument` is measured with at 48 kHz.
+    fn steps_of(instrument: &Instrument, kit: bool) -> Vec<Step> {
+        phrase_steps(&phrase_notes(instrument, kit), 48_000.0)
     }
 
     fn keys(steps: &[Step]) -> Vec<u8> {
@@ -374,25 +457,22 @@ mod tests {
     fn the_melody_moves_to_where_the_instrument_has_its_keys() {
         // Where it is written.
         let piano = instrument("<region> sample=*sine lokey=21 hikey=108");
-        let steps = phrase_steps(&piano, false, 48_000.0);
+        let steps = steps_of(&piano, false);
         assert_eq!(keys(&steps), [60, 64, 67, 69, 67, 64, 62, 60, 62, 64, 60]);
         // A glockenspiel, two octaves up.
         let high = instrument("<region> sample=*sine lokey=79 hikey=108");
-        assert_eq!(
-            keys(&phrase_steps(&high, false, 48_000.0))[..4],
-            [84, 88, 91, 93]
-        );
+        assert_eq!(keys(&steps_of(&high, false))[..4], [84, 88, 91, 93]);
         // Three keys only: each note on the nearest.
         let sparse = instrument(
             "<region> sample=*sine key=48 <region> sample=*sine key=55 <region> sample=*sine key=67",
         );
-        let played = keys(&phrase_steps(&sparse, false, 48_000.0));
+        let played = keys(&steps_of(&sparse, false));
         assert!(
             played.iter().all(|key| [48, 55, 67].contains(key)),
             "{played:?}"
         );
         // Ends before starts on one frame, every start with its end.
-        let steps = phrase_steps(&piano, false, 48_000.0);
+        let steps = steps_of(&piano, false);
         assert!(
             steps
                 .windows(2)
@@ -404,7 +484,7 @@ mod tests {
     #[test]
     fn a_kit_plays_the_groove_on_its_own_drums() {
         let kit = instrument("<region> sample=*sine key=36 <region> sample=*sine key=42");
-        let played = keys(&phrase_steps(&kit, true, 48_000.0));
+        let played = keys(&steps_of(&kit, true));
         assert_eq!(played.iter().filter(|&&key| key == 36).count(), 4);
         assert_eq!(played.iter().filter(|&&key| key == 42).count(), 16);
         assert!(!played.contains(&38), "the snare is not the kit's");
@@ -412,14 +492,14 @@ mod tests {
         let pandeiro = instrument(
             "<region> sample=*sine key=89 <region> sample=*sine key=90 <region> sample=*sine key=91",
         );
-        let played = keys(&phrase_steps(&pandeiro, true, 48_000.0));
+        let played = keys(&steps_of(&pandeiro, true));
         assert_eq!(played.len(), 16);
         assert_eq!(played[..4], [89, 90, 91, 89]);
         // Nothing on the keyboard: nothing to measure.
         let nothing = instrument("<region> sample=*sine key=60 trigger=release");
-        assert!(phrase_steps(&nothing, false, 48_000.0).is_empty());
+        assert!(steps_of(&nothing, false).is_empty());
         let probe = LoudnessProbe::new(nothing, false, 48_000.0, true);
-        assert_eq!(probe.finish().1, None);
+        assert_eq!((probe.estimate_db(), probe.finish()), (None, None));
     }
 
     #[test]
@@ -440,12 +520,49 @@ mod tests {
     }
 
     #[test]
-    fn a_probe_that_does_not_measure_hands_the_instrument_back_untouched() {
+    fn a_probe_that_does_not_measure_finds_nothing() {
         let probe = LoudnessProbe::new(instrument("<region> sample=*sine"), true, 48_000.0, false);
         assert!(probe.fits(true, false));
         assert!(!probe.fits(true, true), "a part that normalises measures");
         assert!(!probe.fits(false, false), "another kind measures");
-        let (instrument, make_up) = probe.finish();
-        assert_eq!((instrument.num_regions(), make_up), (1, None));
+        assert!(probe.is_done());
+        assert_eq!((probe.estimate_db(), probe.finish()), (None, None));
+    }
+
+    #[test]
+    fn the_estimate_is_the_energy_the_phrase_reads() {
+        // A full-scale sine, held: at velocity 0.8 (102 of 127, squared, on
+        // the gain) for the melody's 3.6 s of held notes, over its 4 s.
+        let sine = instrument("<region> sample=*sine lokey=0 hikey=127");
+        let gain = (102.0f64 / 127.0).powi(2);
+        let power = gain * gain * 3.6 / 4.0;
+        let loudness = -0.691 + 10.0 * power.log10() + SAMPLER_LEVEL_DB;
+        let probe = LoudnessProbe::new(sine, false, 48_000.0, true);
+        let estimate = probe.estimate_db().unwrap();
+        assert!(
+            (estimate - (LOUDNESS_TARGET_LUFS - loudness)).abs() < 0.01,
+            "{estimate}"
+        );
+        // A sine is what the estimate leaves nothing out of: the
+        // measurement finds the same, within the K-weighting and the gate.
+        let measured = probe.finish().unwrap();
+        assert!(
+            (estimate - measured).abs() < 0.5,
+            "{estimate} against {measured}"
+        );
+        // Held by the range, like the measurement.
+        let faint = instrument("<region> sample=*sine lokey=0 hikey=127 volume=-90");
+        let probe = LoudnessProbe::new(faint, false, 48_000.0, true);
+        assert_eq!(probe.estimate_db(), Some(NORMALIZE_RANGE_DB));
+        // A kit's drums count for a beat each.
+        let kit = instrument("<region> sample=*sine key=36");
+        let probe = LoudnessProbe::new(kit, true, 48_000.0, true);
+        let power = gain * gain * 4.0 * DRUM_ESTIMATE_SECONDS / 4.0;
+        let loudness = -0.691 + 10.0 * power.log10() + SAMPLER_LEVEL_DB;
+        let estimate = probe.estimate_db().unwrap();
+        assert!(
+            (estimate - (LOUDNESS_TARGET_LUFS - loudness)).abs() < 0.01,
+            "{estimate}"
+        );
     }
 }

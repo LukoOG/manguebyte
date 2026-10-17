@@ -10,6 +10,7 @@ use manguebyte_sampler::{Instrument, Interpolation, Sampler, SamplerLoader};
 use crate::drums::{Drum, DrumKit};
 use crate::level::{Trim, gain_of};
 use crate::params::{self, SamplerParams};
+use crate::probe::LoudnessProbe;
 
 /// How many voices a sampler part plays at once. A voice plays one region,
 /// so a note that starts two layered regions takes two. A quarter as many
@@ -49,6 +50,11 @@ pub(crate) struct SampledInstrument {
     /// The make-up gain the loudness normalisation measured for the
     /// instrument the part plays (`crate::probe`), if it did.
     make_up_db: Option<f64>,
+    /// While the instrument the part plays is being measured: the
+    /// measurement, which no render call touches, and the make-up the
+    /// part plays at meanwhile, its estimate.
+    measuring: Option<Box<LoudnessProbe>>,
+    provisional_db: Option<f64>,
     /// Whether the part normalises (`sampler.normalize`).
     normalize: bool,
     /// What the samples are played at: [`SAMPLER_LEVEL_DB`], and the
@@ -70,6 +76,8 @@ impl SampledInstrument {
             accent_gain: gain_of(SAMPLER_ACCENT_DB),
             next_id: 0,
             make_up_db: None,
+            measuring: None,
+            provisional_db: None,
             normalize: params.normalize.value(),
             trim: Trim::new(gain_of(SAMPLER_LEVEL_DB) as f32, spec.sample_rate),
         };
@@ -89,14 +97,25 @@ impl SampledInstrument {
     }
 
     /// The make-up gain measured for the instrument the part plays, in
-    /// decibels, if it was.
+    /// decibels, if it was: not while it is still being measured.
     pub(crate) fn make_up_db(&self) -> Option<f64> {
         self.make_up_db
     }
 
+    /// Whether the instrument the part plays is still being measured.
+    pub(crate) fn is_measuring(&self) -> bool {
+        self.measuring.is_some()
+    }
+
+    /// The make-up the part plays at while its instrument is measured, in
+    /// decibels.
+    pub(crate) fn provisional_db(&self) -> Option<f64> {
+        self.provisional_db
+    }
+
     /// What the samples are to be played at now.
     fn gain(&self) -> f32 {
-        let make_up = match (self.normalize, self.make_up_db) {
+        let make_up = match (self.normalize, self.make_up_db.or(self.provisional_db)) {
             (true, Some(make_up)) => make_up,
             _ => 0.0,
         };
@@ -139,13 +158,70 @@ impl SampledInstrument {
     /// to their end. `make_up_db` is what the loudness normalisation
     /// measured for it, if it did: the part plays at it from the next frame
     /// if nothing sounds, and glides to it over 20 ms if something does,
-    /// the notes of the instrument it replaces too. Frees the instruments
-    /// the sampler is done with first. Allocates.
+    /// the notes of the instrument it replaces too. A measurement of the
+    /// instrument it replaces that was under way is dropped. Frees the
+    /// instruments the sampler is done with first. Allocates.
     pub(crate) fn load(
         &mut self,
         instrument: Instrument,
         make_up_db: Option<f64>,
     ) -> Result<(), Box<Instrument>> {
+        self.take(instrument)?;
+        self.measuring = None;
+        self.provisional_db = None;
+        self.make_up_db = make_up_db;
+        self.retrim();
+        Ok(())
+    }
+
+    /// Hands `instrument` to the sampler as [`load`](Self::load) does,
+    /// before it is measured: `probe` measures a clone of it, and until
+    /// [`measure`](Self::measure) says it is done, the part plays at the
+    /// probe's estimate of the make-up, at once or gliding to it as `load`
+    /// would. A probe that measures nothing leaves the instrument
+    /// unmeasured. Allocates.
+    pub(crate) fn install(
+        &mut self,
+        instrument: Instrument,
+        probe: LoudnessProbe,
+    ) -> Result<(), Box<Instrument>> {
+        if probe.is_done() {
+            return self.load(instrument, probe.make_up_db());
+        }
+        self.take(instrument)?;
+        self.make_up_db = None;
+        self.provisional_db = probe.estimate_db();
+        // A measurement under way is replaced, and dropped, here: never in
+        // a render call.
+        self.measuring = Some(Box::new(probe));
+        self.retrim();
+        Ok(())
+    }
+
+    /// Measures up to `frames` more frames of the phrase the instrument the
+    /// part plays is measured on. Returns whether the measurement is over,
+    /// or there was none: once it is, the part plays at the make-up
+    /// measured, at once if nothing sounds and gliding over 20 ms if
+    /// something does, as when `sampler.normalize` is switched. A control
+    /// call's work, never a render call's: it renders sound of its own, and
+    /// frees.
+    pub(crate) fn measure(&mut self, frames: usize) -> bool {
+        let Some(probe) = &mut self.measuring else {
+            return true;
+        };
+        if !probe.step(frames) {
+            return false;
+        }
+        self.make_up_db = probe.make_up_db();
+        self.measuring = None;
+        self.provisional_db = None;
+        self.retrim();
+        true
+    }
+
+    /// Gives the sampler `instrument`, to play from the next frame it
+    /// renders.
+    fn take(&mut self, instrument: Instrument) -> Result<(), Box<Instrument>> {
         self.loader.collect();
         self.loader.load(instrument)?;
         // The sampler takes what has arrived when it renders; rendering no
@@ -154,8 +230,6 @@ impl SampledInstrument {
         // holds two instruments with notes sounding: those of the older
         // fade out over 6 ms, and then it comes in.
         self.sampler.process(&mut AudioBuffer::new(2, 0));
-        self.make_up_db = make_up_db;
-        self.retrim();
         Ok(())
     }
 

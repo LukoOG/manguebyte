@@ -258,8 +258,12 @@
 //! never beyond [`NORMALIZE_RANGE_DB`]. That is `sampler.normalize`, on by
 //! default; off, the part plays the samples as they are. The measurement
 //! is a control call's work, never the render call's:
-//! [`Engine::load_instrument`] makes it at once, `js/worklet.js`
-//! [`PROBE_STEP_FRAMES`] frames between two render quanta at a time.
+//! [`Engine::load_instrument`] makes it at once, and
+//! [`Engine::measure_instrument`] a step at a time, [`PROBE_STEP_FRAMES`]
+//! frames between two render quanta in `js/worklet.js`. Meanwhile the part
+//! already plays the instrument ([`Engine::install_instrument`]), at a
+//! provisional make-up estimated from the energy its phrase reads from the
+//! samples, and glides to the one measured over 20 ms when it is done.
 //!
 //! # The contract with Aratu
 //!

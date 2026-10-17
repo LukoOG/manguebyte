@@ -51,6 +51,18 @@ fn is_master(event: Event) -> bool {
     matches!(event, Event::Param { param, .. } if params::is_master(param))
 }
 
+/// `probe`, or the same instrument measured again if the probe was made for
+/// a part of the other sampler kind, or does not measure for a part that
+/// now normalises.
+fn refit(probe: LoudnessProbe, sampled: &SampledInstrument) -> LoudnessProbe {
+    let (kit, normalize) = (sampled.is_kit(), sampled.normalizes());
+    if probe.fits(kit, normalize) {
+        probe
+    } else {
+        probe.again(kit, normalize)
+    }
+}
+
 /// What a part plays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InstrumentKind {
@@ -1033,16 +1045,20 @@ impl Engine {
     /// with.
     ///
     /// If the part normalises its loudness (`sampler.normalize`, on by
-    /// default), the instrument is measured first: it plays the phrase the
+    /// default), the instrument is measured too: it plays the phrase the
     /// part's kind is calibrated on, offline, and the part plays it at the
     /// make-up gain that brings that phrase to
     /// [`LOUDNESS_TARGET_LUFS`](crate::LOUDNESS_TARGET_LUFS)
     /// ([`sampler_make_up_db`](Self::sampler_make_up_db) says what it
     /// measured). That renders 4.5 s of the instrument here, in the control
-    /// call; `js/worklet.js` does it a step at a time between render quanta
-    /// instead. An instrument loaded while normalisation is off is not
-    /// measured, and plays at the level of its samples even if it is
-    /// switched on later.
+    /// call, before the part renders again. To have the part play the
+    /// instrument while it is measured, a step at a time, as
+    /// `js/worklet.js` does between render quanta, use
+    /// [`install_instrument`](Self::install_instrument) and
+    /// [`measure_instrument`](Self::measure_instrument), which this call
+    /// is. An instrument loaded while normalisation is off is not measured,
+    /// and plays at the level of its samples even if it is switched on
+    /// later.
     ///
     /// # Errors
     ///
@@ -1055,8 +1071,110 @@ impl Engine {
         part: u16,
         instrument: SfzInstrument,
     ) -> Result<(), EngineError> {
-        let probe = self.probe_instrument(part, instrument)?;
-        self.load_probed(part, probe)
+        self.install_instrument(part, instrument)?;
+        self.measure_instrument(part, usize::MAX).map(|_| ())
+    }
+
+    /// Gives a sampler part an SFZ instrument to play at once, before its
+    /// loudness is measured. New notes play it from the next frame
+    /// rendered, as with [`load_instrument`](Self::load_instrument), while
+    /// the notes of the instrument it replaces ring on with that one.
+    ///
+    /// If the part normalises its loudness, a clone of the instrument,
+    /// sharing its samples, is set up to be measured by
+    /// [`measure_instrument`](Self::measure_instrument), and until that is
+    /// done the part plays at a provisional make-up
+    /// ([`sampler_provisional_make_up_db`](Self::sampler_provisional_make_up_db)),
+    /// a quick estimate from the energy its phrase reads from the samples:
+    /// at once if nothing sounds, gliding to it over 20 ms if something
+    /// does. When the measurement is over the part glides to the make-up
+    /// measured in the same way. The part plays the instrument itself, with
+    /// round robins and random choices of its own, so what it plays does
+    /// not depend on how far the measurement has got, nor on when its
+    /// steps are taken: only on the frame the last one is taken before.
+    /// A measurement of the instrument it replaces that was still under
+    /// way is dropped. Setting it up costs a clone of the instrument's
+    /// round robins and the estimate, about a pass over the frames the
+    /// phrase's notes read; nothing is rendered. Allocates.
+    ///
+    /// # Errors
+    ///
+    /// As [`load_instrument`](Self::load_instrument)'s.
+    ///
+    /// ```
+    /// use manguebyte_web::{Engine, EngineConfig, EventRecord, InstrumentKind};
+    /// # use manguebyte_sampler::{Instrument, MemorySource};
+    ///
+    /// let mut engine = Engine::new(EngineConfig::new(48_000.0)).unwrap();
+    /// engine.create_part(0, InstrumentKind::Sampler).unwrap();
+    /// # let instrument = Instrument::from_sfz("<region> sample=*sine", &mut MemorySource::new()).unwrap();
+    /// engine.install_instrument(0, instrument).unwrap();
+    /// // Playable at once, at a provisional level...
+    /// engine.push(EventRecord::note_on(engine.frame(), 0, 60, 0.8));
+    /// engine.render(128);
+    /// assert!(engine.output().0.iter().any(|&sample| sample != 0.0));
+    /// assert_eq!(engine.sampler_measuring(0), Some(true));
+    /// // ...and at the measured one once the measurement is over.
+    /// while !engine.measure_instrument(0, manguebyte_web::PROBE_STEP_FRAMES).unwrap() {
+    ///     engine.render(128);
+    /// }
+    /// assert!(engine.sampler_make_up_db(0).is_some());
+    /// ```
+    pub fn install_instrument(
+        &mut self,
+        part: u16,
+        instrument: SfzInstrument,
+    ) -> Result<(), EngineError> {
+        let probe = self.probe_instrument(part, &instrument)?;
+        self.install_probed(part, instrument, probe)
+    }
+
+    /// Measures the instrument sampler part `part` plays for its loudness
+    /// normalisation, if it is still being measured
+    /// ([`install_instrument`](Self::install_instrument)): up to `frames`
+    /// more frames of its phrase, out of 4.5 s
+    /// ([`PROBE_STEP_FRAMES`](crate::PROBE_STEP_FRAMES) frames take about
+    /// as long as decoding a 64 KiB sample file). Returns whether the
+    /// measurement is over, or there was none to make; once it is, the
+    /// part plays at the make-up measured, from the next frame rendered if
+    /// nothing sounds and gliding there over 20 ms if something does, as
+    /// when `sampler.normalize` is switched (if it is switched off, the
+    /// part stays where it is). With `frames` 0 it only says. Not
+    /// real-time safe: it renders sound of its own and allocates.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::NoSuchPart`] if there is no such part,
+    /// [`EngineError::NotASampler`] if it plays something else.
+    pub fn measure_instrument(&mut self, part: u16, frames: usize) -> Result<bool, EngineError> {
+        let sampled = self.sampled_mut(part)?;
+        Ok(if frames == 0 {
+            !sampled.is_measuring()
+        } else {
+            sampled.measure(frames)
+        })
+    }
+
+    /// Whether the instrument sampler part `part` plays is still being
+    /// measured ([`install_instrument`](Self::install_instrument)): `None`
+    /// if there is no such part or it is not a sampler.
+    pub fn sampler_measuring(&self, part: u16) -> Option<bool> {
+        match &self.part(part)?.instrument {
+            Instrument::Sampled(sampled) => Some(sampled.is_measuring()),
+            _ => None,
+        }
+    }
+
+    /// The make-up gain, in decibels, sampler part `part` plays its
+    /// instrument at while it is being measured: an estimate of what
+    /// [`sampler_make_up_db`](Self::sampler_make_up_db) will be. `None` if
+    /// the part is not measuring, or the estimate found no sound (it then
+    /// plays at the level of its samples).
+    pub fn sampler_provisional_make_up_db(&self, part: u16) -> Option<f64> {
+        match &self.part(part)?.instrument {
+            Instrument::Sampled(sampled) => sampled.provisional_db(),
+            _ => None,
+        }
     }
 
     /// Gives a sampler part an SFZ instrument as
@@ -1074,59 +1192,78 @@ impl Engine {
         part: u16,
         instrument: SfzInstrument,
     ) -> Result<(), EngineError> {
-        let index = self.index_of(part)?;
-        let Instrument::Sampled(sampled) = &mut self.parts[index].instrument else {
-            return Err(EngineError::NotASampler(part));
-        };
-        sampled
+        self.sampled_mut(part)?
             .load(instrument, None)
             .map_err(|_| EngineError::LoaderFull(part))
     }
 
-    /// Starts measuring `instrument` for sampler part `part`'s loudness
-    /// normalisation, if the part normalises, as
-    /// [`load_instrument`](Self::load_instrument) would. Allocates.
+    /// Starts measuring a clone of `instrument` for sampler part `part`'s
+    /// loudness normalisation, if the part normalises, as
+    /// [`install_instrument`](Self::install_instrument) would. Allocates.
     pub(crate) fn probe_instrument(
         &self,
         part: u16,
-        instrument: SfzInstrument,
+        instrument: &SfzInstrument,
     ) -> Result<LoudnessProbe, EngineError> {
-        let index = self.index_of(part)?;
-        let Instrument::Sampled(sampled) = &self.parts[index].instrument else {
-            return Err(EngineError::NotASampler(part));
-        };
+        let sampled = self.sampled(part)?;
         Ok(LoudnessProbe::new(
-            instrument,
+            instrument.clone(),
             sampled.is_kit(),
             self.config.sample_rate,
             sampled.normalizes(),
         ))
     }
 
-    /// Finishes the measurement of `probe`, all at once, and gives its
-    /// instrument to sampler part `part` with the make-up gain measured, as
-    /// [`load_instrument`](Self::load_instrument) does. A probe made for a
-    /// part of the other sampler kind, or that did not measure for a part
-    /// that now normalises, measures again. Allocates.
+    /// Gives `instrument` to sampler part `part` to play at once, `probe`
+    /// measuring a clone of it, as
+    /// [`install_instrument`](Self::install_instrument) does. A probe made
+    /// for a part of the other sampler kind, or that does not measure for a
+    /// part that now normalises, starts again. Allocates.
+    pub(crate) fn install_probed(
+        &mut self,
+        part: u16,
+        instrument: SfzInstrument,
+        probe: LoudnessProbe,
+    ) -> Result<(), EngineError> {
+        let sampled = self.sampled_mut(part)?;
+        let probe = refit(probe, sampled);
+        sampled
+            .install(instrument, probe)
+            .map_err(|_| EngineError::LoaderFull(part))
+    }
+
+    /// Finishes the measurement of `probe`, all at once, and gives
+    /// `instrument`, which it measured a clone of, to sampler part `part`
+    /// with the make-up gain measured, as
+    /// [`load_instrument`](Self::load_instrument) does. A probe that does
+    /// not fit the part starts again. Allocates.
     pub(crate) fn load_probed(
         &mut self,
         part: u16,
+        instrument: SfzInstrument,
         probe: LoudnessProbe,
     ) -> Result<(), EngineError> {
-        let index = self.index_of(part)?;
-        let Instrument::Sampled(sampled) = &mut self.parts[index].instrument else {
-            return Err(EngineError::NotASampler(part));
-        };
-        let (kit, normalize) = (sampled.is_kit(), sampled.normalizes());
-        let probe = if probe.fits(kit, normalize) {
-            probe
-        } else {
-            probe.again(kit, normalize)
-        };
-        let (instrument, make_up_db) = probe.finish();
+        let sampled = self.sampled_mut(part)?;
+        let make_up_db = refit(probe, sampled).finish();
         sampled
             .load(instrument, make_up_db)
             .map_err(|_| EngineError::LoaderFull(part))
+    }
+
+    fn sampled(&self, part: u16) -> Result<&SampledInstrument, EngineError> {
+        let index = self.index_of(part)?;
+        match &self.parts[index].instrument {
+            Instrument::Sampled(sampled) => Ok(sampled),
+            _ => Err(EngineError::NotASampler(part)),
+        }
+    }
+
+    fn sampled_mut(&mut self, part: u16) -> Result<&mut SampledInstrument, EngineError> {
+        let index = self.index_of(part)?;
+        match &mut self.parts[index].instrument {
+            Instrument::Sampled(sampled) => Ok(sampled),
+            _ => Err(EngineError::NotASampler(part)),
+        }
     }
 
     /// The make-up gain, in decibels, that sampler part `part`'s loudness
@@ -1137,7 +1274,8 @@ impl Engine {
     /// [`NORMALIZE_RANGE_DB`](crate::NORMALIZE_RANGE_DB) allow. The part
     /// plays at it while `sampler.normalize` is on. `None` if there is no
     /// such part, it is not a sampler, or its instrument was not measured
-    /// (loaded while normalisation was off, or playing no key).
+    /// (loaded while normalisation was off, or playing no key) or is still
+    /// being measured ([`sampler_measuring`](Self::sampler_measuring)).
     pub fn sampler_make_up_db(&self, part: u16) -> Option<f64> {
         match &self.part(part)?.instrument {
             Instrument::Sampled(sampled) => sampled.make_up_db(),

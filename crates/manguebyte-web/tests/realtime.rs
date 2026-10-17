@@ -442,6 +442,74 @@ fn loudness_normalisation_is_measured_outside_the_render_call() {
     assert_eq!(engine.stats().unrouted, 0);
 }
 
+/// An instrument handed over before it is measured plays while the
+/// measurement goes on between the quanta: the render calls, with notes
+/// sounding, normalisation switched under them and the glide to the
+/// make-up measured, touch no heap; the steps, which do, are control
+/// calls of their own.
+#[test]
+fn rendering_while_an_instrument_is_measured_never_allocates() {
+    let mut engine = Engine::new(EngineConfig::new(48_000.0)).unwrap();
+    engine.create_part(0, InstrumentKind::Sampler).unwrap();
+    engine.create_part(1, InstrumentKind::SamplerKit).unwrap();
+    let (sfz, files) = common::tone_instrument();
+    let (kit_sfz, kit_files) = common::kit_instrument();
+    engine
+        .install_instrument(0, common::build_sfz(&sfz, &files))
+        .unwrap();
+    engine
+        .install_instrument(1, common::build_sfz(&kit_sfz, &kit_files))
+        .unwrap();
+    let normalize = ParamId::from_name(ids::SAMPLER_NORMALIZE);
+    let mut records = Vec::new();
+    for step in 0..60u64 {
+        let frame = step * 1_000;
+        let key = 57 + (step % 12) as u8;
+        records.push(EventRecord::note_on(frame, 0, key, 0.8));
+        records.push(EventRecord::note_off(frame + 900, 0, key));
+        records.push(EventRecord::note_on(
+            frame,
+            1,
+            [36, 38, 42, 88][step as usize % 4],
+            0.8,
+        ));
+        if step % 7 == 3 {
+            records.push(EventRecord::param(frame + 300, 0, normalize, 0.0));
+            records.push(EventRecord::param(frame + 600, 0, normalize, 1.0));
+        }
+    }
+    for &record in &records {
+        engine.push(record);
+    }
+    let mut calls = 0;
+    let mut steps = 0;
+    while engine.sampler_measuring(0) == Some(true) || engine.sampler_measuring(1) == Some(true) {
+        calls += heap_calls(|| {
+            for _ in 0..4 {
+                engine.render(128);
+            }
+        });
+        for part in [0, 1] {
+            engine
+                .measure_instrument(part, manguebyte_web::PROBE_STEP_FRAMES)
+                .unwrap();
+        }
+        steps += 1;
+    }
+    // The glides to the make-ups measured, and what rings on.
+    calls += heap_calls(|| {
+        for _ in 0..200 {
+            engine.render(128);
+        }
+    });
+    assert_eq!(calls, 0, "the engine touched the heap {calls} times");
+    assert!(steps >= 27, "{steps} steps");
+    assert!(engine.sampler_make_up_db(0).is_some());
+    assert!(engine.sampler_make_up_db(1).is_some());
+    assert_eq!(engine.stats().dropped, 0);
+    assert_eq!(engine.stats().unrouted, 0);
+}
+
 /// Every path a full queue takes: waiting events pushed out by earlier
 /// ones, records refused, and drains and staged copies that stop with
 /// records left over. (Silencing a part that produced something that is

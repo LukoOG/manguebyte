@@ -25,12 +25,20 @@
 //!    [`mb_sfz_files_json`] lists the sample files it names.
 //! 2. For each file, write its path and then its bytes at [`mb_input_ptr`]
 //!    and call [`mb_sfz_add_file`], which decodes it.
-//! 3. Call [`mb_sfz_measure`] until it returns [`status::OK`] rather than
-//!    [`status::MEASURING`]: each call renders a few thousand frames of the
-//!    phrase the part's loudness normalisation measures the instrument on.
-//! 4. Call [`mb_sfz_finish`], which hands the instrument to the part (and
-//!    measures what step 3 left, all at once); later, [`mb_collect`] frees
-//!    the instruments parts are done with.
+//! 3. Call [`mb_sfz_install`], which hands the instrument to the part at
+//!    once: from the next frame rendered, it plays at a provisional
+//!    make-up, an estimate of what its loudness normalisation will find.
+//! 4. Call [`mb_sampler_measure`] until it returns [`status::OK`] rather
+//!    than [`status::MEASURING`]: each call renders a few thousand frames of
+//!    the phrase the normalisation measures a clone of the instrument on,
+//!    and the last glides the part to the make-up measured
+//!    ([`mb_sampler_make_up_db`]). Later, [`mb_collect`] frees the
+//!    instruments parts are done with.
+//!
+//! The older way, which still works, measures before the part plays the
+//! instrument: after step 2, call [`mb_sfz_measure`] until it returns
+//! [`status::OK`], then [`mb_sfz_finish`], which hands the instrument over
+//! at the make-up measured (and measures what was left, all at once).
 //!
 //! A load that fails writes why into the text buffer ([`mb_text_ptr`],
 //! [`mb_text_len`]).
@@ -56,7 +64,7 @@
 use crate::drums::drum_map_json;
 use crate::effect::Effect;
 use crate::engine::{Chain, Engine, EngineConfig, EngineError, InstrumentKind};
-use crate::load::{SfzLoad, summary_json};
+use crate::load::{SfzInstrument, SfzLoad, summary_json};
 use crate::probe::LoudnessProbe;
 use crate::record::RECORD_SIZE;
 use manguebyte_params::ParamId;
@@ -111,6 +119,16 @@ use manguebyte_params::ParamId;
 /// what any export or record means.
 /// The synth takes its accent as an argument of the note now, and sounds
 /// the same.
+///
+/// Nor did playing an instrument before it is measured: [`mb_sfz_install`],
+/// [`mb_sampler_measure`] and [`mb_sampler_make_up_db`] are added, and
+/// `js/worklet.js` looks for them by name, loading the older way without
+/// them. [`mb_sfz_measure`] still measures before the part plays the
+/// instrument, and [`mb_sfz_finish`] still hands it over measured. The one
+/// difference those two show is in round robins and random regions: the
+/// part now plays the instrument from where it was loaded, and a clone of
+/// it is measured, where before the part went on from where the
+/// measurement had left them.
 pub const ABI_VERSION: u32 = 2;
 
 /// The part number [`mb_effect_curve`] and [`mb_effect_running`] take for
@@ -182,8 +200,12 @@ pub struct WebEngine {
 enum Load {
     /// Its sample files arriving and being decoded.
     Decoding(SfzLoad),
-    /// Made, and being measured for the part's loudness normalisation.
-    Measuring(LoudnessProbe),
+    /// Made, and a clone of it being measured for the part's loudness
+    /// normalisation before the part plays it.
+    Measuring {
+        instrument: SfzInstrument,
+        probe: LoudnessProbe,
+    },
 }
 
 impl WebEngine {
@@ -778,7 +800,7 @@ pub unsafe extern "C" fn mb_sfz_files_json(engine: *mut WebEngine, part: u32) ->
         Some(index) => {
             web.text = match &web.loads[index].1 {
                 Load::Decoding(load) => load.missing_json(),
-                Load::Measuring(_) => "[]".to_owned(),
+                Load::Measuring { .. } => "[]".to_owned(),
             };
             web.text.as_ptr()
         }
@@ -839,15 +861,16 @@ pub unsafe extern "C" fn mb_sfz_add_file(
 /// Measures the instrument of the load of `part` for the part's loudness
 /// normalisation, up to `frames` frames of the phrase it plays at a time
 /// ([`PROBE_STEP_FRAMES`](crate::PROBE_STEP_FRAMES) is about what decoding
-/// a 64 KiB file costs). The first call makes the instrument, every file
-/// being in, and the measurement, and renders nothing. Returns a
-/// [`status`]: [`status::MEASURING`] while there is
-/// more to measure, [`status::OK`] once it is done (at once, for a part
-/// that does not normalise), and then [`mb_sfz_finish`] gives the
-/// instrument to the part. On an error the text buffer says why, and the
-/// load is over: [`status::BAD_SAMPLE`] if a file is missing, or the
-/// part's own if it is gone or plays something else now. Allocates on the
-/// first call; the work of each is bounded by `frames`.
+/// a 64 KiB file costs), before the part plays it. The first call makes
+/// the instrument, every file being in, and the measurement of a clone of
+/// it, and renders nothing. Returns a [`status`]: [`status::MEASURING`]
+/// while there is more to measure, [`status::OK`] once it is done (at
+/// once, for a part that does not normalise), and then [`mb_sfz_finish`]
+/// gives the instrument to the part (or [`mb_sfz_install`], to go on
+/// measuring while the part plays it). On an error the text buffer says
+/// why, and the load is over: [`status::BAD_SAMPLE`] if a file is missing,
+/// or the part's own if it is gone or plays something else now. Allocates
+/// on the first call; the work of each is bounded by `frames`.
 ///
 /// # Safety
 ///
@@ -865,15 +888,15 @@ pub unsafe extern "C" fn mb_sfz_measure(engine: *mut WebEngine, part: u32, frame
         );
     };
     let (number, load) = web.loads.swap_remove(index);
-    let (mut probe, made) = match load {
-        Load::Measuring(probe) => (probe, false),
+    let (instrument, mut probe, made) = match load {
+        Load::Measuring { instrument, probe } => (instrument, probe, false),
         Load::Decoding(load) => {
             let instrument = match load.finish() {
                 Ok(instrument) => instrument,
                 Err(error) => return web.fail(status::BAD_SAMPLE, error),
             };
-            match web.engine.probe_instrument(number, instrument) {
-                Ok(probe) => (probe, true),
+            match web.engine.probe_instrument(number, &instrument) {
+                Ok(probe) => (instrument, probe, true),
                 Err(error) => return web.fail(status_of(Err(error)), error),
             }
         }
@@ -884,7 +907,8 @@ pub unsafe extern "C" fn mb_sfz_measure(engine: *mut WebEngine, part: u32, frame
     } else {
         probe.step(frames as usize)
     };
-    web.loads.push((number, Load::Measuring(probe)));
+    web.loads
+        .push((number, Load::Measuring { instrument, probe }));
     if done { status::OK } else { status::MEASURING }
 }
 
@@ -897,13 +921,46 @@ pub unsafe extern "C" fn mb_sfz_measure(engine: *mut WebEngine, part: u32, frame
 /// `{"regions":10,"samples":10,"sample_bytes":1234,"warnings":["..."]}`.
 /// Returns a [`status`]: [`status::BAD_SAMPLE`] if a file is still
 /// missing, with the text buffer naming it. The load is over either way.
-/// Allocates.
+/// Allocates. [`mb_sfz_install`] gives the part the instrument before it
+/// is measured instead.
 ///
 /// # Safety
 ///
 /// `engine` is null or a live pointer from [`mb_engine_new`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mb_sfz_finish(engine: *mut WebEngine, part: u32) -> i32 {
+    // SAFETY: as the caller promises.
+    unsafe { give(engine, part, false) }
+}
+
+/// Finishes the load of `part` and gives the instrument to the part at
+/// once, before it is measured
+/// ([`Engine::install_instrument`](crate::Engine::install_instrument)): it
+/// plays new notes with it from the next frame rendered, at a provisional
+/// make-up while [`mb_sampler_measure`] measures it, a step at a time, and
+/// then at the make-up measured. A measurement [`mb_sfz_measure`] began
+/// goes on where it was. On success the text buffer holds the summary
+/// [`mb_sfz_finish`] gives. Returns a [`status`]: [`status::BAD_SAMPLE`]
+/// if a file is still missing, with the text buffer naming it. The load is
+/// over either way. Allocates; nothing is rendered, and the estimate of
+/// the make-up reads about as many frames as one step of
+/// [`mb_sampler_measure`] renders.
+///
+/// # Safety
+///
+/// `engine` is null or a live pointer from [`mb_engine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mb_sfz_install(engine: *mut WebEngine, part: u32) -> i32 {
+    // SAFETY: as the caller promises.
+    unsafe { give(engine, part, true) }
+}
+
+/// [`mb_sfz_finish`], or with `now` [`mb_sfz_install`].
+///
+/// # Safety
+///
+/// `engine` is null or a live pointer from [`mb_engine_new`].
+unsafe fn give(engine: *mut WebEngine, part: u32, now: bool) -> i32 {
     // SAFETY: as the caller promises.
     let Some(web) = (unsafe { web(engine) }) else {
         return status::NO_ENGINE;
@@ -915,27 +972,89 @@ pub unsafe extern "C" fn mb_sfz_finish(engine: *mut WebEngine, part: u32) -> i32
         );
     };
     let (number, load) = web.loads.swap_remove(index);
-    let (summary, loaded) = match load {
+    let (summary, given) = match load {
         Load::Decoding(load) => {
             let instrument = match load.finish() {
                 Ok(instrument) => instrument,
                 Err(error) => return web.fail(status::BAD_SAMPLE, error),
             };
             let summary = summary_json(&instrument);
-            (summary, web.engine.load_instrument(number, instrument))
+            let given = if now {
+                web.engine.install_instrument(number, instrument)
+            } else {
+                web.engine.load_instrument(number, instrument)
+            };
+            (summary, given)
         }
-        Load::Measuring(probe) => {
-            let summary = summary_json(probe.instrument());
-            (summary, web.engine.load_probed(number, probe))
+        Load::Measuring { instrument, probe } => {
+            let summary = summary_json(&instrument);
+            let given = if now {
+                web.engine.install_probed(number, instrument, probe)
+            } else {
+                web.engine.load_probed(number, instrument, probe)
+            };
+            (summary, given)
         }
     };
-    match loaded {
+    match given {
         Ok(()) => {
             web.text = summary;
             status::OK
         }
         Err(error) => web.fail(status_of(Err(error)), error),
     }
+}
+
+/// Measures the instrument sampler part `part` plays, if it is still being
+/// measured after [`mb_sfz_install`], up to `frames` frames of its phrase
+/// ([`PROBE_STEP_FRAMES`](crate::PROBE_STEP_FRAMES) is about what decoding
+/// a 64 KiB file costs; with 0 it only asks), and once that is done has
+/// the part play at the make-up measured, gliding there over 20 ms
+/// ([`Engine::measure_instrument`](crate::Engine::measure_instrument)).
+/// Returns a [`status`]: [`status::MEASURING`] while there is more to
+/// measure, [`status::OK`] once it is done or if there was nothing to
+/// measure, or [`status::NO_SUCH_PART`], [`status::NOT_A_SAMPLER`],
+/// [`status::BAD_PART`]. Allocates; the work is bounded by `frames`.
+///
+/// # Safety
+///
+/// `engine` is null or a live pointer from [`mb_engine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mb_sampler_measure(engine: *mut WebEngine, part: u32, frames: u32) -> i32 {
+    // SAFETY: as the caller promises.
+    let Some(web) = (unsafe { web(engine) }) else {
+        return status::NO_ENGINE;
+    };
+    let part = match part_number(part) {
+        Ok(part) => part,
+        Err(status) => return status,
+    };
+    match web.engine.measure_instrument(part, frames as usize) {
+        Ok(true) => status::OK,
+        Ok(false) => status::MEASURING,
+        Err(error) => status_of(Err(error)),
+    }
+}
+
+/// The make-up gain, in decibels, the loudness normalisation of sampler
+/// part `part` measured for the instrument it plays
+/// ([`Engine::sampler_make_up_db`](crate::Engine::sampler_make_up_db)), or
+/// NaN: while it is still being measured, if it was not measured, or if
+/// there is no such sampler part.
+///
+/// # Safety
+///
+/// `engine` is null or a live pointer from [`mb_engine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mb_sampler_make_up_db(engine: *mut WebEngine, part: u32) -> f64 {
+    // SAFETY: as the caller promises.
+    let Some(web) = (unsafe { web(engine) }) else {
+        return f64::NAN;
+    };
+    part_number(part)
+        .ok()
+        .and_then(|part| web.engine.sampler_make_up_db(part))
+        .unwrap_or(f64::NAN)
 }
 
 /// Gives up the load of `part`, if there is one. Returns a [`status`]:

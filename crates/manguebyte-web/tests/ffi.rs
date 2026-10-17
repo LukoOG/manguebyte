@@ -649,3 +649,138 @@ fn sfz_instruments_load_through_the_exports() {
         ffi::mb_engine_free(engine);
     }
 }
+
+/// Begins a load of `sfz` with its one file, `a.wav`, for part `part`.
+///
+/// # Safety
+///
+/// `engine` is live.
+unsafe fn begin_with_file(engine: *mut WebEngine, part: u32, sfz: &[u8]) {
+    // SAFETY: as the caller promises.
+    unsafe {
+        input(engine, sfz);
+        assert_eq!(
+            ffi::mb_sfz_begin(engine, part, sfz.len() as u32),
+            status::OK
+        );
+        let mut file = b"a.wav".to_vec();
+        file.extend_from_slice(&small_wav());
+        input(engine, &file);
+        let file_bytes = file.len() as u32 - 5;
+        assert_eq!(
+            ffi::mb_sfz_add_file(engine, part, 5, file_bytes),
+            status::OK
+        );
+    }
+}
+
+#[test]
+fn an_instrument_installed_plays_at_once_and_is_measured_a_step_at_a_time() {
+    let null = core::ptr::null_mut();
+    let engine = ffi::mb_engine_new(48_000.0, 128, 4, 64, 16);
+    let sfz = b"<control> default_path=./\n<region> sample=a.wav lokey=0 hikey=127";
+    // SAFETY: `engine` is live until it is freed; every pointer read is
+    // read before the call that could move what it points at.
+    unsafe {
+        assert_eq!(ffi::mb_sfz_install(null, 0), status::NO_ENGINE);
+        assert_eq!(ffi::mb_sampler_measure(null, 0, 64), status::NO_ENGINE);
+        assert!(ffi::mb_sampler_make_up_db(null, 0).is_nan());
+        assert_eq!(ffi::mb_create_part(engine, 0, 2, 0), status::OK);
+        assert_eq!(ffi::mb_create_part(engine, 1, 0, 0), status::OK);
+        assert_eq!(
+            ffi::mb_sampler_measure(engine, 1, 64),
+            status::NOT_A_SAMPLER
+        );
+        assert_eq!(ffi::mb_sampler_measure(engine, 7, 64), status::NO_SUCH_PART);
+        assert_eq!(
+            ffi::mb_sampler_measure(engine, 70_000, 64),
+            status::BAD_PART
+        );
+        assert_eq!(
+            ffi::mb_sampler_measure(engine, 0, 64),
+            status::OK,
+            "nothing to measure"
+        );
+        assert!(ffi::mb_sampler_make_up_db(engine, 1).is_nan());
+        assert_eq!(ffi::mb_sfz_install(engine, 0), status::NO_LOAD);
+        // A file missing ends the load, naming it.
+        input(engine, sfz);
+        assert_eq!(ffi::mb_sfz_begin(engine, 0, sfz.len() as u32), status::OK);
+        assert_eq!(ffi::mb_sfz_install(engine, 0), status::BAD_SAMPLE);
+        assert!(text(engine, ffi::mb_text_ptr(engine)).contains("a.wav"));
+        assert_eq!(ffi::mb_sfz_install(engine, 0), status::NO_LOAD);
+
+        // Under Miri the part does not normalise: measuring 4.5 s of sound
+        // would take far too long there.
+        if cfg!(miri) {
+            let off = ParamId::from_name(ids::SAMPLER_NORMALIZE);
+            assert_eq!(push(engine, &[EventRecord::param(0, 0, off, 0.0)]), 1);
+            assert_eq!(ffi::mb_render(engine, 128), 128);
+        }
+        begin_with_file(engine, 0, sfz);
+        assert_eq!(ffi::mb_sfz_install(engine, 0), status::OK);
+        let summary = text(engine, ffi::mb_text_ptr(engine));
+        assert!(
+            summary.starts_with("{\"regions\":1,\"samples\":1,"),
+            "{summary}"
+        );
+        // Playable from the next frame, before it is measured.
+        let at = ffi::mb_frame(engine) as u64 + 10;
+        assert_eq!(push(engine, &[EventRecord::note_on(at, 0, 60, 1.0)]), 1);
+        assert_eq!(ffi::mb_render(engine, 128), 128);
+        let (left, _) = output(engine, 128);
+        assert!(left[..10].iter().all(|&sample| sample == 0.0));
+        assert!(left[11..].iter().any(|&sample| sample != 0.0));
+        assert!(
+            ffi::mb_sampler_make_up_db(engine, 0).is_nan(),
+            "not measured yet"
+        );
+        let measuring = if cfg!(miri) {
+            status::OK
+        } else {
+            status::MEASURING
+        };
+        assert_eq!(
+            ffi::mb_sampler_measure(engine, 0, 0),
+            measuring,
+            "0 frames only asks"
+        );
+        let mut steps = 0;
+        loop {
+            steps += 1;
+            match ffi::mb_sampler_measure(engine, 0, manguebyte_web::PROBE_STEP_FRAMES as u32) {
+                status::OK => break,
+                other => assert_eq!(other, status::MEASURING),
+            }
+            assert_eq!(ffi::mb_render(engine, 128), 128);
+        }
+        if cfg!(miri) {
+            assert_eq!(steps, 1);
+            assert!(ffi::mb_sampler_make_up_db(engine, 0).is_nan());
+        } else {
+            // 4.5 s at 48 kHz in steps of 8 192 frames.
+            assert_eq!(steps, 27);
+            assert!(ffi::mb_sampler_make_up_db(engine, 0).is_finite());
+            // A measurement begun before the hand-over goes on after it.
+            begin_with_file(engine, 0, sfz);
+            assert_eq!(ffi::mb_sfz_measure(engine, 0, 8_192), status::MEASURING);
+            for _ in 0..10 {
+                assert_eq!(ffi::mb_sfz_measure(engine, 0, 8_192), status::MEASURING);
+            }
+            assert_eq!(ffi::mb_sfz_install(engine, 0), status::OK);
+            assert!(ffi::mb_sampler_make_up_db(engine, 0).is_nan());
+            let mut left_over = 0;
+            while ffi::mb_sampler_measure(engine, 0, 8_192) == status::MEASURING {
+                left_over += 1;
+            }
+            assert_eq!(left_over, 27 - 10 - 1);
+            assert!(ffi::mb_sampler_make_up_db(engine, 0).is_finite());
+            // Made again, the part has nothing left to measure.
+            begin_with_file(engine, 0, sfz);
+            assert_eq!(ffi::mb_sfz_install(engine, 0), status::OK);
+            assert_eq!(ffi::mb_create_part(engine, 0, 2, 0), status::OK);
+            assert_eq!(ffi::mb_sampler_measure(engine, 0, 0), status::OK);
+        }
+        ffi::mb_engine_free(engine);
+    }
+}

@@ -505,3 +505,258 @@ fn normalisation_switches_off_and_on_without_a_jump() {
     let steps = |from: u64| largest_step(&reference[from as usize..from as usize + 960]);
     assert!(steps(switch) <= steps(switch + 960) * 1.01);
 }
+
+/// The largest error [`the_provisional_make_up_is_near_the_measured_one`]
+/// allows the estimate, in dB. It measures 0.22 at most.
+const ESTIMATE_TOLERANCE_DB: f64 = 1.0;
+
+/// While an instrument is measured, its part plays at an estimate of the
+/// make-up; for every fixture instrument the estimate lands within
+/// [`ESTIMATE_TOLERANCE_DB`] of what the measurement finds, where playing
+/// the samples as they are, 0 dB, would be as far off as the make-up
+/// itself, -11 to +11 dB.
+#[test]
+fn the_provisional_make_up_is_near_the_measured_one() {
+    let mut fixtures = Vec::new();
+    for amplitude in [0.2, 0.5, 0.8] {
+        for kind in [InstrumentKind::Sampler, InstrumentKind::SamplerKit] {
+            fixtures.push((
+                format!("{} recorded at {amplitude}", kind.name()),
+                kind,
+                recorded(kind, amplitude),
+            ));
+        }
+    }
+    fixtures.push((
+        "looped sines".to_owned(),
+        InstrumentKind::Sampler,
+        tone_instrument(),
+    ));
+    fixtures.push((
+        "kit".to_owned(),
+        InstrumentKind::SamplerKit,
+        kit_instrument(),
+    ));
+    let mut worst: f64 = 0.0;
+    for (name, kind, (sfz, files)) in &fixtures {
+        let mut engine = engine_with(*kind, Chain::NONE);
+        engine.install_instrument(0, build_sfz(sfz, files)).unwrap();
+        let provisional = engine.sampler_provisional_make_up_db(0).unwrap();
+        assert_eq!(
+            engine.sampler_make_up_db(0),
+            None,
+            "{name}: not measured yet"
+        );
+        while !engine
+            .measure_instrument(0, manguebyte_web::PROBE_STEP_FRAMES)
+            .unwrap()
+        {}
+        let measured = engine.sampler_make_up_db(0).unwrap();
+        println!(
+            "{name:<28} provisional {provisional:+6.2} dB, measured {measured:+6.2} dB, off by {:+5.2}",
+            provisional - measured
+        );
+        worst = worst.max((provisional - measured).abs());
+    }
+    println!("worst: {worst:.2} dB");
+    assert!(
+        worst < ESTIMATE_TOLERANCE_DB,
+        "the estimate is {worst:.2} dB off"
+    );
+}
+
+/// Renders `engine` from its frame to `end` in quanta of `quantum`, calling
+/// `between` before each quantum with the frame it starts on; returns
+/// what it rendered.
+fn render_with(
+    engine: &mut Engine,
+    end: u64,
+    quantum: usize,
+    between: &mut dyn FnMut(&mut Engine, u64),
+) -> Vec<f32> {
+    let mut left = Vec::new();
+    while engine.frame() < end {
+        between(engine, engine.frame());
+        let frames = quantum.min((end - engine.frame()) as usize);
+        engine.render(frames);
+        left.extend_from_slice(engine.output().0);
+    }
+    left
+}
+
+/// A note struck on the frame after an instrument is handed over sounds,
+/// at the provisional make-up, before it is measured; when the
+/// measurement ends the part glides to the make-up measured in a straight
+/// line over 20 ms, the ramp `sampler.normalize` takes.
+#[test]
+fn an_instrument_plays_before_it_is_measured_and_then_glides() {
+    let (sfz, files) = tone_instrument();
+    let note = EventRecord::note_on(0, 0, 69, 0.8);
+    let measured_at = 4_864u64;
+    let mut engine = engine_with(InstrumentKind::Sampler, Chain::NONE);
+    engine
+        .install_instrument(0, build_sfz(&sfz, &files))
+        .unwrap();
+    assert_eq!(engine.sampler_measuring(0), Some(true));
+    assert_eq!(engine.sampler_make_up_db(0), None);
+    let provisional = engine.sampler_provisional_make_up_db(0).unwrap();
+    push_all(&mut engine, &[note]);
+    let played = render_with(&mut engine, 12_000, 128, &mut |engine, frame| {
+        if frame == measured_at {
+            assert!(engine.measure_instrument(0, usize::MAX).unwrap());
+        }
+    });
+    assert_eq!(engine.sampler_measuring(0), Some(false));
+    let measured = engine.sampler_make_up_db(0).unwrap();
+    // The same note as recorded, at the part's level and no make-up.
+    let mut recorded = engine_with(InstrumentKind::Sampler, Chain::NONE);
+    load_sfz_unmeasured(&mut recorded, 0, &sfz, &files);
+    push_all(&mut recorded, &[note]);
+    let reference = render(&mut recorded, 12_000, 128).0;
+    // A sine starts at 0: the note sounds from its second frame.
+    assert_eq!(onset(&played), Some(1));
+    let gain = |db: f64| 10f64.powf(db / 20.0);
+    let ratio = |frame: usize| f64::from(played[frame]) / f64::from(reference[frame]);
+    let (from, to) = (gain(provisional), gain(measured));
+    // The parts are rendered the master's look-ahead ahead of the output,
+    // so a change made on frame 4 864 is heard that much later.
+    let start = measured_at as usize + engine.master_latency_frames();
+    let ramp = 960;
+    for frame in (0..12_000).filter(|&frame| reference[frame].abs() > 0.05) {
+        let expected = if frame < start {
+            from
+        } else if frame >= start + ramp - 1 {
+            to
+        } else {
+            from + (to - from) * (frame - start + 1) as f64 / ramp as f64
+        };
+        assert!(
+            (ratio(frame) - expected).abs() < 1e-4 * expected,
+            "frame {frame}: {} against {expected}",
+            ratio(frame)
+        );
+    }
+    println!(
+        "provisional {provisional:+.2} dB, measured {measured:+.2} dB, glide from frame {start} over {ramp} frames"
+    );
+}
+
+/// With `sampler.normalize` off an instrument handed over before it is
+/// measured plays as recorded, bit for bit, and is not measured; switched
+/// off while it is measured, the end of the measurement changes nothing.
+#[test]
+fn with_normalisation_off_a_measurement_changes_nothing() {
+    let (sfz, files) = tone_instrument();
+    let off = EventRecord::param(0, 0, id(ids::SAMPLER_NORMALIZE), 0.0);
+    let notes = [
+        EventRecord::note_on(128, 0, 69, 0.8),
+        EventRecord::note_on(3_000, 0, 76, 0.6),
+    ];
+    let as_recorded = || {
+        let mut engine = engine_with(InstrumentKind::Sampler, Chain::NONE);
+        push_all(&mut engine, &[off]);
+        engine.render(128);
+        load_sfz_unmeasured(&mut engine, 0, &sfz, &files);
+        push_all(&mut engine, &notes);
+        render(&mut engine, 9_600, 128).0
+    };
+    let mut engine = engine_with(InstrumentKind::Sampler, Chain::NONE);
+    push_all(&mut engine, &[off]);
+    engine.render(128);
+    engine
+        .install_instrument(0, build_sfz(&sfz, &files))
+        .unwrap();
+    assert_eq!(engine.sampler_measuring(0), Some(false));
+    assert_eq!(engine.sampler_provisional_make_up_db(0), None);
+    assert!(engine.measure_instrument(0, 0).unwrap());
+    push_all(&mut engine, &notes);
+    let off_from_the_start = render(&mut engine, 9_600, 128).0;
+    assert_eq!(bits(&off_from_the_start), bits(&as_recorded()));
+    assert_eq!(engine.sampler_make_up_db(0), None);
+
+    // Switched off on frame 1 000, while measured; the measurement ends on
+    // frame 4 864, or never.
+    let play = |measure: bool| {
+        let mut engine = engine_with(InstrumentKind::Sampler, Chain::NONE);
+        engine
+            .install_instrument(0, build_sfz(&sfz, &files))
+            .unwrap();
+        push_all(&mut engine, &notes);
+        push_all(
+            &mut engine,
+            &[EventRecord::param(
+                1_000,
+                0,
+                id(ids::SAMPLER_NORMALIZE),
+                0.0,
+            )],
+        );
+        let left = render_with(&mut engine, 9_600, 128, &mut |engine, frame| {
+            if measure && frame == 4_864 {
+                assert!(engine.measure_instrument(0, usize::MAX).unwrap());
+            }
+        });
+        (left, engine.sampler_make_up_db(0))
+    };
+    let (measured, make_up) = play(true);
+    let (unmeasured, none) = play(false);
+    assert!(make_up.is_some() && none.is_none());
+    assert!(peak(&measured) > 0.1);
+    assert_eq!(bits(&measured), bits(&unmeasured));
+}
+
+/// What a part plays while its instrument is measured depends only on the
+/// frame the measurement ends before, not on the size of the quanta nor on
+/// how far the measurement had got at each one: the part plays the
+/// instrument with round robins of its own, which the measurement, on a
+/// clone, never moves. Here the instrument alternates two regions, one of
+/// them 6 dB down, and replaces one whose notes still ring.
+#[test]
+fn a_measurement_under_way_is_the_same_in_every_quantum_and_every_schedule() {
+    let (first_sfz, files) = tone_instrument();
+    let alternating = "<global> ampeg_release=0.05 pitch_keycenter=69 lokey=0 hikey=127
+        loop_mode=loop_continuous loop_start=12000 loop_end=17999
+        <region> sample=a4.wav seq_length=2 seq_position=1
+        <region> sample=a4.wav seq_length=2 seq_position=2 volume=-6";
+    let (installed_at, measured_at, end) = (672u64, 2_688u64, 6_000u64);
+    let phrase_frames = (Phrase::MEASURED_SECONDS * RATE) as usize;
+    let play = |quantum: usize, stepped: bool| {
+        let mut engine = engine_with(InstrumentKind::Sampler, Chain::NONE);
+        load_sfz_unmeasured(&mut engine, 0, &first_sfz, &files);
+        let mut records = vec![EventRecord::note_on(0, 0, 57, 0.9)];
+        for (step, frame) in (700..end).step_by(400).enumerate() {
+            let key = 60 + (step % 5) as u8;
+            records.push(EventRecord::note_on(frame, 0, key, 0.8));
+            records.push(EventRecord::note_off(frame + 350, 0, key));
+        }
+        records.push(EventRecord::note_off(1_500, 0, 57));
+        push_all(&mut engine, &records);
+        let mut taken = 0;
+        let left = render_with(&mut engine, end, quantum, &mut |engine, frame| {
+            if frame == installed_at {
+                let instrument = build_sfz(alternating, &files);
+                engine.install_instrument(0, instrument).unwrap();
+            } else if frame == measured_at {
+                assert!(engine.measure_instrument(0, usize::MAX).unwrap());
+            } else if stepped && frame > installed_at && frame < measured_at {
+                // Steps of every size between the quanta, short of the end.
+                let step = 997.min(phrase_frames - 1_000 - taken);
+                assert!(!engine.measure_instrument(0, step).unwrap());
+                taken += step;
+            }
+        });
+        assert!(engine.sampler_make_up_db(0).is_some());
+        left
+    };
+    let reference = play(224, false);
+    assert!(peak(&reference) > 0.05);
+    for quantum in [1, 7, 32, 96, 224] {
+        for stepped in [false, true] {
+            assert_eq!(
+                bits(&play(quantum, stepped)),
+                bits(&reference),
+                "quanta of {quantum}, stepped {stepped}"
+            );
+        }
+    }
+}
