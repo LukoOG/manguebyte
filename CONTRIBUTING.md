@@ -50,10 +50,11 @@ You need a recent stable Rust toolchain (1.85 or newer) with `rustfmt` and
 rustup component add rustfmt clippy
 ```
 
-On Linux, the device backend needs the ALSA development headers:
+On Linux, the device backend needs the ALSA development headers, and the
+JACK host, which `--all-features` builds, the JACK ones:
 
 ```bash
-sudo apt install libasound2-dev
+sudo apt install libasound2-dev libjack-jackd2-dev
 ```
 
 Then fork the repository, clone your fork and create a branch:

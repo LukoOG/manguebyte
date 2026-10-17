@@ -30,11 +30,12 @@ nothing beside or above it.
                               |
       +-----------+-----------+-----------+
       |           |           |
-      |           |         plugin          plugin API + test harness
-      |           |          /   \
-   devices     formats     dsp   params
-   (cpal)         |        /  \     |
-      |           |     midi   \    |
+   devices        |         plugin          plugin API + test harness
+   (cpal)         |          /   \
+      |    \      |         /     \
+      |     +-----|------ dsp   params      devices resample with dsp
+      |        formats    /  \     |
+      |           |    midi   \    |
       +-----------+-------------+---+
                         |
                       core                  no dependencies
@@ -49,7 +50,7 @@ nothing beside or above it.
 | `manguebyte-formats` | Audio files: whole or streamed, read and written, with play and record bridges | core |
 | `manguebyte-osc` | Open Sound Control, with a real-time bridge | core |
 | `manguebyte-analysis` | Loudness, true peak, level meters, spectrum, pitch | core, dsp |
-| `manguebyte-devices` | Sound card input, output and duplex; MIDI ports | core, midi, `cpal`, `midir` |
+| `manguebyte-devices` | Audio hosts, sound card input, output and duplex with drift correction, the device manager and hot-plug; MIDI ports | core, midi, dsp (its `Resampler`), `cpal`, `midir` |
 | `manguebyte-plugin` | `Plugin` trait, state, `Harness` for testing without a host | core, midi, dsp, params |
 | `manguebyte-graph` | A processing graph that is rewired while it plays | core, dsp |
 | `manguebyte-standalone` | Runs a `Plugin` on the sound card and MIDI ports | core, midi, dsp, params, plugin, devices |

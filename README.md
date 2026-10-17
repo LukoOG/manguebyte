@@ -109,7 +109,7 @@ small part of the road ahead and the API will change before 1.0. See
 | [`manguebyte-midi`](crates/manguebyte-midi) | MIDI 1.0 channel and system messages, a byte-stream parser, standard MIDI files, sample-accurate `MidiBuffer`; MIDI 2.0 packets (UMP) and translation between the protocols; RPN and NRPN; MPE zones and note tracking; keyboard state |
 | [`manguebyte-formats`](crates/manguebyte-formats) | WAV (with RF64), AIFF and FLAC, read and written, and Ogg Vorbis and MP3 read, whole or block by block with exact seeking; a FLAC encoder and decoder written from the specification and checked against FFmpeg, and Vorbis and MP3 decoders written from theirs and tested on files libvorbis and LAME wrote; wait-free bridges to play and record from an audio callback |
 | [`manguebyte-osc`](crates/manguebyte-osc) | Open Sound Control over UDP and TCP, with a real-time bridge that puts time-tagged bundles on their exact frame |
-| [`manguebyte-devices`](crates/manguebyte-devices) | Device listing and selection, playback, recording and full-duplex streams, in any hardware sample format; MIDI input and output ports, with arrival times mapped to frames so a player's timing survives the audio buffer |
+| [`manguebyte-devices`](crates/manguebyte-devices) | Audio hosts (WASAPI, ASIO, CoreAudio, ALSA, JACK, AAudio), device listing and selection, playback, recording and full-duplex streams that follow the drift between two devices' clocks, in any hardware sample format, with timing and latency in every callback; a device manager that saves its setup and restores it with fallbacks, and follows devices as they are plugged in and out; MIDI input and output ports, virtual ones too, with arrival times mapped to frames so a player's timing survives the audio buffer; a headless backend for tests |
 | [`manguebyte-gfx`](crates/manguebyte-gfx) | 2D drawing on the CPU: paths, gradients, images, clips and layers recorded as a scene with an exact text dump; repaint limited to what changed, identical to a full repaint; text shaped and laid out with an embedded Inter subset |
 | [`manguebyte-ui`](crates/manguebyte-ui) | Widgets for plugin editors: a retained tree, row and column layout, theme tokens, label, knob, slider, toggle, meter and canvas, parameter edits as gestures, an accessibility description required of every widget, and a harness that drives it all in a unit test |
 | [`manguebyte-window`](crates/manguebyte-window) | Windows for plugin editors: a child of the host's window on Win32, presenting only what changed, and a headless backend that lets a test drive a window on any system |
@@ -200,7 +200,8 @@ cargo run --example play_riff -- -12
 ```
 
 On Linux the device backend needs the ALSA development headers
-(`sudo apt install libasound2-dev` on Debian and Ubuntu).
+(`sudo apt install libasound2-dev` on Debian and Ubuntu), and the JACK host
+(feature `jack`) the JACK ones (`libjack-jackd2-dev`).
 
 ## Why "Manguebyte"?
 

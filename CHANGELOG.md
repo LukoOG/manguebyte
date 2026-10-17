@@ -1124,6 +1124,46 @@ display, and no editor has been opened inside a real host yet.
 - `devices::midi`: MIDI input and output ports. `MidiReceiver` stamps each
   message with its arrival time and places it inside the next block at the
   matching frame, so a player's timing is not quantised to the buffer size.
+- Audio hosts: `audio_hosts` lists the system's audio APIs that can be used
+  now, and `AudioHost` lists and opens the devices of one of them: WASAPI,
+  CoreAudio, ALSA, AAudio, and JACK with the new `jack` feature (on Linux
+  it needs the JACK development files to build). ASIO comes from `cpal`'s
+  own `asio` feature, which an application turns on itself with
+  Steinberg's SDK; the documentation says why this crate has no feature for
+  it.
+- Timing: `start_timed` on `OutputDevice`, `InputDevice` and `DuplexStream`
+  hands the callback a `CallbackInfo` with the frame position, the
+  backend's clock and the latencies it reports. Streams tell how many frames
+  they have processed and whether the backend reported their device lost.
+- `DuplexStream` follows the drift between two devices' clocks by
+  resampling the input instead of dropping or padding it
+  (`DuplexSettings::drift_correction`, on by default;
+  `DuplexStream::clock_drift_ppm`). `Resampler::set_ratio` changes a
+  converter's ratio while it runs.
+- `DeviceManager`: opens the input, output and MIDI ports a `DeviceSetup`
+  names and runs one `AudioCallback` on them, keeping it across restarts.
+  A setup is saved as versioned text and restored with fallbacks, each
+  listed in a `RestoreReport`: a device found by its name when its
+  identifier changed, the default when it is missing, a rate, channel count
+  or buffer size the device can do. MIDI from every open port is merged
+  into the callback's `DeviceIo::read_midi`.
+- Hot-plug: `DeviceManager::poll_devices` and `DeviceWatcher` report
+  devices and MIDI ports added and removed, the default changing, and a
+  stream whose device was lost (unplugged, reported by the backend, or a
+  callback silent for two seconds). The devices are polled, every second
+  by default, because no backend notifies. `DeviceManager::follow` restarts
+  on the saved device when it returns and on the default when the stream's
+  device is lost.
+- Virtual MIDI ports: `MidiInput::create_virtual` and
+  `MidiOutput::create_virtual` on macOS, iOS, Linux and the BSDs;
+  `MidiError::VirtualPortsUnsupported` on Windows and Android.
+- `MockBackend`: a headless stand-in for the system's devices, driven by
+  hand, through which the manager, hot-plug, saved setups and duplex
+  timing are tested on every system, and the device path is checked for
+  allocations.
+- The core, DSP, MIDI, formats and device crates and the facade build for
+  Android (`aarch64-linux-android`) and iOS (`aarch64-apple-ios`) in CI, and
+  the crates that do not touch devices for WebAssembly.
 - `manguebyte-standalone`: `Standalone::<P>::start` runs a plugin on the
   default output device, listens to every MIDI input, gives an effect the
   default input, and accepts notes from the program itself.

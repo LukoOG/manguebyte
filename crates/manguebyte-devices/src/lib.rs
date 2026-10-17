@@ -5,12 +5,42 @@
 //! [`AudioBuffer`](manguebyte_core::AudioBuffer)s whatever sample format and
 //! layout the hardware actually uses. The platform work is done by [`cpal`].
 //!
+//! - [`audio_hosts`] lists the system's audio APIs (WASAPI, ASIO, CoreAudio,
+//!   ALSA, JACK, AAudio) and [`AudioHost`] picks one.
 //! - [`output_devices`] and [`input_devices`] list what is connected.
 //! - [`OutputDevice`] plays audio.
 //! - [`InputDevice`] records it.
-//! - [`DuplexStream`] does both at once, for effects and monitoring.
-//! - [`midi`] opens MIDI ports and keeps a player's timing on the way to
-//!   the audio thread (feature `midi`, on by default).
+//! - [`DuplexStream`] does both at once, for effects and monitoring, and
+//!   follows the drift between two devices' clocks.
+//! - [`DeviceManager`] opens the devices a saved [`DeviceSetup`] names, with
+//!   fallbacks for what is missing, runs one [`AudioCallback`] on them, and
+//!   follows the system as devices come and go ([`DeviceEvent`],
+//!   [`DeviceWatcher`]).
+//! - [`MockBackend`] stands in for the system with no hardware, for tests.
+//! - [`midi`] opens MIDI ports, real and virtual, and keeps a player's
+//!   timing on the way to the audio thread (feature `midi`, on by default).
+//!
+//! Every callback can be told when its audio is heard or was captured: the
+//! `start_timed` methods and the device manager hand it a [`CallbackInfo`]
+//! with the frame position, the backend's clock and the latencies it
+//! reports.
+//!
+//! # Features
+//!
+//! - `midi` (default): MIDI ports, through `midir`.
+//! - `jack`: the JACK audio host. On Linux, building it needs the JACK
+//!   development files (`libjack-jackd2-dev` on Debian and Ubuntu).
+//!
+//! ASIO has no feature here, because the backend's build script fetches
+//! Steinberg's SDK by itself; [`audio_hosts`] says how an application turns
+//! it on.
+//!
+//! # Platforms
+//!
+//! Windows, macOS and Linux are built and tested in CI, Android
+//! (`aarch64-linux-android`) and iOS (`aarch64-apple-ios`) are built there.
+//! Virtual MIDI ports exist where the system allows them; see
+//! [`midi`](midi#virtual-ports).
 //!
 //! ```no_run
 //! use manguebyte_devices::OutputDevice;

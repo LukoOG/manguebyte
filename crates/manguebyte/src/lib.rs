@@ -22,7 +22,7 @@
 //! | `analysis` | `manguebyte-analysis` | loudness, true peak, level meters, spectrum and pitch (feature `analysis`, on by default) |
 //! | `osc` | `manguebyte-osc` | Open Sound Control, with time tags landing on their frame (feature `osc`, on by default) |
 //! | `standalone` | `manguebyte-standalone` | runs a plugin on the sound card and MIDI ports (feature `standalone`) |
-//! | [`devices`] | `manguebyte-devices` | audio device input, output and duplex streams (feature `devices`, on by default) |
+//! | [`devices`] | `manguebyte-devices` | audio hosts, device input, output and duplex streams, a device manager with saved setups and hot-plug, MIDI ports (feature `devices`, on by default) |
 //!
 //! # Example
 //!
@@ -120,8 +120,9 @@ pub mod prelude {
 
     #[cfg(feature = "devices")]
     pub use crate::devices::{
-        DeviceError, DeviceInfo, DuplexStream, InputDevice, InputStream, OutputDevice,
-        OutputStream, StreamSettings, input_devices, output_devices,
+        AudioHost, CallbackInfo, DeviceError, DeviceInfo, DeviceIo, DeviceManager, DeviceSetup,
+        DuplexStream, InputDevice, InputStream, OutputDevice, OutputStream, StreamSettings,
+        input_devices, output_devices,
     };
 }
 

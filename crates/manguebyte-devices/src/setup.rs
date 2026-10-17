@@ -93,9 +93,7 @@ pub struct DeviceSetup {
     pub input_channels: Option<u16>,
     /// MIDI input ports, merged into the callback's MIDI.
     pub midi_inputs: Vec<DeviceRef>,
-    /// The MIDI output port that
-    /// [`DeviceManager::send_midi`](crate::DeviceManager::send_midi) sends
-    /// to.
+    /// The MIDI output port that `DeviceManager::send_midi` sends to.
     pub midi_output: Option<DeviceRef>,
 }
 
