@@ -1168,12 +1168,13 @@ mod tests {
     #[test]
     fn a_stream_that_is_short_from_the_start_ends_where_it_does() {
         // 40 blocks where the file states 45: the decode from the start is
-        // short too, so the reader ends there, after one decode from the
-        // start for each seek that met the end.
+        // short too, so the reader ends there. A seek forward walks on
+        // without opening the file again, and one back starts again from
+        // the first block, once.
         let mut reader = reader(40, None);
         assert_eq!(reader.seek(43_728).unwrap(), 40 * 1_024 - 1_024);
         assert_eq!(read_checked(&mut reader, 700), 0);
-        assert_eq!(reader.decoder.reopened, 1);
+        assert_eq!(reader.decoder.reopened, 0);
         assert_eq!(reader.seek(30_000).unwrap(), 30_000);
         let mut total = 0;
         loop {
@@ -1184,6 +1185,6 @@ mod tests {
             }
         }
         assert_eq!(total, 40 * 1_024 - 1_024 - 30_000);
-        assert_eq!(reader.decoder.reopened, 2);
+        assert_eq!(reader.decoder.reopened, 1);
     }
 }
