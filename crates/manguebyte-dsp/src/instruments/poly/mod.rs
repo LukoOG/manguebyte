@@ -36,7 +36,8 @@
 //!
 //! [`PRESETS`] holds them in this order, so an interface can offer them by
 //! index, and [`preset`] finds one by name. Each one's level is set so that
-//! a single note peaks near -9 dBFS, which leaves room for chords. The
+//! a single note peaks near -9 dBFS (a sweep at its loudest), which leaves
+//! room for chords. The
 //! example `poly_synth_presets` renders every one as a phrase suited to its
 //! category: a bass line, a lead melody, pad chords, a pluck arpeggio,
 //! keyboard comping, brass stabs, effects.
