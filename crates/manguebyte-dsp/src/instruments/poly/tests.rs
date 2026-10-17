@@ -1033,6 +1033,27 @@ fn extreme_settings_and_notes_stay_finite() {
 }
 
 #[test]
+fn the_library_is_large_covers_every_category_and_is_documented_in_order() {
+    assert!(PRESETS.len() >= 64, "{}", PRESETS.len());
+    for category in Category::ALL {
+        let count = PRESETS.iter().filter(|p| p.category == category).count();
+        assert!(count >= 6, "{category:?}: {count}");
+    }
+    // The table in the module's documentation lists every preset, by its
+    // index, name, category and description.
+    let docs = include_str!("mod.rs");
+    for (index, preset) in PRESETS.iter().enumerate() {
+        let row = format!(
+            "//! | {index} | {} | {} | {} |",
+            preset.name,
+            preset.category.name(),
+            preset.description
+        );
+        assert!(docs.contains(&row), "{} is not in the table as it is", preset.name);
+    }
+}
+
+#[test]
 fn every_preset_plays_and_keeps_its_level() {
     let mut names = std::collections::BTreeSet::new();
     for preset in PRESETS.iter() {

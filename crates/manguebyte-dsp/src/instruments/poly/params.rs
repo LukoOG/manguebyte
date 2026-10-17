@@ -750,7 +750,8 @@ impl LfoParams {
         fade_in: 0.0,
     };
 
-    /// A free-running oscillator of `shape` at `rate` hertz.
+    /// An oscillator of `shape` at `rate` hertz that starts again with
+    /// every note.
     pub const fn new(shape: LfoShape, rate: f64) -> Self {
         Self {
             shape,
@@ -760,12 +761,21 @@ impl LfoParams {
     }
 
     /// An oscillator of `shape` locked to the tempo, one cycle every
-    /// `beats` quarter notes.
+    /// `beats` quarter notes, that starts again with every note.
     pub const fn synced(shape: LfoShape, beats: f64) -> Self {
         Self {
             shape,
             beats,
             ..Self::DEFAULT
+        }
+    }
+
+    /// The same oscillator with its depth rising over `seconds` from the
+    /// start of a note.
+    pub const fn fading_in(self, seconds: f64) -> Self {
+        Self {
+            fade_in: seconds,
+            ..self
         }
     }
 
