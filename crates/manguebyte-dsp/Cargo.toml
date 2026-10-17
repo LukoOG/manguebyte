@@ -1,6 +1,6 @@
 [package]
 name = "manguebyte-dsp"
-description = "Signal processing for the Manguebyte Audio Framework: oscillators, wavetables, filters, EQ, dynamics with sidechain, delay, modulation, reverb, convolution, FIR, oversampling, a polyphonic synth with instrument voices (plucked strings, FM, tonewheel organ, acid bass, drum kits: acoustic by modal synthesis and drum machines) and zero-cost processor chains."
+description = "Signal processing for the Manguebyte Audio Framework: oscillators, wavetables, filters, EQ, dynamics with sidechain, delay, modulation, reverb, convolution, FIR, oversampling, a polyphonic synth with instrument voices (plucked strings, FM, tonewheel organ, acid bass, drum kits: acoustic by modal synthesis and drum machines, a deep polyphonic synthesiser with 68 presets) and zero-cost processor chains."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

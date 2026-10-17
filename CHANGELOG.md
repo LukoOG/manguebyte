@@ -889,6 +889,54 @@ display, and no editor has been opened inside a real host yet.
   ringing. A ringing cymbal costs about 3.5 % of one core at 48 kHz, a
   snare 1.3 %. `cargo run --release -p manguebyte-dsp --example
   drum_kit_wavs -- <directory>` renders a tour of every kit and grooves.
+- `PolySynthVoice` (`instruments::poly`): a deep polyphonic synthesiser
+  and a library of 68 presets. Three oscillators (sine, triangle, saw, a
+  pulse whose width is modulated, and twelve wavetables built from
+  formulas, each of sixteen frames to morph through) of up to sixteen
+  unison voices, detuned more densely in the middle as the classic
+  supersaw is and spread with pitch neighbours on opposite sides, each at
+  a random phase if asked; hard sync to oscillator 1, phase and ring
+  modulation by any oscillator, unison voice by unison voice; a sub
+  oscillator; white, pink and brown noise. Two filters in series or in
+  parallel, each one of fifteen models: the transistor ladder (24 and
+  12 dB low-pass, high-pass, band-pass), the linear state-variable filter,
+  an SEM-like one morphing low-pass, notch or band-pass, high-pass, an
+  MS-20-like Sallen-Key low- and high-pass with a saturating loop, combs
+  with positive and negative feedback tuned for their damping, and a
+  formant filter on Peterson and Barney's vowels; key tracking, envelope,
+  drive and morph. Four envelopes with a curve per segment (the
+  amplifier's and the filters' wired), three LFOs with six shapes, tempo
+  sync, retrigger and fade-in, and a sixteen-slot matrix of source, `via`
+  source and amount over 27 destinations, with velocity, accent,
+  aftertouch, the wheel, the key, a random value per note and brightness
+  as sources. Glide; poly, mono and legato modes (`PolySynthVoice::synth`
+  sets a `Synth` up for each). Everything runs at twice the sample rate
+  and comes down through a 100 dB half-band filter (20.5 samples late):
+  the classic shapes are band-limited by four-point polyBLEP and polyBLAMP
+  residuals that also correct sync and phase-modulation jumps, the
+  wavetables are mip-mapped an octave a level. The tests measure tuning
+  (within 0.012 cent from key 21 to 108), aliasing below 20 kHz from key
+  72 to 103 (at most -82 dB of a saw or square, -109 dB of a triangle,
+  -87 dB of the wavetables), hard sync (-97 dB between the master's
+  harmonics), the phase-modulation sidebands against the Bessel functions
+  (within 0.1 dB), ring modulation (the carriers 80 dB down), unison
+  level, density and decorrelation, every filter's quiet response against
+  `curve` (within 1e-5), key tracking, envelope and matrix cutoff against
+  `LadderResponse`, envelope and LFO timing, every matrix destination and
+  source, glide time and the voice modes, clicks at note on, off, steal
+  and setting jumps, block-size independence and finite output under
+  garbage. One held voice costs 3 % to 29 % of a core of a 15 W laptop
+  processor at 48 kHz, 2 % to 12 % for the presets. The presets are
+  constants (`PRESETS`, `preset`), documented in a table: basses (Moog,
+  reese, wobble, sub, FM growl, house organ, acid, garage, 808 glide and
+  more), leads (supersaw, square, sync, chiptune, hoover, talking),
+  pads (warm, string machine, glass, drone, choir, formant, PWM, comb
+  wash), plucks (house, bell, marimba, a Karplus-Strong string,
+  kalimba), keys (synth piano, clavinet, FM piano, organ, vibraphone),
+  brass (synth brass, stabs, a rave chord stab) and effects (riser,
+  downlifter, sweeps, zap, wind, impact). `cargo run --release -p
+  manguebyte-dsp --example poly_synth_presets -- <directory>` plays each
+  in a phrase of its category to WAV files.
 
 ### Parameters
 

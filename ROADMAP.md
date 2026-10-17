@@ -92,6 +92,10 @@ Everything a standalone audio application needs, short of a user interface.
 - ✅ Drum kits: acoustic drums and cymbals by modal synthesis, calibrated
   against recordings of a real snare and crash; the 909, 606, CR-78 and
   808; kits for trap, techno, house, drum and bass and lo-fi
+- ✅ A deep polyphonic synthesiser: three band-limited oscillators with
+  sixteen-voice unison, wavetables, sync, FM and ring modulation; two
+  filters of fifteen models; four envelopes, three LFOs and a sixteen-slot
+  modulation matrix; 68 presets for electronic and pop music
 - ✅ Metering: loudness to ITU-R BS.1770 and EBU R 128 (checked against the
   EBU's test signals), true peak, peak, RMS, VU, PPM, stereo correlation
 - ✅ Pitch detection (YIN and the McLeod method) with note naming

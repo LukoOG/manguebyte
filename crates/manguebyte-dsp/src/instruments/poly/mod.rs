@@ -45,13 +45,13 @@
 //! | the init patch: one saw through the ladder | 4% |
 //! | sixteen unison saws, no filter | 3% |
 //! | sixteen unison wavetable voices, no filter | 7% |
-//! | three oscillators of sixteen unison voices each (saws and a wavetable), two driven filters, saturation and three modulations | 24% |
+//! | three oscillators of sixteen unison voices each (saws and a wavetable), two driven filters, saturation and three modulations | 24% to 29% |
 //! | the presets | 2% to 12% |
 //!
 //! Unison voices are cheap; what costs is the oversampled filters and
 //! saturation, which run on two channels once the voice is spread across
-//! the stereo field, and table reading. Quieter runs of the same machine
-//! measured two thirds of these figures.
+//! the stereo field, and table reading. The figures moved by a fifth from
+//! run to run with the load of the machine.
 //!
 //! # Presets
 //!
