@@ -89,7 +89,7 @@ Nothing has been published to crates.io yet. Everything below is on `main`.
   buffer per channel at any sample rate; input pulled from the render
   callback or the connection the host set; parameters with their units,
   value strings and text both ways; `ScheduleParameters` and
-  `MusicDeviceMIDIEvent` on their frames; the transport from the host's
+  `MusicDeviceMIDIEvent` (and `StartNote`, `StopNote`) on their frames; the transport from the host's
   callbacks; `ClassInfo` holding the codes and the state text; latency,
   tail, maximum frames per slice, channel layouts, bypass for effects,
   property listeners and render notifications. Render allocates nothing
