@@ -274,6 +274,33 @@ frames between two frames. Intensity stereo and the reordering of short
 blocks are checked by the unit tests of `src/mp3/layer3.rs`, against the
 formulas of the standard.
 
+### Layer II
+
+FFmpeg's own encoder (`mp2`), from the same sources, one file for each
+allocation table of ISO/IEC 11172-3 and the one of 13818-3:
+
+```bash
+ffmpeg -i signal-2ch-44100.wav -map_metadata -1 -bitexact -c:a mp2 -b:a 192k -f mp2 mp2-2ch-44100-192.mp2
+ffmpeg -i tones-2ch-48000.wav -map_metadata -1 -bitexact -c:a mp2 -b:a 96k -f mp2 mp2-tones-2ch-48000-96.mp2
+ffmpeg -i signal-2ch-32000.wav -map_metadata -1 -bitexact -c:a mp2 -b:a 64k -f mp2 mp2-2ch-32000-64.mp2
+ffmpeg -i signal-2ch-32000.wav -map_metadata -1 -bitexact -c:a mp2 -b:a 160k -f mp2 mp2-2ch-32000-160.mp2
+ffmpeg -i signal-1ch-22050.wav -map_metadata -1 -bitexact -c:a mp2 -b:a 64k -f mp2 mp2-1ch-22050-64.mp2
+```
+
+They take tables B (96 kbit/s a channel at 44.1 kHz), C (48 at 48 kHz),
+D (32 at 32 kHz), A (80 at 32 kHz) and the table of the lower sample
+frequencies; `mp2-2ch-44100.mp2`, above, takes table A at 44.1 kHz.
+FFmpeg writes stereo, not joint stereo, and no CRC; FFmpeg has no layer I
+encoder. `tests/common/mpeg12.rs` writes what is missing.
+
+Their decodes were compared once, by hand, with FFmpeg 7.1's decoder
+(`ffmpeg -i FILE.mp2 -c:a pcm_f32le FILE.wav`), and with two more files
+made the same way (`signal-1ch-22050.wav` resampled to 44.1 kHz at
+64 kbit/s, table A in mono, and `signal-2ch-24000.wav` at 96 kbit/s):
+every file decodes to the same number of samples, from the same first
+sample, within 84 to 86 dB of FFmpeg's decode and never further from it
+than 3.2e-5, which is FFmpeg's own rounding to 16 bits.
+
 ## Metadata
 
 The `meta-*` files hold tags that another program wrote, for

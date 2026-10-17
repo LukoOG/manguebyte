@@ -25,7 +25,7 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    #[cfg(test)]
+    /// The bit the next read starts at.
     pub(super) fn position(&self) -> usize {
         self.position
     }

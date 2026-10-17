@@ -24,7 +24,31 @@ use manguebyte_core::AudioBuffer;
 use super::Mp3Error;
 use super::header::{FrameHeader, StreamInfo, crc16, id3v2_len, stream_info};
 use super::layer3::{Layer3, side_info};
+use super::layer12::Layer12;
 use crate::window::Window;
+
+/// The decoder of the stream's layer.
+enum Decoder {
+    Layer3(Box<Layer3>),
+    Layer12(Box<Layer12>),
+}
+
+impl Decoder {
+    fn reset(&mut self) {
+        match self {
+            Self::Layer3(decoder) => decoder.reset(),
+            Self::Layer12(decoder) => decoder.reset(),
+        }
+    }
+
+    /// The samples of a channel of the frame decoded last.
+    fn pcm(&self, channel: usize) -> &[f32; 1_152] {
+        match self {
+            Self::Layer3(decoder) => &decoder.pcm[channel],
+            Self::Layer12(decoder) => &decoder.pcm[channel],
+        }
+    }
+}
 
 /// How many bytes are read from the file at a time.
 const READ_CHUNK: usize = 16 * 1_024;
@@ -48,8 +72,9 @@ const MAX_INDEX: usize = 16_384;
 /// again from a little before its target.
 const SHORT_WALK: u64 = 4;
 
-/// The largest frame of layer III: 320 kbit/s at 32 kHz, padded.
-const MAX_FRAME: usize = 1_441;
+/// The largest frame of any layer: layer II at 384 kbit/s and 32 kHz,
+/// padded. Layer III reaches 1441 bytes, layer I 676.
+const MAX_FRAME: usize = 1_729;
 
 /// Decodes an MP3 stream block by block, from any position.
 ///
@@ -74,7 +99,7 @@ pub(crate) struct Mp3Reader<R> {
     known: (u64, u64),
     /// How many frames the stream has, once its end has been met.
     frame_count: Option<u64>,
-    decoder: Layer3,
+    decoder: Decoder,
     /// The main data of the last frames, for the frames after them to start
     /// in.
     reservoir: Vec<u8>,
@@ -122,7 +147,7 @@ impl<R: Read + Seek> Mp3Reader<R> {
             stride: 1,
             known: (0, 0),
             frame_count: None,
-            decoder: Layer3::new(),
+            decoder: Decoder::Layer3(Box::new(Layer3::new())),
             reservoir: Vec::with_capacity(2 * 1_024),
             main: Vec::with_capacity(1_024 + MAX_FRAME),
             frame: Vec::with_capacity(MAX_FRAME),
@@ -135,21 +160,20 @@ impl<R: Read + Seek> Mp3Reader<R> {
         let Some((offset, header)) = this.find_first_frame(start)? else {
             return Err(Mp3Error::NotMp3);
         };
-        match header.layer {
-            3 => {}
-            1 => return Err(Mp3Error::Unsupported("MPEG audio layer I")),
-            _ => return Err(Mp3Error::Unsupported("MPEG audio layer II")),
-        }
         if header.bitrate == 0 {
             return Err(Mp3Error::Unsupported("free-format bitrate"));
         }
         this.format = header;
         this.samples_per_frame = header.samples() as u64;
+        if header.layer != 3 {
+            this.decoder = Decoder::Layer12(Box::new(Layer12::new()));
+        }
 
-        // A first frame may hold no audio but a header that says how long
-        // the stream is and what the encoder put around the audio.
+        // A first frame of layer III may hold no audio but a header that
+        // says how long the stream is and what the encoder put around the
+        // audio.
         let mut first = offset;
-        if this.load_frame(offset, &header)? {
+        if header.layer == 3 && this.load_frame(offset, &header)? {
             if let Some(info) = stream_info(&this.frame, &header) {
                 this.apply(info);
                 match this.frame_after(offset, &header)? {
@@ -232,7 +256,7 @@ impl<R: Read + Seek> Mp3Reader<R> {
     /// another of the same kind where the first ends.
     fn find_first_frame(&mut self, from: u64) -> io::Result<Option<(u64, FrameHeader)>> {
         if let Some(header) = self.header_at(from)? {
-            if header.bitrate == 0 || header.layer != 3 {
+            if header.bitrate == 0 {
                 // A frame this decoder does not read: the caller says so.
                 return Ok(Some((from, header)));
             }
@@ -244,7 +268,7 @@ impl<R: Read + Seek> Mp3Reader<R> {
         let mut at = from;
         while at.saturating_add(4) <= self.stream_len {
             if let Some(header) = self.header_at(at)? {
-                if header.bitrate != 0 && header.layer == 3 {
+                if header.bitrate != 0 {
                     self.format = header;
                     let end = at + header.len() as u64;
                     let followed = end == self.stream_len || self.frame_at(end)?.is_some();
@@ -395,7 +419,7 @@ impl<R: Read + Seek> Mp3Reader<R> {
                 .min(usize::try_from(left).unwrap_or(usize::MAX));
             for (channel, samples) in out.iter_channels_mut().enumerate() {
                 samples[done..done + count]
-                    .copy_from_slice(&self.decoder.pcm[channel][from..from + count]);
+                    .copy_from_slice(&self.decoder.pcm(channel)[from..from + count]);
             }
             done += count;
             self.position += count as u64;
@@ -417,37 +441,49 @@ impl<R: Read + Seek> Mp3Reader<R> {
             self.end_at(number);
             return Ok(());
         }
-        let side_start = header.side_info_start();
-        let side_end = side_start + header.side_info_len();
-        if header.protected {
-            // The CRC covers the last two bytes of the header and the side
-            // information.
-            let stored = u16::from_be_bytes([self.frame[4], self.frame[5]]);
-            let mut covered = [0u8; 34];
-            covered[..2].copy_from_slice(&self.frame[2..4]);
-            covered[2..2 + side_end - side_start]
-                .copy_from_slice(&self.frame[side_start..side_end]);
-            if crc16(&covered[..2 + side_end - side_start]) != stored {
-                return Err(Mp3Error::Corrupt);
+        let decoder = match &mut self.decoder {
+            Decoder::Layer12(decoder) => {
+                // Layers I and II keep everything a frame needs in the
+                // frame, CRC included.
+                decoder.decode(&header, &self.frame)?;
+                None
             }
-        }
-        let side = side_info(&header, &self.frame[side_start..side_end])?;
+            Decoder::Layer3(decoder) => Some(decoder),
+        };
+        if let Some(decoder) = decoder {
+            let side_start = header.side_info_start();
+            let side_end = side_start + header.side_info_len();
+            if header.protected {
+                // The CRC covers the last two bytes of the header and the
+                // side information.
+                let stored = u16::from_be_bytes([self.frame[4], self.frame[5]]);
+                let mut covered = [0u8; 34];
+                covered[..2].copy_from_slice(&self.frame[2..4]);
+                covered[2..2 + side_end - side_start]
+                    .copy_from_slice(&self.frame[side_start..side_end]);
+                if crc16(&covered[..2 + side_end - side_start]) != stored {
+                    return Err(Mp3Error::Corrupt);
+                }
+            }
+            let side = side_info(&header, &self.frame[side_start..side_end])?;
 
-        // The main data: the end of what the frames before left, then this
-        // frame's own. If the frames before are not there, as at the start
-        // of a stream that was cut, the frame is decoded as silence.
-        self.main.clear();
-        let begin = side.main_data_begin;
-        if begin <= self.reservoir.len() {
-            self.main
-                .extend_from_slice(&self.reservoir[self.reservoir.len() - begin..]);
-            self.main.extend_from_slice(&self.frame[side_end..]);
-            if side.main_data_bits(&header) > self.main.len() * 8 {
-                return Err(Mp3Error::Malformed("main data runs past the frame"));
+            // The main data: the end of what the frames before left, then
+            // this frame's own. If the frames before are not there, as at
+            // the start of a stream that was cut, the frame is decoded as
+            // silence.
+            self.main.clear();
+            let begin = side.main_data_begin;
+            if begin <= self.reservoir.len() {
+                self.main
+                    .extend_from_slice(&self.reservoir[self.reservoir.len() - begin..]);
+                self.main.extend_from_slice(&self.frame[side_end..]);
+                if side.main_data_bits(&header) > self.main.len() * 8 {
+                    return Err(Mp3Error::Malformed("main data runs past the frame"));
+                }
             }
+            decoder.decode(&header, &side, &self.main, 0)?;
+            self.keep_main_data(side_end);
         }
-        self.decoder.decode(&header, &side, &self.main, 0)?;
-        self.keep_main_data(side_end);
         self.block = Some(number);
         self.next = match self.frame_after(offset, &header)? {
             Some((next, _)) => {
@@ -528,11 +564,18 @@ impl<R: Read + Seek> Mp3Reader<R> {
     fn start_before(&mut self, target: u64) -> Result<u64, Mp3Error> {
         let spf = self.samples_per_frame;
         let wanted = target.saturating_add(self.skip) / spf;
-        // Two granules decoded before the frame wanted set the decoder's
-        // state as a decode from the start would.
-        let preroll = 2 / self.format.granules() as u64;
+        // In layer III, two granules decoded before the frame wanted set the
+        // decoder's state as a decode from the start would. In layers I and
+        // II only the synthesis filter bank remembers, its last sixteen time
+        // slots: two frames of twelve in layer I, one of 36 in layer II.
+        // Only layer III has a bit reservoir to fill first.
+        let (preroll, reservoir) = match self.format.layer {
+            1 => (2, 0),
+            2 => (1, 0),
+            _ => (2 / self.format.granules() as u64, RESERVOIR_FRAMES),
+        };
         let first = wanted.saturating_sub(preroll);
-        let load = first.saturating_sub(RESERVOIR_FRAMES);
+        let load = first.saturating_sub(reservoir);
 
         self.decoder.reset();
         self.reservoir.clear();

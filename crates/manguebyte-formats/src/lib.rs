@@ -6,7 +6,7 @@
 //! | [`aiff`] | 1 to 32-bit PCM, either byte order, 32 and 64-bit float | 16 and 24-bit PCM, 32-bit float |
 //! | [`flac`] | everything the format defines | 4 to 32 bits, 1 to 8 channels, levels 0 to 8 |
 //! | [`vorbis`] | Ogg Vorbis: every stream but those with floors of type 0, 1 to 255 channels | no |
-//! | [`mp3`] | MPEG-1, 2 and 2.5 layer III, every rate and stereo coding, gapless with a LAME tag | no |
+//! | [`mp3`] | MPEG-1, 2 and 2.5 layer III, every rate and stereo coding, gapless with a LAME tag; layers I and II | no |
 //!
 //! [`read_file`] and [`decode`] work out which format they have been given,
 //! so a program that only wants the audio does not need to care:
@@ -82,7 +82,7 @@ pub enum FileFormat {
     Flac,
     /// Vorbis in an Ogg container.
     OggVorbis,
-    /// MPEG audio layer III.
+    /// MPEG audio: layer III, which is MP3, and layers I and II.
     Mp3,
 }
 

@@ -1,5 +1,7 @@
-//! The tables of MPEG audio layer III: from ISO/IEC 11172-3, Annex B, and
-//! for the lower sample rates from ISO/IEC 13818-3.
+//! The tables of MPEG audio layer III, and the bitrates of all three
+//! layers: from ISO/IEC 11172-3, Annex B, and for the lower sample rates
+//! from ISO/IEC 13818-3. The allocation tables of layer II are in
+//! `layer12.rs`.
 //!
 //! These are facts of the standards, not code. The Huffman tables are
 //! checked by a test to be complete prefix codes, which a mistake in a
@@ -7,8 +9,24 @@
 //! checked to make, with the analysis window it is the scaled copy of, a
 //! filter bank that gives back what it was given.
 
-/// Bitrates in kbit/s by index, for MPEG-1 and for MPEG-2 and 2.5.
-/// Index 0 is free format; 15 is not allowed.
+/// Bitrates of layer I in kbit/s by index, for MPEG-1.
+pub(super) const LAYER1_BITRATES: [u16; 15] = [
+    0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448,
+];
+
+/// Bitrates of layer II in kbit/s by index, for MPEG-1.
+pub(super) const LAYER2_BITRATES: [u16; 15] = [
+    0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384,
+];
+
+/// Bitrates of layer I in kbit/s by index, for the lower sample rates of
+/// MPEG-2; layer II there has those of layer III.
+pub(super) const LAYER1_LSF_BITRATES: [u16; 15] = [
+    0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256,
+];
+
+/// Bitrates of layer III in kbit/s by index, for MPEG-1 and for MPEG-2 and
+/// 2.5. Index 0 is free format; 15 is not allowed.
 pub(super) const BITRATES: [[u16; 15]; 2] = [
     [
         0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,

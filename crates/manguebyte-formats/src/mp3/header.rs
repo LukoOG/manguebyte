@@ -2,7 +2,9 @@
 //! and among the frames of a file: ID3v2 at the start, and the Xing, Info,
 //! LAME and VBRI headers that encoders put in a first frame of silence.
 
-use super::tables::{BITRATES, SAMPLE_RATES};
+use super::tables::{
+    BITRATES, LAYER1_BITRATES, LAYER1_LSF_BITRATES, LAYER2_BITRATES, SAMPLE_RATES,
+};
 
 /// Which standard a frame follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,11 +77,20 @@ impl FrameHeader {
         let (row, rates) = match version {
             Version::Mpeg1 => (0, 0),
             Version::Mpeg2 => (1, 1),
+            // MPEG-2.5 is an extension of layer III alone.
+            Version::Mpeg25 if layer != 3 => return None,
             Version::Mpeg25 => (1, 2),
         };
-        // Only layer III bitrates are tabled; the layers this decoder does
-        // not read are recognised as frames and refused as a whole.
-        let bitrate = u32::from(BITRATES[row][bitrate_index]) * 1_000;
+        // Table 2.4.2.3 of 11172-3, and 2.4.2.3 of 13818-3, which gives the
+        // lower sample frequencies one table for layer I and one for layers
+        // II and III.
+        let kbits = match (layer, row) {
+            (1, 0) => LAYER1_BITRATES[bitrate_index],
+            (2, 0) => LAYER2_BITRATES[bitrate_index],
+            (1, _) => LAYER1_LSF_BITRATES[bitrate_index],
+            _ => BITRATES[row][bitrate_index],
+        };
+        let bitrate = u32::from(kbits) * 1_000;
         let mode = match (word >> 6) & 3 {
             0 => Mode::Stereo,
             1 => Mode::JointStereo,
@@ -103,23 +114,31 @@ impl FrameHeader {
         if self.mode == Mode::Mono { 1 } else { 2 }
     }
 
-    /// Samples in each channel of a frame.
+    /// Samples in each channel of a frame: 384 in layer I, 1152 in layer
+    /// II, and in layer III 1152 or, at the lower sample rates, 576.
     pub(crate) fn samples(&self) -> usize {
-        if self.version == Version::Mpeg1 {
-            1_152
-        } else {
-            576
+        match self.layer {
+            1 => 384,
+            2 => 1_152,
+            _ if self.version == Version::Mpeg1 => 1_152,
+            _ => 576,
         }
     }
 
-    /// Granules in a frame: two in MPEG-1, one in the others.
+    /// Granules of layer III in a frame: two in MPEG-1, one in the others.
     pub(crate) fn granules(&self) -> usize {
         if self.version == Version::Mpeg1 { 2 } else { 1 }
     }
 
-    /// Bytes the whole frame takes, header included. Zero for free format.
+    /// Bytes the whole frame takes, header included (2.4.3.1). Layer I
+    /// counts in slots of four bytes, the others in bytes. Zero for free
+    /// format.
     pub(crate) fn len(&self) -> usize {
-        let per_slot = if self.version == Version::Mpeg1 {
+        if self.layer == 1 {
+            return ((12 * self.bitrate / self.sample_rate) as usize + usize::from(self.padding))
+                * 4;
+        }
+        let per_slot = if self.layer == 2 || self.version == Version::Mpeg1 {
             144
         } else {
             72
@@ -294,6 +313,33 @@ mod tests {
         ] {
             assert_eq!(FrameHeader::parse(bytes), None, "{bytes:02X?}");
         }
+    }
+
+    #[test]
+    fn frames_of_layers_i_and_ii_are_measured() {
+        // Layer II, 192 kbit/s at 44.1 kHz, padded: 144 * 192000 / 44100
+        // bytes and one more.
+        let header = FrameHeader::parse([0xFF, 0xFD, 0xA2, 0x04]).unwrap();
+        assert_eq!((header.layer, header.bitrate), (2, 192_000));
+        assert_eq!((header.len(), header.samples()), (627, 1_152));
+        // Layer I, 448 kbit/s at 48 kHz: 112 slots of four bytes, and one
+        // more slot when padded.
+        let header = FrameHeader::parse([0xFF, 0xFF, 0xE4, 0x00]).unwrap();
+        assert_eq!((header.layer, header.bitrate), (1, 448_000));
+        assert_eq!((header.len(), header.samples()), (448, 384));
+        let header = FrameHeader::parse([0xFF, 0xFF, 0xE6, 0x00]).unwrap();
+        assert_eq!(header.len(), 452);
+        // Layer II at the lower rates: 160 kbit/s at 24 kHz, still 1152
+        // samples a frame.
+        let header = FrameHeader::parse([0xFF, 0xF5, 0xE4, 0xC0]).unwrap();
+        assert_eq!((header.bitrate, header.sample_rate), (160_000, 24_000));
+        assert_eq!((header.len(), header.samples()), (960, 1_152));
+        // Layer I at the lower rates has a table of its own.
+        let header = FrameHeader::parse([0xFF, 0xF7, 0xE4, 0xC0]).unwrap();
+        assert_eq!(header.bitrate, 256_000);
+        // MPEG-2.5 is for layer III only.
+        assert_eq!(FrameHeader::parse([0xFF, 0xE5, 0x90, 0xC0]), None);
+        assert_eq!(FrameHeader::parse([0xFF, 0xE7, 0x90, 0xC0]), None);
     }
 
     #[test]

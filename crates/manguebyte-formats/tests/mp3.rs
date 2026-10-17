@@ -327,14 +327,9 @@ fn what_is_not_a_frame_is_stepped_over() {
 }
 
 #[test]
-fn layers_i_and_ii_and_free_format_are_refused() {
-    let layer2 = data!("mp2-2ch-44100.mp2");
-    assert_eq!(FileFormat::detect(layer2), Some(FileFormat::Mp3));
-    match decode(layer2) {
-        Err(FormatError::Mp3(Mp3Error::Unsupported(what))) => assert!(what.contains("layer II")),
-        other => panic!("{other:?}"),
-    }
-    // Every frame's bitrate index set to 0, which is free format.
+fn free_format_is_refused() {
+    // Layers I and II, which this once refused too, are read; see
+    // `tests/mp2.rs`. Every frame's bitrate index set to 0 is free format.
     let mut free = data!("mp3-2ch-44100-plain160.mp3").to_vec();
     for frame in common::mp3::frames(data!("mp3-2ch-44100-plain160.mp3")) {
         free[frame.start + 2] &= 0x0F;

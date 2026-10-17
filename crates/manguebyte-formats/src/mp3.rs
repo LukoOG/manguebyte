@@ -1,11 +1,14 @@
-//! MP3: MPEG audio layer III.
+//! MP3 and its elders: MPEG audio layers I, II and III.
 //!
 //! A decoder written from ISO/IEC 11172-3 (MPEG-1) and ISO/IEC 13818-3
-//! (the lower sample frequencies of MPEG-2), with the further halving of
-//! the sample frequencies known as MPEG-2.5: every sample rate from 8 to
-//! 48 kHz, mono, stereo, dual channel and joint stereo with mid/side and
-//! intensity coding, long, short and mixed blocks, the bit reservoir, and
-//! the CRC that frames may carry.
+//! (the lower sample frequencies of MPEG-2). Layer III has the further
+//! halving of the sample frequencies known as MPEG-2.5: every sample rate
+//! from 8 to 48 kHz, mono, stereo, dual channel and joint stereo with
+//! mid/side and intensity coding, long, short and mixed blocks, the bit
+//! reservoir, and the CRC that frames may carry. Layers I and II (`.mp1`,
+//! `.mp2`, the audio of DVB, DAB and Video CD) come at 16 to 48 kHz, with
+//! every allocation table, the grouping of three samples, the selection of
+//! scale factors and joint stereo, and their CRC.
 //!
 //! ```no_run
 //! let file = manguebyte_formats::mp3::read_file("track.mp3")?;
@@ -33,7 +36,9 @@
 //!   encoded.
 //! - Without a LAME tag, every decoded sample is given, delay included, and
 //!   without a Xing or VBRI header the length is known only once the end
-//!   of the stream has been reached.
+//!   of the stream has been reached. Layers I and II have neither: their
+//!   audio starts 481 samples in, the delay of the two filter banks, and
+//!   ends where the last frame does.
 //! - Samples are not clipped: a lossy codec does not give back the samples
 //!   it was given, and loud audio can come back slightly beyond full scale.
 //!
@@ -48,11 +53,12 @@
 //!
 //! # Limits
 //!
-//! - Layers I and II are recognised and refused with
-//!   [`Mp3Error::Unsupported`]; so is free format, whose frames state no
-//!   bitrate, which encoders do not write unless told to.
-//! - A stream must keep one sample rate and one number of channels; frames
-//!   of another kind are stepped over.
+//! - Free format, whose frames state no bitrate and which encoders do not
+//!   write unless told to, is refused with [`Mp3Error::Unsupported`].
+//! - A stream must keep one layer, one sample rate and one number of
+//!   channels; frames of another kind are stepped over.
+//! - The multichannel extension of 13818-3 to layers I and II is not read:
+//!   such a stream decodes to the two channels it is compatible with.
 
 use std::fmt;
 use std::fs::File;
@@ -67,6 +73,7 @@ use crate::pcm::read_up_to;
 mod bits;
 mod header;
 mod huffman;
+mod layer12;
 mod layer3;
 mod reader;
 mod synth;
