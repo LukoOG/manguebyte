@@ -43,11 +43,11 @@ nothing beside or above it.
 
 | Crate | Role | Depends on |
 |---|---|---|
-| `manguebyte-core` | `AudioBuffer`, `Sample`, smoothing, atomics, wait-free queue, real-time log | nothing |
-| `manguebyte-midi` | MIDI 1.0 and 2.0 messages, translation, MPE, MIDI files, sample-accurate event buffers | nothing |
+| `manguebyte-core` | `AudioBuffer`, `Sample`, smoothing, atomics, wait-free queue, real-time log, the `AudioSource` trait and audio in memory as a source | nothing |
+| `manguebyte-midi` | MIDI 1.0 and 2.0 messages, translation, MPE, MIDI files, MIDI-CI (messages, property chunks, a device agent with no I/O), sample-accurate event buffers | nothing |
 | `manguebyte-params` | Parameters, ranges, smoothing, saved state, descriptions as data and JSON | core |
-| `manguebyte-dsp` | `Processor`, events, transport, synth, filters, effects, dynamics with sidechain keying, convolution, FIR filtering, wavetable oscillator, FFT, instrument voices | core, midi |
-| `manguebyte-formats` | Audio files: whole or streamed, read and written, with play and record bridges | core |
+| `manguebyte-dsp` | `Processor`, events, MIDI 1.0, MPE and MIDI 2.0 read into per-note events (`NoteInput`), sources built from sources (mixer, resampler, channel router) and sources as processors, transport, synth, filters, effects, dynamics with sidechain keying, convolution, FIR filtering, wavetable oscillator, FFT, instrument voices | core, midi |
+| `manguebyte-formats` | Audio files: whole or streamed, read and written, with play and record bridges, and a transport source over a streamed file | core |
 | `manguebyte-osc` | Open Sound Control, with a real-time bridge | core |
 | `manguebyte-analysis` | Loudness, true peak, level meters, spectrum, pitch | core, dsp |
 | `manguebyte-devices` | Audio hosts, sound card input, output and duplex with drift correction, the device manager and hot-plug; MIDI ports | core, midi, dsp (its `Resampler`), `cpal`, `midir` |
@@ -241,7 +241,7 @@ that the plugin API must honour when it is written.
 | No native CLAP | CLAP is the first plugin format, and passes the CLAP project's own validator | Done |
 | The VST3 wrapper applies only the last automation point of each block | Every point is an event on its frame; while blocks run, the value a host sets on the controller is kept for display and never competes with the points | Done |
 | No sample-accurate automation in `AudioProcessor` | The process call carries timestamped events; `split_at_events` applies each on its frame | Done |
-| No MIDI 2.0, note expression or per-voice modulation in the processor model | Notes carry ids and float velocity; expression and modulation are per note; modulation never alters the stored value | Done in the model; UMP transport planned |
+| No MIDI 2.0, note expression or per-voice modulation in the processor model | Notes carry ids and float velocity; expression and modulation are per note; modulation never alters the stored value; MPE and MIDI 2.0 are read into these events by one converter that every input uses | Done; writing MIDI 2.0 back out planned |
 | Real-time safety rests on convention | A counting-allocator test and Miri in CI | Done, grows with the code |
 | Each plugin has to remember `ScopedNoDenormals` in its callback | The wrappers and the device streams hold the guard around every block | Done |
 

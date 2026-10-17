@@ -11,6 +11,17 @@ Nothing has been published to crates.io yet. Everything below is on `main`.
 
 ### Plugins
 
+- MPE and MIDI 2.0 reach plugins as per-note events in every format,
+  through the plugin's `NoteInput`. `manguebyte-clap` offers the MPE and
+  MIDI 2.0 note dialects beside CLAP and MIDI and reads
+  `CLAP_EVENT_MIDI2` packets; a phrase played as CLAP notes and
+  expressions, as MPE and as MIDI 2.0 gives the same output.
+  `manguebyte-vst3` reads notes on the channels of a zone keeping the
+  host's note ids, and puts the host's parameter changes and events in
+  time order before reading them, so a member channel's bend lands before
+  the note after it. `manguebyte-lv2` reads its MIDI atoms the same way.
+  The CLAP, VST 3 and LV2 wrappers forget the notes they followed when
+  the plugin is reset or deactivated.
 - `manguebyte-clap`: native CLAP support. `export_clap!(MyPlugin)` turns a
   `Plugin` into a CLAP plugin with audio and note ports, sample-accurate
   events, parameters, state and latency. The example plugin passes the CLAP
@@ -677,6 +688,39 @@ display, and no editor has been opened inside a real host yet.
 
 ### Processing model
 
+- `dsp::note_input::NoteInput`: one reader of MIDI for the framework.
+  Plain MIDI 1.0 is read exactly as `Event::from_midi` reads it, plus the
+  high-resolution velocity prefix (controller 88). In an MPE zone, set up
+  by the configuration message in the stream or by `Mpe::Zones`, a note
+  gets an identifier and is reported on the zone's master channel, and
+  its member channel's pitch bend (under the member bend range, 48
+  semitones until registered parameter 0 says otherwise), channel
+  pressure and controller 74 become `Tuning`, `Pressure` and `Brightness`.
+  MIDI 2.0 notes get identifiers and their 16-bit velocities; per-note
+  pitch bend (range from registered controller 0/7, 48 by default), poly
+  pressure, the pitch attribute and the registered per-note controllers
+  for pitch, volume and expression, pan, brightness and vibrato depth
+  become expressions, and per-note management detaches and resets them.
+  Channel-wide messages stay channel-wide MIDI 1.0. MIDI 1.0 values are
+  widened with the specification's min-centre-max method first, so an MPE
+  stream and its MIDI 2.0 equivalent give identical events. Identifiers
+  made here have their top bit set and never equal a host's. Bounded,
+  and real-time safe after construction.
+- `Plugin::MPE` (`Mpe::Follow` by default, `Mpe::LOWER_ZONE`, `Mpe::Off`):
+  how the wrappers, the standalone runner and the harness read a plugin's
+  MIDI as MPE. A stream that never configures a zone reads as before.
+- `Harness::schedule_midi` and `Harness::schedule_ump` deliver MIDI 1.0
+  messages and Universal MIDI Packets through the plugin's `NoteInput`,
+  as a wrapper does.
+- `core::source`: `AudioSource`, pulled a block at a time,
+  `PositionableSource`, and `BufferSource`, audio in memory played once
+  or looped, positionable to the frame.
+- `dsp::sources`: `MixerSource` (inputs with gains), `ResamplingSource`
+  (the band-limited `Resampler`, pulled in fixed chunks so the output does
+  not depend on the size of the pulls, lined up with the input),
+  `ChannelRemapSource` (one channel to many, or to none),
+  `ProcessedSource` (a source through a processor) and `SourceProcessor`
+  (a source as a processor, for a graph node or a device callback).
 - `Processor::process_with` takes a `ProcessContext` carrying one
   timestamped `EventBuffer` (notes, per-note expression, parameter values,
   modulation, MIDI), the `Transport` and a sidechain.
@@ -1081,6 +1125,31 @@ display, and no editor has been opened inside a real host yet.
 
 ### MIDI
 
+- `ci`: MIDI Capability Inquiry, written from MIDI-CI 1.2 (M2-101-UM) and
+  the profile and property exchange common rules. `parse` and `encode`
+  read and write every message: discovery and its reply, endpoint
+  information, invalidate MUID, ACK and NAK, profile inquiry, set on and
+  off, the enabled, disabled, added and removed reports, profile details
+  and profile data, property exchange capabilities and the chunked get,
+  set, subscribe and notify messages, process inquiry with the MIDI
+  message report, and the protocol negotiation that 1.2 deprecates.
+  Reading borrows from the bytes and never panics or allocates; older
+  messages read with their version's defaults and newer bytes are
+  ignored. `Muid::from_seed` makes a MUID a device may take.
+- `ci::property`: property data cut into chunks that fit a receiver's
+  announced message size, an `Assembler` that puts chunks back together
+  with bounds on memory and on messages under way and tells a chunk out
+  of sequence, and Mcoded7 for binary data.
+- `ci::agent::Agent`: a responder and initiator in one, with no I/O. It
+  answers discovery and endpoint inquiries, lists and turns its profiles
+  on and off on request and reports them, reports property requests for
+  the application to answer with `reply_property`, chunks requests and
+  replies for the receiver, times unanswered requests out with `tick`,
+  ends them on a NAK, answers deprecated and unsupported inquiries with a
+  NAK and malformed messages meant for it with one, and takes a new MUID
+  and invalidates the old when another device uses it. Peers, the
+  outgoing queue and reassembly are bounded. Not yet checked against
+  another implementation.
 - System common and real-time messages; `StreamParser` for raw byte streams
   with running status and SysEx; reading and writing standard MIDI files.
 - `ump`: Universal MIDI Packets with typed access to every message of
@@ -1143,6 +1212,14 @@ display, and no editor has been opened inside a real host yet.
   `Unsupported` and `Platform`. A layer I or II file, refused before, now
   decodes, and the headers of layers I and II of MPEG-2.5, which does not
   exist, are no longer taken for frames.
+- `TransportSource`: a streamed file as an `AudioSource` with a
+  transport, worked from any thread through a `TransportControl` (play,
+  pause, stop, seek, loop, gain) that also tells the position, whether it
+  is playing or seeking, and the underruns. The existing worker reads
+  ahead; both queues are wait-free on the audio side. Seeks land on the
+  exact frame, loops go round sample for sample, a late worker is counted
+  and nothing is skipped, and declicking (on by default) fades starts and
+  pauses and glides the gain over one block.
 - `vorbis`: an Ogg Vorbis decoder written from the Vorbis I specification
   and RFC 3533: floors of type 1, residues of types 0, 1 and 2, codebooks
   of every lookup type, channel coupling, both block sizes, 1 to 255
@@ -1200,6 +1277,11 @@ display, and no editor has been opened inside a real host yet.
 
 ### Devices
 
+- `MidiReceiver::read_events` and `DeviceIo::read_midi_events` hand MIDI
+  to the audio thread as events, read through a `NoteInput`, so that MPE
+  arrives as per-note events; the standalone runner uses them.
+- `MidiInput::open_with_sysex` also hands every system exclusive message
+  to a handler on the system's MIDI thread, as MIDI-CI needs.
 - Device listing with stable identifiers; choice of sample rate, channel
   count and buffer size; `InputDevice`; `DuplexStream`.
 - `devices::midi`: MIDI input and output ports. `MidiReceiver` stamps each

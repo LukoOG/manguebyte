@@ -26,7 +26,7 @@ says where. Nothing here contains JUCE code: see
 | [Block size and sound](#2-the-sound-does-not-depend-on-the-hosts-block-size) | Left to each plugin | Bit-identical across block sizes, tested | [`offline.rs`](../crates/manguebyte/tests/offline.rs) |
 | [Changes from a UI or a restored state](#3-every-parameter-change-reaches-the-plugin-as-an-event) | Seen by polling, or by listeners that may run on the audio thread | Delivered as events in the same stream as automation | [`harness.rs`](../crates/manguebyte-plugin/src/harness.rs) |
 | [Real-time safety](#4-real-time-safety-is-tested-not-promised) | A convention | A heap call while processing fails CI | [`realtime.rs`](../crates/manguebyte-dsp/tests/realtime.rs), [`abi.rs`](../crates/manguebyte-clap/tests/abi.rs) |
-| [Per-note control](#5-per-note-expression-and-modulation) | Through MPE channels | Per-note expression and modulation events | [`synth.rs`](../crates/manguebyte-dsp/src/synth.rs) |
+| [Per-note control](#5-per-note-expression-and-modulation) | Through MPE channels | Per-note expression and modulation events, which MPE and MIDI 2.0 arrive as too | [`synth.rs`](../crates/manguebyte-dsp/src/synth.rs), [`note_input.rs`](../crates/manguebyte-dsp/tests/note_input.rs) |
 | [CLAP](#6-native-clap) | Not available natively | Native, passes `clap-validator` | [CI](../.github/workflows/ci.yml) |
 | [Testing a plugin](#7-a-plugin-can-be-tested-without-a-host) | Needs a host or a hand-built rig | In a unit test, with `Harness` | [`plugins/pluck`](../plugins/pluck/src/lib.rs) |
 | [Thread safety of parameters and state](#8-parameters-and-state-cannot-race) | Synchronised by each plugin | Atomics; nothing to lock | [`set.rs`](../crates/manguebyte-params/src/set.rs) |
@@ -196,13 +196,35 @@ optionally for a single note, and never changes the stored value, so it
 cannot fight automation or end up in a saved preset. `Synth` routes each to
 the voice that is playing the note.
 
+MPE and MIDI 2.0 arrive as the same events. One converter,
+`dsp::note_input::NoteInput`, reads the MIDI of every device input, the
+standalone runner, the test harness and the CLAP, VST 3 and LV2 wrappers:
+a note of an MPE zone gets an identifier and is reported on the zone's
+master channel, its member channel's pitch bend (under the zone's bend
+range), pressure and controller 74 become its tuning, pressure and
+brightness, and MIDI 2.0's per-note pitch bend, pressure, pitch attributes
+and registered per-note controllers do the same. MIDI 1.0 values are
+widened with the specification's own method first, so an MPE stream and
+the MIDI 2.0 stream that says the same thing give identical events, bit for
+bit. A plugin says in `Plugin::MPE` whether it expects zones from the
+start.
+
 **Check it.** `expression_and_modulation_reach_one_note_and_parameters_reach_all`
 and `notes_with_identifiers_overlap_on_one_key_and_end_separately` in
 `synth.rs`; `an_instrument_takes_notes_expression_modulation_and_a_sidechain`
 in `abi.rs` does it through CLAP.
+`an_mpe_stream_and_the_same_midi_2_stream_give_identical_events` in
+[`note_input.rs`](../crates/manguebyte-dsp/tests/note_input.rs);
+`clap_notes_mpe_and_midi_2_end_in_the_same_events` in the CLAP wrapper's
+`abi.rs` plays one phrase as CLAP notes, as MPE and as MIDI 2.0 packets
+and requires the same output from all three, with no heap use.
 
-**Limit.** MIDI 2.0 packets and MPE zone handling are not converted to these
-events yet, and per-note *automation* from a CLAP host is not accepted yet.
+**Limit.** Per-note *automation* from a CLAP host is not accepted yet.
+MIDI 2.0 is read, not written: a processor's per-note output cannot be sent
+as packets yet. Per-note controllers with no `Expression` to become
+(modulation, breath, the assignable ones) are dropped, and channel-wide
+MIDI 2.0 messages reach the processor at MIDI 1.0 resolution
+([TECH_DEBT](TECH_DEBT.md) item 76).
 
 ## 6. Native CLAP
 

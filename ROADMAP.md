@@ -45,8 +45,12 @@ Everything a standalone audio application needs, short of a user interface.
   to 2.0 translation as the specification prescribes
 - ✅ RPN and NRPN, MPE zones, channel allocation and per-note tracking, and
   a keyboard state an interface can read while the audio thread writes
-- ⬜ MIDI 2.0 and MPE delivered to processors as per-note events, and
-  through the device and plugin layers
+- ✅ MIDI 2.0 and MPE delivered to processors as per-note events, and
+  through the device and plugin layers: one `NoteInput` that devices, the
+  standalone runner, the harness and every wrapper read MIDI through
+- ✅ MIDI-CI: discovery, profiles, property exchange and process inquiry,
+  and a device agent an application drives
+- ⬜ MIDI 2.0 out of processors: per-note events written back as packets
 
 **DSP**
 - ✅ FFT of any length, real FFT and window functions
@@ -109,6 +113,9 @@ Everything a standalone audio application needs, short of a user interface.
 - ✅ Streaming readers and writers that do not load whole files, with
   sample-exact seeking, RF64, and wait-free bridges for playing and
   recording from an audio callback
+- ✅ Audio sources pulled by a device callback or a graph: a transport
+  over a streamed file (play, pause, seek, loop from any thread), audio in
+  memory, a mixer, a sample rate converter and a channel router
 - ✅ AIFF and AIFF-C reading and writing
 - ✅ FLAC decoding
 - ✅ Recognising a file's format from its contents

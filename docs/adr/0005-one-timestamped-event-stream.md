@@ -118,4 +118,5 @@ can provide. The sidechain, which really is a different signal, is separate.
 4. [x] `Synth` and `Voice`
 5. [x] Block-size independence test
 6. [ ] Output events
-7. [ ] MIDI 2.0 UMP conversion to and from `Event`
+7. [x] MIDI 2.0 and MPE read into `Event`s: `dsp::note_input::NoteInput`
+8. [ ] `Event`s written back as MIDI 2.0 packets

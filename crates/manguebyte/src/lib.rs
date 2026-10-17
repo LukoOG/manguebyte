@@ -5,13 +5,13 @@
 //!
 //! | Module | Crate | What it holds |
 //! |---|---|---|
-//! | (root) | `manguebyte-core` | [`AudioBuffer`], [`Sample`], [`Smoothed`], atomics, [`spsc`] queue, [`NoDenormals`] |
-//! | [`dsp`] | `manguebyte-dsp` | processor chains, sample-accurate events, polyphonic synth, instruments, filters, effects, dynamics with sidechain keying, convolution, wavetables, FFT, response curves for drawing |
+//! | (root) | `manguebyte-core` | [`AudioBuffer`], [`Sample`], [`Smoothed`], atomics, [`spsc`] queue, [`NoDenormals`], [`source`] (pulled audio sources) |
+//! | [`dsp`] | `manguebyte-dsp` | processor chains, sample-accurate events, MIDI, MPE and MIDI 2.0 read into per-note events, audio sources built from sources, polyphonic synth, instruments, filters, effects, dynamics with sidechain keying, convolution, wavetables, FFT, response curves for drawing |
 //! | [`params`] | `manguebyte-params` | thread-safe parameters, ranges, smoothing, saved state |
 //! | [`graph`] | `manguebyte-graph` | a processing graph that can be rewired while it plays |
 //! | [`plugin`] | `manguebyte-plugin` | the format-independent plugin API and a test harness |
-//! | [`midi`] | `manguebyte-midi` | MIDI messages, stream parsing, MIDI files, sample-accurate event buffers |
-//! | [`formats`] | `manguebyte-formats` | audio file reading and writing, metadata, waveform thumbnails; AAC, ALAC and WMA through the system's codecs (feature `platform-codecs`) |
+//! | [`midi`] | `manguebyte-midi` | MIDI 1.0 and 2.0 messages, stream parsing, MIDI files, MPE, MIDI-CI, sample-accurate event buffers |
+//! | [`formats`] | `manguebyte-formats` | audio file reading and writing, metadata, waveform thumbnails; AAC, ALAC and WMA through the system's codecs (feature `platform-codecs`); streamed playback with a transport |
 //! | `clap` | `manguebyte-clap` | builds CLAP plugins (feature `clap`) |
 //! | `vst3` | `manguebyte-vst3` | builds VST 3 plugins (feature `vst3`) |
 //! | `lv2` | `manguebyte-lv2` | builds LV2 plugins and their Turtle files (feature `lv2`) |
@@ -51,7 +51,8 @@
 
 pub use manguebyte_core::log::{DrainedLog, LogLevel, LogQueue, LogRecord};
 pub use manguebyte_core::{
-    AtomicF32, AtomicF64, AudioBuffer, NoDenormals, ParamId, Sample, Smoothed, decibels, spsc,
+    AtomicF32, AtomicF64, AudioBuffer, NoDenormals, ParamId, Sample, Smoothed, decibels, source,
+    spsc,
 };
 
 #[cfg(feature = "analysis")]
@@ -86,6 +87,10 @@ pub use manguebyte_vst3 as vst3;
 /// The names most programs need, in one import.
 pub mod prelude {
     pub use crate::dsp::event::{Event, EventBuffer, EventKind, Expression, NoteRef};
+    pub use crate::dsp::note_input::{Mpe, NoteInput};
+    pub use crate::dsp::sources::{
+        ChannelRemapSource, MixerSource, ProcessedSource, ResamplingSource, SourceProcessor,
+    };
     pub use crate::dsp::{
         Adsr, AdsrParams, Biquad, BiquadCascade, BiquadCoefficients, Chorus, Compressor,
         Convolution, ConvolutionEngine, ConvolutionLoader, ConvolutionRouting, ConvolutionSettings,
@@ -101,7 +106,7 @@ pub mod prelude {
     pub use crate::formats::wav::{self, WavFormat};
     pub use crate::formats::{
         AudioFile, AudioReader, AudioWriter, FileFormat, FormatError, RecordingWriter,
-        StreamingPlayer, flac, mp3, vorbis,
+        StreamingPlayer, TransportControl, TransportSource, flac, mp3, vorbis,
     };
     pub use crate::graph::{Graph, GraphEngine, GraphError, NodeId};
     pub use crate::midi::file::{MetaEvent, MidiFile, Track};
@@ -114,6 +119,7 @@ pub mod prelude {
         ParamSmoother, ParamState, Smoothing, param_set,
     };
     pub use crate::plugin::{AudioLayout, Harness, Plugin, PluginInfo, PluginKind};
+    pub use crate::source::{AudioSource, BufferSource, PositionableSource};
     pub use crate::{
         AtomicF32, AtomicF64, AudioBuffer, NoDenormals, ParamId, Sample, Smoothed, decibels, spsc,
     };
