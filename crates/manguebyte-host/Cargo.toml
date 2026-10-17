@@ -1,6 +1,6 @@
 [package]
 name = "manguebyte-host"
-description = "Plugin hosting for the Manguebyte Audio Framework: load CLAP and VST 3 plugins and run them as processors."
+description = "Plugin hosting for the Manguebyte Audio Framework: load CLAP, VST 3 and LV2 plugins and run them as processors."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,11 +12,13 @@ repository.workspace = true
 homepage.workspace = true
 
 [features]
-default = ["clap", "vst3"]
+default = ["clap", "vst3", "lv2"]
 ## Hosting CLAP plugins.
 clap = ["dep:clap-sys", "dep:libloading"]
 ## Hosting VST 3 plugins.
 vst3 = ["dep:vst3", "dep:libloading"]
+## Hosting LV2 plugins. The Turtle reader is the crate's own.
+lv2 = ["dep:libloading"]
 
 [dependencies]
 manguebyte-core.workspace = true

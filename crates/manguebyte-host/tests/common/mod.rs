@@ -382,3 +382,82 @@ pub fn assert_same_bits(actual: &AudioBuffer<f32>, expected: &AudioBuffer<f32>, 
         }
     }
 }
+
+// --- LV2 bundles -------------------------------------------------------------
+
+/// Writes the LV2 bundle of an example plugin into a fresh folder named
+/// `<name>.lv2`: its Turtle files, as the plugin's own `export_lv2!`
+/// describes them through `files`, and a copy of the library cargo built
+/// for `crate_name`.
+#[cfg(feature = "lv2")]
+pub fn lv2_bundle(
+    crate_name: &str,
+    files: fn(&str) -> Vec<(String, String)>,
+    name: &str,
+) -> PathBuf {
+    let library = built_library(crate_name);
+    let binary = library.file_name().unwrap().to_str().unwrap().to_owned();
+    let folder = scratch_folder(&format!("lv2-{name}")).join(format!("{name}.lv2"));
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::copy(&library, folder.join(&binary)).unwrap();
+    for (file, text) in files(&binary) {
+        std::fs::write(folder.join(file), text).unwrap();
+    }
+    folder
+}
+
+/// Loads an LV2 bundle a test wrote with [`lv2_bundle`].
+///
+/// Its library is an example plugin built from this workspace, whose
+/// `lv2_descriptor` is the framework's own LV2 wrapper, which keeps to the
+/// LV2 specification.
+#[cfg(feature = "lv2")]
+pub fn load_lv2(path: &Path) -> manguebyte_host::lv2::Lv2Library {
+    // SAFETY: see above.
+    unsafe { manguebyte_host::lv2::Lv2Library::load(path) }.expect("the bundle loads")
+}
+
+/// The event the plugin with no host has to be given for it to receive
+/// what the LV2 host delivers: notes and pressure through MIDI 1.0, and a
+/// parameter value as the 32-bit float a control port holds.
+pub fn as_lv2_delivers(kind: EventKind) -> EventKind {
+    use manguebyte_dsp::event::Expression;
+    use manguebyte_midi::MidiMessage;
+    let byte = |value: f64| (value * 127.0).round().clamp(0.0, 127.0) as u8;
+    let message = match kind {
+        EventKind::ParamValue { param, value } => {
+            return EventKind::ParamValue {
+                param,
+                value: f64::from(value as f32),
+            };
+        }
+        EventKind::NoteOn { note, velocity } => MidiMessage::NoteOn {
+            channel: note.channel,
+            note: note.key,
+            velocity: byte(f64::from(velocity)).max(1),
+        },
+        EventKind::NoteOff { note, velocity } => MidiMessage::NoteOff {
+            channel: note.channel,
+            note: note.key,
+            velocity: byte(f64::from(velocity)),
+        },
+        EventKind::NoteExpression {
+            note,
+            expression: Expression::Pressure,
+            value,
+        } => MidiMessage::PolyPressure {
+            channel: note.channel,
+            note: note.key,
+            pressure: byte(value),
+        },
+        other => return other,
+    };
+    Event::from_midi(0, message).kind
+}
+
+/// A plain value of a parameter, at a position between 0 and 1 of its
+/// range, as the 32-bit float the plugin keeps.
+pub fn plain_at(params: &dyn ParamSet, id: ParamId, position: f64) -> f64 {
+    let param = params.find_param(id).expect("a known parameter");
+    f64::from(param.normalized_to_plain(position) as f32)
+}

@@ -1,7 +1,8 @@
 //! Telling threads apart, and keeping panics on this side of a plugin.
 //!
-//! Every plugin format has rules about which thread may call what. Both
-//! hosts in this crate hold a plugin to them with the same two tools.
+//! Every plugin format has rules about which thread may call what. The
+//! CLAP and VST 3 hosts hold a plugin to them with the same two tools; the
+//! LV2 host, whose format has no main thread, uses only the second.
 
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -16,6 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// at the same time, but the system gives the address of a thread that has
 /// ended to a later one, and a plugin's main thread may end while its audio
 /// half lives on: the later thread would then pass for the main thread.
+#[cfg_attr(not(any(feature = "clap", feature = "vst3")), allow(dead_code))]
 pub(crate) fn thread_token() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     thread_local! {

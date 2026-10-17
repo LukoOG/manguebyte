@@ -1,15 +1,15 @@
-//! One interface over both plugin formats.
+//! One interface over every plugin format.
 //!
 //! An application that hosts plugins mostly does not care which format a
 //! plugin comes in. It lists what a file holds, creates a plugin, shows its
 //! parameters, restores a saved state, and runs it. This module does those
-//! things through the same types for a CLAP plugin and a VST 3 plugin:
+//! things through the same types for a CLAP, a VST 3 and an LV2 plugin:
 //!
 //! | Type | What it is | Stands for |
 //! |---|---|---|
-//! | [`Library`] | A loaded file and the plugins in it | [`ClapLibrary`] or [`Vst3Module`] |
-//! | [`Plugin`] | One plugin, on the main thread | [`ClapPlugin`] or [`Vst3Plugin`] |
-//! | `Box<dyn Processor<f32> + Send>` | The same plugin, on the audio thread | [`ClapProcessor`](crate::clap::ClapProcessor) or [`Vst3Processor`](crate::vst3::Vst3Processor) |
+//! | [`Library`] | A loaded file and the plugins in it | [`ClapLibrary`], [`Vst3Module`] or [`Lv2Library`] |
+//! | [`Plugin`] | One plugin, on the main thread | [`ClapPlugin`], [`Vst3Plugin`] or [`Lv2Plugin`] |
+//! | `Box<dyn Processor<f32> + Send>` | The same plugin, on the audio thread | [`ClapProcessor`](crate::clap::ClapProcessor), [`Vst3Processor`](crate::vst3::Vst3Processor) or [`Lv2Processor`](crate::lv2::Lv2Processor) |
 //!
 //! The thread rules are those of the formats' own modules: a [`Plugin`] is
 //! not `Send`, and its audio half is the only thing that processes.
@@ -23,8 +23,9 @@
 //! [`EventKind::ParamValue`](manguebyte_dsp::event::EventKind::ParamValue)
 //! for its audio half, is in that scale. For CLAP it is the range the
 //! plugin declares; for VST 3 it is the normalized `0..=1` that VST 3
-//! automates. [`Plugin::param_to_text`] turns either into what a person
-//! should see.
+//! automates; for LV2 it is the control port's own unit and range.
+//! [`Plugin::param_to_text`] turns any of them into what a person should
+//! see.
 //!
 //! # Example
 //!
@@ -95,6 +96,8 @@ use manguebyte_dsp::Processor;
 
 #[cfg(feature = "clap")]
 use crate::clap::{ClapError, ClapLibrary, ClapPlugin};
+#[cfg(feature = "lv2")]
+use crate::lv2::{Lv2Error, Lv2Library, Lv2Plugin};
 #[cfg(feature = "vst3")]
 use crate::vst3::{ClassId, Vst3Error, Vst3Module, Vst3Plugin};
 
@@ -106,6 +109,8 @@ pub enum Format {
     Clap,
     /// VST 3.
     Vst3,
+    /// [LV2](https://lv2plug.in).
+    Lv2,
 }
 
 impl fmt::Display for Format {
@@ -113,6 +118,7 @@ impl fmt::Display for Format {
         f.write_str(match self {
             Self::Clap => "CLAP",
             Self::Vst3 => "VST 3",
+            Self::Lv2 => "LV2",
         })
     }
 }
@@ -143,6 +149,9 @@ pub enum Error {
     /// What the VST 3 host said.
     #[cfg(feature = "vst3")]
     Vst3(Vst3Error),
+    /// What the LV2 host said.
+    #[cfg(feature = "lv2")]
+    Lv2(Lv2Error),
     /// The file is a plugin of neither format this crate was built for.
     UnknownFormat(PathBuf),
     /// The format is one this crate was built without: its feature is off.
@@ -158,6 +167,8 @@ impl fmt::Display for Error {
             Self::Clap(error) => write!(f, "CLAP: {error}"),
             #[cfg(feature = "vst3")]
             Self::Vst3(error) => write!(f, "VST 3: {error}"),
+            #[cfg(feature = "lv2")]
+            Self::Lv2(error) => write!(f, "LV2: {error}"),
             Self::UnknownFormat(path) => {
                 write!(f, "{} is not a plugin of a known format", path.display())
             }
@@ -174,6 +185,8 @@ impl std::error::Error for Error {
             Self::Clap(error) => Some(error),
             #[cfg(feature = "vst3")]
             Self::Vst3(error) => Some(error),
+            #[cfg(feature = "lv2")]
+            Self::Lv2(error) => Some(error),
             _ => None,
         }
     }
@@ -193,14 +206,21 @@ impl From<Vst3Error> for Error {
     }
 }
 
+#[cfg(feature = "lv2")]
+impl From<Lv2Error> for Error {
+    fn from(error: Lv2Error) -> Self {
+        Self::Lv2(error)
+    }
+}
+
 /// What a library says about one of its plugins.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginEntry {
     /// The plugin's format.
     pub format: Format,
     /// What [`Library::create`] takes and what a session stores: a CLAP
-    /// plugin's identifier, or a VST 3 class identifier as 32 hexadecimal
-    /// digits, written in upper case.
+    /// plugin's identifier, a VST 3 class identifier as 32 hexadecimal
+    /// digits, written in upper case, or an LV2 plugin's URI.
     pub id: String,
     /// The name shown to people.
     pub name: String,
@@ -210,12 +230,13 @@ pub struct PluginEntry {
     pub version: String,
     /// What kind of plugin it is.
     pub kind: Kind,
-    /// The words the library files it under: CLAP's features, or VST 3's
-    /// sub-categories.
+    /// The words the library files it under: CLAP's features, VST 3's
+    /// sub-categories, or the names of LV2's classes, such as
+    /// `InstrumentPlugin`.
     pub categories: Vec<String>,
 }
 
-/// A loaded plugin file of either format, and the plugins in it.
+/// A loaded plugin file or bundle of any format, and the plugins in it.
 ///
 /// The handle can be cloned and sent between threads.
 #[derive(Debug, Clone)]
@@ -230,6 +251,8 @@ enum LibraryInner {
     Clap(ClapLibrary),
     #[cfg(feature = "vst3")]
     Vst3(Vst3Module),
+    #[cfg(feature = "lv2")]
+    Lv2(Lv2Library),
 }
 
 /// The format a path's name says it is in, if it says.
@@ -239,19 +262,23 @@ fn format_by_name(path: &Path) -> Option<Format> {
         Some(Format::Clap)
     } else if extension.eq_ignore_ascii_case("vst3") {
         Some(Format::Vst3)
+    } else if extension.eq_ignore_ascii_case("lv2") {
+        Some(Format::Lv2)
     } else {
         None
     }
 }
 
 impl Library {
-    /// Loads a plugin file, in whichever of the two formats it is.
+    /// Loads a plugin file or bundle, in whichever format it is.
     ///
-    /// The name decides: a path ending in `.clap` is loaded as CLAP and one
-    /// ending in `.vst3` as VST 3, file or bundle folder alike. A library
-    /// with another name is tried as CLAP, and then, if it has no CLAP
-    /// entry point, as VST 3. A file that exports both is taken as CLAP;
-    /// use [`load_as`](Self::load_as) to choose.
+    /// The name decides: a path ending in `.clap` is loaded as CLAP, one
+    /// ending in `.vst3` as VST 3, file or bundle folder alike, and one
+    /// ending in `.lv2` as an LV2 bundle. A folder with another name that
+    /// holds a `manifest.ttl` is an LV2 bundle too. A library with another
+    /// name is tried as CLAP, and then, if it has no CLAP entry point, as
+    /// VST 3. A file that exports both is taken as CLAP; use
+    /// [`load_as`](Self::load_as) to choose.
     ///
     /// # Errors
     ///
@@ -261,13 +288,18 @@ impl Library {
     ///
     /// # Safety
     ///
-    /// The terms of [`ClapLibrary::load`] and [`Vst3Module::load`]: the
-    /// file's code is run, and the caller vouches for it.
+    /// The terms of [`ClapLibrary::load`], [`Vst3Module::load`] and
+    /// [`Lv2Library::load`]: the file's code is run, and the caller vouches
+    /// for it.
     pub unsafe fn load(path: impl AsRef<Path>) -> Result<Self, Error> {
         let path = path.as_ref();
         if let Some(format) = format_by_name(path) {
             // SAFETY: passed on from the caller.
             return unsafe { Self::load_as(path, format) };
+        }
+        if path.join("manifest.ttl").is_file() {
+            // SAFETY: passed on from the caller.
+            return unsafe { Self::load_as(path, Format::Lv2) };
         }
         #[cfg(feature = "clap")]
         {
@@ -308,6 +340,9 @@ impl Library {
             #[cfg(feature = "vst3")]
             // SAFETY: passed on from the caller.
             Format::Vst3 => Ok(unsafe { Vst3Module::load(path) }?.into()),
+            #[cfg(feature = "lv2")]
+            // SAFETY: passed on from the caller.
+            Format::Lv2 => Ok(unsafe { Lv2Library::load(path) }?.into()),
             #[allow(unreachable_patterns)]
             other => Err(Error::NotBuiltIn(other)),
         }
@@ -320,6 +355,8 @@ impl Library {
             LibraryInner::Clap(_) => Format::Clap,
             #[cfg(feature = "vst3")]
             LibraryInner::Vst3(_) => Format::Vst3,
+            #[cfg(feature = "lv2")]
+            LibraryInner::Lv2(_) => Format::Lv2,
         }
     }
 
@@ -330,6 +367,8 @@ impl Library {
             LibraryInner::Clap(library) => library.path(),
             #[cfg(feature = "vst3")]
             LibraryInner::Vst3(module) => module.path(),
+            #[cfg(feature = "lv2")]
+            LibraryInner::Lv2(library) => library.path(),
         }
     }
 
@@ -342,9 +381,10 @@ impl Library {
     /// Creates the plugin with this identifier, as
     /// [`PluginEntry::id`] gives it.
     ///
-    /// A CLAP identifier is matched exactly. A VST 3 identifier is read as
-    /// the class identifier it is, so its hexadecimal digits may be in
-    /// either case, as `vst3::ClassId` reads them.
+    /// A CLAP identifier and an LV2 URI are matched exactly. A VST 3
+    /// identifier is read as the class identifier it is, so its
+    /// hexadecimal digits may be in either case, as `vst3::ClassId` reads
+    /// them.
     ///
     /// The calling thread becomes the plugin's main thread.
     ///
@@ -376,6 +416,12 @@ impl Library {
                 let inner = PluginInner::Vst3(Box::new(module.create(class)?));
                 Ok(Plugin { inner, entry })
             }
+            #[cfg(feature = "lv2")]
+            LibraryInner::Lv2(library) => {
+                let entry = find(id)?;
+                let inner = PluginInner::Lv2(Box::new(library.create(id)?));
+                Ok(Plugin { inner, entry })
+            }
         }
     }
 
@@ -394,6 +440,16 @@ impl Library {
     pub fn as_vst3(&self) -> Option<&Vst3Module> {
         match &self.inner {
             LibraryInner::Vst3(module) => Some(module),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// The LV2 bundle, if this is one.
+    #[cfg(feature = "lv2")]
+    pub fn as_lv2(&self) -> Option<&Lv2Library> {
+        match &self.inner {
+            LibraryInner::Lv2(library) => Some(library),
             #[allow(unreachable_patterns)]
             _ => None,
         }
@@ -476,8 +532,54 @@ impl From<Vst3Module> for Library {
     }
 }
 
-/// What a plugin says about one of its parameters, the same way for both
-/// formats.
+#[cfg(feature = "lv2")]
+impl From<Lv2Library> for Library {
+    fn from(library: Lv2Library) -> Self {
+        let plugins = library.plugins().iter().map(lv2_entry).collect();
+        Self {
+            inner: LibraryInner::Lv2(library),
+            plugins,
+        }
+    }
+}
+
+/// What an LV2 bundle says about one of its plugins, as an entry.
+#[cfg(feature = "lv2")]
+pub(crate) fn lv2_entry(info: &crate::lv2::Lv2PluginInfo) -> PluginEntry {
+    use crate::lv2::{Direction, PortKind};
+    let audio = |direction| {
+        info.ports
+            .iter()
+            .any(|port| port.kind == PortKind::Audio && port.direction == direction)
+    };
+    let kind = if info.is_a("InstrumentPlugin") {
+        Kind::Instrument
+    } else if info.is_a("AnalyserPlugin") {
+        Kind::Analyzer
+    } else if info.is_a("MIDIPlugin") {
+        Kind::NoteEffect
+    } else if audio(Direction::Input) && audio(Direction::Output) {
+        Kind::Effect
+    } else {
+        Kind::Other
+    };
+    PluginEntry {
+        format: Format::Lv2,
+        id: info.uri.clone(),
+        name: info.name.clone(),
+        vendor: info.vendor.clone(),
+        version: info.version.clone(),
+        kind,
+        categories: info
+            .classes
+            .iter()
+            .map(|class| class.rsplit(['#', '/']).next().unwrap_or(class).to_owned())
+            .collect(),
+    }
+}
+
+/// What a plugin says about one of its parameters, the same way for every
+/// format.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
     /// The number that stands for the parameter.
@@ -487,9 +589,10 @@ pub struct Param {
     /// The unit of the value as the plugin shows it, if the format says.
     pub unit: String,
     /// The lowest value in the plugin's automation scale: the declared
-    /// minimum for CLAP, 0 for VST 3.
+    /// minimum for CLAP and LV2, 0 for VST 3.
     pub min: f64,
-    /// The highest value: the declared maximum for CLAP, 1 for VST 3.
+    /// The highest value: the declared maximum for CLAP and LV2, 1 for
+    /// VST 3.
     pub max: f64,
     /// The value the parameter starts at.
     pub default: f64,
@@ -516,7 +619,7 @@ pub struct Bus {
     pub is_main: bool,
 }
 
-/// Why a block came out silent, the same way for both formats.
+/// Why a block came out silent, the same way for every format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Failure {
@@ -530,7 +633,7 @@ pub enum Failure {
 }
 
 /// Something a plugin asked for or reported, as returned by
-/// [`Plugin::pump`]: what both formats can say.
+/// [`Plugin::pump`]: what every format can say.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Notice {
@@ -567,7 +670,7 @@ pub enum Notice {
     Message(String),
 }
 
-/// A plugin of either format, as the main thread deals with it.
+/// A plugin of any format, as the main thread deals with it.
 ///
 /// Like the formats' own types, it cannot leave the thread that created
 /// it, and its audio half, from [`activate`](Self::activate), is the only
@@ -582,6 +685,8 @@ enum PluginInner {
     Clap(Box<ClapPlugin>),
     #[cfg(feature = "vst3")]
     Vst3(Box<Vst3Plugin>),
+    #[cfg(feature = "lv2")]
+    Lv2(Box<Lv2Plugin>),
 }
 
 /// Runs the same expression on whichever plugin `$inner` holds.
@@ -592,6 +697,8 @@ macro_rules! either {
             PluginInner::Clap($plugin) => $work,
             #[cfg(feature = "vst3")]
             PluginInner::Vst3($plugin) => $work,
+            #[cfg(feature = "lv2")]
+            PluginInner::Lv2($plugin) => $work,
         }
     };
 }
@@ -650,6 +757,24 @@ impl Plugin {
                     bypass: param.flags.bypass,
                 })
                 .collect(),
+            #[cfg(feature = "lv2")]
+            PluginInner::Lv2(plugin) => plugin
+                .params()
+                .iter()
+                .map(|param| Param {
+                    id: param.id,
+                    name: param.name.clone(),
+                    unit: param.unit.clone(),
+                    min: param.min,
+                    max: param.max,
+                    default: param.default,
+                    steps: param.steps,
+                    automatable: !param.properties.not_automatic,
+                    hidden: param.properties.not_on_gui,
+                    read_only: false,
+                    bypass: false,
+                })
+                .collect(),
         }
     }
 
@@ -687,6 +812,11 @@ impl Plugin {
             PluginInner::Clap(plugin) => clap_buses(plugin.audio_inputs()),
             #[cfg(feature = "vst3")]
             PluginInner::Vst3(plugin) => vst3_buses(plugin.audio_inputs()),
+            #[cfg(feature = "lv2")]
+            PluginInner::Lv2(plugin) => {
+                let (main, sidechain, _) = plugin.audio_channels();
+                lv2_buses(&[("Main", main, true), ("Sidechain", sidechain, false)])
+            }
         }
     }
 
@@ -697,6 +827,8 @@ impl Plugin {
             PluginInner::Clap(plugin) => clap_buses(plugin.audio_outputs()),
             #[cfg(feature = "vst3")]
             PluginInner::Vst3(plugin) => vst3_buses(plugin.audio_outputs()),
+            #[cfg(feature = "lv2")]
+            PluginInner::Lv2(plugin) => lv2_buses(&[("Main", plugin.audio_channels().2, true)]),
         }
     }
 
@@ -707,6 +839,8 @@ impl Plugin {
             PluginInner::Clap(plugin) => !plugin.note_inputs().is_empty(),
             #[cfg(feature = "vst3")]
             PluginInner::Vst3(plugin) => !plugin.event_inputs().is_empty(),
+            #[cfg(feature = "lv2")]
+            PluginInner::Lv2(plugin) => plugin.takes_notes(),
         }
     }
 
@@ -719,7 +853,7 @@ impl Plugin {
     /// Everything the plugin needs to come back as it is now, as bytes for
     /// [`load_state`](Self::load_state). The bytes are the format's: the
     /// plugin's own for CLAP, component and controller state together for
-    /// VST 3.
+    /// VST 3, control values and the plugin's own values for LV2.
     ///
     /// # Errors
     ///
@@ -801,6 +935,8 @@ impl Plugin {
             PluginInner::Clap(plugin) => plugin.pump().into_iter().filter_map(from_clap).collect(),
             #[cfg(feature = "vst3")]
             PluginInner::Vst3(plugin) => plugin.pump().into_iter().filter_map(from_vst3).collect(),
+            #[cfg(feature = "lv2")]
+            PluginInner::Lv2(plugin) => plugin.pump().into_iter().filter_map(from_lv2).collect(),
         }
     }
 
@@ -843,6 +979,26 @@ impl Plugin {
             _ => None,
         }
     }
+
+    /// The LV2 plugin, if this is one.
+    #[cfg(feature = "lv2")]
+    pub fn as_lv2(&self) -> Option<&Lv2Plugin> {
+        match &self.inner {
+            PluginInner::Lv2(plugin) => Some(&**plugin),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// The LV2 plugin, if this is one, to change.
+    #[cfg(feature = "lv2")]
+    pub fn as_lv2_mut(&mut self) -> Option<&mut Lv2Plugin> {
+        match &mut self.inner {
+            PluginInner::Lv2(plugin) => Some(&mut **plugin),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Debug for Plugin {
@@ -877,6 +1033,32 @@ fn vst3_buses(buses: &[crate::vst3::BusInfo]) -> Vec<Bus> {
             is_main: bus.is_main,
         })
         .collect()
+}
+
+#[cfg(feature = "lv2")]
+fn lv2_buses(buses: &[(&str, usize, bool)]) -> Vec<Bus> {
+    buses
+        .iter()
+        .filter(|(_, channels, _)| *channels > 0)
+        .map(|&(name, channels, is_main)| Bus {
+            name: name.to_owned(),
+            channels: channels as u32,
+            is_main,
+        })
+        .collect()
+}
+
+#[cfg(feature = "lv2")]
+fn from_lv2(event: crate::lv2::Lv2Event) -> Option<Notice> {
+    use crate::lv2::{Lv2Event, Lv2Failure};
+    Some(match event {
+        Lv2Event::LatencyChanged(frames) => Notice::LatencyChanged(frames),
+        Lv2Event::ProcessFailed(Lv2Failure::SampleRateMismatch) => {
+            Notice::ProcessFailed(Failure::SampleRateMismatch)
+        }
+        Lv2Event::Log { level, message } => Notice::Message(format!("{level:?}: {message}")),
+        Lv2Event::Remark(message) => Notice::Message(message),
+    })
 }
 
 #[cfg(feature = "clap")]
@@ -936,6 +1118,7 @@ mod tests {
             Some(Format::Clap)
         );
         assert_eq!(format_by_name(Path::new("Plugin.VST3")), Some(Format::Vst3));
+        assert_eq!(format_by_name(Path::new("Plugin.lv2")), Some(Format::Lv2));
         assert_eq!(format_by_name(Path::new("libplugin.so")), None);
         assert_eq!(format_by_name(Path::new("plugin")), None);
     }
@@ -945,6 +1128,7 @@ mod tests {
         for path in [
             "no/such/plugin.clap",
             "no/such/plugin.vst3",
+            "no/such/plugin.lv2",
             "no/such/plugin.dll",
         ] {
             // SAFETY: there is nothing at these paths, so no code is run.

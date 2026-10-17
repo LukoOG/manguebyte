@@ -10,7 +10,8 @@
 //!
 //! - [`clap`]: CLAP plugins.
 //! - [`vst3`]: VST 3 plugins.
-//! - [`any`]: either format through the same types, for an application
+//! - [`lv2`]: LV2 plugins, read from their bundles' Turtle files.
+//! - [`any`]: any of them through the same types, for an application
 //!   that lists, loads, restores and runs plugins without caring which
 //!   format each one is.
 //!
@@ -24,13 +25,15 @@
 //! Loading a plugin is `unsafe`: it runs code this crate cannot check, and
 //! the caller vouches for it. Everything after that is safe to call.
 
-#[cfg(any(feature = "clap", feature = "vst3"))]
+#[cfg(any(feature = "clap", feature = "vst3", feature = "lv2"))]
 pub mod any;
 #[cfg(any(feature = "clap", feature = "vst3"))]
 mod bundle;
 #[cfg(feature = "clap")]
 pub mod clap;
-#[cfg(any(feature = "clap", feature = "vst3"))]
+#[cfg(feature = "lv2")]
+pub mod lv2;
+#[cfg(any(feature = "clap", feature = "vst3", feature = "lv2"))]
 mod threads;
 #[cfg(feature = "vst3")]
 pub mod vst3;
