@@ -799,7 +799,9 @@ fn trumpet_fanfare() -> Score {
     score
 }
 
-/// A trombone phrase in B flat, slurred so the slide glides between notes.
+/// A trombone phrase in B flat, slurred: the preset tongues softly between
+/// slurred notes, as a trombonist does; its slide glides only with
+/// portamento on.
 fn trombone_phrase() -> Score {
     let beat = 60.0 / 70.0;
     let mut score = Score::default();
@@ -826,6 +828,87 @@ fn trombone_phrase() -> Score {
         ],
         true,
     );
+    score
+}
+
+/// A slow, soft flute melody in G, low in the instrument where its breath is
+/// heard most: long notes that swell and ease, a few tongued afresh after a
+/// breath, a few slurred.
+fn flute_soft_solo() -> Score {
+    let beat = 60.0 / 54.0;
+    let mut score = Score::default();
+    let at = score.line(
+        0.0,
+        beat,
+        &[
+            (67, 2.0, 0.35, false),
+            (71, 1.0, 0.3, false),
+            (74, 3.0, 0.4, false),
+        ],
+        true,
+    );
+    let at = score.line(
+        at + 0.35,
+        beat,
+        &[
+            (72, 1.0, 0.35, false),
+            (71, 1.0, 0.3, false),
+            (69, 2.0, 0.35, false),
+        ],
+        true,
+    );
+    let at = score.line(
+        at + 0.4,
+        beat,
+        &[
+            (64, 1.5, 0.3, false),
+            (66, 0.5, 0.3, false),
+            (67, 4.0, 0.35, false),
+        ],
+        true,
+    );
+    score.line(
+        at + 0.3,
+        beat,
+        &[(62, 1.0, 0.25, false), (67, 4.0, 0.3, false)],
+        false,
+    );
+    score
+}
+
+/// The flute loud: a bright fanfare-like figure in D high in the
+/// instrument, tongued, with accents, then a long fortissimo note.
+fn flute_loud() -> Score {
+    let beat = 60.0 / 96.0;
+    let mut score = Score::default();
+    let at = score.line(
+        0.0,
+        beat,
+        &[
+            (74, 0.5, 0.9, true),
+            (78, 0.5, 0.85, false),
+            (81, 1.0, 0.95, true),
+            (79, 0.5, 0.85, false),
+            (78, 0.5, 0.85, false),
+            (76, 0.5, 0.85, false),
+            (78, 0.5, 0.9, false),
+            (81, 2.0, 1.0, true),
+        ],
+        false,
+    );
+    let at = score.line(
+        at + 0.1,
+        beat,
+        &[
+            (86, 1.0, 0.95, true),
+            (85, 0.5, 0.9, false),
+            (83, 0.5, 0.9, false),
+            (81, 1.0, 0.9, false),
+            (78, 1.0, 0.85, false),
+        ],
+        true,
+    );
+    score.line(at + 0.1, beat, &[(74, 6.0, 1.0, true)], true);
     score
 }
 
@@ -1029,6 +1112,18 @@ fn main() -> io::Result<()> {
         let synth = Synth::with_voices(2, || WindVoice::new(params));
         phrase(directory, name, synth, true, &score, seconds)?;
     }
+    // The flute alone, soft and breathy, and loud.
+    let synth = Synth::with_voices(2, || WindVoice::new(WindParams::flute()));
+    phrase(
+        directory,
+        "flauta_solo_suave",
+        synth,
+        true,
+        &flute_soft_solo(),
+        27.0,
+    )?;
+    let synth = Synth::with_voices(2, || WindVoice::new(WindParams::flute()));
+    phrase(directory, "flauta_forte", synth, true, &flute_loud(), 14.0)?;
 
     // Voices.
     let aah = choir_chords(&[
