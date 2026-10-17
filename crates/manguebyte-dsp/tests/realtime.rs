@@ -948,6 +948,57 @@ fn flood<V: Voice>(what: &str, mut synth: Synth<V>, mut change: impl FnMut(&mut 
     assert!(all_finite(&buffer));
 }
 
+/// Shapes every note of `synth` the way a player of an acoustic instrument
+/// does while it sounds: pressure, brightness, vibrato, volume, and the
+/// breath controller, the expression pedal and the modulation wheel.
+fn shape_notes<V: Voice>(synth: &mut Synth<V>, round: u8) {
+    let amount = f64::from(round % 8) / 7.0;
+    for voice in synth.voices_mut() {
+        for expression in [
+            Expression::Pressure,
+            Expression::Brightness,
+            Expression::Vibrato,
+            Expression::Volume,
+        ] {
+            voice.expression(expression, amount);
+        }
+        for controller in [1, 2, 11] {
+            voice.midi(manguebyte_midi::MidiMessage::ControlChange {
+                channel: 9,
+                controller,
+                value: 127 - round * 5,
+            });
+        }
+    }
+}
+
+#[test]
+fn the_modelled_acoustic_instruments_do_not_use_the_heap() {
+    use manguebyte_dsp::instruments::{MalletParams, MalletVoice};
+
+    let mallets = [
+        MalletParams::marimba(),
+        MalletParams::xylophone(),
+        MalletParams::vibraphone(),
+        MalletParams::glockenspiel(),
+        MalletParams::celesta(),
+        MalletParams::kalimba(),
+        MalletParams::steel_pan(),
+        MalletParams::tubular_bells(),
+    ];
+    flood(
+        "MalletVoice",
+        Synth::with_voices(4, || MalletVoice::new(MalletParams::marimba())),
+        |synth, round| {
+            let params = mallets[usize::from(round) % mallets.len()];
+            synth
+                .voices_mut()
+                .for_each(|voice| voice.set_params(params));
+            shape_notes(synth, round);
+        },
+    );
+}
+
 #[test]
 fn the_instruments_do_not_use_the_heap() {
     use manguebyte_dsp::instruments::{

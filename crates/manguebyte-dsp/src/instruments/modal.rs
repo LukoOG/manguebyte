@@ -346,6 +346,35 @@ impl Phasors {
             self.set_pole(i);
         }
     }
+
+    /// Multiplies every frequency by `factor`, each mode keeping its
+    /// state, as a bend does: the modes ring on at their new pitch. A mode
+    /// sent to 0.45 of the sample rate or above stops there, silent.
+    pub(crate) fn scale_frequencies(&mut self, factor: f64) {
+        if !(factor > 0.0 && factor.is_finite()) {
+            return;
+        }
+        for i in 0..self.len {
+            self.omega[i] *= factor;
+            if self.omega[i] >= 0.9 * PI {
+                self.omega[i] = 0.9 * PI;
+                self.radius[i] = 0.0;
+                self.zr[i] = 0.0;
+                self.zi[i] = 0.0;
+            }
+            self.set_pole(i);
+        }
+    }
+
+    /// Shortens every decay to at most `t60` seconds from now on, as a
+    /// damper does.
+    pub(crate) fn limit_decay(&mut self, t60: f64, rate: f64) {
+        let radius = t60_factor(t60, rate);
+        for i in 0..self.len {
+            self.radius[i] = self.radius[i].min(radius);
+            self.set_pole(i);
+        }
+    }
 }
 
 /// How many frequency bands a [`Plate`] has.

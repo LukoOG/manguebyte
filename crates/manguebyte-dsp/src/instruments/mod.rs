@@ -11,6 +11,7 @@
 //! | [`KickBassVoice`] | that machine's long kick played as a bass, with slides | [the classic](KickBassParams::default) |
 //! | [`AcidVoice`] | the acid bass: an oscillator, a diode ladder and envelopes, with accent and slide | [classic](AcidParams::classic), [squelch](AcidParams::squelch), [square](AcidParams::square) |
 //! | [`PolySynthVoice`] | a deep polyphonic synthesiser: three oscillators of classic shapes and wavetables with sixteen-voice unison, sync, FM and ring modulation, two filters of fifteen models, four envelopes, three LFOs and a modulation matrix | the [library](poly::PRESETS) of basses, leads, pads, plucks, keys, brass and effects |
+//! | [`MalletVoice`] | struck bars, tines, plates and tubes by modal synthesis: mallet hardness, strike position, resonator tubes, the vibraphone's motor and damper | [marimba](MalletParams::marimba), [xylophone](MalletParams::xylophone), [vibraphone](MalletParams::vibraphone), [glockenspiel](MalletParams::glockenspiel), [celesta](MalletParams::celesta), [kalimba](MalletParams::kalimba), [steel pan](MalletParams::steel_pan), [tubular bells](MalletParams::tubular_bells) |
 //!
 //! [`RotarySpeaker`] is not a voice but a [`Processor`](crate::Processor)
 //! to put after the organ: the rotating horn and drum it is usually heard
@@ -98,6 +99,7 @@ mod common;
 mod fm;
 mod kit;
 mod machines;
+mod mallet;
 #[cfg(test)]
 pub(crate) mod measure;
 mod modal;
@@ -117,6 +119,7 @@ pub use kit::{
     CHOKE_GROUPS, CHOKE_SECONDS, ChokeGroups, DrumKit, DrumKitVoice, DrumModel, KIT_FIRST_KEY,
     KIT_KEYS, LoFi, Piece, gm,
 };
+pub use mallet::{MALLET_MODES, MalletMode, MalletParams, MalletShape, MalletVoice};
 pub use organ::{
     DRAWBAR_FOOTAGES, DRAWBARS, OrganManual, OrganParams, OrganVoice, Percussion, PercussionDecay,
     PercussionHarmonic,
