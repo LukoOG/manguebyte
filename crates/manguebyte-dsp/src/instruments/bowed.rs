@@ -11,7 +11,8 @@ use super::common::{
     velocity_gain,
 };
 use super::modelling::{
-    DcBlock, Dynamics, Glide, Loss, Vibrato, VibratoShape, cubic_delay_for, trip_gain,
+    Bump, DRIFT_SECONDS, DcBlock, Dynamics, Glide, Life, Loss, Switch, Vibrato, VibratoShape,
+    Wander, cubic_delay_for, trip_gain,
 };
 use super::string::BodyMode;
 use crate::event::{Expression, NoteRef};
@@ -21,8 +22,50 @@ use crate::{DelayLine, ProcessSpec, Processor, StateVariableFilter, SvfMode, Voi
 /// instruments playing each note.
 pub const MAX_PLAYERS: usize = 4;
 
-/// How many resonances of the instrument's body a [`BowedParams`] has.
-pub const BODY_MODES: usize = 6;
+/// How many resonances of the instrument's body a [`BowedParams`] names: the
+/// air and wood modes that give each instrument its voice. Above them the
+/// body has many more, too close together to name ([`WOOD_MODES`] of them,
+/// see [`BowedParams::wood`]).
+pub const BODY_MODES: usize = 8;
+
+/// How many resonances the body has above its named ones.
+pub const WOOD_MODES: usize = 24;
+
+/// The band the unnamed resonances of the body spread over, as multiples of
+/// its air resonance (the first of [`BowedParams::body`]): for the violin,
+/// from about 800 Hz to 7 kHz, where its modes overlap into the bridge hill
+/// (J. Woodhouse, "The acoustics of the violin: a review", Rep. Prog. Phys.
+/// 77, 2014, section 4).
+const WOOD_LOWEST: f64 = 3.0;
+const WOOD_HIGHEST: f64 = 25.0;
+
+/// How narrow the unnamed resonances are, at the least and over their
+/// spread, as Q: the wood's damping leaves them some 30 to 60 Hz wide near
+/// 1.5 kHz.
+const WOOD_Q: (f64, f64) = (25.0, 20.0);
+
+/// How loud the unnamed resonances are against the named ones at
+/// [`BowedParams::wood`] 1.
+const WOOD_GAIN: f64 = 1.5;
+
+/// How long a finger takes to stop the string at a slur without portamento:
+/// the string's length moves to the new note's over this long, too fast to
+/// be heard as a slide.
+const FINGER_SECONDS: f64 = 0.002;
+
+/// The finger landing on the string at a slur: a small knock, a fraction of
+/// the bow's speed, for half a millisecond.
+const FINGER_KNOCK: f64 = 0.15;
+const KNOCK_SECONDS: f64 = 0.0005;
+
+/// The bow's scratch at the start of a note: how long it lasts (its 60 dB
+/// fall), and how much it roughens the bow at [`BowedParams::scratch`] 1
+/// against [`BowedParams::bow_noise`] 1.
+const SCRATCH_SECONDS: f64 = 0.06;
+const SCRATCH_GRAIN: f64 = 6.0;
+
+/// How many times more than the bow's speed its roughness wavers.
+const NOISE_WAVER: f64 = 3.0;
 
 /// The lowest note a string plays, in hertz (A0). Lower keys sound here.
 const LOWEST_HZ: f64 = 27.5;
@@ -181,12 +224,37 @@ pub struct BowedParams {
     pub vibrato_delay: f64,
     /// How long it then takes to reach its depth, 0.01 to 4.
     pub vibrato_rise: f64,
-    /// How long the finger takes to move to a slurred note, 0 to 1. A short
-    /// time is a clean change of finger; a longer one a portamento.
+    /// How long the finger takes to slide to a slurred note when
+    /// [`portamento`](Self::portamento) is on, 0 to 1.
     pub legato_time: f64,
+    /// Whether slurred notes slide into each other, the finger gliding along
+    /// the string over [`legato_time`](Self::legato_time), as in an
+    /// expressive portamento. Off, a slur is a change of finger: the string
+    /// is stopped at its new length at once, with the small knock of the
+    /// finger landing.
+    pub portamento: bool,
+    /// How far the pitch drifts, slowly, as a player's finger and ear do, in
+    /// cents (its RMS), 0 to 20. Each player of a section drifts on their
+    /// own.
+    pub drift: f64,
+    /// How much the bow's speed wavers, slowly, as a fraction of it (its
+    /// RMS), 0 to 0.3; the bow's roughness wavers three times as much.
+    pub fluctuation: f64,
+    /// How much a held note swells after its attack, at its height about
+    /// 0.9 s in, and then eases back over a few seconds, as a fraction of
+    /// the bow's speed, 0 to 0.5.
+    pub swell: f64,
+    /// How much the bow scratches as it bites at the start of a note, 0 to
+    /// 1, before the string settles into its motion: more at a higher
+    /// velocity and on an accent, over some 60 ms.
+    pub scratch: f64,
     /// The resonances of the instrument's body, fed by the force on the
     /// bridge.
     pub body: [BodyMode; BODY_MODES],
+    /// How much the many resonances of the body above its named ones add, 0
+    /// to 1: the wood's dense, uneven response, which a few resonances alone
+    /// would leave smooth, like a filter.
+    pub wood: f64,
     /// How much of the sound comes through the body, 0 to 1.
     pub body_mix: f64,
     /// The cut-off of the final low-pass, 500 to 20 000.
@@ -220,11 +288,17 @@ pub struct BowedParams {
 
 impl BowedParams {
     /// A violin: strings G3, D4, A4 and E5, bowed about a ninth of the open
-    /// string from the bridge, with the body's air resonance near 275 Hz,
-    /// its main wood resonances near 470 and 550 Hz and the bridge's hill
-    /// around 2.5 kHz (N. H. Fletcher and T. D. Rossing, "The Physics of
-    /// Musical Instruments", 2nd ed., chapter 10; J. Woodhouse, "The
-    /// acoustics of the violin: a review", Rep. Prog. Phys. 77, 2014).
+    /// string from the bridge. Its body: the air resonance A0 near 275 Hz,
+    /// the centre bout's rotation near 405 Hz (which radiates little), the
+    /// two corpus bending modes B1- and B1+ near 470 and 545 Hz (the T1 and
+    /// C3 of the older nomenclature), C4 near 700 Hz, a mode near 1 kHz, the
+    /// bridge's hill around 2.5 kHz, and above 800 Hz the dense, uneven
+    /// modes of the wood (N. H. Fletcher and T. D. Rossing, "The Physics of
+    /// Musical Instruments", 2nd ed., chapter 10; E. V. Jansson, "Acoustics
+    /// for violin and guitar makers", 2002, chapter 7; G. Bissinger,
+    /// "Structural acoustics of good and bad violins", JASA 124, 2008; J.
+    /// Woodhouse, "The acoustics of the violin: a review", Rep. Prog. Phys.
+    /// 77, 2014).
     pub fn violin() -> Self {
         Self {
             strings: [196.0, 293.66, 440.0, 659.26],
@@ -241,14 +315,22 @@ impl BowedParams {
             vibrato_delay: 0.25,
             vibrato_rise: 0.35,
             legato_time: 0.03,
+            portamento: false,
+            drift: 2.0,
+            fluctuation: 0.03,
+            swell: 0.08,
+            scratch: 0.4,
             body: [
                 BodyMode::new(275.0, 12.0, 0.8),
+                BodyMode::new(405.0, 15.0, 0.25),
                 BodyMode::new(470.0, 18.0, 1.0),
-                BodyMode::new(550.0, 16.0, 0.9),
-                BodyMode::new(720.0, 10.0, 0.4),
+                BodyMode::new(545.0, 16.0, 0.9),
+                BodyMode::new(700.0, 12.0, 0.5),
+                BodyMode::new(1_050.0, 10.0, 0.3),
                 BodyMode::new(2_500.0, 1.6, 0.9),
                 BodyMode::new(3_500.0, 3.0, 0.3),
             ],
+            wood: 0.6,
             body_mix: 0.75,
             tone: 7_500.0,
             velocity_range_db: 24.0,
@@ -273,9 +355,11 @@ impl BowedParams {
             decay: 1.4,
             body: [
                 BodyMode::new(230.0, 12.0, 0.8),
+                BodyMode::new(320.0, 15.0, 0.25),
                 BodyMode::new(350.0, 16.0, 1.0),
                 BodyMode::new(420.0, 16.0, 0.9),
                 BodyMode::new(600.0, 10.0, 0.4),
+                BodyMode::new(880.0, 10.0, 0.3),
                 BodyMode::new(2_000.0, 1.6, 0.8),
                 BodyMode::new(3_000.0, 3.0, 0.25),
             ],
@@ -299,9 +383,11 @@ impl BowedParams {
             release: 0.3,
             body: [
                 BodyMode::new(100.0, 10.0, 0.8),
+                BodyMode::new(145.0, 12.0, 0.25),
                 BodyMode::new(175.0, 12.0, 0.9),
                 BodyMode::new(215.0, 14.0, 0.9),
                 BodyMode::new(290.0, 12.0, 0.5),
+                BodyMode::new(440.0, 10.0, 0.3),
                 BodyMode::new(1_200.0, 1.5, 0.8),
                 BodyMode::new(2_400.0, 3.0, 0.3),
             ],
@@ -325,9 +411,11 @@ impl BowedParams {
             release: 0.35,
             body: [
                 BodyMode::new(60.0, 8.0, 0.8),
+                BodyMode::new(88.0, 10.0, 0.25),
                 BodyMode::new(110.0, 10.0, 0.8),
                 BodyMode::new(145.0, 12.0, 0.7),
                 BodyMode::new(210.0, 10.0, 0.5),
+                BodyMode::new(320.0, 10.0, 0.3),
                 BodyMode::new(800.0, 1.5, 0.7),
                 BodyMode::new(1_600.0, 3.0, 0.3),
             ],
@@ -354,9 +442,11 @@ impl BowedParams {
             legato_time: 0.05,
             body: [
                 BodyMode::new(250.0, 10.0, 0.8),
+                BodyMode::new(360.0, 14.0, 0.25),
                 BodyMode::new(410.0, 14.0, 1.0),
                 BodyMode::new(500.0, 14.0, 0.9),
                 BodyMode::new(680.0, 10.0, 0.4),
+                BodyMode::new(950.0, 10.0, 0.3),
                 BodyMode::new(2_200.0, 1.5, 0.7),
                 BodyMode::new(3_200.0, 3.0, 0.2),
             ],
@@ -431,11 +521,17 @@ impl BowedParams {
             vibrato_delay: setting(self.vibrato_delay, 0.0, 4.0, default.vibrato_delay),
             vibrato_rise: setting(self.vibrato_rise, 0.01, 4.0, default.vibrato_rise),
             legato_time: setting(self.legato_time, 0.0, 1.0, default.legato_time),
+            portamento: self.portamento,
+            drift: setting(self.drift, 0.0, 20.0, 0.0),
+            fluctuation: setting(self.fluctuation, 0.0, 0.3, 0.0),
+            swell: setting(self.swell, 0.0, 0.5, 0.0),
+            scratch: setting(self.scratch, 0.0, 1.0, default.scratch),
             body: self.body.map(|mode| BodyMode {
                 frequency: setting(mode.frequency, 20.0, 10_000.0, body_default.frequency),
                 q: setting(mode.q, 0.5, 50.0, body_default.q),
                 gain: setting(mode.gain, 0.0, 4.0, 0.0),
             }),
+            wood: setting(self.wood, 0.0, 1.0, default.wood),
             body_mix: setting(self.body_mix, 0.0, 1.0, default.body_mix),
             tone: setting(self.tone, 500.0, 20_000.0, default.tone),
             velocity_range_db: setting(
@@ -490,8 +586,8 @@ impl BowedParams {
             depth_cents: self.vibrato_depth,
             delay: self.vibrato_delay,
             rise: self.vibrato_rise,
-            wander: 0.6,
-            develop: 0.0,
+            wander: 0.8,
+            develop: 1.0,
         }
     }
 }
@@ -554,6 +650,48 @@ fn friction(drop: f64, force: f64, slip_speed: f64, sticking: &mut bool) -> f64 
     (x - slip).max(0.0).copysign(drop)
 }
 
+/// One of the body's unnamed resonances: a two-pole band-pass whose peak
+/// gain is 1, `y[n] = b0 (x[n] - x[n-2]) + a1 y[n-1] - a2 y[n-2]` with its
+/// poles at radius `r = e^(-π f / (Q fs))`, the resonator of J. O. Smith
+/// and J. B. Angell, "A constant-gain digital resonator tuned by a single
+/// coefficient", Computer Music Journal 6, 1982.
+#[derive(Debug, Clone, Copy, Default)]
+struct Resonator {
+    a1: f64,
+    a2: f64,
+    b0: f64,
+    x1: f64,
+    x2: f64,
+    y1: f64,
+    y2: f64,
+}
+
+impl Resonator {
+    fn tune(&mut self, frequency: f64, q: f64, rate: f64) {
+        let r = (-core::f64::consts::PI * frequency / (q * rate)).exp();
+        self.a1 = 2.0 * r * (TAU * frequency / rate).cos();
+        self.a2 = r * r;
+        self.b0 = 0.5 * (1.0 - r * r);
+    }
+
+    #[inline]
+    fn step(&mut self, x: f64) -> f64 {
+        let y = flush(self.b0 * (x - self.x2) + self.a1 * self.y1 - self.a2 * self.y2);
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y;
+        y
+    }
+
+    fn reset(&mut self) {
+        self.x1 = 0.0;
+        self.x2 = 0.0;
+        self.y1 = 0.0;
+        self.y2 = 0.0;
+    }
+}
+
 /// One player's string: the two stretches of string either side of the
 /// bow, each a delay line holding the waves going out and back.
 #[derive(Debug, Clone)]
@@ -567,6 +705,8 @@ struct Player {
     finger: f64,
     sticking: bool,
     vibrato: Vibrato,
+    /// The player's own drift of pitch.
+    drift: Wander,
     /// The bow's roughness: noise, and a low-pass of it.
     noise: Noise,
     rough: f64,
@@ -599,6 +739,7 @@ impl Player {
             finger: 0.0,
             sticking: false,
             vibrato: Vibrato::new(),
+            drift: Wander::new(),
             noise: Noise::for_note(0, 0.0, 0),
             rough: 0.0,
             detune: 0.0,
@@ -647,9 +788,27 @@ struct BowedTone {
     players: [Player; MAX_PLAYERS],
     count: usize,
     pizzicato: bool,
-    /// The pitch, in keys, gliding between slurred notes, and the bend.
+    /// The pitch, in keys, gliding between slurred notes with portamento,
+    /// and the bend.
     glide: Glide,
     bend: f64,
+    /// A change of finger: the fade from the old length's reads, the key
+    /// they were at and their offsets, and the finger's knock.
+    switch: Switch,
+    from_key: f64,
+    from_bridge_offset: f64,
+    from_nut_offset: f64,
+    knock: Bump,
+    /// The player's swell and waver, and how much of each and of the drift.
+    life: Life,
+    drift: f64,
+    fluctuation: f64,
+    swell: f64,
+    /// The bow's scratch at the start of a note: how much, now, and how fast
+    /// it falls.
+    scratch: f64,
+    scratch_now: f64,
+    scratch_fall: f64,
     /// The open string the note is played on, in hertz.
     open: f64,
     /// The bow's place on the string, as asked and as it moves there.
@@ -693,6 +852,8 @@ struct BowedTone {
     roughness: f64,
     body: [StateVariableFilter<f64>; BODY_MODES],
     body_gain: [f64; BODY_MODES],
+    wood: [Resonator; WOOD_MODES],
+    wood_gain: [f64; WOOD_MODES],
     body_mix: f64,
     /// The corner's low-pass: its pole and its memory.
     corner: f64,
@@ -716,6 +877,18 @@ impl BowedTone {
             pizzicato: false,
             glide: Glide::new(),
             bend: 0.0,
+            switch: Switch::new(),
+            from_key: 60.0,
+            from_bridge_offset: 0.0,
+            from_nut_offset: 0.0,
+            knock: Bump::new(),
+            life: Life::new(),
+            drift: 0.0,
+            fluctuation: 0.0,
+            swell: 0.0,
+            scratch: 0.0,
+            scratch_now: 0.0,
+            scratch_fall: 0.0,
             open: 196.0,
             position: 0.1,
             position_now: 0.1,
@@ -744,6 +917,8 @@ impl BowedTone {
             roughness: 0.0,
             body: core::array::from_fn(|_| band()),
             body_gain: [0.0; BODY_MODES],
+            wood: [Resonator::default(); WOOD_MODES],
+            wood_gain: [0.0; WOOD_MODES],
             body_mix: 0.0,
             corner: 0.0,
             corner_memory: 0.0,
@@ -777,6 +952,7 @@ impl BowedTone {
         self.position_follow = 1.0 - (-1.0 / (0.02 * rate)).exp();
         self.bow_fall = 1.0 - (-3.0 / (LIFT_SECONDS * rate)).exp();
         self.bite_fall = t60_factor(BITE_SECONDS, rate);
+        self.scratch_fall = t60_factor(SCRATCH_SECONDS, rate);
         self.damping_step = 1.0 / (LIFT_SECONDS * rate);
         self.follower_fall = t60_factor(0.3, rate);
         self.silence();
@@ -794,7 +970,26 @@ impl BowedTone {
             filter.set_q(mode.q);
             *gain = mode.gain;
         }
+        // The unnamed resonances: spread evenly in log frequency over the
+        // band above the air resonance, each nudged off its place, its Q and
+        // its share drawn from the same noise for every voice (the
+        // instrument's own, not a note's), falling gently with frequency.
+        let air = params.body[0].frequency;
+        let (low, high) = (WOOD_LOWEST * air, WOOD_HIGHEST * air);
+        let mut noise = Noise::for_note(0, 0.0, 0xB0D1);
+        for (n, (mode, gain)) in self.wood.iter_mut().zip(&mut self.wood_gain).enumerate() {
+            let place = (n as f64 + 0.5 + 0.8 * noise.next() * 0.5) / WOOD_MODES as f64;
+            let frequency = (low * (high / low).powf(place)).min(0.45 * self.rate);
+            let q = WOOD_Q.0 + WOOD_Q.1 * noise.unit();
+            mode.tune(frequency, q, self.rate);
+            let share = 0.3 + 0.7 * noise.unit();
+            *gain = WOOD_GAIN * params.wood * share / (1.0 + frequency / (10.0 * air));
+        }
         self.body_mix = params.body_mix;
+        self.drift = params.drift;
+        self.fluctuation = params.fluctuation;
+        self.swell = params.swell;
+        self.scratch = params.scratch;
         self.tone.set_frequency(params.tone.min(0.45 * self.rate));
         self.pressure = params.pressure;
         self.shape_corner();
@@ -885,6 +1080,7 @@ impl BowedTone {
         params: &BowedParams,
         key: f64,
         level: f64,
+        velocity: f64,
         accent: bool,
         scale: f64,
         seed: u64,
@@ -893,6 +1089,21 @@ impl BowedTone {
         let fresh = !self.sounding;
         self.pizzicato = params.pizzicato;
         self.glide.set(key);
+        self.switch.finish();
+        // The bow bites: it scratches before the string settles, more the
+        // harder it is played.
+        let bite = params.scratch * (0.4 + 0.6 * velocity.clamp(0.0, 1.0));
+        self.scratch_now = if params.pizzicato {
+            0.0
+        } else if accent {
+            1.5 * bite
+        } else {
+            bite
+        };
+        if fresh {
+            self.life
+                .start(Noise::for_note(key as u8, level, seed + 9), rate);
+        }
         self.struck = setting(level, 0.0, 16.0, 1.0);
         self.aim(params, key, scale, false);
         if fresh {
@@ -934,6 +1145,11 @@ impl BowedTone {
                     ((0.004 + 0.022 * noise.unit()) * rate) as u32
                 };
                 player.vibrato.start(&params.vibrato(), rate, noise);
+                player.drift.start(
+                    Noise::for_note(key as u8, level, seed + 5 + n as u64),
+                    DRIFT_SECONDS,
+                    rate,
+                );
                 player.ear = if params.pizzicato {
                     1.0
                 } else {
@@ -963,9 +1179,21 @@ impl BowedTone {
     /// A slurred note: the finger moves to `key`, the bow carries on.
     fn slur(&mut self, params: &BowedParams, key: f64, level: f64, scale: f64) {
         let rate = self.rate;
-        self.glide.to(key, params.legato_time, rate);
         self.struck = setting(level, 0.0, 16.0, 1.0);
-        self.aim(params, key, scale, true);
+        if params.portamento {
+            self.glide.to(key, params.legato_time, rate);
+            self.aim(params, key, scale, true);
+        } else {
+            // A change of finger: the string is stopped at its new length at
+            // once, and the finger knocks as it lands.
+            self.from_key = self.glide.key;
+            self.from_bridge_offset = self.bridge_offset;
+            self.from_nut_offset = self.nut_offset;
+            self.glide.set(key);
+            self.aim(params, key, scale, true);
+            self.switch.start(FINGER_SECONDS, rate);
+            self.knock.start(KNOCK_SECONDS, rate);
+        }
         self.dynamics.strike(level, false);
         self.held = true;
         self.damping = 0.0;
@@ -982,10 +1210,32 @@ impl BowedTone {
         self.held = false;
     }
 
+    /// The force on the bridge `x` through the body: its named resonances
+    /// and the wood's many, mixed with what reaches the air directly.
+    #[inline]
+    fn resonate(&mut self, x: f64) -> f64 {
+        let mut body = 0.0;
+        for (filter, gain) in self.body.iter_mut().zip(&self.body_gain) {
+            if *gain > 0.0 {
+                body += gain * filter.process_sample(0, x);
+            }
+        }
+        for (mode, gain) in self.wood.iter_mut().zip(&self.wood_gain) {
+            if *gain > 0.0 {
+                body += gain * mode.step(x);
+            }
+        }
+        (1.0 - self.body_mix) * x + self.body_mix * body
+    }
+
     #[inline]
     fn next(&mut self) -> f64 {
         let rate = self.rate;
         let key = self.glide.next() + self.bend;
+        let life = self.life.next();
+        self.scratch_now = flush(self.scratch_now * self.scratch_fall);
+        // The bow arm's swell and waver.
+        let sway = (1.0 + self.swell * life.swell + self.fluctuation * life.waver).max(0.0);
         self.position_now += (self.position - self.position_now) * self.position_follow;
         let position = self.position_now;
 
@@ -1017,8 +1267,8 @@ impl BowedTone {
 
         // The bow's speed, and the force, which sits between Schelleng's
         // limits, both proportional to the speed.
-        let speed = BOW_SPEED * dynamics * self.bow * (1.0 + BITE_SPEED * self.bite);
-        let maximum = BOW_SPEED * dynamics / (position * (MU_STATIC - MU_DYNAMIC));
+        let speed = BOW_SPEED * dynamics * sway * self.bow * (1.0 + BITE_SPEED * self.bite);
+        let maximum = BOW_SPEED * dynamics * sway / (position * (MU_STATIC - MU_DYNAMIC));
         // The force: where the pressure puts it in Schelleng's window, from
         // the top of the window at the start of a note or a slur. A string
         // falls into Helmholtz motion most surely with a firm start, and the
@@ -1029,22 +1279,46 @@ impl BowedTone {
 
         let mut out = 0.0;
         let count = self.count;
-        let roughness = self.roughness;
+        // The bow's roughness wavers with the arm, and scratches as it bites.
+        let waver = (1.0 + NOISE_WAVER * self.fluctuation * life.waver).max(0.0);
+        let roughness = self.roughness * waver + SCRATCH_GRAIN * self.scratch_now;
+        // A change of finger: the string's length moves to the new note's in
+        // a couple of milliseconds, as the finger lands. A fade between the
+        // two lengths' reads would carry two corners round the string, each
+        // slipping on its own for a dozen periods; moved this fast, the one
+        // corner is only squeezed, and the string goes on in its motion.
+        let (key, bridge_offset, nut_offset, landing) = if self.switch.fading() {
+            let share = self.switch.next();
+            let rest = 1.0 - share;
+            (
+                key + rest * (self.from_key - self.glide.key),
+                self.bridge_offset + rest * (self.from_bridge_offset - self.bridge_offset),
+                self.nut_offset + rest * (self.from_nut_offset - self.nut_offset),
+                true,
+            )
+        } else {
+            (key, self.bridge_offset, self.nut_offset, false)
+        };
+        let knock = FINGER_KNOCK * speed * self.knock.next();
         // The ear listens once the note has settled, and not while the
-        // finger slides.
-        let listening = self.grip < 0.2 && !self.glide.moving();
+        // finger slides or lands.
+        let listening = self.grip < 0.2 && !self.glide.moving() && !landing;
+        let drift = self.drift;
         for player in self.players.iter_mut().take(count) {
             let vibrato = player.vibrato.next(self.dynamics.vibrato);
-            let f = key_hz(key + 0.01 * (player.detune + vibrato));
+            let wobble = 0.01 * (player.detune + vibrato + drift * player.drift.next());
+            let f = key_hz(key + wobble);
             let period = rate / f;
             let length = period * player.ear;
-            let bridge_delay = (position * length + self.bridge_offset).max(1.0);
-            let nut_delay = ((1.0 - position) * length + self.nut_offset).max(1.0);
-            let from_bridge = -loss.step(&mut player.loss, player.bridge.read_cubic(bridge_delay));
-            let from_nut = -FINGER.step(&mut player.finger, player.nut.read_cubic(nut_delay));
-            out += player.bridge.read_cubic(bridge_delay);
+            let bridge_delay = (position * length + bridge_offset).max(1.0);
+            let nut_delay = ((1.0 - position) * length + nut_offset).max(1.0);
+            let at_bridge = player.bridge.read_cubic(bridge_delay);
+            let at_nut = player.nut.read_cubic(nut_delay);
+            let from_bridge = -loss.step(&mut player.loss, at_bridge);
+            let from_nut = -FINGER.step(&mut player.finger, at_nut);
+            out += at_bridge;
 
-            let mut jump = 0.0;
+            let mut jump = knock;
             if player.wait > 0 {
                 player.wait -= 1;
             } else if speed > 0.0 {
@@ -1113,14 +1387,7 @@ impl BowedTone {
         // The corner of the Helmholtz motion, sharper for a heavier bow and a
         // bow nearer the bridge.
         self.corner_memory = flush(out + self.corner * (self.corner_memory - out));
-        let out = self.corner_memory;
-        let mut body = 0.0;
-        for (filter, gain) in self.body.iter_mut().zip(&self.body_gain) {
-            if *gain > 0.0 {
-                body += gain * filter.process_sample(0, out);
-            }
-        }
-        let mixed = (1.0 - self.body_mix) * out + self.body_mix * body;
+        let mixed = self.resonate(self.corner_memory);
         let toned = self.tone.process_sample(0, mixed);
         let out = self.dc.step(toned) * self.level * self.dynamics.volume;
         self.follower = (self.follower * self.follower_fall).max(out.abs());
@@ -1146,6 +1413,12 @@ impl Tone for BowedTone {
         for filter in self.body.iter_mut().chain([&mut self.tone]) {
             Processor::<f64>::reset(filter);
         }
+        for mode in &mut self.wood {
+            mode.reset();
+        }
+        self.switch.finish();
+        self.knock.stop();
+        self.scratch_now = 0.0;
         self.dc.reset();
         self.corner_memory = 0.0;
         self.bow = 0.0;
@@ -1204,14 +1477,30 @@ impl Tone for BowedTone {
 /// - **Dynamics** are the bow's speed: velocity sets it, and pressure on
 ///   the key, the breath controller or the expression pedal take over
 ///   while the note sounds. The level follows the speed.
-/// - **Vibrato** waits, then grows, and wanders a little, as a player's
-///   does; [`Expression::Vibrato`] and the modulation wheel scale it.
+/// - **The bow's bite**: a note starts with the bow scratching before the
+///   string settles into its motion ([`BowedParams::scratch`]), more at a
+///   higher velocity and on an accent.
+/// - **The player** is never quite still: each player's pitch drifts by a
+///   few cents ([`BowedParams::drift`]), the bow's speed and roughness
+///   waver ([`BowedParams::fluctuation`]), and a held note swells after its
+///   attack and eases back ([`BowedParams::swell`]), each from slow noise
+///   seeded by the note.
+/// - **Vibrato** waits, then grows, quickening to its rate as it does, and
+///   wanders, as a player's does; [`Expression::Vibrato`] and the
+///   modulation wheel scale it.
 /// - **Legato**: in a [`Synth`](crate::Synth) set to legato, a note
-///   struck while another is held slurs to it: the finger moves, the bow
-///   goes on ([`BowedParams::legato_time`]), and the note stays on its
-///   string if it lies within a sixth above it, as a slurring player keeps
-///   to a string.
-/// - **The body** is a set of resonances fed by the force on the bridge.
+///   struck while another is held slurs to it: the bow goes on, and the
+///   finger stops the string at its new length within 2 ms, with the
+///   small knock of its landing, rather than sliding through the pitches
+///   between; with [`BowedParams::portamento`] it slides
+///   ([`BowedParams::legato_time`]). The note stays on its string if it
+///   lies within a sixth above it, as a slurring player keeps to a string.
+/// - **The body** is fed by the force on the bridge: its named air and
+///   wood resonances ([`BowedParams::body`]: for the violin A0, the centre
+///   bout's rotation, B1-, B1+, C4 and the bridge hill) and, above them,
+///   [`WOOD_MODES`] narrow, unevenly spread resonances of the wood
+///   ([`BowedParams::wood`]), whose dense, irregular response is what makes
+///   a body sound like wood rather than a filter.
 /// - **A section** ([`BowedParams::players`]) is several strings to a note,
 ///   tuned a little apart, starting a little apart, each with its own
 ///   vibrato.
@@ -1343,6 +1632,7 @@ impl<S: Sample> Voice<S> for BowedString {
             &params,
             f64::from(self.key),
             level,
+            self.velocity,
             accent,
             scale,
             u64::from(self.key) * 16,
@@ -1413,11 +1703,11 @@ impl<S: Sample> Voice<S> for BowedString {
 mod tests {
     use super::*;
     use crate::instruments::measure::{
-        self, Act, RATE, accented, amplitude_at, between, cents, decibels, frequency_near,
-        largest_jump, note, off, on, play, rms, synth_of, t60_at,
+        self, Act, RATE, accented, amplitude_at, band_passed, between, cents, decibels,
+        frequency_near, inharmonic_db, largest_jump, note, off, on, play, rms, synth_of, t60_at,
     };
     use crate::instruments::modelling::probe::{
-        harmonic_centroid, levels, modulation, pitch_track,
+        harmonic_centroid, high_band_levels, levels, modulation, period_track, pitch_track,
     };
 
     /// The bowed presets and the range each plays.
@@ -1444,14 +1734,103 @@ mod tests {
         [BowedString::new(params)]
     }
 
-    /// The same settings with no vibrato, one player and no roughness.
+    /// The same settings with none of the player's drift, waver, swell or
+    /// scratch.
+    fn lifeless(params: BowedParams) -> BowedParams {
+        BowedParams {
+            drift: 0.0,
+            fluctuation: 0.0,
+            swell: 0.0,
+            scratch: 0.0,
+            ..params
+        }
+    }
+
+    /// The same settings with no vibrato, one player, no roughness and none
+    /// of the player's drift, waver, swell or scratch: the model alone.
     fn plain(params: BowedParams) -> BowedParams {
+        BowedParams {
+            vibrato_depth: 0.0,
+            players: 1,
+            bow_noise: 0.0,
+            ..lifeless(params)
+        }
+    }
+
+    /// The same settings with no vibrato, one player and no roughness, but
+    /// the player's drift, waver and swell.
+    fn held(params: BowedParams) -> BowedParams {
         BowedParams {
             vibrato_depth: 0.0,
             players: 1,
             bow_noise: 0.0,
             ..params
         }
+    }
+
+    /// A slur from `first` to `second` at 1 s on a fresh legato synth, the
+    /// first note released just after.
+    fn slurred(params: BowedParams, first: u8, second: u8) -> Vec<f64> {
+        let mut synth = synth_of(voice(params));
+        synth.set_legato(true);
+        let at = (1.0 * RATE) as usize;
+        play(
+            &mut synth,
+            &[
+                (0, on(first, 0.8)),
+                (at, on(second, 0.8)),
+                (at + 10, off(first)),
+            ],
+            (2.0 * RATE) as usize,
+            256,
+        )
+    }
+
+    /// How long after `at` seconds the pitch settles within `tolerance`
+    /// cents of `target` and stays there for 100 ms, and how many periods
+    /// before that lay between `from` and `target`, more than `tolerance`
+    /// from both.
+    fn settling(signal: &[f64], at: f64, from: f64, target: f64, tolerance: f64) -> (f64, usize) {
+        let (low, high) = (from.min(target), from.max(target));
+        // A narrow band, as a bowed string's harmonics are strong; and the
+        // median of seven periods, as each slip lands on a sample and a
+        // single period of a high note is out by up to a sample's worth
+        // (some 25 cents at 700 Hz).
+        let raw = period_track(between(signal, at - 0.05, at + 0.3), 0.85 * low, 1.2 * high);
+        let track: Vec<(f64, f64)> = (0..raw.len())
+            .map(|n| {
+                let mut near: Vec<f64> = raw[n.saturating_sub(3)..(n + 4).min(raw.len())]
+                    .iter()
+                    .map(|p| p.1)
+                    .collect();
+                near.sort_by(f64::total_cmp);
+                (raw[n].0, near[near.len() / 2])
+            })
+            .collect();
+        let start = 0.05;
+        let settled = track
+            .iter()
+            .enumerate()
+            .find(|&(n, &(t, _))| {
+                t >= start
+                    && track[n..]
+                        .iter()
+                        .take_while(|&&(u, _)| u < t + 0.1)
+                        .all(|&(_, f)| cents(f, target).abs() < tolerance)
+            })
+            .map_or(f64::INFINITY, |(_, &(t, _))| t - start);
+        let between_notes = track
+            .iter()
+            .filter(|&&(t, f)| {
+                t >= start
+                    && t - start < settled
+                    && f > low
+                    && f < high
+                    && cents(f, from).abs() > tolerance
+                    && cents(f, target).abs() > tolerance
+            })
+            .count();
+        (settled, between_notes)
     }
 
     /// Bows `key` on a fresh string for `seconds` and returns the sound and
@@ -1518,7 +1897,7 @@ mod tests {
                 let params = BowedParams {
                     pressure,
                     players: 1,
-                    ..params
+                    ..lifeless(params)
                 };
                 let (mut notes, mut helmholtz) = (0, 0);
                 for key in (low..=high).step_by(3) {
@@ -1558,28 +1937,39 @@ mod tests {
 
     #[test]
     fn every_bowed_note_is_in_tune_across_its_range() {
+        // The player's drift is on, so a note's tuning is its average over
+        // two seconds of its steady part: the drift keeps about 0.6 of its
+        // RMS there (see the winds' test). Every note is held to the
+        // model's own 5 cents plus three times that, and 95% of them to its
+        // own 2 cents plus that once.
         let mut errors = Vec::new();
         for (name, params, low, high) in bowed() {
             for key in (low..=high).step_by(2) {
                 let f0 = key_hz(f64::from(key));
-                let signal = note(voice(plain(params)), on(key, 0.8), 2.0, 1.2);
-                let error = cents(frequency_near(between(&signal, 0.5, 1.1), f0), f0);
-                errors.push((name, key, error));
+                let signal = note(voice(held(params)), on(key, 0.8), 3.0, 2.8);
+                let error = cents(frequency_near(between(&signal, 0.8, 2.8), f0), f0);
+                errors.push((name, key, error, params.drift));
             }
         }
         let worst = errors.iter().fold(0.0f64, |m, e| m.max(e.2.abs()));
-        let within = errors.iter().filter(|e| e.2.abs() < 2.0).count();
+        let within = errors
+            .iter()
+            .filter(|e| e.2.abs() < 2.0 + 0.6 * e.3)
+            .count();
         println!(
-            "{within} of {} bowed notes within 2 cents, worst {worst:.2}",
+            "{within} of {} bowed notes within 2 cents and their drift, worst {worst:.2}",
             errors.len()
         );
-        for (name, key, error) in &errors {
-            if error.abs() >= 2.0 {
+        for (name, key, error, drift) in &errors {
+            if error.abs() >= 2.0 + 0.6 * drift {
                 println!("{name} key {key}: {error:.2} cents");
             }
         }
-        for (name, key, error) in &errors {
-            assert!(error.abs() < 5.0, "{name} key {key}: {error:.2} cents");
+        for (name, key, error, drift) in &errors {
+            assert!(
+                error.abs() < 5.0 + 1.8 * drift,
+                "{name} key {key}: {error:.2} cents"
+            );
         }
         assert!(within as f64 >= 0.95 * errors.len() as f64);
     }
@@ -1619,7 +2009,7 @@ mod tests {
         let params = BowedParams {
             bow_noise: 0.0,
             players: 1,
-            ..BowedParams::violin()
+            ..lifeless(BowedParams::violin())
         };
         let key = 69;
         let f0 = key_hz(f64::from(key));
@@ -1738,38 +2128,274 @@ mod tests {
     }
 
     #[test]
-    fn legato_slurs_to_the_next_note_without_a_new_attack() {
+    fn legato_is_a_change_of_finger_and_only_portamento_slides() {
         for (name, params, low, high) in bowed() {
             let params = plain(params);
-            let (first, second) = ((low + high) / 2, (low + high) / 2 + 2);
+            let middle = (low + high) / 2;
+            for (first, second) in [(middle, middle + 2), (middle + 4, middle - 1)] {
+                let signal = slurred(params, first, second);
+                // The level through the slur stays within a few decibels of
+                // the quieter of the two notes (the body favours some
+                // pitches).
+                let before = rms(between(&signal, 0.8, 1.0));
+                let after = rms(between(&signal, 1.4, 1.6));
+                let through = levels(between(&signal, 1.0, 1.2), 0.01);
+                let dip = through.iter().fold(f64::MAX, |m, &x| m.min(x));
+                let dip = decibels(dip / before.min(after));
+                // A finger stops the string at once: the string's pitch
+                // (heard without the body, whose resonances ring on at the
+                // old note for a few tens of milliseconds, as an
+                // instrument's do) is the new note's within 30 cents, as the
+                // slips' own jitter allows, within 20 ms, with at most three
+                // irregular periods between the notes as it reorganises (a
+                // slide passes steadily through a dozen or more; see
+                // below).
+                let (f0, f1) = (key_hz(f64::from(first)), key_hz(f64::from(second)));
+                let string = slurred(
+                    BowedParams {
+                        body_mix: 0.0,
+                        ..params
+                    },
+                    first,
+                    second,
+                );
+                let (settled, gliding) = settling(&string, 1.0, f0, f1, 30.0);
+                let error = cents(frequency_near(between(&signal, 1.3, 1.8), f1), f1);
+                println!(
+                    "{name} {first} to {second}: dip {dip:.1} dB, at the new pitch after {:.1} ms with {gliding} periods between, then {error:.2} cents",
+                    1000.0 * settled
+                );
+                assert!(dip > -6.0, "{name}: {dip} dB");
+                assert!(error.abs() < 5.0, "{name}: {error} cents");
+                assert!(settled < 0.02, "{name}: {settled} s");
+                assert!(gliding <= 3, "{name}: {gliding} periods between");
+            }
+            // One voice played both.
             let mut synth = synth_of(voice(params));
             synth.set_legato(true);
-            let at = (1.0 * RATE) as usize;
-            let signal = play(
+            play(
                 &mut synth,
-                &[
-                    (0, on(first, 0.8)),
-                    (at, on(second, 0.8)),
-                    (at + 10, off(first)),
-                ],
-                (1.8 * RATE) as usize,
+                &[(0, on(middle, 0.8)), (4_800, on(middle + 2, 0.8))],
+                9_600,
                 256,
             );
-            // The level through the slur stays within a few decibels of the
-            // quieter of the two notes (the body favours some pitches).
-            let before = rms(between(&signal, 0.8, 1.0));
-            let after = rms(between(&signal, 1.4, 1.6));
-            let through = levels(between(&signal, 1.0, 1.2), 0.01);
-            let dip = through.iter().fold(f64::MAX, |m, &x| m.min(x));
-            let dip = decibels(dip / before.min(after));
-            // And the new note is soon in tune.
-            let f1 = key_hz(f64::from(second));
-            let error = cents(frequency_near(between(&signal, 1.3, 1.8), f1), f1);
-            println!("{name}: dip {dip:.1} dB, then {error:.2} cents");
-            assert!(dip > -6.0, "{name}: {dip} dB");
-            assert!(error.abs() < 5.0, "{name}: {error} cents");
-            // One voice played both.
             assert_eq!(synth.active_voices(), 1);
+        }
+        // With portamento the finger slides: 15 ms into a slide of a fourth
+        // over 30 ms the pitch is between the notes.
+        let params = BowedParams {
+            portamento: true,
+            ..plain(BowedParams::violin())
+        };
+        let signal = slurred(params, 69, 74);
+        let middle = frequency_near(between(&signal, 1.005, 1.02), key_hz(71.5));
+        let semitones = 12.0 * (middle / key_hz(69.0)).log2();
+        let (settled, gliding) = settling(&signal, 1.0, key_hz(69.0), key_hz(74.0), 30.0);
+        println!(
+            "violin portamento: {semitones:.2} semitones up 12 ms in, settled after {:.0} ms with {gliding} periods between",
+            1000.0 * settled
+        );
+        assert!(semitones > 0.5 && semitones < 4.5, "{semitones}");
+        assert!(gliding >= 8, "{gliding}");
+    }
+
+    #[test]
+    fn a_change_of_finger_has_no_click_thump_or_burst() {
+        // The finger's knock and the fade from the old length to the new
+        // leave no sample stepping further than the notes' own largest
+        // steps by more than half again, no 2 ms window above 8 kHz more
+        // than 10 dB over the notes' own level there, and nothing below
+        // half the lower note and the body's air resonance within 20 dB of
+        // the tone.
+        for (name, params, low, high) in bowed() {
+            let middle = (low + high) / 2;
+            for (first, second) in [(middle, middle + 2), (middle + 4, middle - 1)] {
+                let signal = slurred(held(params), first, second);
+                let steps = largest_jump(between(&signal, 0.6, 0.98))
+                    .max(largest_jump(between(&signal, 1.3, 1.9)));
+                let change = largest_jump(between(&signal, 0.995, 1.06));
+                let hf = high_band_levels(&signal, 8_000.0, 0.002);
+                let quiet: Vec<f64> = hf[300..490].iter().chain(&hf[650..950]).copied().collect();
+                let reference = quiet.iter().sum::<f64>() / quiet.len() as f64;
+                let burst = hf[495..530].iter().fold(0.0f64, |m, &x| m.max(x));
+                // Below the body's air resonance, which a change of finger
+                // rings, as on the instrument.
+                let lowest = key_hz(f64::from(first.min(second)));
+                let below = (0.5 * lowest).min(0.8 * params.body[0].frequency);
+                let thump = levels(&band_passed(&signal, 10.0, below), 0.005);
+                let thump = thump[195..230].iter().fold(0.0f64, |m, &x| m.max(x));
+                let tone = rms(between(&signal, 0.6, 0.98));
+                println!(
+                    "{name} {first} to {second}: largest step {:.2} of the notes', high band {:.1} dB, low band {:.1} dB under the tone",
+                    change / steps,
+                    decibels(burst / reference),
+                    -decibels(thump / tone)
+                );
+                assert!(change < 1.5 * steps, "{name}: {change} against {steps}");
+                assert!(decibels(burst / reference) < 10.0, "{name}");
+                assert!(decibels(thump / tone) < -20.0, "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_violins_body_resonates_at_its_modes_and_its_wood() {
+        // The body's response to a tap on the bridge: a peak at each named
+        // resonance, within 3% of where it was put (A0, the centre bout,
+        // B1-, B1+ and C4; above them the wood's modes crowd the named
+        // ones, and the broad bridge hill is too wide to peak), and between 800 Hz and 7 kHz the many uneven peaks
+        // of the wood: at least a dozen more than the named modes give.
+        let params = BowedParams::violin();
+        let peaks_of = |params: BowedParams| {
+            let mut tone = BowedTone::new();
+            tone.prepare(RATE);
+            tone.configure(&params);
+            let len = 1 << 16;
+            let mut response = vec![0.0; len];
+            for (n, slot) in response.iter_mut().enumerate() {
+                *slot = tone.resonate(if n == 0 { 1.0 } else { 0.0 });
+            }
+            let mut fft = crate::fft::RealFft::<f64>::new(len);
+            let mut spectrum = vec![crate::fft::Complex::<f64>::ZERO; fft.spectrum_len()];
+            fft.forward(&response, &mut spectrum);
+            let magnitude: Vec<f64> = spectrum.iter().map(|c| c.norm()).collect();
+            (magnitude, RATE / len as f64)
+        };
+        let (magnitude, bin) = peaks_of(params);
+        let level_at = |hz: f64| magnitude[(hz / bin).round() as usize];
+        for mode in &params.body[..5] {
+            let (low, high) = (
+                (0.97 * mode.frequency / bin) as usize,
+                (1.03 * mode.frequency / bin) as usize,
+            );
+            let (at, peak) = (low..=high).fold((low, 0.0f64), |b, k| {
+                if magnitude[k] > b.1 {
+                    (k, magnitude[k])
+                } else {
+                    b
+                }
+            });
+            let local = magnitude[at - 1] < peak && magnitude[at + 1] < peak;
+            println!(
+                "violin body: {:.0} Hz peaks at {:.0} Hz, {:.1} dB",
+                mode.frequency,
+                at as f64 * bin,
+                decibels(peak)
+            );
+            assert!(local && at > low && at < high, "{} Hz", mode.frequency);
+        }
+        let count = |magnitude: &[f64]| {
+            let (from, to) = ((800.0 / bin) as usize, (7_000.0 / bin) as usize);
+            (from..to)
+                .filter(|&k| {
+                    // A peak that stands at least 1 dB over the response
+                    // 2% either side of it.
+                    let spread = ((k as f64 * 0.02) as usize).max(2);
+                    magnitude[k] > magnitude[k - 1]
+                        && magnitude[k] > magnitude[k + 1]
+                        && magnitude[k] > 1.12 * magnitude[k - spread]
+                        && magnitude[k] > 1.12 * magnitude[k + spread]
+                })
+                .count()
+        };
+        let woody = count(&magnitude);
+        let (smooth, _) = peaks_of(BowedParams {
+            wood: 0.0,
+            ..params
+        });
+        let named = count(&smooth);
+        println!(
+            "violin body: {woody} peaks between 800 Hz and 7 kHz, {named} without the wood; {:.1} dB at 275 Hz against {:.1} dB at 1.5 kHz",
+            decibels(level_at(275.0)),
+            decibels(level_at(1_500.0))
+        );
+        assert!(woody >= named + 12, "{woody} against {named}");
+    }
+
+    #[test]
+    fn the_bow_scratches_as_it_bites() {
+        // Bowed harder, or accented, the first tens of milliseconds carry
+        // more noise against the tone, as the bow bites before the string
+        // settles into its motion; held, the scratch is gone.
+        let key = 67;
+        let f0 = key_hz(f64::from(key));
+        let noise_in = |params: BowedParams, act: Act, from: f64, to: f64| {
+            let signal = note(voice(params), act, 1.0, 1.0);
+            inharmonic_db(between(&signal, from, to), f0, 30.0, 2_048)
+        };
+        let params = BowedParams {
+            body_mix: 0.0,
+            ..held(BowedParams::violin())
+        };
+        let smooth = BowedParams {
+            scratch: 0.0,
+            ..params
+        };
+        let biting = noise_in(params, on(key, 1.0), 0.01, 0.0527);
+        let soft = noise_in(params, on(key, 0.3), 0.01, 0.0527);
+        let without = noise_in(smooth, on(key, 1.0), 0.01, 0.0527);
+        let accent = noise_in(params, accented(key, 1.0), 0.01, 0.0527);
+        let settled = noise_in(params, on(key, 1.0), 0.6, 0.6427);
+        let settled_without = noise_in(smooth, on(key, 1.0), 0.6, 0.6427);
+        println!(
+            "violin attack noise: {biting:.1} dB at full velocity, {soft:.1} soft, {accent:.1} accented, {without:.1} without the scratch; held {settled:.1} dB, {settled_without:.1} without"
+        );
+        assert!(biting > without + 3.0, "{biting} against {without}");
+        assert!(biting > soft + 1.0, "{biting} against {soft}");
+        assert!(accent > biting, "{accent} against {biting}");
+        assert!(
+            (settled - settled_without).abs() < 1.5,
+            "{settled} {settled_without}"
+        );
+    }
+
+    #[test]
+    fn a_held_note_drifts_wavers_and_swells_as_designed() {
+        for (name, params, low, high) in bowed() {
+            let key = (low + high) / 2;
+            let f0 = key_hz(f64::from(key));
+            let params = held(params);
+            let drifting = note(voice(params), on(key, 0.7), 6.0, 6.0);
+            let track = pitch_track(&drifting, f0, 1.0, 5.9, 0.05, 0.025);
+            let cents_track: Vec<f64> = track.iter().map(|&f| cents(f, f0)).collect();
+            let mean = cents_track.iter().sum::<f64>() / cents_track.len() as f64;
+            let drift = (cents_track.iter().map(|c| (c - mean).powi(2)).sum::<f64>()
+                / cents_track.len() as f64)
+                .sqrt();
+            let swaying = levels(between(&drifting, 1.0, 5.9), 0.05);
+            let level_mean =
+                swaying.iter().map(|&x| decibels(x)).sum::<f64>() / swaying.len() as f64;
+            let waver = (swaying
+                .iter()
+                .map(|&x| (decibels(x) - level_mean).powi(2))
+                .sum::<f64>()
+                / swaying.len() as f64)
+                .sqrt();
+            let swelling = note(
+                voice(BowedParams {
+                    drift: 0.0,
+                    fluctuation: 0.0,
+                    ..params
+                }),
+                on(key, 0.7),
+                6.0,
+                6.0,
+            );
+            let swell =
+                decibels(rms(between(&swelling, 0.7, 1.1)) / rms(between(&swelling, 5.0, 5.9)));
+            println!(
+                "{name}: drift {drift:.2} cents (set {}), waver {waver:.2} dB, swell {swell:.2} dB",
+                params.drift
+            );
+            // The drift's RMS within a factor of two either way, over a few
+            // seconds of a slow random motion; a waver of the level and a
+            // swell of the long note, heard but not a tremolo.
+            assert!(
+                drift > 0.5 * params.drift && drift < 2.0 * params.drift,
+                "{name}: {drift}"
+            );
+            assert!(waver > 0.05 && waver < 2.0, "{name}: {waver}");
+            assert!(swell > 0.2 && swell < 4.0, "{name}: {swell}");
         }
     }
 
@@ -1946,7 +2572,13 @@ mod tests {
                 vibrato_delay: -1.0,
                 vibrato_rise: 0.0,
                 legato_time: f64::NAN,
+                portamento: true,
+                drift: f64::INFINITY,
+                fluctuation: 1e9,
+                swell: f64::NAN,
+                scratch: -1e9,
                 body: [BodyMode::new(f64::NAN, f64::INFINITY, 1e9); BODY_MODES],
+                wood: f64::INFINITY,
                 body_mix: f64::NAN,
                 tone: 0.0,
                 velocity_range_db: -5.0,
@@ -1967,6 +2599,11 @@ mod tests {
                 body_mix: 1.0,
                 vibrato_depth: 100.0,
                 body: [BodyMode::new(20.0, 50.0, 4.0); BODY_MODES],
+                wood: 1.0,
+                drift: 20.0,
+                fluctuation: 0.3,
+                swell: 0.5,
+                scratch: 1.0,
                 players: MAX_PLAYERS,
                 spread: 50.0,
                 ..BowedParams::contrabass()

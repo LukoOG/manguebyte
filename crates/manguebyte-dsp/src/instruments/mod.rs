@@ -11,7 +11,7 @@
 //! | [`KickBassVoice`] | that machine's long kick played as a bass, with slides | [the classic](KickBassParams::default) |
 //! | [`AcidVoice`] | the acid bass: an oscillator, a diode ladder and envelopes, with accent and slide | [classic](AcidParams::classic), [squelch](AcidParams::squelch), [square](AcidParams::square) |
 //! | [`PolySynthVoice`] | a deep polyphonic synthesiser: three oscillators of classic shapes and wavetables with sixteen-voice unison, sync, FM and ring modulation, two filters of fifteen models, four envelopes, three LFOs and a modulation matrix | the [library](poly::PRESETS) of basses, leads, pads, plucks, keys, brass and effects |
-//! | [`BowedString`] | a bowed string by digital waveguide, with the friction of rosin: Helmholtz motion, a player's ear for intonation, vibrato that waits, legato, a body, sections, pizzicato | [violin](BowedParams::violin), [viola](BowedParams::viola), [cello](BowedParams::cello), [double bass](BowedParams::contrabass), [string section](BowedParams::string_ensemble), pizzicato [violin](BowedParams::violin_pizzicato), [cello](BowedParams::cello_pizzicato) and [bass](BowedParams::contrabass_pizzicato) |
+//! | [`BowedString`] | a bowed string by digital waveguide, with the friction of rosin: Helmholtz motion, the bow's bite, a player's ear for intonation, drift and swell, vibrato that waits, legato as a change of finger, a body of air and wood resonances, sections, pizzicato | [violin](BowedParams::violin), [viola](BowedParams::viola), [cello](BowedParams::cello), [double bass](BowedParams::contrabass), [string section](BowedParams::string_ensemble), pizzicato [violin](BowedParams::violin_pizzicato), [cello](BowedParams::cello_pizzicato) and [bass](BowedParams::contrabass_pizzicato) |
 //! | [`WindVoice`] | wind instruments by digital waveguide: a reed, the lips or an air jet driving a bore, with breath control and breath noise, tonguing, a player's ear, drift and swell, vibrato, and legato that changes notes as keys and valves do | [flute](WindParams::flute), [clarinet](WindParams::clarinet), [saxophone](WindParams::saxophone), [trumpet](WindParams::trumpet), [trombone](WindParams::trombone) |
 //! | [`MalletVoice`] | struck bars, tines, plates and tubes by modal synthesis: mallet hardness, strike position, resonator tubes, the vibraphone's motor and damper | [marimba](MalletParams::marimba), [xylophone](MalletParams::xylophone), [vibraphone](MalletParams::vibraphone), [glockenspiel](MalletParams::glockenspiel), [celesta](MalletParams::celesta), [kalimba](MalletParams::kalimba), [steel pan](MalletParams::steel_pan), [tubular bells](MalletParams::tubular_bells) |
 //! | [`ChoirVoice`] | sung vowels and choirs by formant synthesis: a glottal pulse through five formants, from basses to sopranos, several detuned singers to a note | ["aah" choir](ChoirParams::aah_choir), ["ooh" choir](ChoirParams::ooh_choir), [solo voice](ChoirParams::solo_voice) |
@@ -120,7 +120,7 @@ pub use analog_drums::{
     AnalogDrum, AnalogKitParams, AnalogKitVoice, ChokeGroup, DrumSettings, KickBassParams,
     KickBassVoice, METAL_HZ,
 };
-pub use bowed::{BODY_MODES, BowedParams, BowedString, MAX_PLAYERS};
+pub use bowed::{BODY_MODES, BowedParams, BowedString, MAX_PLAYERS, WOOD_MODES};
 pub use choir::{ChoirParams, ChoirVoice, FORMANTS, MAX_SINGERS, Vowel};
 pub use common::HANDOVER_SECONDS;
 pub use fm::{Algorithm, FM_OPERATORS, FM_VELOCITY_RANGE_DB, FmOperator, FmParams, FmVoice};
