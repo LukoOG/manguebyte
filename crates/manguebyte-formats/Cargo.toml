@@ -18,13 +18,11 @@ manguebyte-core.workspace = true
 # 1.71 and is already in Cargo.lock (the window crate uses it). Media
 # Foundation itself is COM, which windows-sys does not declare; its
 # functions and interfaces are declared in `src/platform/windows.rs`. Only
-# these modules are compiled: `Win32_Foundation` for the error codes,
-# `Win32_System_Com` to initialise COM on the threads that decode, and
-# `Win32_UI_Shell` for `SHCreateMemStream`, which lets Media Foundation
-# read a file held in memory.
+# two modules are compiled: `Win32_System_Com` to initialise COM on the
+# threads that decode, and `Win32_UI_Shell` for `SHCreateMemStream`, which
+# lets Media Foundation read a file held in memory.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", optional = true, features = [
-    "Win32_Foundation",
     "Win32_System_Com",
     "Win32_UI_Shell",
 ] }
