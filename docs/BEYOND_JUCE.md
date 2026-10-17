@@ -37,6 +37,7 @@ says where. Nothing here contains JUCE code: see
 | [Pitch and band analysis](#14-pitch-detection-and-fractional-octave-analysis) | None documented | YIN and McLeod pitch; IEC octave bands and weighting | [`pitch.rs`](../crates/manguebyte-analysis/tests/pitch.rs) |
 | [Keyboard state](#15-a-keyboard-an-interface-can-read-without-listening) | Listeners that may run on the audio thread | Atomics an interface polls; no listener, no lock | [`realtime.rs`](../crates/manguebyte-midi/tests/realtime.rs) |
 | [Slow-downs in silence](#10-a-fading-sound-cannot-slow-the-audio-thread-down) | A guard each plugin places in its own callback | Set by the framework around every plugin and every device callback | [`denormal.rs`](../crates/manguebyte-core/src/denormal.rs), both `abi.rs` |
+| [Instruments ready to play](#16-instruments-ready-to-play-measured-in-tests) | Classes to build an instrument from; none ready to play | Synthesised and modelled instruments and drum kits, their tuning and spectra measured in tests | [`instruments`](../crates/manguebyte-dsp/src/instruments) |
 
 ## 1. Automation on the exact sample
 
@@ -229,12 +230,13 @@ validator on it as well as Steinberg's on the `.vst3`. JUCE's
 [`juce_add_plugin`](https://raw.githubusercontent.com/juce-framework/JUCE/master/docs/CMake%20API.md)
 accepts no CLAP format.
 
-**Limit.** The `gui` extension exists and is tested through the C interface
-against a fake editor and a fake host, but there are no native windows yet, so
-no editor opens inside a real host. No 64-bit audio, no presets. VST 3 is the
-only other format on `main` so far: JUCE's AU, AAX and LV2 support has no
-counterpart here yet. Both example plugins were also loaded and tested by hand
-in REAPER; see [HOST_TESTS.md](HOST_TESTS.md).
+**Limit.** Editors open in the host's window on Windows only, through
+`manguebyte-window`'s Win32 backend, which CI tests with real windows; macOS
+and Linux windows are not there yet, and no editor has yet been tested by hand
+inside a DAW. No 64-bit audio, no presets. VST 3 and LV2 are the other formats
+on `main`: JUCE's AU and AAX support has no counterpart here yet. Both example
+plugins were also loaded and tested by hand in REAPER, without their editors;
+see [HOST_TESTS.md](HOST_TESTS.md).
 
 ## 7. A plugin can be tested without a host
 
@@ -511,17 +513,75 @@ its key. Only the sustain pedal is tracked. "No lock" and "no listener"
 follow from the code (atomic operations only, no callback interface), not
 from a test.
 
+## 16. Instruments ready to play, measured in tests
+
+**In JUCE.** JUCE gives the parts to build an instrument from:
+[`Synthesiser`](https://docs.juce.com/master/classSynthesiser.html) and
+[`SynthesiserVoice`](https://docs.juce.com/master/classSynthesiserVoice.html),
+a basic sample player in
+[`SamplerSound`](https://docs.juce.com/master/classSamplerSound.html) and
+[`SamplerVoice`](https://docs.juce.com/master/classSamplerVoice.html), and
+building blocks such as
+[`dsp::Oscillator`](https://docs.juce.com/master/classdsp_1_1Oscillator.html)
+and [`dsp::LadderFilter`](https://docs.juce.com/master/classdsp_1_1LadderFilter.html).
+Its [class list](https://docs.juce.com/master/annotated.html) has no
+instrument ready to play: no modelled acoustic instrument, no drum machine,
+no synthesiser with presets.
+
+**In Manguebyte.** `manguebyte_dsp::instruments` holds voices for the
+polyphonic `Synth` that play as they are: plucked guitars and basses,
+four-operator FM, a tonewheel organ with a rotary speaker, mallets by modal
+synthesis, bowed strings and winds by digital waveguide, choirs by formant
+synthesis, an acid bass with accent and slide, drum kits (acoustic drums and
+cymbals by modal synthesis, and the 808, 909, 606 and CR-78 with genre kits),
+and a deep polyphonic synthesiser with 68 presets. Every one of them takes
+velocity and accents, is free of the heap while it plays, and renders the
+same samples whatever the block size.
+
+**Check it.** Tuning is measured across each instrument's range:
+`every_note_is_in_tune_across_the_keyboard` in
+[`poly/tests.rs`](../crates/manguebyte-dsp/src/instruments/poly/tests.rs)
+(within 0.012 cent),
+`every_note_is_within_a_cent_across_the_keyboard` in
+[`string.rs`](../crates/manguebyte-dsp/src/instruments/string.rs),
+`every_bowed_note_is_in_tune_across_its_range` in
+[`bowed.rs`](../crates/manguebyte-dsp/src/instruments/bowed.rs) and the
+tuning tests of the mallets, winds, choir, organ, FM and
+acid voices. Spectra are measured too:
+`every_mode_rings_within_half_a_percent_of_its_model` in
+[`mallet.rs`](../crates/manguebyte-dsp/src/instruments/mallet.rs),
+`the_formants_peak_at_the_vowels_targets` in
+[`choir.rs`](../crates/manguebyte-dsp/src/instruments/choir.rs),
+`high_notes_are_kept_free_of_aliasing` in
+[`fm.rs`](../crates/manguebyte-dsp/src/instruments/fm.rs) and
+[`poly/tests.rs`](../crates/manguebyte-dsp/src/instruments/poly/tests.rs),
+and `the_snare_measures_as_the_one_recorded` and
+`the_crash_measures_as_the_one_recorded` in
+[`kit.rs`](../crates/manguebyte-dsp/src/instruments/kit.rs), which compare
+the modelled snare and crash with recordings of real ones. The allocation
+tests are in [`realtime.rs`](../crates/manguebyte-dsp/tests/realtime.rs).
+
+**Limit.** These numbers are measurements, not opinions: nobody outside the
+project has judged how the instruments sound yet. Only the snare and the
+crash are calibrated against recordings, from lossy files. The low notes of
+the bowed cello and double bass take up to half a second to settle, the
+saxophone's bore is cylindrical, the choir sings speech vowels and no
+consonants, and the instruments' levels are matched only in the browser
+engine, not in `manguebyte-dsp` itself; [TECH_DEBT.md](TECH_DEBT.md) items
+66 to 71 list the rest.
+
 ## Where JUCE is ahead
 
 JUCE has been in production for more than twenty years, and it shows. Today
 it has, and Manguebyte does not:
 
-- a complete GUI toolkit, with plugin editor windows in every format;
-- Audio Unit, AAX and LV2 plugin formats;
+- a complete GUI toolkit, with plugin editor windows on macOS and Linux as
+  well as Windows (Manguebyte's editors open on Windows only so far);
+- the Audio Unit and AAX plugin formats;
 - hosting of AU and LV2 plugins, plugin scanning, and the editors of hosted
   plugins (Manguebyte hosts CLAP and VST 3 plugins, without their editors);
-- more DSP building blocks (convolution among them), and readers for
-  compressed audio formats;
+- SIMD wrappers and lookup tables among its DSP utilities, and more audio
+  formats (Opus, encoders for compressed formats, metadata);
 - iOS and Android;
 - documentation, tutorials and a large community.
 

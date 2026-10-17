@@ -8,7 +8,8 @@
   <strong>A modern, real-time-safe audio framework for Rust.</strong><br>
   The crates are called <code>manguebyte</code>; the project is the Manguebyte Audio Framework.<br>
   Our goal is to be for Rust what JUCE is for C++, and then go further.<br>
-  <a href="#where-it-already-goes-beyond-juce">See where it already does.</a>
+  <a href="#where-it-already-goes-beyond-juce">See where it already does.</a><br>
+  Website: <a href="https://manguebyte.org">manguebyte.org</a>
 </p>
 
 <p align="center">
@@ -65,6 +66,7 @@ sources for what is said about JUCE and the limits of each claim.
 | **Loudness and broadcast meters** | None in the documented API | BS.1770 / EBU R 128 loudness, true peak, VU, PPM and correlation, checked against the EBU's own test signals | [test](crates/manguebyte-analysis/tests/ebu_tech_3341.rs) |
 | **OSC timing** | Listeners on the message or network thread | A time-tagged bundle lands on its exact frame in the audio thread | [test](crates/manguebyte-osc/tests/bridge.rs) |
 | **Slow-downs in silence** | A guard against subnormal numbers that each plugin places in its own callback | Set by the framework around every plugin and every device callback | [test](crates/manguebyte-vst3/tests/abi.rs) |
+| **Instruments ready to play** | Classes to build an instrument from, none ready to play | Synthesised and modelled instruments and drum kits whose tuning and spectra are measured in tests, two of them against recordings | [test](crates/manguebyte-dsp/src/instruments/kit.rs) |
 | **Licence** | AGPLv3 or commercial | MIT or Apache-2.0 | [licence](LICENSE-MIT) |
 
 These checks find real problems. The block-size test failed the first time it
@@ -113,7 +115,7 @@ small part of the road ahead and the API will change before 1.0. See
 | [`manguebyte-window`](crates/manguebyte-window) | Windows for plugin editors: a child of the host's window on Win32, presenting only what changed, and a headless backend that lets a test drive a window on any system |
 | [`manguebyte-gui`](crates/manguebyte-gui) | The `Editor` a plugin returns for the CLAP and VST 3 wrappers to open: a widget tree in a child of the host's window, on Win32 so far, tested through both formats' real interfaces |
 | [`manguebyte-sampler`](crates/manguebyte-sampler) | An SFZ sampler: parses SFZ instruments with inheritance, `#define` and `#include`, loads their samples from files or from memory, and plays them on the exact frame with velocity layers, round robin, release triggers, loops with crossfades, choke groups and voice stealing that fades. Builds for WebAssembly |
-| [`manguebyte-web`](crates/manguebyte-web) | An engine for the browser: parts that play a synth, drum kits, SFZ instruments or the instruments of `manguebyte-dsp` (guitars and basses, FM, an organ, an 808-style kit and bass, an acid bass) through a chain of effects and a master bus with a true-peak limiter, every kind and preset at one loudness (sampled instruments measured as they load), 32-byte event records that land on their exact frame, a shared-memory event ring, WebAssembly exports with no imports, an `AudioWorklet` and a demo page. The sound engine Aratu is to use |
+| [`manguebyte-web`](crates/manguebyte-web) | An engine for the browser: parts that play a synth, drum kits, SFZ instruments or the instruments of `manguebyte-dsp` (guitars and basses, FM, an organ, an 808-style kit and bass, an acid bass) through a chain of effects and a master bus with a true-peak limiter, every kind and preset at one loudness (sampled instruments measured as they load), 32-byte event records that land on their exact frame, a shared-memory event ring, WebAssembly exports with no imports, an `AudioWorklet` and a demo page. The sound engine Aratu plays through |
 | [`manguebyte-standalone`](crates/manguebyte-standalone) | Runs a `Plugin` as an application: sound card out, MIDI keyboards in, microphone in for effects |
 | [`cargo-mangue`](crates/cargo-mangue) | The command-line tool: `cargo mangue new` creates a plugin crate, `bundle`, `install` and `validate` turn it into a `.clap` and a `.vst3`, and `bundle --format lv2` into a `.lv2` |
 
@@ -287,16 +289,17 @@ host's block size are checked on every commit.
 
 ## The Manguebyte ecosystem
 
-Two projects from Recife are being built on Manguebyte, which is to be
-their sound engine:
+Two projects from Recife build on Manguebyte:
 
 - **[Aratu](https://github.com/alessonqueirozdev-hub/aratu)**: a live-coding
   language that reads like music, with measures, beats and note values first,
   in Portuguese and English, in the browser and inside a DAW. In development:
   the language reads, checks and schedules every example in its manual, and
   its web editor runs in the browser with nothing to install
-  ([try it](https://alessonqueirozdev-hub.github.io/aratu/)), playing with
-  temporary built-in sounds that Manguebyte's engine will replace.
+  ([try it at aratu.live](https://aratu.live/)). Its sounds come from
+  Manguebyte's browser engine, `manguebyte-web`: the synths, instruments,
+  drum kits, sampled voices, effects and master bus. Only its Brazilian
+  percussion still plays from Aratu's own provisional sounds.
 - **Parabolic** (planned): a tool for musicians to record their own
   instruments and turn them into plugins and samplers without writing code.
 

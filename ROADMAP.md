@@ -112,7 +112,8 @@ Everything a standalone audio application needs, short of a user interface.
 - ✅ AIFF and AIFF-C reading and writing
 - ✅ FLAC decoding
 - ✅ Recognising a file's format from its contents
-- ⬜ Ogg Vorbis, Opus and MP3 decoding
+- ✅ Ogg Vorbis and MP3 decoding, with sample-exact seeking
+- ⬜ Opus decoding
 - ✅ FLAC encoding, checked against FFmpeg
 - ⬜ Ogg Vorbis encoding
 - ⬜ Metadata, cue points and loop markers
