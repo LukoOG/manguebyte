@@ -179,7 +179,13 @@ Write a processor once and ship it in every format.
   host
 - ⬜ VST 3 still to come: 64-bit audio, changing the bus layout, program
   lists
-- ⬜ Audio Unit (AUv2 and AUv3)
+- 🚧 Audio Unit, version 2: `export_au!` through the plain C interface,
+  with formats, parameters, scheduled parameters and MIDI on their
+  frames, the host's transport and state; `.component` bundles written and
+  installed by `cargo mangue`; tested through its C interface on every
+  system, and checked by `auval` in a macOS CI job that has yet to run. No
+  editor, MIDI output or presets
+- ⬜ Audio Unit, version 3 (app extension)
 - 🚧 LV2: audio and sidechain ports, parameters as control ports, MIDI and
   transport on their frames, state, latency and generated Turtle files,
   tested in process through the C interface; `.lv2` bundles written by
@@ -187,7 +193,7 @@ Write a processor once and ship it in every format.
   lilv in CI. Not yet checked by `lv2lint` or run in a host; no editor
 - ✅ Standalone application wrapper: sound card, MIDI ports, input for
   effects
-- 🚧 Tooling: `cargo mangue` bundles (CLAP, VST 3 and LV2), installs and
+- 🚧 Tooling: `cargo mangue` bundles (CLAP, VST 3, LV2 and AU), installs and
   validates plugins and creates new plugin crates from templates; macOS
   bundles get an ad-hoc signature and universal binaries. Signing with a
   real identity and notarisation are not started, and there is no LV2
@@ -239,9 +245,13 @@ our own, and nothing claimed before its test exists.
   compensation
 - ⬜ Graph extras: sidechain and per-node event routing, feedback through an
   explicit delay, crossfaded swaps, buffer reuse
-- ✅ Hosting CLAP and VST 3 plugins as processors, through one interface
-  for both formats, with every event on its frame
-- ⬜ Plugin scanning (out of process), hosted plugins' editors, AU and LV2
+- ✅ Hosting CLAP, VST 3 and LV2 plugins as processors, through one
+  interface for all three formats, with every event on its frame; LV2
+  bundles read with the host's own Turtle reader
+- ✅ Plugin scanning: the standard folders of each format, each CLAP and
+  VST 3 file listed in a process of its own with a time limit, crashes and
+  hangs reported, a cache keyed by path, time and size
+- ⬜ Hosting AU plugins, and hosted plugins' editors
 - ⬜ Transport, tempo map and timeline primitives
 
 ## Phase 5: everywhere

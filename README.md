@@ -81,9 +81,9 @@ plugin against subnormal numbers. All of them are fixed, and the checks stay
 in CI.
 
 **Where JUCE is ahead.** JUCE has more than twenty years of production use
-behind it and more breadth: a full GUI toolkit with plugin editors, AU, AAX
-and LV2, hosting of AU and LV2 plugins and of plugins' editors, more file
-formats, and mobile platforms. Manguebyte has none of those yet. [docs/JUCE_PARITY.md](docs/JUCE_PARITY.md)
+behind it and more breadth: a full GUI toolkit with plugin editors, AUv3
+and AAX, hosting of AU plugins and of plugins' editors, more file formats,
+and mobile platforms. Manguebyte has none of those yet. [docs/JUCE_PARITY.md](docs/JUCE_PARITY.md)
 tracks the gap module by module.
 
 ## Status
@@ -105,7 +105,8 @@ small part of the road ahead and the API will change before 1.0. See
 | [`manguebyte-clap`](crates/manguebyte-clap) | Exports a `Plugin` as a CLAP plugin with one line. Notes, expression, automation and modulation arrive on their exact frame. Passes the CLAP project's validator |
 | [`manguebyte-vst3`](crates/manguebyte-vst3) | Exports the same `Plugin` as a VST 3 plugin with one line. Every automation point lands on its frame; notes carry ids, tuning and per-note expression; the MIDI controllers the plugin declares arrive as MIDI again. Passes Steinberg's validator on Windows, Linux and macOS |
 | [`manguebyte-lv2`](crates/manguebyte-lv2) | Exports the same `Plugin` as an LV2 plugin with one line, and generates its Turtle files; `cargo mangue` writes the `.lv2` bundle. Tested through its C interface in process, and CI loads the example plugins' bundles with lilv; not yet checked by `lv2lint` or loaded in a host |
-| [`manguebyte-host`](crates/manguebyte-host) | Loads CLAP and VST 3 plugins made by anyone and runs them as processors, through one interface for both formats, with every event on its frame and nothing allocated while processing |
+| [`manguebyte-au`](crates/manguebyte-au) | Exports the same `Plugin` as an Audio Unit (version 2) for macOS with one line; `cargo mangue` writes and installs the `.component`. Tested through its C interface on every system; Apple's `auval` checks the examples in a macOS CI job |
+| [`manguebyte-host`](crates/manguebyte-host) | Loads CLAP, VST 3 and LV2 plugins made by anyone and runs them as processors, through one interface for all three formats, with every event on its frame and nothing allocated while processing; LV2 bundles read with its own Turtle reader. Finds the plugins installed on a system and lists them in a process of their own, so one that crashes or hangs is reported and the host goes on, with a cache of what it found |
 | [`manguebyte-midi`](crates/manguebyte-midi) | MIDI 1.0 channel and system messages, a byte-stream parser, standard MIDI files, sample-accurate `MidiBuffer`; MIDI 2.0 packets (UMP) and translation between the protocols; RPN and NRPN; MPE zones and note tracking; keyboard state; MIDI-CI: discovery, profiles, property exchange and process inquiry, and a device agent an application drives |
 | [`manguebyte-formats`](crates/manguebyte-formats) | WAV (with RF64), AIFF, FLAC, Ogg Vorbis and MP3, read and written, and Ogg Opus and MPEG layers I and II read, whole or block by block with exact seeking; codecs written from their specifications: FLAC checked against FFmpeg, the Vorbis, Opus and MPEG decoders tested on files libvorbis, libopus, LAME and FFmpeg wrote, and the Vorbis and MP3 encoders' files decoded by FFmpeg and libvorbis to the same audio and length; tags, cue points, loops, Broadcast Wave fields and pictures in one metadata model, kept on a round trip; waveform thumbnails with a cache; AAC, ALAC and WMA through the system's codecs on Windows and macOS; wait-free bridges to play and record from an audio callback, and a transport source: play, pause, stop, seek and loop a streamed file from any thread, sample-exact |
 | [`manguebyte-osc`](crates/manguebyte-osc) | Open Sound Control over UDP and TCP, with a real-time bridge that puts time-tagged bundles on their exact frame |
@@ -117,7 +118,7 @@ small part of the road ahead and the API will change before 1.0. See
 | [`manguebyte-sampler`](crates/manguebyte-sampler) | An SFZ sampler: parses SFZ instruments with inheritance, `#define` and `#include`, loads their samples from files or from memory, and plays them on the exact frame with velocity layers, round robin, release triggers, loops with crossfades, choke groups and voice stealing that fades. Builds for WebAssembly |
 | [`manguebyte-web`](crates/manguebyte-web) | An engine for the browser: parts that play a synth, drum kits, SFZ instruments or the instruments of `manguebyte-dsp` (guitars and basses, FM, an organ, an 808-style kit and bass, an acid bass, drum kits from an acoustic one to the 808, 909, 606 and CR-78 and genre kits, the polyphonic synthesiser and its 68 presets, mallets, bowed strings, winds and a choir) through a chain of effects and a master bus with a true-peak limiter, every kind and preset at one loudness (sampled instruments measured as they load), 32-byte event records that land on their exact frame, a shared-memory event ring, WebAssembly exports with no imports, an `AudioWorklet` and a demo page. The sound engine Aratu plays through |
 | [`manguebyte-standalone`](crates/manguebyte-standalone) | Runs a `Plugin` as an application: sound card out, MIDI keyboards in, microphone in for effects |
-| [`cargo-mangue`](crates/cargo-mangue) | The command-line tool: `cargo mangue new` creates a plugin crate, `bundle`, `install` and `validate` turn it into a `.clap` and a `.vst3`, and `bundle --format lv2` into a `.lv2` |
+| [`cargo-mangue`](crates/cargo-mangue) | The command-line tool: `cargo mangue new` creates a plugin crate, `bundle`, `install` and `validate` turn it into a `.clap` and a `.vst3`, `bundle --format lv2` into a `.lv2`, and on a Mac `--format au` into a `.component` checked by `auval` |
 
 Not there yet: an editor opened inside a real host. The editor interfaces
 of both formats, the renderer, the widget set, windows on Win32, the glue
@@ -126,12 +127,14 @@ that opens two plugin binaries' editors in one process exist and are tested
 ([ADR 0007](docs/adr/0007-user-interface-layer.md)), but nobody has opened
 them in a host by hand yet; windows on macOS and Linux come after. `cargo
 mangue` writes `.lv2` bundles and CI loads the examples' with lilv, but no
-LV2 host has run one and `lv2lint`, which the Ubuntu archive does not
-carry, has not checked one; LV2 plugins have no editor. The browser engine
+LV2 host but the framework's own has run one and `lv2lint`, which the
+Ubuntu archive does not carry, has not checked one; LV2 plugins have no
+editor. The Audio Unit wrapper is tested through its C interface on every
+system, but no Mac has run it yet: the macOS CI job that bundles the
+examples and runs `auval` on them is new. The browser engine
 and the sampler are tested natively and in Node.js, not yet in a browser's
-audio thread under load. Also missing: the Audio Unit and AAX formats;
-encoding Opus; plugin scanning and the
-editors of hosted plugins.
+audio thread under load. Also missing: the AUv3 and AAX formats;
+encoding Opus; hosting AU plugins, and the editors of hosted plugins.
 
 ## Quick start
 

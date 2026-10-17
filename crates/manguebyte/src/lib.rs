@@ -15,10 +15,11 @@
 //! | `clap` | `manguebyte-clap` | builds CLAP plugins (feature `clap`) |
 //! | `vst3` | `manguebyte-vst3` | builds VST 3 plugins (feature `vst3`) |
 //! | `lv2` | `manguebyte-lv2` | builds LV2 plugins and their Turtle files (feature `lv2`) |
+//! | `au` | `manguebyte-au` | builds Audio Units for macOS and their `Info.plist` (feature `au`) |
 //! | `gui` | `manguebyte-gui` | opens a plugin's editor in the host's window (feature `gui`) |
 //! | `ui` | `manguebyte-ui` | the widgets editors are made of (feature `gui`) |
 //! | `sampler` | `manguebyte-sampler` | an SFZ sampler, from files or from memory (feature `sampler`) |
-//! | `host` | `manguebyte-host` | loads CLAP and VST 3 plugins and runs them as processors (feature `host`) |
+//! | `host` | `manguebyte-host` | loads CLAP, VST 3 and LV2 plugins and runs them as processors, and scans for them out of process (feature `host`) |
 //! | `analysis` | `manguebyte-analysis` | loudness, true peak, level meters, spectrum and pitch (feature `analysis`, on by default) |
 //! | `osc` | `manguebyte-osc` | Open Sound Control, with time tags landing on their frame (feature `osc`, on by default) |
 //! | `standalone` | `manguebyte-standalone` | runs a plugin on the sound card and MIDI ports (feature `standalone`) |
@@ -57,6 +58,8 @@ pub use manguebyte_core::{
 
 #[cfg(feature = "analysis")]
 pub use manguebyte_analysis as analysis;
+#[cfg(feature = "au")]
+pub use manguebyte_au as au;
 #[cfg(feature = "clap")]
 pub use manguebyte_clap as clap;
 #[cfg(feature = "devices")]

@@ -78,6 +78,37 @@ Nothing has been published to crates.io yet. Everything below is on `main`.
     a release is never marked experimental or in development, and versions
     keep their order. `0.1.0` becomes 4 and 2. The URI does not change
     with the major version.
+- `manguebyte-au`: Audio Units (version 2) for macOS. `export_au!(MyPlugin)`
+  exports `ManguebyteAudioUnitFactory`, which hands a host an
+  `AudioComponentPlugInInterface` for the same `Plugin`, through the plain
+  C AudioUnit interface declared by hand from Apple's headers. The type is
+  `aumu` for an instrument, `aufx` for an effect and `aumf` for a note
+  effect; the subtype and manufacturer are hashed from the plugin's id
+  (`subtype_code`, `manufacturer_code`), and are the same on every machine.
+  Fixed elements (main input, sidechain, output) in 32-bit float with one
+  buffer per channel at any sample rate; input pulled from the render
+  callback or the connection the host set; parameters with their units,
+  value strings and text both ways; `ScheduleParameters` and
+  `MusicDeviceMIDIEvent` on their frames; the transport from the host's
+  callbacks; `ClassInfo` holding the codes and the state text; latency,
+  tail, maximum frames per slice, channel layouts, bypass for effects,
+  property listeners and render notifications. Render allocates nothing
+  and never waits. The wrapper builds on every system: elsewhere than
+  macOS a stand-in for the few CoreFoundation calls it makes lets
+  `tests/abi.rs` act as a host through the factory, with test plugins
+  that sound the same as with no host, bit for bit, and no CoreFoundation
+  object leaked. `info_plist` writes the bundle's `Info.plist`, which
+  `export_au!` makes available to `cargo mangue` through a hidden
+  `__manguebyte_au_info_plist`. Both example plugins export an AU. A new
+  macOS CI job installs both as components and runs Apple's `auval` on
+  them; it has not run yet.
+- `cargo mangue bundle --format au` writes `Name.component` on macOS (the
+  library, `PkgInfo`, and the `Info.plist` from the plugin's code through a
+  small program, as for LV2's Turtle files), signed ad hoc; it is refused
+  for Windows and Linux. `install --format au` copies it to
+  `~/Library/Audio/Plug-Ins/Components` (`/Library/...` with `--system`),
+  and `validate --format au` runs `auval -v` with the codes the bundle
+  names, judging its last word. The facade has an `au` feature.
 - `manguebyte-plugin`: the `Plugin` trait every format wraps; `Harness`,
   which runs a plugin in a unit test with scheduled notes and automation;
   `ParamWatcher`, which turns parameter changes made outside the host into
@@ -665,6 +696,42 @@ display, and no editor has been opened inside a real host yet.
   points, produce output identical bit for bit to `Harness` running them in
   process, in either format. Loading a library is `unsafe`; everything after
   it is safe.
+- `manguebyte-host::lv2`: hosting LV2 plugins. `read_bundle` describes a
+  bundle's plugins from its `manifest.ttl` and the files its plugins point
+  at, with the host's own Turtle reader (prefixes and bases in both
+  spellings, relative IRIs resolved by RFC 3986, blank nodes, collections,
+  literals with their escapes), which runs no code and takes a bundle as
+  hostile input: limits on document length, nesting, triples, IRI length
+  and distinct text, and an error with its line. A library outside its
+  bundle is refused. `Lv2Library` loads the libraries, `Lv2Plugin` creates
+  an instance with `urid:map` and `unmap`, `options:options` (block sizes,
+  sequence size, sample rate), `buf-size:boundedBlockLength` and `log:log`
+  (posted to a wait-free queue; a lone `%s` is shown as its string), and a
+  plugin that requires any other feature is refused by name. Control
+  inputs are its parameters, in their own unit and range; `Lv2Processor`
+  runs a block in pieces at every parameter change, so each lands on its
+  frame, and writes MIDI 1.0 and a `time:Position` into the event input as
+  an atom sequence. State is the plugin's `state:interface` values and
+  every control value, kept by URI and port symbol. LV2 fixes the sample
+  rate at instantiation, so activating at another rate creates the instance
+  again and carries its state over. The `any` interface speaks for LV2
+  too (`Format::Lv2`). Both example plugins, hosted from bundles their own
+  `export_lv2!` describes, sound the same, bit for bit, as with no host at
+  every block pattern tried, with no heap use in the host.
+- `manguebyte-host::scan`: finding installed plugins. `standard_paths`
+  gives each format's folders on each system (with `CLAP_PATH` and
+  `LV2_PATH`), `find` finds candidates by name, and a `Scanner` lists each
+  CLAP and VST 3 file in a scanner process of its own, reading its
+  descriptions without creating a plugin, waits a set time and kills it
+  after; LV2 bundles are read in the host from their Turtle files. The
+  report gives every plugin and every failure (crashed, with the exit code
+  and the end of its error output; timed out; refused, with the reason). A
+  `ScanCache`, saved as text, keeps what was found by path and fingerprint
+  (newest write, size, file count), so only new and changed files are
+  scanned again. The scanner process is any program that calls
+  `serve_if_asked` first, or the crate's `manguebyte-scan` binary. Tested
+  with the example plugins in all three formats and fake plugins built by
+  the test that abort, hang and refuse in `init`.
 
 ### Metering and analysis
 
@@ -1427,6 +1494,8 @@ display, and no editor has been opened inside a real host yet.
   crate (`scripts/check-layering.sh`), checks every dependency's licence
   with `cargo deny` against the list in `deny.toml`, and runs the window
   probe on Windows.
+- CI runs on pushes to branches named `ci/...` as well as `main`, so a
+  change can be checked on every system before it is merged.
 - CI runs `cargo mangue`'s end-to-end test on Windows, Linux and macOS:
   generate a plugin of each kind, build it, test it and bundle it, as CLAP,
   VST 3 and LV2.

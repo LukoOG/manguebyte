@@ -22,6 +22,9 @@ clap = ["dep:manguebyte-clap"]
 vst3 = ["dep:manguebyte-vst3"]
 ## Building LV2 plugins.
 lv2 = ["dep:manguebyte-lv2"]
+## Building Audio Units (version 2) for macOS. The wrapper builds on every
+## system; only on macOS does it export a unit a host can load.
+au = ["dep:manguebyte-au"]
 ## Plugin editors: the widgets and the glue that opens them in a host's
 ## window.
 gui = ["dep:manguebyte-gui", "dep:manguebyte-ui"]
@@ -31,7 +34,8 @@ sampler = ["dep:manguebyte-sampler"]
 analysis = ["dep:manguebyte-analysis"]
 ## Open Sound Control.
 osc = ["dep:manguebyte-osc"]
-## Loading CLAP and VST 3 plugins made by anyone and running them.
+## Loading CLAP, VST 3 and LV2 plugins made by anyone and running them,
+## and finding the ones installed on a system.
 host = ["dep:manguebyte-host"]
 ## Running a plugin as a standalone application.
 standalone = ["dep:manguebyte-standalone", "devices"]
@@ -51,6 +55,7 @@ manguebyte-devices = { workspace = true, optional = true }
 manguebyte-clap = { workspace = true, optional = true }
 manguebyte-vst3 = { workspace = true, optional = true }
 manguebyte-lv2 = { workspace = true, optional = true }
+manguebyte-au = { workspace = true, optional = true }
 manguebyte-gui = { workspace = true, optional = true }
 manguebyte-ui = { workspace = true, optional = true }
 manguebyte-sampler = { workspace = true, optional = true }

@@ -606,6 +606,7 @@ name = "manguebyte"
 version = "0.1.0"
 dependencies = [
  "manguebyte-analysis",
+ "manguebyte-au",
  "manguebyte-clap",
  "manguebyte-core",
  "manguebyte-devices",

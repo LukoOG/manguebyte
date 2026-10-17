@@ -255,8 +255,9 @@ accepts no CLAP format.
 **Limit.** Editors open in the host's window on Windows only, through
 `manguebyte-window`'s Win32 backend, which CI tests with real windows; macOS
 and Linux windows are not there yet, and no editor has yet been tested by hand
-inside a DAW. No 64-bit audio, no presets. VST 3 and LV2 are the other formats
-on `main`: JUCE's AU and AAX support has no counterpart here yet. Both example
+inside a DAW. No 64-bit audio, no presets. VST 3, LV2 and AU (version 2,
+not yet run on a Mac) are the other formats on `main`: JUCE's AUv3 and AAX
+support has no counterpart here yet. Both example
 plugins were also loaded and tested by hand in REAPER, without their editors;
 see [HOST_TESTS.md](HOST_TESTS.md).
 
@@ -390,7 +391,9 @@ that created the plugin; the types do not check that it is the program's
 main thread. At most 4,096 events per call; the rest are counted. No
 modulation is sent to VST 3 plugins. Tested with the framework's own
 plugins and deliberately misbehaving test plugins, not yet with plugins
-from other vendors; no editors of hosted plugins; no scanning yet.
+from other vendors; no editors of hosted plugins. Scanning lists CLAP and
+VST 3 files out of process and LV2 bundles from their Turtle files, and has
+not met plugins from other vendors either.
 
 ## 12. Loudness, true peak and broadcast meters, ready to use
 
@@ -599,9 +602,10 @@ it has, and Manguebyte does not:
 
 - a complete GUI toolkit, with plugin editor windows on macOS and Linux as
   well as Windows (Manguebyte's editors open on Windows only so far);
-- the Audio Unit and AAX plugin formats;
-- hosting of AU and LV2 plugins, plugin scanning, and the editors of hosted
-  plugins (Manguebyte hosts CLAP and VST 3 plugins, without their editors);
+- the AUv3 and AAX plugin formats, and Audio Units checked in real hosts
+  (Manguebyte's AUv2 wrapper has only its own tests and `auval` in CI);
+- hosting of AU plugins and the editors of hosted plugins (Manguebyte hosts
+  CLAP, VST 3 and LV2 plugins, without their editors, and scans for them);
 - SIMD wrappers and lookup tables among its DSP utilities, and more audio
   formats (Opus, encoders for compressed formats);
 - iOS and Android;
