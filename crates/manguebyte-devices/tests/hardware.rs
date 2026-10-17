@@ -147,3 +147,76 @@ fn duplex_carries_input_to_the_output_callback() {
         "the reserve never settled: {underruns} underruns"
     );
 }
+
+#[test]
+#[ignore = "needs an audio output device"]
+fn the_device_manager_runs_and_restores_the_system_default() {
+    use manguebyte_devices::{
+        AudioHost, DeviceEvent, DeviceIo, DeviceManager, DeviceSetup, Direction, audio_hosts,
+    };
+
+    println!("hosts: {:?}", audio_hosts());
+    for host in audio_hosts() {
+        let host = AudioHost::by_name(&host.name).unwrap();
+        println!(
+            "{}: {} outputs",
+            host.name(),
+            host.output_devices().unwrap().len()
+        );
+    }
+
+    let mut manager = DeviceManager::new();
+    let frames = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&frames);
+    let report = manager
+        .start(&DeviceSetup::default(), move |io: &mut DeviceIo<'_>| {
+            counter.fetch_add(io.num_frames(), Ordering::Relaxed);
+        })
+        .unwrap();
+    println!("report: {report:?}, format: {:?}", manager.format());
+    assert!(manager.is_running());
+    assert!(
+        manager.poll_devices().is_empty(),
+        "the first poll only learns"
+    );
+    sleep(Duration::from_millis(400));
+    let events = manager.poll_devices();
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, DeviceEvent::StreamLost { .. })),
+        "{events:?}"
+    );
+
+    // Saved and restored, it opens the same device.
+    let saved = manager.setup().to_string();
+    let device = manager.running_device(Direction::Output).cloned();
+    manager.apply(&saved.parse().unwrap()).unwrap();
+    assert_eq!(manager.running_device(Direction::Output).cloned(), device);
+    sleep(Duration::from_millis(200));
+    drop(manager);
+    let rendered = frames.load(Ordering::Relaxed);
+    assert!(rendered > 10_000, "only {rendered} frames");
+}
+
+#[cfg(all(feature = "midi", unix, not(target_os = "android")))]
+#[test]
+#[ignore = "needs the system MIDI service"]
+fn a_virtual_port_is_seen_by_other_programs() {
+    use manguebyte_devices::midi::{MidiInput, MidiOutput, midi_input_ports};
+
+    let name = "Manguebyte virtual test";
+    let mut output = MidiOutput::create_virtual(name).unwrap();
+    sleep(Duration::from_millis(200));
+    let port = midi_input_ports()
+        .unwrap()
+        .into_iter()
+        .find(|port| port.name.contains(name))
+        .expect("the virtual port is listed");
+    let (_input, mut receiver) = MidiInput::open(&port.id).unwrap();
+    output.send_raw(&[0x90, 60, 100]).unwrap();
+    sleep(Duration::from_millis(200));
+    let mut received = 0;
+    receiver.read(256, 48_000.0, |_, _| received += 1);
+    assert_eq!(received, 1);
+}

@@ -42,15 +42,20 @@
 
 #![forbid(unsafe_code)]
 
+mod backend;
 mod blocks;
 mod device;
 mod drift;
 mod duplex;
 mod error;
 mod host;
+mod hotplug;
+mod manager;
 #[cfg(feature = "midi")]
 pub mod midi;
+mod mock;
 mod settings;
+mod setup;
 mod timing;
 
 pub use device::{
@@ -60,5 +65,12 @@ pub use device::{
 pub use duplex::{DuplexSettings, DuplexStream};
 pub use error::DeviceError;
 pub use host::{AudioHost, HostInfo, audio_hosts};
+pub use hotplug::{
+    DEFAULT_POLL_INTERVAL, DeviceEvent, DeviceSnapshot, DeviceSummary, DeviceWatcher, LossCause,
+    MIN_POLL_INTERVAL, STALL_TIMEOUT,
+};
+pub use manager::{AudioCallback, DEFAULT_MAX_BLOCK_SIZE, DeviceIo, DeviceManager, StreamFormat};
+pub use mock::MockBackend;
 pub use settings::{ConfigRange, StreamSettings};
+pub use setup::{DeviceChoice, DeviceRef, DeviceSetup, Fallback, ParseSetupError, RestoreReport};
 pub use timing::CallbackInfo;

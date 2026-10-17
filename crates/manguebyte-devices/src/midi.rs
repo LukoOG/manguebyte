@@ -32,8 +32,18 @@
 //! [`MidiReceiver::read`] places it inside the block at the offset that
 //! matches how long after the previous block it came. Every note is late by
 //! one block, and by the same amount, so the player's timing is kept.
+//!
+//! # Virtual ports
+//!
+//! [`MidiInput::create_virtual`] and [`MidiOutput::create_virtual`] make a
+//! port that other programs see and connect to, as if this program were a
+//! MIDI device. macOS, iOS, Linux and the BSDs allow it. Windows has no
+//! such ports in its MIDI API (a loopback driver such as loopMIDI has to
+//! be installed), and Android lets only a Java `MidiDeviceService` offer
+//! one; there both functions return [`MidiError::VirtualPortsUnsupported`].
 
 use std::fmt;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use manguebyte_core::spsc::{self, Consumer, Producer};
@@ -56,6 +66,9 @@ pub enum MidiError {
     Connect(String),
     /// A message could not be sent.
     Send(String),
+    /// This system cannot create virtual MIDI ports. See the
+    /// [module documentation](self#virtual-ports).
+    VirtualPortsUnsupported,
 }
 
 impl fmt::Display for MidiError {
@@ -65,6 +78,9 @@ impl fmt::Display for MidiError {
             Self::PortNotFound(id) => write!(f, "no MIDI port with id \"{id}\""),
             Self::Connect(reason) => write!(f, "could not open the MIDI port: {reason}"),
             Self::Send(reason) => write!(f, "could not send the MIDI message: {reason}"),
+            Self::VirtualPortsUnsupported => {
+                f.write_str("this system cannot create virtual MIDI ports")
+            }
         }
     }
 }
@@ -145,9 +161,95 @@ pub enum MidiInputMessage {
 
 /// A message and the moment it arrived.
 #[derive(Debug, Clone, Copy)]
-struct Timed {
+pub(crate) struct Timed {
     at: Instant,
     message: MidiInputMessage,
+}
+
+/// Where a port's messages go: a queue of its own, or one that several
+/// ports share. The shared queue's lock is taken by the threads the system
+/// delivers MIDI on, never by the audio thread, which only reads.
+pub(crate) enum MidiSink {
+    Own(Producer<Timed>),
+    Shared(Arc<Mutex<Producer<Timed>>>),
+}
+
+impl MidiSink {
+    /// Parses `bytes`, which arrived just now, and queues every message.
+    pub(crate) fn deliver(&mut self, bytes: &[u8], parser: &mut StreamParser) {
+        let at = Instant::now();
+        let mut push = |message| {
+            let timed = Timed { at, message };
+            // A full queue means the audio thread has stopped reading.
+            // Dropping is all that can be done.
+            match self {
+                Self::Own(producer) => {
+                    let _ = producer.push(timed);
+                }
+                Self::Shared(shared) => {
+                    if let Ok(mut producer) = shared.lock() {
+                        let _ = producer.push(timed);
+                    }
+                }
+            }
+        };
+        parser.feed_slice(bytes, |event| match event {
+            StreamEvent::Channel(message) => push(MidiInputMessage::Channel(message)),
+            StreamEvent::System(message) => push(MidiInputMessage::System(message)),
+            StreamEvent::SysEx(_) => {}
+        });
+    }
+}
+
+/// One receiver for any number of ports: the sink to share between the
+/// ports, and the audio thread's end.
+pub(crate) fn merged_receiver() -> (Arc<Mutex<Producer<Timed>>>, MidiReceiver) {
+    let (sender, receiver) = receiver_pair(QUEUE_CAPACITY);
+    (Arc::new(Mutex::new(sender)), receiver)
+}
+
+/// The system's input port with this identifier, and its name.
+fn find_input(
+    input: &midir::MidiInput,
+    id: &str,
+) -> Result<(midir::MidiInputPort, String), MidiError> {
+    input
+        .ports()
+        .into_iter()
+        .map(|port| {
+            let name = port_name(input.port_name(&port));
+            (port, name)
+        })
+        .find(|(port, name)| port_id(&port.id(), name) == id)
+        .ok_or_else(|| MidiError::PortNotFound(id.to_owned()))
+}
+
+fn new_input() -> Result<midir::MidiInput, MidiError> {
+    let mut input = midir::MidiInput::new(CLIENT_NAME).map_err(|_| MidiError::Unavailable)?;
+    input.ignore(midir::Ignore::SysexAndActiveSense);
+    Ok(input)
+}
+
+/// A connection to an input port. Receiving stops when it is dropped.
+pub(crate) type InputConnection = midir::MidiInputConnection<StreamParser>;
+
+/// Connects the input port with this identifier to `sink`, and returns the
+/// connection and the port's name.
+pub(crate) fn connect_input(
+    id: &str,
+    mut sink: MidiSink,
+) -> Result<(InputConnection, String), MidiError> {
+    let input = new_input()?;
+    let (port, name) = find_input(&input, id)?;
+    let connection = input
+        .connect(
+            &port,
+            "manguebyte-in",
+            move |_timestamp, bytes, parser: &mut StreamParser| sink.deliver(bytes, parser),
+            StreamParser::new(0),
+        )
+        .map_err(|error| MidiError::Connect(error.to_string()))?;
+    Ok((connection, name))
 }
 
 /// An open MIDI input port. Receiving stops when it is dropped.
@@ -163,39 +265,8 @@ impl MidiInput {
     /// Returns the connection, which must be kept alive, and the receiver,
     /// which goes to the audio thread.
     pub fn open(id: &str) -> Result<(Self, MidiReceiver), MidiError> {
-        let mut input = midir::MidiInput::new(CLIENT_NAME).map_err(|_| MidiError::Unavailable)?;
-        input.ignore(midir::Ignore::SysexAndActiveSense);
-        let (port, name) = input
-            .ports()
-            .into_iter()
-            .map(|port| {
-                let name = port_name(input.port_name(&port));
-                (port, name)
-            })
-            .find(|(port, name)| port_id(&port.id(), name) == id)
-            .ok_or_else(|| MidiError::PortNotFound(id.to_owned()))?;
-
-        let (mut sender, receiver) = receiver_pair(QUEUE_CAPACITY);
-        let connection = input
-            .connect(
-                &port,
-                "manguebyte-in",
-                move |_timestamp, bytes, parser: &mut StreamParser| {
-                    let at = Instant::now();
-                    parser.feed_slice(bytes, |event| {
-                        let message = match event {
-                            StreamEvent::Channel(message) => MidiInputMessage::Channel(message),
-                            StreamEvent::System(message) => MidiInputMessage::System(message),
-                            StreamEvent::SysEx(_) => return,
-                        };
-                        // A full queue means the audio thread has stopped
-                        // reading. Dropping is all that can be done.
-                        let _ = sender.push(Timed { at, message });
-                    });
-                },
-                StreamParser::new(0),
-            )
-            .map_err(|error| MidiError::Connect(error.to_string()))?;
+        let (sender, receiver) = receiver_pair(QUEUE_CAPACITY);
+        let (connection, name) = connect_input(id, MidiSink::Own(sender))?;
         Ok((
             Self {
                 name,
@@ -203,6 +274,41 @@ impl MidiInput {
             },
             receiver,
         ))
+    }
+
+    /// Creates a virtual input port called `name`, which other programs
+    /// see as a MIDI output they can send to.
+    ///
+    /// Fails with [`MidiError::VirtualPortsUnsupported`] on Windows and
+    /// Android; see the [module documentation](self#virtual-ports).
+    pub fn create_virtual(name: &str) -> Result<(Self, MidiReceiver), MidiError> {
+        #[cfg(all(unix, not(target_os = "android")))]
+        {
+            use midir::os::unix::VirtualInput;
+
+            let input = new_input()?;
+            let (sender, receiver) = receiver_pair(QUEUE_CAPACITY);
+            let mut sink = MidiSink::Own(sender);
+            let connection = input
+                .create_virtual(
+                    name,
+                    move |_timestamp, bytes, parser: &mut StreamParser| sink.deliver(bytes, parser),
+                    StreamParser::new(0),
+                )
+                .map_err(|error| MidiError::Connect(error.to_string()))?;
+            Ok((
+                Self {
+                    name: name.to_owned(),
+                    _connection: connection,
+                },
+                receiver,
+            ))
+        }
+        #[cfg(not(all(unix, not(target_os = "android"))))]
+        {
+            let _ = name;
+            Err(MidiError::VirtualPortsUnsupported)
+        }
     }
 
     /// Human-readable name of the port.
@@ -243,6 +349,12 @@ impl MidiReceiver {
         handle: impl FnMut(u32, MidiInputMessage),
     ) {
         self.read_at(Instant::now(), frames, sample_rate, handle);
+    }
+
+    /// Forgets when the previous block was read, for a stream that
+    /// starts again after a pause.
+    pub(crate) fn restart(&mut self) {
+        self.previous = None;
     }
 
     /// [`read`](Self::read), with the current time passed in.
@@ -296,6 +408,32 @@ impl MidiOutput {
             .connect(&port, "manguebyte-out")
             .map_err(|error| MidiError::Connect(error.to_string()))?;
         Ok(Self { name, connection })
+    }
+
+    /// Creates a virtual output port called `name`, which other programs
+    /// see as a MIDI input they can receive from.
+    ///
+    /// Fails with [`MidiError::VirtualPortsUnsupported`] on Windows and
+    /// Android; see the [module documentation](self#virtual-ports).
+    pub fn create_virtual(name: &str) -> Result<Self, MidiError> {
+        #[cfg(all(unix, not(target_os = "android")))]
+        {
+            use midir::os::unix::VirtualOutput;
+
+            let output = midir::MidiOutput::new(CLIENT_NAME).map_err(|_| MidiError::Unavailable)?;
+            let connection = output
+                .create_virtual(name)
+                .map_err(|error| MidiError::Connect(error.to_string()))?;
+            Ok(Self {
+                name: name.to_owned(),
+                connection,
+            })
+        }
+        #[cfg(not(all(unix, not(target_os = "android"))))]
+        {
+            let _ = name;
+            Err(MidiError::VirtualPortsUnsupported)
+        }
     }
 
     /// Human-readable name of the port.
@@ -427,6 +565,43 @@ mod tests {
             port_id("", "Microsoft GS Wavetable Synth"),
             "name:Microsoft GS Wavetable Synth"
         );
+    }
+
+    #[test]
+    fn a_shared_sink_merges_ports_into_one_receiver() {
+        let (shared, mut receiver) = merged_receiver();
+        let mut first = MidiSink::Shared(Arc::clone(&shared));
+        let mut second = MidiSink::Shared(shared);
+        let (mut a, mut b) = (StreamParser::new(0), StreamParser::new(0));
+        // A message split across two deliveries and running status stay
+        // with their own port, because each port has its own parser.
+        first.deliver(&[0x90, 60], &mut a);
+        second.deliver(&[0x90, 64, 100], &mut b);
+        first.deliver(&[100, 62, 90], &mut a);
+        second.deliver(&[0xF0, 1, 2, 0xF7], &mut b);
+        let mut seen = Vec::new();
+        receiver.read(FRAMES, RATE, |_, message| seen.push(message));
+        let on = |note, velocity| {
+            MidiInputMessage::Channel(MidiMessage::NoteOn {
+                channel: 0,
+                note,
+                velocity,
+            })
+        };
+        assert_eq!(seen, [on(64, 100), on(60, 100), on(62, 90)]);
+    }
+
+    #[cfg(any(windows, target_os = "android"))]
+    #[test]
+    fn virtual_ports_are_refused_where_the_system_has_none() {
+        assert!(matches!(
+            MidiInput::create_virtual("Manguebyte test"),
+            Err(MidiError::VirtualPortsUnsupported)
+        ));
+        assert!(matches!(
+            MidiOutput::create_virtual("Manguebyte test"),
+            Err(MidiError::VirtualPortsUnsupported)
+        ));
     }
 
     #[test]

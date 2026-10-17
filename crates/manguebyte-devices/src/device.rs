@@ -5,6 +5,7 @@ use cpal::{FromSample, SizedSample, StreamConfig};
 use manguebyte_core::AudioBuffer;
 
 use crate::blocks::{BlockCapturer, BlockClock, BlockRenderer};
+use crate::hotplug::DeviceSummary;
 use crate::settings::{ConfigRange, Resolved, resolve};
 use crate::timing::{StreamHealth, input_timing, output_timing};
 use crate::{AudioHost, CallbackInfo, DeviceError, StreamSettings};
@@ -118,6 +119,23 @@ fn devices_of(host: &cpal::Host, direction: Direction) -> Result<Vec<cpal::Devic
         Direction::Output => host.output_devices()?.collect(),
         Direction::Input => host.input_devices()?.collect(),
     })
+}
+
+/// Identifiers and names only, and the default's identifier.
+pub(crate) fn summaries(
+    host: &cpal::Host,
+    direction: Direction,
+) -> Result<(Vec<DeviceSummary>, Option<String>), DeviceError> {
+    let devices = devices_of(host, direction)?
+        .iter()
+        .filter_map(|device| {
+            Some(DeviceSummary {
+                id: device_id(device)?,
+                name: device_name(device),
+            })
+        })
+        .collect();
+    Ok((devices, default_device_id(host, direction)))
 }
 
 pub(crate) fn list(
@@ -249,6 +267,19 @@ impl Opened {
 
     pub(crate) fn num_channels(&self) -> usize {
         usize::from(self.resolved.config.channels)
+    }
+
+    /// The configuration the stream will run with, as settings.
+    pub(crate) fn settings(&self) -> StreamSettings {
+        let config = self.resolved.config;
+        StreamSettings {
+            sample_rate: Some(config.sample_rate),
+            channels: Some(config.channels),
+            buffer_size: match config.buffer_size {
+                cpal::BufferSize::Fixed(frames) => Some(frames),
+                cpal::BufferSize::Default => None,
+            },
+        }
     }
 }
 
@@ -631,7 +662,7 @@ macro_rules! stream_controls {
 /// A running output stream. Playback stops when it is dropped.
 pub struct OutputStream {
     stream: cpal::Stream,
-    health: Arc<StreamHealth>,
+    pub(crate) health: Arc<StreamHealth>,
 }
 
 impl OutputStream {
@@ -641,7 +672,7 @@ impl OutputStream {
 /// A running input stream. Recording stops when it is dropped.
 pub struct InputStream {
     stream: cpal::Stream,
-    health: Arc<StreamHealth>,
+    pub(crate) health: Arc<StreamHealth>,
 }
 
 impl InputStream {

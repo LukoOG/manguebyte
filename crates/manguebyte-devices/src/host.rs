@@ -1,6 +1,7 @@
 //! Audio hosts: the system audio APIs a device can be reached through.
 
-use crate::device::{Direction, list};
+use crate::device::{Direction, list, summaries};
+use crate::hotplug::DeviceSummary;
 use crate::{DeviceError, DeviceInfo, InputDevice, OutputDevice};
 
 /// An audio host that can be used on this system, as listed by
@@ -134,6 +135,16 @@ impl AudioHost {
     /// configuration.
     pub fn default_input_device(&self) -> Result<InputDevice, DeviceError> {
         InputDevice::open_default_of(&self.backend()?)
+    }
+
+    /// The identifier and name of every device in `direction`, and which
+    /// one is the default, without asking each device what it supports.
+    /// Cheap enough to call every second.
+    pub(crate) fn summaries(
+        &self,
+        direction: Direction,
+    ) -> Result<(Vec<DeviceSummary>, Option<String>), DeviceError> {
+        summaries(&self.backend()?, direction)
     }
 
     pub(crate) fn backend(&self) -> Result<cpal::Host, DeviceError> {

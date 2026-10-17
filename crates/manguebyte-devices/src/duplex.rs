@@ -149,8 +149,8 @@ pub struct DuplexStream {
     input: cpal::Stream,
     output: cpal::Stream,
     stats: Arc<Stats>,
-    input_health: Arc<StreamHealth>,
-    output_health: Arc<StreamHealth>,
+    pub(crate) input_health: Arc<StreamHealth>,
+    pub(crate) output_health: Arc<StreamHealth>,
 }
 
 impl DuplexStream {

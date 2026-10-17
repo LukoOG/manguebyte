@@ -27,6 +27,9 @@ pub enum DeviceError {
         /// Sample rate of the output device, in hertz.
         output: u32,
     },
+    /// A device manager was asked to restart before it was ever started,
+    /// or a stream that stopped never gave its callback back.
+    NoCallback,
     /// The platform audio backend reported an error.
     Backend(cpal::Error),
 }
@@ -60,6 +63,7 @@ impl fmt::Display for DeviceError {
             Self::SampleRateMismatch { input, output } => {
                 write!(f, "input runs at {input} Hz but output runs at {output} Hz")
             }
+            Self::NoCallback => f.write_str("the device manager has no callback to run"),
             Self::Backend(error) => write!(f, "audio backend error: {error}"),
         }
     }
