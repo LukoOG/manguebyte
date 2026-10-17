@@ -126,9 +126,20 @@ mod with_the_system {
     }
 
     /// The largest difference between what a seek reads and what a decode
-    /// from the start has there, over seeks all over the file.
+    /// from the start has there, over seeks all over the file, read from
+    /// the file and from memory.
     fn seek_error(name: &str, whole: &AudioBuffer<f32>) -> f32 {
-        let mut reader = AudioReader::open(path(name)).unwrap();
+        let bytes = std::fs::read(path(name)).unwrap();
+        let from_file = seek_error_of(name, whole, AudioReader::open(path(name)).unwrap());
+        let from_memory = seek_error_of(name, whole, AudioReader::new(Cursor::new(bytes)).unwrap());
+        from_file.max(from_memory)
+    }
+
+    fn seek_error_of(
+        name: &str,
+        whole: &AudioBuffer<f32>,
+        mut reader: AudioReader<impl std::io::Read + std::io::Seek>,
+    ) -> f32 {
         let len = whole.num_frames() as u64;
         let mut rng = Rng::new(17);
         let mut block = AudioBuffer::<f32>::new(reader.num_channels(), 700);
