@@ -13,6 +13,7 @@ use manguebyte_core::AudioBuffer;
 pub mod lossy;
 pub mod mp3;
 pub mod mpeg12;
+pub mod opus;
 pub mod vorbis;
 
 /// A small deterministic random number generator (xorshift64*), so that

@@ -10,6 +10,7 @@ use crate::aiff::{self, AiffDecoder};
 use crate::flac::FlacReader;
 use crate::metadata::Metadata;
 use crate::mp3::{self, Mp3Reader};
+use crate::opus::{self, OpusReader};
 use crate::pcm::{PcmReader, read_up_to};
 use crate::platform::{self, PlatformReader};
 use crate::vorbis::VorbisReader;
@@ -21,8 +22,8 @@ use crate::{FileFormat, FormatError, LOSSY_BITS};
 /// Where [`read_file`](crate::read_file) loads a whole file, this keeps only
 /// the block being read: a recording of an hour costs the same memory as one
 /// of a second. It reads WAV (RF64 included), AIFF, AIFF-C, FLAC, Ogg
-/// Vorbis and MP3, and works out which one it has been given from the
-/// contents.
+/// Vorbis, Ogg Opus and MP3, and works out which one it has been given
+/// from the contents.
 ///
 /// ```
 /// use std::io::Cursor;
@@ -78,6 +79,13 @@ use crate::{FileFormat, FormatError, LOSSY_BITS};
 /// the place of every so many frames of the stream, at most 16384 of them:
 /// under 100 KB for a stream of any length.
 ///
+/// For Ogg Opus it holds a stretch of the file of a page or two, one
+/// packet of up to 120 ms decoded, the state of the decoder of each
+/// stream, about 25 KB for a stereo one, and up to 64 copies of that state
+/// kept as it decodes from the start, for exact seeks: some 300 KB for a
+/// stereo stream, and 1.6 MB more once 64 copies are kept, which happens
+/// after ten minutes of it. They are then kept further apart, never more.
+///
 /// # Threads
 ///
 /// Reading does I/O, so it does not belong on the audio thread. To play a
@@ -122,6 +130,7 @@ enum Inner<R> {
     Flac(Box<FlacReader<R>>),
     Vorbis(Box<VorbisReader<R>>),
     Mp3(Box<Mp3Reader<R>>),
+    Opus(Box<OpusReader<R>>),
     /// The system's codecs, which read the file themselves; the reader it
     /// was opened from is kept for `into_inner`.
     Platform(Box<PlatformReader>, R),
@@ -232,6 +241,24 @@ impl<R: Read + Seek> AudioReader<R> {
                     inner: Inner::Vorbis(Box::new(stream)),
                 }
             }
+            FileFormat::OggOpus => {
+                let mut stream = OpusReader::new(reader).map_err(FormatError::Opus)?;
+                let comments = stream.take_comments();
+                let metadata = Metadata::from_vorbis_comments(
+                    comments
+                        .comments
+                        .iter()
+                        .map(|(name, value)| (name.as_str(), value.as_str())),
+                );
+                Self {
+                    format,
+                    sample_rate: opus::SAMPLE_RATE,
+                    bits_per_sample: LOSSY_BITS,
+                    is_float: true,
+                    metadata,
+                    inner: Inner::Opus(Box::new(stream)),
+                }
+            }
             FileFormat::Mp3 => {
                 let metadata = mp3::read_tags(&mut reader)?;
                 let stream = Mp3Reader::new(reader).map_err(FormatError::Mp3)?;
@@ -294,6 +321,7 @@ impl<R: Read + Seek> AudioReader<R> {
             Inner::Flac(stream) => stream.num_channels(),
             Inner::Vorbis(stream) => stream.num_channels(),
             Inner::Mp3(stream) => stream.num_channels(),
+            Inner::Opus(stream) => stream.num_channels(),
             Inner::Platform(stream, _) => stream.num_channels(),
         }
     }
@@ -323,6 +351,7 @@ impl<R: Read + Seek> AudioReader<R> {
             Inner::Flac(stream) => stream.frames(),
             Inner::Vorbis(stream) => stream.frames(),
             Inner::Mp3(stream) => stream.frames(),
+            Inner::Opus(stream) => stream.frames(),
             Inner::Platform(stream, _) => stream.frames(),
         }
     }
@@ -335,6 +364,7 @@ impl<R: Read + Seek> AudioReader<R> {
             Inner::Flac(stream) => stream.position(),
             Inner::Vorbis(stream) => stream.position(),
             Inner::Mp3(stream) => stream.position(),
+            Inner::Opus(stream) => stream.position(),
             Inner::Platform(stream, _) => stream.position(),
         }
     }
@@ -372,6 +402,7 @@ impl<R: Read + Seek> AudioReader<R> {
             Inner::Flac(stream) => stream.read(buffer).map_err(FormatError::Flac),
             Inner::Vorbis(stream) => stream.read(buffer).map_err(FormatError::Vorbis),
             Inner::Mp3(stream) => stream.read(buffer).map_err(FormatError::Mp3),
+            Inner::Opus(stream) => stream.read(buffer).map_err(FormatError::Opus),
             Inner::Platform(stream, _) => stream.read(buffer),
         }
     }
@@ -417,8 +448,18 @@ impl<R: Read + Seek> AudioReader<R> {
     /// a seek past the frames counted so far counts on to the end if it
     /// has to.
     ///
-    /// Whatever the format, what is read after a seek is, bit for bit, what
-    /// reading from the start gives at that place.
+    /// In Ogg Opus the samples depend on every packet before them, not on
+    /// one overlap, so a seek is exact only from a place whose decoder
+    /// state is known: it decodes on from the start, from where the reader
+    /// stands, or from one of the states it kept while it decoded from the
+    /// start, if one is less than about 30 s before the target. Otherwise
+    /// it finds the page 800 ms before the target by bisection, decodes
+    /// from there, and gives samples close to those of a decode from the
+    /// start, but not the same: see the [`opus`](crate::opus) module.
+    ///
+    /// Whatever the format but that last case of Ogg Opus, what is read
+    /// after a seek is, bit for bit, what reading from the start gives at
+    /// that place.
     ///
     /// If this fails, the position is unchanged.
     pub fn seek(&mut self, frame: u64) -> Result<u64, FormatError> {
@@ -428,6 +469,7 @@ impl<R: Read + Seek> AudioReader<R> {
             Inner::Flac(stream) => stream.seek(frame).map_err(FormatError::Flac),
             Inner::Vorbis(stream) => stream.seek(frame).map_err(FormatError::Vorbis),
             Inner::Mp3(stream) => stream.seek(frame).map_err(FormatError::Mp3),
+            Inner::Opus(stream) => stream.seek(frame).map_err(FormatError::Opus),
             Inner::Platform(stream, _) => stream.seek(frame),
         }
     }
@@ -440,6 +482,7 @@ impl<R: Read + Seek> AudioReader<R> {
             Inner::Flac(stream) => stream.into_inner(),
             Inner::Vorbis(stream) => stream.into_inner(),
             Inner::Mp3(stream) => stream.into_inner(),
+            Inner::Opus(stream) => stream.into_inner(),
             Inner::Platform(_, reader) => reader,
         }
     }

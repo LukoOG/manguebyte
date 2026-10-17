@@ -86,7 +86,12 @@ pub(crate) struct Comments {
 /// Reads the comment header. Its lengths are checked against the packet, so
 /// nothing is allocated for what is not there.
 pub(crate) fn comments(packet: &[u8]) -> Result<Comments, VorbisError> {
-    let body = header_body(packet, 3)?;
+    parse_comments(header_body(packet, 3)?)
+}
+
+/// Reads the body of a comment header, what follows its type and name:
+/// the comment header of Opus has the same layout (RFC 7845, section 5.2).
+pub(crate) fn parse_comments(body: &[u8]) -> Result<Comments, VorbisError> {
     let mut at = 0usize;
     let mut take = |len: usize| -> Result<&[u8], VorbisError> {
         let end = at

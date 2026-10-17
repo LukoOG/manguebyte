@@ -301,6 +301,82 @@ every file decodes to the same number of samples, from the same first
 sample, within 84 to 86 dB of FFmpeg's decode and never further from it
 than 3.2e-5, which is FFmpeg's own rounding to 16 bits.
 
+### Ogg Opus
+
+From the same sources, with two more of them at 48 kHz, `signal-2ch-48000`
+and `signal-1ch-48000` (57601 frames each), with FFmpeg 7.1 (the gyan.dev
+build) and its libopus:
+
+```bash
+ffmpeg -i signal-2ch-48000.wav -map_metadata -1 -bitexact -c:a libopus -application lowdelay -b:a 128k opus-celt-2ch-20ms-128k.opus
+ffmpeg -i signal-2ch-48000.wav -map_metadata -1 -bitexact -c:a libopus -application lowdelay -b:a 96k -frame_duration 2.5 opus-celt-2ch-2.5ms-96k.opus
+ffmpeg -i signal-1ch-48000.wav -map_metadata -1 -bitexact -c:a libopus -application lowdelay -b:a 40k -cutoff 12000 -frame_duration 10 opus-celt-1ch-swb-10ms-40k.opus
+ffmpeg -i signal-1ch-48000.wav -map_metadata -1 -bitexact -c:a libopus -application lowdelay -b:a 24k -cutoff 4000 -frame_duration 5 opus-celt-1ch-nb-5ms-24k.opus
+ffmpeg -i signal-2ch-48000.wav -map_metadata -1 -bitexact -c:a libopus -application lowdelay -b:a 48k -cutoff 8000 -frame_duration 40 -vbr off opus-celt-2ch-wb-40ms-cbr.opus
+ffmpeg -i signal-2ch-48000.wav -map_metadata -1 -bitexact -c:a libopus -application lowdelay -b:a 64k -frame_duration 40 opus-celt-2ch-40ms-vbr.opus
+ffmpeg -i signal-1ch-8000.wav -map_metadata -1 -bitexact -c:a libopus -application voip -b:a 10k opus-silk-1ch-nb-20ms.opus
+ffmpeg -i signal-1ch-12000.wav -map_metadata -1 -bitexact -c:a libopus -application voip -b:a 12k -frame_duration 60 opus-silk-1ch-mb-60ms.opus
+ffmpeg -i signal-1ch-16000.wav -map_metadata -1 -bitexact -c:a libopus -application voip -b:a 18k -frame_duration 10 opus-silk-1ch-wb-10ms.opus
+ffmpeg -i signal-2ch-24000.wav -map_metadata -1 -bitexact -c:a libopus -application voip -b:a 24k -cutoff 8000 -frame_duration 40 opus-silk-2ch-wb-40ms.opus
+ffmpeg -i bursts-1ch-8000.wav -t 45 -map_metadata -1 -bitexact -c:a libopus -application voip -b:a 6k -frame_duration 60 opus-silk-1ch-bursts-45s.opus
+ffmpeg -i signal-1ch-22050.wav -map_metadata -1 -bitexact -c:a libopus -application voip -b:a 24k opus-hybrid-1ch-swb-20ms.opus
+ffmpeg -i signal-2ch-48000.wav -map_metadata -1 -bitexact -c:a libopus -application voip -b:a 40k -frame_duration 10 opus-hybrid-2ch-fb-10ms.opus
+ffmpeg -i signal-2ch-48000.wav -map_metadata -1 -bitexact -c:a libopus -application audio -b:a 48k -frame_duration 120 opus-audio-2ch-120ms.opus
+ffmpeg -i signal-2ch-48000.wav -map_metadata -1 -bitexact -c:a libopus -application audio -b:a 16k opus-audio-2ch-16k.opus
+ffmpeg -i signal-6ch-48000.wav -map_metadata -1 -bitexact -c:a libopus -application audio -b:a 128k -mapping_family 1 opus-6ch-family1.opus
+ffmpeg -i signal-2ch-48000.wav -map_metadata -1 -bitexact -c:a libopus -application audio -b:a 64k -mapping_family 255 opus-2ch-family255.opus
+```
+
+What libopus made of them, from the tables of contents of their packets:
+CELT alone at 2.5, 5, 10 and 20 ms, narrow, wide, super-wide and full
+band, mono and stereo, packets of one frame (code 0), of two (codes 1
+and 2, in `40ms-vbr`) and of several (code 3: the 40 ms CBR file, and
+six 20 ms frames in each packet of `120ms`); SILK alone in narrow, medium
+and wide band at 10, 20, 40 and 60 ms, mono and stereo; hybrid frames in
+super-wide and full band, with changes to and from CELT and to SILK
+(`hybrid-1ch-swb-20ms` changes mode four times, `silk-2ch-wb-40ms`
+between SILK and CELT three times), all with the redundant frames libopus
+puts in for them; `audio-2ch-16k`, a stereo stream whose packets are all
+mono; `6ch-family1`, 5.1 in four streams, two of them coupled, as FFmpeg
+reads a WAV of six channels without a channel mask; `2ch-family255`, two
+uncoupled mono streams. libopus put 312 samples of pre-skip before each
+file, 120 before the low-delay ones. The 45 s of bursts are for seeking
+over a longer stream.
+
+`opus-2ch-mono-stereo-splice.opus` is made of two files, the stereo
+stream `signal-2ch-48000.wav` makes at `-application voip -b:a 24k` and
+`opus-audio-2ch-16k.opus`, whose packets are mono: its headers are the
+first file's, and its audio packets are taken from the first and the
+second file by turns, seven at a time, by packet number (packets 0 to 6 of
+the first, 7 to 13 of the second, and so on), ten to a page, each page's
+granule position the sum of the durations of the packets up to its end.
+Its packets switch between hybrid and CELT, and between mono and stereo,
+in the middle of a stream.
+
+Each `.ref` file is what FFmpeg decoded the `.opus` file of the same name
+to with libopus, as 32-bit float:
+
+```bash
+ffmpeg -c:a libopus -request_sample_fmt flt -i FILE.opus -f f32le -c:a pcm_f32le FILE.raw
+```
+
+(Without `-request_sample_fmt flt`, FFmpeg's libopus decoder gives 16-bit
+samples, soft-clipped.) Only every 64th frame is kept, every 1024th for
+the 45 s file, after a header of three numbers, little-endian: the step
+(`u32`), the channels (`u32`) and the length of the whole decode in frames
+(`u64`); then the frames kept, their channels interleaved, as `f32`.
+
+Every file decodes to the length libopus gives. The SILK files decode to
+the samples libopus gives, bit for bit. The others, and the CELT frames of
+the mixed ones, come within 8e-5 of libopus, 85 to 89 dB below the
+signal, because that libopus was built with `FLOAT_APPROX`, which works
+out `2^x` for the gains of the CELT bands with a cubic in the fraction of
+`x`, within 1e-4 of it: with the same cubic, which a unit test of
+`src/opus.rs` switches on, the decoder comes within 1.1e-6 of libopus on
+every file, 132 to 143 dB below the signal. Decoded with the C library's
+`exp`, as this decoder does and as a default build of libopus does, the
+samples are the more accurate ones.
+
 ### Formats the system decodes
 
 For `tests/platform.rs`, from the same sources, with FFmpeg 7.1's own

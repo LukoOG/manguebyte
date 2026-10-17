@@ -6,6 +6,7 @@
 //! | [`aiff`] | 1 to 32-bit PCM, either byte order, 32 and 64-bit float | 16 and 24-bit PCM, 32-bit float |
 //! | [`flac`] | everything the format defines | 4 to 32 bits, 1 to 8 channels, levels 0 to 8 |
 //! | [`vorbis`] | Ogg Vorbis: every stream but those with floors of type 0, 1 to 255 channels | no |
+//! | [`opus`] | Ogg Opus: SILK, CELT and hybrid, every frame size and bandwidth, up to 255 channels | no |
 //! | [`mp3`] | MPEG-1, 2 and 2.5 layer III, every rate and stereo coding, gapless with a LAME tag; layers I and II | no |
 //!
 //! [`read_file`] and [`decode`] work out which format they have been given,
@@ -64,6 +65,7 @@ pub mod flac;
 pub mod metadata;
 pub mod mp3;
 mod ogg;
+pub mod opus;
 mod pcm;
 pub mod platform;
 mod player;
@@ -100,6 +102,8 @@ pub enum FileFormat {
     Flac,
     /// Vorbis in an Ogg container.
     OggVorbis,
+    /// Opus in an Ogg container.
+    OggOpus,
     /// MPEG audio: layer III, which is MP3, and layers I and II.
     Mp3,
     /// An MPEG-4 file (`.m4a`, `.mp4`), which holds AAC or ALAC. Decoded
@@ -123,7 +127,7 @@ const ASF_HEADER: [u8; 16] = [
 impl FileFormat {
     /// How many bytes [`detect`](Self::detect) needs to recognise every
     /// format.
-    pub const DETECT_LEN: usize = 16;
+    pub const DETECT_LEN: usize = 64;
 
     /// Recognises a format from the first bytes of a file:
     /// [`DETECT_LEN`](Self::DETECT_LEN) are enough for every format.
@@ -133,11 +137,15 @@ impl FileFormat {
     /// header of an MPEG audio frame. An MPEG-4 file is told by the `ftyp`
     /// box it starts with, ADTS by the sync word of its frames, which MPEG
     /// audio frames do not share.
+    ///
+    /// An Ogg file is taken for Opus if its first page holds the
+    /// identification header of Opus, and for Vorbis otherwise.
     pub fn detect(bytes: &[u8]) -> Option<Self> {
         match bytes.get(..4)? {
             b"RIFF" | b"RF64" => Some(Self::Wav),
             b"FORM" => Some(Self::Aiff),
             b"fLaC" => Some(Self::Flac),
+            b"OggS" if opus::starts_opus(bytes) => Some(Self::OggOpus),
             b"OggS" => Some(Self::OggVorbis),
             b"caff" => Some(Self::Caf),
             _ if bytes.get(4..8) == Some(b"ftyp") => Some(Self::Mp4),
@@ -207,6 +215,8 @@ pub enum FormatError {
     Vorbis(vorbis::VorbisError),
     /// The file is an MP3 file with a problem.
     Mp3(mp3::Mp3Error),
+    /// The file is an Ogg Opus file with a problem.
+    Opus(opus::OpusError),
     /// What was asked cannot be done with this format, or on this system:
     /// the message says what. A format the system's codecs decode is
     /// refused with this where they cannot: see [`platform`].
@@ -225,6 +235,7 @@ impl fmt::Display for FormatError {
             Self::Flac(error) => write!(f, "{error}"),
             Self::Vorbis(error) => write!(f, "{error}"),
             Self::Mp3(error) => write!(f, "{error}"),
+            Self::Opus(error) => write!(f, "{error}"),
             Self::Unsupported(what) => write!(f, "unsupported: {what}"),
             Self::Platform(error) => write!(f, "{error}"),
         }
@@ -241,6 +252,7 @@ impl std::error::Error for FormatError {
             Self::Flac(error) => Some(error),
             Self::Vorbis(error) => Some(error),
             Self::Mp3(error) => Some(error),
+            Self::Opus(error) => Some(error),
             Self::Unsupported(_) => None,
             Self::Platform(error) => Some(error),
         }
@@ -291,6 +303,10 @@ pub fn decode(bytes: &[u8]) -> Result<AudioFile, FormatError> {
         FileFormat::Mp3 => {
             let file = mp3::read(bytes).map_err(FormatError::Mp3)?;
             (file.buffer, file.sample_rate, LOSSY_BITS, file.metadata)
+        }
+        FileFormat::OggOpus => {
+            let file = opus::read(bytes).map_err(FormatError::Opus)?;
+            (file.buffer, opus::SAMPLE_RATE, LOSSY_BITS, file.metadata)
         }
         FileFormat::Mp4 | FileFormat::Aac | FileFormat::Wma | FileFormat::Caf => {
             let mut reader = platform::PlatformReader::open_bytes(bytes.to_vec(), format)?;

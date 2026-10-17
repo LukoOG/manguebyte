@@ -646,7 +646,7 @@ impl<R: Read + Seek> VorbisReader<R> {
 /// For each channel handed out, the channel of the stream it is: the
 /// order of section 4.3.9 of the specification turned into the order of
 /// WAV and FLAC.
-fn channel_order(channels: usize) -> Vec<usize> {
+pub(crate) fn channel_order(channels: usize) -> Vec<usize> {
     match channels {
         // Left, centre, right.
         3 => vec![0, 2, 1],

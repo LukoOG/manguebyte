@@ -351,7 +351,7 @@ fn what_is_not_vorbis_in_an_ogg_file_is_refused() {
     page.extend_from_slice(&[0; 4]);
     page.push(1);
     page.push(8);
-    page.extend_from_slice(b"OpusHead");
+    page.extend_from_slice(b"Speex   ");
     fix_page_checksums(&mut page);
     assert!(matches!(
         decode(&page),

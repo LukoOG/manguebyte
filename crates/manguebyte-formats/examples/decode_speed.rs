@@ -50,6 +50,11 @@ fn main() -> Result<(), FormatError> {
         data!("mp3-tones-2ch-48000-320.mp3"),
         data!("mp3-1ch-22050-64.mp3"),
         data!("mp3-1ch-8000-16.mp3"),
+        data!("opus-celt-2ch-20ms-128k.opus"),
+        data!("opus-celt-2ch-2.5ms-96k.opus"),
+        data!("opus-hybrid-2ch-fb-10ms.opus"),
+        data!("opus-silk-1ch-wb-10ms.opus"),
+        data!("opus-6ch-family1.opus"),
     ];
     println!("{:<34} {:>10} {:>12}", "file", "audio (s)", "x real time");
     for (name, bytes) in files {

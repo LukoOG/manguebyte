@@ -151,7 +151,7 @@ pub fn fitted_closeness(
 }
 
 /// The name of every source, which is also the name of its WAV file.
-pub const SOURCES: [&str; 14] = [
+pub const SOURCES: [&str; 16] = [
     "signal-2ch-44100",
     "signal-1ch-22050",
     "signal-6ch-48000",
@@ -166,6 +166,8 @@ pub const SOURCES: [&str; 14] = [
     "signal-2ch-11025",
     "signal-1ch-12000",
     "tones-2ch-44100",
+    "signal-2ch-48000",
+    "signal-1ch-48000",
 ];
 
 /// The audio of a source and its sample rate.

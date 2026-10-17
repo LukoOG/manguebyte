@@ -77,8 +77,9 @@ mod mdct;
 mod reader;
 mod setup;
 
-pub(crate) use reader::VorbisReader;
+pub(crate) use reader::{VorbisReader, channel_order};
 use setup::Limits;
+pub(crate) use setup::{Comments, parse_comments};
 
 /// The contents of an Ogg Vorbis file.
 #[derive(Debug, Clone, PartialEq)]
