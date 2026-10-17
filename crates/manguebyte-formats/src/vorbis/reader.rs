@@ -121,13 +121,8 @@ pub(crate) struct VorbisReader<R> {
 }
 
 impl<R: Read + Seek> VorbisReader<R> {
-    /// Reads the headers of the stream in `reader` and gets ready to decode
-    /// from its first sample. The comments are not kept.
-    pub(crate) fn new(reader: R) -> Result<Self, VorbisError> {
-        Self::open(reader, false)
-    }
-
-    /// The same, keeping the comments.
+    /// Reads the headers of the stream in `reader`, keeping the comments,
+    /// and gets ready to decode from its first sample.
     pub(crate) fn with_comments(reader: R) -> Result<Self, VorbisError> {
         Self::open(reader, true)
     }

@@ -68,6 +68,8 @@ use std::path::Path;
 
 use manguebyte_core::AudioBuffer;
 
+use crate::metadata::Metadata;
+
 mod bits;
 mod codebook;
 mod decoder;
@@ -91,6 +93,9 @@ pub struct VorbisFile {
     /// A name is ASCII and its case means nothing; a value is text of any
     /// kind. Bytes that are not UTF-8 are replaced.
     pub comments: Vec<(String, String)>,
+    /// The same comments read into the fields of [`Metadata`], with the
+    /// pictures `METADATA_BLOCK_PICTURE` comments carry.
+    pub metadata: Metadata,
 }
 
 /// What went wrong while reading an Ogg Vorbis file.
@@ -177,10 +182,17 @@ fn decode(bytes: &[u8]) -> Result<VorbisFile, VorbisError> {
         out.copy_from_slice(channel);
     }
     let comments = reader.take_comments();
+    let metadata = Metadata::from_vorbis_comments(
+        comments
+            .comments
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str())),
+    );
     Ok(VorbisFile {
         buffer,
         sample_rate: reader.sample_rate(),
         vendor: comments.vendor,
         comments: comments.comments,
+        metadata,
     })
 }

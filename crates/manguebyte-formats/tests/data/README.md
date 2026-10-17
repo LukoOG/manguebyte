@@ -273,3 +273,43 @@ spare, a VBRI header put in place of an Info frame, bytes that are not
 frames between two frames. Intensity stereo and the reordering of short
 blocks are checked by the unit tests of `src/mp3/layer3.rs`, against the
 formulas of the standard.
+
+## Metadata
+
+The `meta-*` files hold tags that another program wrote, for
+`tests/metadata.rs` to read. Their audio is a tone FFmpeg 7.1 generated
+(`lavfi`), and the picture a PNG of 4 by 2 red pixels it generated too:
+
+```bash
+ffmpeg -f lavfi -i "color=c=red:s=4x2" -frames:v 1 -bitexact cover.png
+ffmpeg -f lavfi -i "sine=frequency=440:sample_rate=8000:duration=0.05" -c:a pcm_s16le -write_bext 1 \
+  -metadata title="Frevo" -metadata artist="Manguebyte" -metadata album="Tests" -metadata date="2026" \
+  -metadata comment="A comment" -metadata copyright="(C) 2026" -metadata genre="Frevo" -metadata track="4" \
+  -metadata description="A test tone" -metadata originator="FFmpeg" -metadata originator_reference="MB-1" \
+  -metadata origination_date="2026-10-17" -metadata origination_time="12:34:56" \
+  -metadata time_reference="480000" -metadata coding_history="A=PCM,F=8000,W=16,M=mono" \
+  -bitexact meta-info-bext.wav
+ffmpeg -f lavfi -i "sine=frequency=440:sample_rate=8000:duration=0.05" -i cover.png -map 0 -map 1 \
+  -c:a flac -c:v copy -disposition:v attached_pic -metadata title="Maracatu" -metadata artist="Nação Zumbi" \
+  -metadata album="Da Lama ao Caos" -metadata date="1994" -metadata track="3/12" -metadata genre="Manguebeat" \
+  -metadata BPM="96" -metadata:s:v comment="Cover (front)" -metadata:s:v title="Capa" -bitexact meta-tags-picture.flac
+ffmpeg -f lavfi -i "sine=frequency=440:sample_rate=8000:duration=0.2" -i cover.png -map 0 -map 1 \
+  -c:a libmp3lame -b:a 16k -c:v copy -disposition:v attached_pic -metadata title="Ciranda" \
+  -metadata artist="Lia de Itamaracá" -metadata album="Eu Sou Lia" -metadata date="2000" -metadata track="1/10" \
+  -metadata genre="Ciranda" -metadata TBPM="104" -metadata TKEY="Am" -metadata comment="Ciranda de praia" \
+  -metadata:s:v title="Capa" -metadata:s:v comment="Cover (front)" -bitexact meta-id3v24.mp3
+ffmpeg -f lavfi -i "sine=frequency=440:sample_rate=8000:duration=0.2" -c:a libmp3lame -b:a 16k \
+  -id3v2_version 3 -write_id3v1 1 -metadata title="Coco" -metadata artist="Selma do Coco" \
+  -metadata album="Minha Ciranda" -metadata date="1998" -metadata track="7" -metadata genre="Folk" \
+  -metadata comment="Old tags" -bitexact meta-id3v23-v1.mp3
+```
+
+What FFmpeg made of them, which the tests hold the reader to: the WAV
+file has a `bext` chunk of version 1 before its samples and a `LIST/INFO`
+after the `bext`, with the track number as `IPRT`; the FLAC file has its
+picture block before its Vorbis comment and 8192 bytes of padding; the
+MP3 files carry the comment as a `TXXX` frame described `comment`, not as
+`COMM`, and the ID3v1 tag numbers the genre 80, one of Winamp's additions
+to the 80 genres of ID3v1, which the reader does not name. FFmpeg writes
+no AIFF text chunks, cue points, `smpl` or `iXML`; those are checked by
+writing them and reading them back.

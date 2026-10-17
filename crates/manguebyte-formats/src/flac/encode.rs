@@ -11,6 +11,7 @@ use super::FlacError;
 use super::bits::BitWriter;
 use super::frame::{FrameEncoder, Settings};
 use super::md5::Md5;
+use crate::metadata::{ChunkId, Metadata, Picture, flac_picture_block};
 
 /// The vendor string written into every file, naming the encoder.
 const VENDOR: &str = concat!("manguebyte-formats ", env!("CARGO_PKG_VERSION"));
@@ -53,7 +54,12 @@ const MAX_BLOCK_BODY: usize = (1 << 24) - 1;
 ///   tag with 4 bytes of length; the padding; and the seek table, 18 bytes
 ///   a point, so at most 932,067 points. Seek points that are not used join
 ///   the padding block, so when both are asked for, the padding, 4 bytes
-///   and the seek table must fit one block together;
+///   and the seek table must fit one block together; and each picture, with
+///   its type, MIME type, description and 32 bytes of sizes, and each raw
+///   block;
+/// - raw blocks of a type other than those the encoder writes itself
+///   (stream information, padding, seek table, Vorbis comment) and other
+///   than 127, which is not a type;
 /// - given to the writer beside the options: 1 to 8 channels, and sample
 ///   rates of 1 to 1,048,575 Hz.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +70,11 @@ pub struct FlacOptions {
     padding: u32,
     seek_points: u32,
     tags: Vec<(String, String)>,
+    /// Further metadata blocks, by type, as they are written: pictures and
+    /// raw blocks.
+    blocks: Vec<(u8, Vec<u8>)>,
+    /// Set when a picture was too large to make a block of.
+    oversized: bool,
 }
 
 impl Default for FlacOptions {
@@ -85,6 +96,8 @@ impl FlacOptions {
             padding: 8192,
             seek_points: 100,
             tags: Vec::new(),
+            blocks: Vec::new(),
+            oversized: false,
         }
     }
 
@@ -157,6 +170,44 @@ impl FlacOptions {
     /// more than once.
     pub fn with_tag(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.tags.push((name.into(), value.into()));
+        self
+    }
+
+    /// Adds a picture, such as a cover, in a picture block of its own
+    /// (RFC 9639, section 8.8).
+    ///
+    /// A picture larger than a metadata block can hold, 16,777,215 bytes
+    /// with its description and type, makes the options invalid: see
+    /// [Limits](Self#limits).
+    pub fn with_picture(mut self, picture: &Picture) -> Self {
+        match flac_picture_block(picture) {
+            Some(body) => self.blocks.push((6, body)),
+            // A part beyond 32 bits is beyond a block too.
+            None => self.oversized = true,
+        }
+        self
+    }
+
+    /// Adds what `metadata` holds that FLAC can: its fields and tags as
+    /// Vorbis comments ([`Metadata::to_vorbis_comments`]), its pictures,
+    /// and the FLAC blocks among its raw chunks, such as an application
+    /// block or a cue sheet. The loops, cue points and Broadcast Wave
+    /// fields have no place in FLAC and are left out.
+    ///
+    /// A file read with [`flac::read`](crate::flac::read) and written with
+    /// its metadata keeps every block but the stream information, the seek
+    /// table and the padding, which the encoder writes anew. The vendor
+    /// string becomes this encoder's.
+    pub fn with_metadata(mut self, metadata: &Metadata) -> Self {
+        self.tags.extend(metadata.to_vorbis_comments());
+        for picture in &metadata.pictures {
+            self = self.with_picture(picture);
+        }
+        for chunk in &metadata.chunks {
+            if let ChunkId::Flac(kind) = chunk.id {
+                self.blocks.push((kind, chunk.data.clone()));
+            }
+        }
         self
     }
 
@@ -236,6 +287,21 @@ impl FlacOptions {
             return Err(invalid("FLAC blocks hold 16 to 65535 samples"));
         }
         comment_len(&self.tags)?;
+        for (kind, body) in &self.blocks {
+            // The stream information, padding, seek table and Vorbis
+            // comment are the encoder's own; 127 is not a block type.
+            if matches!(kind, 0 | 1 | 3 | 4) || *kind >= 127 {
+                return Err(invalid(
+                    "a raw FLAC block cannot be of a type the encoder writes",
+                ));
+            }
+            if body.len() > MAX_BLOCK_BODY {
+                return Err(invalid("a picture or block is too large for FLAC"));
+            }
+        }
+        if self.oversized {
+            return Err(invalid("a picture or block is too large for FLAC"));
+        }
         // A metadata block's body has a 24-bit length (RFC 9639, section
         // 8). Seek points that are not used become padding, so when both
         // are asked for, one padding block may have to hold the padding,
@@ -395,6 +461,8 @@ pub(crate) struct Encoder {
     md5: Md5,
     seek_table: SeekTable,
     comment: Vec<u8>,
+    /// Pictures and raw blocks, by type, written after the comment.
+    blocks: Vec<(u8, Vec<u8>)>,
     padding: usize,
 }
 
@@ -437,6 +505,7 @@ impl Encoder {
             md5: Md5::new(),
             seek_table: SeekTable::new(seek_points, sample_rate),
             comment,
+            blocks: options.blocks.clone(),
             padding,
         })
     }
@@ -590,6 +659,11 @@ impl Encoder {
         let table = self.seek_table.capacity;
         4 + (4 + 34)
             + (4 + self.comment.len())
+            + self
+                .blocks
+                .iter()
+                .map(|(_, body)| 4 + body.len())
+                .sum::<usize>()
             + if table > 0 {
                 4 + table * SEEK_POINT_BYTES
             } else {
@@ -668,10 +742,21 @@ impl Encoder {
         };
         out.extend_from_slice(&digest);
 
-        // The vendor string and the tags.
-        let last = seek_block == 0 && padding_block == 0;
-        block_header(&mut out, 4, last, self.comment.len());
+        // The vendor string and the tags, then the pictures and the other
+        // blocks.
+        let after = seek_block == 0 && padding_block == 0;
+        block_header(
+            &mut out,
+            4,
+            after && self.blocks.is_empty(),
+            self.comment.len(),
+        );
         out.extend_from_slice(&self.comment);
+        for (index, (kind, body)) in self.blocks.iter().enumerate() {
+            let last = after && index + 1 == self.blocks.len();
+            block_header(&mut out, *kind, last, body.len());
+            out.extend_from_slice(body);
+        }
 
         if seek_block > 0 {
             block_header(&mut out, 3, padding_block == 0, seek_block - 4);

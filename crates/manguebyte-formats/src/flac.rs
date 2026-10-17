@@ -20,6 +20,11 @@
 //! # Ok::<(), manguebyte_formats::flac::FlacError>(())
 //! ```
 //!
+//! The Vorbis comment and the pictures are read into
+//! [`FlacFile::metadata`], and every other block but the stream
+//! information, the seek table and padding is kept there as it is;
+//! [`FlacOptions::with_metadata`] writes them back.
+//!
 //! The functions here hold a whole file in memory. To decode block by block
 //! and to seek, use [`AudioReader`](crate::AudioReader).
 //!
@@ -97,6 +102,7 @@ use std::path::Path;
 
 use manguebyte_core::AudioBuffer;
 
+use crate::metadata::{self, Budget, ChunkId, Metadata, RawChunk};
 use crate::pcm::read_up_to;
 use crate::window::Window;
 
@@ -120,6 +126,8 @@ pub struct FlacFile {
     pub sample_rate: u32,
     /// Bit depth the samples were stored with.
     pub bits_per_sample: u16,
+    /// The tags of the Vorbis comment, the pictures, and the other blocks.
+    pub metadata: Metadata,
 }
 
 /// What went wrong while reading or writing a FLAC file.
@@ -358,22 +366,26 @@ const PLACEHOLDER_POINT: u64 = u64::MAX;
 const MAX_SEEK_POINTS: usize = 32_768;
 
 /// What comes before the audio of a FLAC stream.
-struct Metadata {
+struct StreamHeader {
     info: StreamInfo,
     /// Offset of the first frame.
     audio_start: u64,
     /// Length of the whole stream in bytes.
     stream_len: u64,
     seek_points: Vec<SeekPoint>,
+    /// The tags, pictures and other blocks.
+    tags: Metadata,
 }
 
 /// Reads the marker and the metadata blocks, leaving the audio unread.
 ///
-/// The seek table is skipped unless `with_seek_table` is set.
+/// The seek table is skipped unless `with_seek_table` is set. The Vorbis
+/// comment and the pictures are read into the metadata, and every block but
+/// the stream information, padding and the seek table is kept.
 fn read_metadata<R: Read + Seek>(
     reader: &mut R,
     with_seek_table: bool,
-) -> Result<Metadata, FlacError> {
+) -> Result<StreamHeader, FlacError> {
     let stream_len = reader.seek(SeekFrom::End(0))?;
     reader.seek(SeekFrom::Start(0))?;
     let mut marker = [0u8; 4];
@@ -388,6 +400,8 @@ fn read_metadata<R: Read + Seek>(
     let mut position = 4u64;
     let mut info = None;
     let mut seek_points = Vec::new();
+    let mut tags = Metadata::default();
+    let mut budget = Budget::new();
     loop {
         if position + 4 > stream_len {
             return Err(FlacError::Truncated);
@@ -413,6 +427,27 @@ fn read_metadata<R: Read + Seek>(
                 seek_points.clear();
                 read_seek_points(reader, length, &mut seek_points)?;
             }
+            // Padding and seek tables hold no metadata; the others do.
+            1 | 3 => {}
+            _ if budget.take(length) => {
+                // The caller has checked that the block lies within the file.
+                let mut body = vec![0u8; length as usize];
+                reader.read_exact(&mut body)?;
+                match kind {
+                    4 => metadata::parse_vorbis_comment_block(&body, &mut tags, &mut budget),
+                    6 => match metadata::parse_flac_picture(&body) {
+                        Some(picture) => tags.pictures.push(picture),
+                        None => tags.chunks.push(RawChunk {
+                            id: ChunkId::Flac(kind),
+                            data: body,
+                        }),
+                    },
+                    _ => tags.chunks.push(RawChunk {
+                        id: ChunkId::Flac(kind),
+                        data: body,
+                    }),
+                }
+            }
             _ => {}
         }
         position += 4 + length;
@@ -421,11 +456,12 @@ fn read_metadata<R: Read + Seek>(
         }
     }
     let info = info.ok_or(FlacError::Malformed("no stream information block"))?;
-    Ok(Metadata {
+    Ok(StreamHeader {
         info,
         audio_start: position,
         stream_len,
         seek_points,
+        tags,
     })
 }
 
@@ -468,7 +504,7 @@ fn read_seek_points<R: Read>(
 }
 
 fn decode(bytes: &[u8]) -> Result<FlacFile, FlacError> {
-    let metadata = read_metadata(&mut Cursor::new(bytes), false)?;
+    let mut metadata = read_metadata(&mut Cursor::new(bytes), false)?;
     let info = metadata.info;
     // The metadata was read from `bytes`, so its end lies within them.
     let audio = &bytes[metadata.audio_start as usize..];
@@ -501,6 +537,7 @@ fn decode(bytes: &[u8]) -> Result<FlacFile, FlacError> {
         buffer,
         sample_rate: info.sample_rate,
         bits_per_sample: info.bits_per_sample as u16,
+        metadata: std::mem::take(&mut metadata.tags),
     })
 }
 
@@ -954,6 +991,8 @@ struct Found {
 /// seek checks that one frame is followed by the next), and the seek table.
 pub(crate) struct FlacReader<R> {
     reader: R,
+    /// The metadata of the stream, until it is taken.
+    tags: Metadata,
     info: StreamInfo,
     scale: f64,
     audio_start: u64,
@@ -1032,7 +1071,13 @@ impl<R: Read + Seek> FlacReader<R> {
             block_position: 0,
             total: (info.total_frames > 0).then_some(info.total_frames),
             lost: false,
+            tags: metadata.tags,
         })
+    }
+
+    /// The tags, pictures and other blocks; empty after the first call.
+    pub(crate) fn take_metadata(&mut self) -> Metadata {
+        std::mem::take(&mut self.tags)
     }
 
     pub(crate) fn sample_rate(&self) -> u32 {

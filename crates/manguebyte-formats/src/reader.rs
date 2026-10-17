@@ -8,7 +8,8 @@ use manguebyte_core::AudioBuffer;
 
 use crate::aiff::{self, AiffDecoder};
 use crate::flac::FlacReader;
-use crate::mp3::Mp3Reader;
+use crate::metadata::Metadata;
+use crate::mp3::{self, Mp3Reader};
 use crate::pcm::{PcmReader, read_up_to};
 use crate::vorbis::VorbisReader;
 use crate::wav::{self, WavDecoder};
@@ -110,6 +111,7 @@ pub struct AudioReader<R> {
     sample_rate: u32,
     bits_per_sample: u16,
     is_float: bool,
+    metadata: Metadata,
 }
 
 enum Inner<R> {
@@ -143,56 +145,88 @@ impl<R: Read + Seek> AudioReader<R> {
         let format = FileFormat::detect(&magic[..have]).ok_or(FormatError::Unrecognized)?;
         Ok(match format {
             FileFormat::Wav => {
-                let stream = wav::open(&mut reader).map_err(FormatError::Wav)?;
+                let mut stream = wav::open(&mut reader).map_err(FormatError::Wav)?;
                 Self {
                     format,
                     sample_rate: stream.sample_rate,
                     bits_per_sample: stream.bits_per_sample,
                     is_float: stream.is_float,
+                    metadata: std::mem::take(&mut stream.metadata),
                     inner: Inner::Wav(PcmReader::new(reader, stream.decoder(), stream.layout)),
                 }
             }
             FileFormat::Aiff => {
-                let stream = aiff::open(&mut reader).map_err(FormatError::Aiff)?;
+                let mut stream = aiff::open(&mut reader).map_err(FormatError::Aiff)?;
                 Self {
                     format,
                     sample_rate: stream.sample_rate,
                     bits_per_sample: stream.bits_per_sample,
                     is_float: stream.is_float,
+                    metadata: std::mem::take(&mut stream.metadata),
                     inner: Inner::Aiff(PcmReader::new(reader, stream.decoder(), stream.layout)),
                 }
             }
             FileFormat::Flac => {
-                let stream = FlacReader::new(reader).map_err(FormatError::Flac)?;
+                let mut stream = FlacReader::new(reader).map_err(FormatError::Flac)?;
                 Self {
                     format,
                     sample_rate: stream.sample_rate(),
                     bits_per_sample: stream.bits_per_sample(),
                     is_float: false,
+                    metadata: stream.take_metadata(),
                     inner: Inner::Flac(Box::new(stream)),
                 }
             }
             FileFormat::OggVorbis => {
-                let stream = VorbisReader::new(reader).map_err(FormatError::Vorbis)?;
+                let mut stream =
+                    VorbisReader::with_comments(reader).map_err(FormatError::Vorbis)?;
+                let comments = stream.take_comments();
+                let metadata = Metadata::from_vorbis_comments(
+                    comments
+                        .comments
+                        .iter()
+                        .map(|(name, value)| (name.as_str(), value.as_str())),
+                );
                 Self {
                     format,
                     sample_rate: stream.sample_rate(),
                     bits_per_sample: LOSSY_BITS,
                     is_float: true,
+                    metadata,
                     inner: Inner::Vorbis(Box::new(stream)),
                 }
             }
             FileFormat::Mp3 => {
+                let metadata = mp3::read_tags(&mut reader)?;
                 let stream = Mp3Reader::new(reader).map_err(FormatError::Mp3)?;
                 Self {
                     format,
                     sample_rate: stream.sample_rate(),
                     bits_per_sample: LOSSY_BITS,
                     is_float: true,
+                    metadata,
                     inner: Inner::Mp3(Box::new(stream)),
                 }
             }
         })
+    }
+
+    /// What the file says beside its audio: tags, markers, loops, pictures,
+    /// and the chunks this crate keeps without interpreting them. The
+    /// [`metadata`](crate::metadata) module says where each format keeps
+    /// each field.
+    ///
+    /// It is read when the file is opened and kept for as long as the
+    /// reader lives: at most 64 MiB, and far less in a real file unless it
+    /// holds large pictures. [`take_metadata`](Self::take_metadata) hands
+    /// it over and frees it.
+    pub fn metadata(&self) -> &Metadata {
+        &self.metadata
+    }
+
+    /// Hands over the metadata, leaving it empty here.
+    pub fn take_metadata(&mut self) -> Metadata {
+        std::mem::take(&mut self.metadata)
     }
 
     /// The format the file is in.

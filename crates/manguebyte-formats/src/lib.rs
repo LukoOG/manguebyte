@@ -32,6 +32,14 @@
 //! [`RecordingWriter`] put them on a worker thread and leave the audio
 //! thread with calls that neither block nor allocate.
 //!
+//! What a file says beside its audio, its tags, cue points, loops,
+//! Broadcast Wave fields and pictures, comes in one model for every format,
+//! [`Metadata`]: in [`AudioFile::metadata`] and [`AudioReader::metadata`]
+//! when reading, and to [`wav::write_with_metadata`],
+//! [`aiff::write_with_metadata`], [`FlacOptions::with_metadata`](flac::FlacOptions::with_metadata)
+//! and [`AudioWriter::set_metadata`] when writing. The [`metadata`] module
+//! says where each format keeps each field.
+//!
 //! Every reader treats its input as untrusted: damaged or hostile data
 //! produces an error, never a panic.
 
@@ -39,6 +47,7 @@
 
 pub mod aiff;
 pub mod flac;
+pub mod metadata;
 pub mod mp3;
 mod ogg;
 mod pcm;
@@ -50,6 +59,7 @@ pub mod wav;
 mod window;
 mod writer;
 
+pub use metadata::Metadata;
 pub use player::{PlayerConfig, PlayerThread, PlayerWorker, StreamingPlayer};
 pub use reader::AudioReader;
 pub use recorder::{RecorderConfig, RecorderThread, RecorderWorker, RecordingWriter};
@@ -117,6 +127,9 @@ pub struct AudioFile {
     pub bits_per_sample: u16,
     /// The format the file was in.
     pub format: FileFormat,
+    /// Tags, markers, loops, pictures and the chunks this crate keeps
+    /// without interpreting them.
+    pub metadata: Metadata,
 }
 
 /// What went wrong while reading an audio file of unknown format, or while
@@ -143,6 +156,9 @@ pub enum FormatError {
     Vorbis(vorbis::VorbisError),
     /// The file is an MP3 file with a problem.
     Mp3(mp3::Mp3Error),
+    /// What was asked cannot be done with this format, or on this system:
+    /// the message says what.
+    Unsupported(&'static str),
 }
 
 impl fmt::Display for FormatError {
@@ -155,6 +171,7 @@ impl fmt::Display for FormatError {
             Self::Flac(error) => write!(f, "{error}"),
             Self::Vorbis(error) => write!(f, "{error}"),
             Self::Mp3(error) => write!(f, "{error}"),
+            Self::Unsupported(what) => write!(f, "unsupported: {what}"),
         }
     }
 }
@@ -169,6 +186,7 @@ impl std::error::Error for FormatError {
             Self::Flac(error) => Some(error),
             Self::Vorbis(error) => Some(error),
             Self::Mp3(error) => Some(error),
+            Self::Unsupported(_) => None,
         }
     }
 }
@@ -182,26 +200,41 @@ impl From<io::Error> for FormatError {
 /// Decodes an audio file held in memory, whatever its format.
 pub fn decode(bytes: &[u8]) -> Result<AudioFile, FormatError> {
     let format = FileFormat::detect(bytes).ok_or(FormatError::Unrecognized)?;
-    let (buffer, sample_rate, bits_per_sample) = match format {
+    let (buffer, sample_rate, bits_per_sample, metadata) = match format {
         FileFormat::Wav => {
             let file = wav::read(bytes).map_err(FormatError::Wav)?;
-            (file.buffer, file.sample_rate, file.bits_per_sample)
+            (
+                file.buffer,
+                file.sample_rate,
+                file.bits_per_sample,
+                file.metadata,
+            )
         }
         FileFormat::Aiff => {
             let file = aiff::read(bytes).map_err(FormatError::Aiff)?;
-            (file.buffer, file.sample_rate, file.bits_per_sample)
+            (
+                file.buffer,
+                file.sample_rate,
+                file.bits_per_sample,
+                file.metadata,
+            )
         }
         FileFormat::Flac => {
             let file = flac::read(bytes).map_err(FormatError::Flac)?;
-            (file.buffer, file.sample_rate, file.bits_per_sample)
+            (
+                file.buffer,
+                file.sample_rate,
+                file.bits_per_sample,
+                file.metadata,
+            )
         }
         FileFormat::OggVorbis => {
             let file = vorbis::read(bytes).map_err(FormatError::Vorbis)?;
-            (file.buffer, file.sample_rate, LOSSY_BITS)
+            (file.buffer, file.sample_rate, LOSSY_BITS, file.metadata)
         }
         FileFormat::Mp3 => {
             let file = mp3::read(bytes).map_err(FormatError::Mp3)?;
-            (file.buffer, file.sample_rate, LOSSY_BITS)
+            (file.buffer, file.sample_rate, LOSSY_BITS, file.metadata)
         }
     };
     Ok(AudioFile {
@@ -209,6 +242,7 @@ pub fn decode(bytes: &[u8]) -> Result<AudioFile, FormatError> {
         sample_rate,
         bits_per_sample,
         format,
+        metadata,
     })
 }
 

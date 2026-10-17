@@ -4,6 +4,11 @@
 //! the `WAVE_FORMAT_EXTENSIBLE` variants and RF64 files, which carry 64-bit
 //! sizes for audio beyond 4 GiB. Writes 16 and 24-bit PCM and 32-bit float.
 //!
+//! The `LIST/INFO`, `bext`, `iXML`, `cue `, `LIST/adtl`, `smpl` and `inst`
+//! chunks are read into [`WavFile::metadata`] and written by
+//! [`write_with_metadata`]; every other chunk is kept as it is. See
+//! [`metadata`](crate::metadata).
+//!
 //! The functions here hold a whole file in memory. To read or write block by
 //! block, use [`AudioReader`](crate::AudioReader) and
 //! [`AudioWriter`](crate::AudioWriter).
@@ -30,6 +35,7 @@ use std::path::Path;
 
 use manguebyte_core::AudioBuffer;
 
+use crate::metadata::{Metadata, RiffMetadata, build_riff};
 use crate::pcm::{self, PcmLayout, PcmReader, SampleDecoder, SampleEncoder};
 
 const FORMAT_PCM: u16 = 1;
@@ -89,6 +95,8 @@ pub struct WavFile {
     pub bits_per_sample: u16,
     /// Whether the samples were stored as floating point.
     pub is_float: bool,
+    /// Tags, markers, loops and the other chunks of the file.
+    pub metadata: Metadata,
 }
 
 /// What went wrong while reading or writing a WAV file.
@@ -149,10 +157,33 @@ pub fn read_file<P: AsRef<Path>>(path: P) -> Result<WavFile, WavError> {
 ///
 /// Integer formats clip samples outside `-1.0..=1.0`.
 pub fn write<W: Write>(
+    writer: W,
+    buffer: &AudioBuffer<f32>,
+    sample_rate: u32,
+    format: WavFormat,
+) -> Result<(), WavError> {
+    write_with_metadata(writer, buffer, sample_rate, format, &Metadata::default())
+}
+
+/// Writes `buffer` to `writer` as a WAV file that also holds `metadata`.
+///
+/// The metadata chunks come after the format and before the samples, in
+/// the layout [`metadata`](crate::metadata) describes. Integer formats clip
+/// samples outside `-1.0..=1.0`.
+///
+/// # Errors
+///
+/// [`WavError::Io`] of kind [`InvalidInput`](io::ErrorKind::InvalidInput),
+/// with nothing written, for metadata a WAV file cannot hold: text with a
+/// NUL character, a `bext` field longer than its room, a loop or cue point
+/// past frame 2^32 - 1, a loop that does not end after it starts, or a raw
+/// chunk that is one the writer makes itself (`fmt `, `data`, ...).
+pub fn write_with_metadata<W: Write>(
     mut writer: W,
     buffer: &AudioBuffer<f32>,
     sample_rate: u32,
     format: WavFormat,
+    metadata: &Metadata,
 ) -> Result<(), WavError> {
     let channels = u16::try_from(buffer.num_channels()).map_err(|_| WavError::TooLarge)?;
     if channels == 0 {
@@ -160,21 +191,25 @@ pub fn write<W: Write>(
             "a WAV file needs at least one channel",
         ));
     }
+    let chunks = metadata_chunks(metadata, sample_rate)?;
     let bytes_per_sample = format.bytes_per_sample();
     let block_align = usize::from(channels) * bytes_per_sample;
     let data_len = buffer
         .num_frames()
         .checked_mul(block_align)
+        .and_then(|len| len.checked_add(chunks.len()))
         .and_then(|len| u32::try_from(len).ok())
         // Leave room for the header and a padding byte in the RIFF size field.
         .filter(|len| *len < u32::MAX - 36)
-        .ok_or(WavError::TooLarge)?;
+        .ok_or(WavError::TooLarge)?
+        - chunks.len() as u32;
     let padding = data_len % 2;
 
     writer.write_all(b"RIFF")?;
-    writer.write_all(&(36 + data_len + padding).to_le_bytes())?;
+    writer.write_all(&(36 + chunks.len() as u32 + data_len + padding).to_le_bytes())?;
     writer.write_all(b"WAVE")?;
     writer.write_all(&fmt_chunk(channels, sample_rate, format))?;
+    writer.write_all(&chunks)?;
     writer.write_all(b"data")?;
     writer.write_all(&data_len.to_le_bytes())?;
 
@@ -200,6 +235,13 @@ pub fn write_file<P: AsRef<Path>>(
         sample_rate,
         format,
     )
+}
+
+/// The metadata chunks of a file holding `metadata`, or the error that
+/// says why they cannot be written.
+pub(crate) fn metadata_chunks(metadata: &Metadata, sample_rate: u32) -> Result<Vec<u8>, WavError> {
+    build_riff(metadata, sample_rate)
+        .map_err(|what| WavError::Io(io::Error::new(io::ErrorKind::InvalidInput, what)))
 }
 
 /// The `fmt ` chunk, with its own header, for audio in `format`.
@@ -228,21 +270,22 @@ fn fmt_chunk(channels: u16, sample_rate: u32, format: WavFormat) -> [u8; 24] {
 pub(crate) const STREAM_HEADER_LEN: usize = 80;
 
 /// The RIFF size of a file that starts with a [`stream_header`]: the form
-/// type, three chunks and the padding byte that follows an odd number of
-/// sample bytes.
-fn stream_riff_size(data_len: u64) -> u64 {
+/// type, three chunks, the padding byte that follows an odd number of
+/// sample bytes, and `extra` bytes of metadata chunks.
+fn stream_riff_size(data_len: u64, extra: u64) -> u64 {
     (STREAM_HEADER_LEN as u64 - 8)
         .saturating_add(data_len)
         .saturating_add(data_len % 2)
+        .saturating_add(extra)
 }
 
-/// Whether `data_len` bytes of samples behind a [`stream_header`] need the
-/// 64-bit sizes of RF64.
+/// Whether `data_len` bytes of samples behind a [`stream_header`], with
+/// `extra` bytes of metadata chunks, need the 64-bit sizes of RF64.
 ///
 /// A size of all ones is never written as a real size: in RF64 it means
 /// "look in the `ds64` chunk".
-pub(crate) fn needs_rf64(data_len: u64) -> bool {
-    stream_riff_size(data_len) >= u64::from(SIZE_IN_DS64)
+pub(crate) fn needs_rf64(data_len: u64, extra: u64) -> bool {
+    stream_riff_size(data_len, extra) >= u64::from(SIZE_IN_DS64)
 }
 
 /// Builds the header of a WAV file whose length is not known when writing
@@ -257,12 +300,15 @@ pub(crate) fn needs_rf64(data_len: u64) -> bool {
 /// The sizes are then all ones, which this crate and other tolerant readers
 /// take to mean "up to the end of the file", so that a recording cut short
 /// before its header was completed can still be read.
+///
+/// `extra` is the length of the metadata chunks that follow the samples.
 pub(crate) fn stream_header(
     channels: u16,
     sample_rate: u32,
     format: WavFormat,
     data_len: Option<u64>,
     always_rf64: bool,
+    extra: u64,
 ) -> [u8; STREAM_HEADER_LEN] {
     let mut header = [0u8; STREAM_HEADER_LEN];
     header[8..12].copy_from_slice(b"WAVE");
@@ -271,12 +317,12 @@ pub(crate) fn stream_header(
     header[72..76].copy_from_slice(b"data");
 
     match data_len {
-        Some(data_len) if always_rf64 || needs_rf64(data_len) => {
+        Some(data_len) if always_rf64 || needs_rf64(data_len, extra) => {
             let block_align = u64::from(channels) * format.bytes_per_sample() as u64;
             header[0..4].copy_from_slice(b"RF64");
             header[4..8].copy_from_slice(&SIZE_IN_DS64.to_le_bytes());
             header[12..16].copy_from_slice(b"ds64");
-            header[20..28].copy_from_slice(&stream_riff_size(data_len).to_le_bytes());
+            header[20..28].copy_from_slice(&stream_riff_size(data_len, extra).to_le_bytes());
             header[28..36].copy_from_slice(&data_len.to_le_bytes());
             // The count of sample frames, as a `fact` chunk would give it.
             header[36..44].copy_from_slice(&(data_len / block_align.max(1)).to_le_bytes());
@@ -285,7 +331,7 @@ pub(crate) fn stream_header(
         }
         _ => {
             let (riff_size, data_size) = match data_len {
-                Some(data_len) => (stream_riff_size(data_len) as u32, data_len as u32),
+                Some(data_len) => (stream_riff_size(data_len, extra) as u32, data_len as u32),
                 None => (SIZE_IN_DS64, SIZE_IN_DS64),
             };
             header[0..4].copy_from_slice(b"RIFF");
@@ -349,7 +395,11 @@ pub(crate) struct WavStream {
     pub bits_per_sample: u16,
     pub is_float: bool,
     pub layout: PcmLayout,
+    pub metadata: Metadata,
 }
+
+/// The most chunk headers a WAV file is searched through.
+const MAX_CHUNKS: u32 = 1 << 16;
 
 impl WavStream {
     pub(crate) fn decoder(&self) -> WavDecoder {
@@ -382,12 +432,18 @@ pub(crate) fn open<R: Read + Seek>(reader: &mut R) -> Result<WavStream, WavError
     let mut data = None;
     // The size of the samples of an RF64 file, where 32 bits are too few.
     let mut long_data_len = None;
+    let mut metadata = RiffMetadata::new();
     let mut position = 12u64;
-    while position.checked_add(8).is_some_and(|end| end <= len) {
+    // Metadata may follow the samples, so every chunk is looked at, up to a
+    // number no real file comes near.
+    let mut chunks = 0;
+    while position.checked_add(8).is_some_and(|end| end <= len) && chunks < MAX_CHUNKS {
+        chunks += 1;
         reader.seek(SeekFrom::Start(position))?;
         let mut header = [0u8; 8];
         reader.read_exact(&mut header)?;
-        let id = &header[0..4];
+        let id = [header[0], header[1], header[2], header[3]];
+        let id = &id;
         let start = position + 8;
         let mut size = u64::from(u32_at(&header, 4));
         if id == b"data" && size == u64::from(SIZE_IN_DS64) {
@@ -401,14 +457,14 @@ pub(crate) fn open<R: Read + Seek>(reader: &mut R) -> Result<WavStream, WavError
         // produced by recorders that were interrupted.
         let end = start.saturating_add(size).min(len);
         match id {
-            b"fmt " => {
+            b"fmt " if layout.is_none() => {
                 // Nothing past the fortieth byte is of interest.
                 let mut body = [0u8; 40];
                 let have = (end - start).min(40) as usize;
                 reader.read_exact(&mut body[..have])?;
                 layout = Some(parse_fmt(&body[..have])?);
             }
-            b"data" => data = Some((start, end - start)),
+            b"data" if data.is_none() => data = Some((start, end - start)),
             b"ds64" if is_rf64 => {
                 // The RIFF size, the data size and the count of frames.
                 if end - start < 24 {
@@ -418,10 +474,15 @@ pub(crate) fn open<R: Read + Seek>(reader: &mut R) -> Result<WavStream, WavError
                 reader.read_exact(&mut body)?;
                 long_data_len = Some(u64_at(&body, 8));
             }
-            _ => {}
-        }
-        if layout.is_some() && data.is_some() {
-            break;
+            _ => {
+                if metadata.wants(id, end - start) {
+                    // No more than the file holds, and no more than the
+                    // metadata may keep.
+                    let mut body = vec![0u8; (end - start) as usize];
+                    reader.read_exact(&mut body)?;
+                    metadata.chunk(*id, &body);
+                }
+            }
         }
         // Chunks are padded to an even length.
         position = start.saturating_add(size).saturating_add(size % 2);
@@ -463,15 +524,17 @@ pub(crate) fn open<R: Read + Seek>(reader: &mut R) -> Result<WavStream, WavError
             data_start,
             frames: data_len / layout.block_align as u64,
         },
+        metadata: metadata.finish(),
     })
 }
 
 fn parse(bytes: &[u8]) -> Result<WavFile, WavError> {
     let mut cursor = Cursor::new(bytes);
-    let stream = open(&mut cursor)?;
+    let mut stream = open(&mut cursor)?;
     // The samples are in memory, so their count fits in a `usize`.
     let frames = usize::try_from(stream.layout.frames).map_err(|_| WavError::TooLarge)?;
     let mut buffer = AudioBuffer::new(stream.layout.channels, frames);
+    let metadata = std::mem::take(&mut stream.metadata);
     PcmReader::new(cursor, stream.decoder(), stream.layout).read(&mut buffer)?;
 
     Ok(WavFile {
@@ -479,6 +542,7 @@ fn parse(bytes: &[u8]) -> Result<WavFile, WavError> {
         sample_rate: stream.sample_rate,
         bits_per_sample: stream.bits_per_sample,
         is_float: stream.is_float,
+        metadata,
     })
 }
 
@@ -678,7 +742,7 @@ mod tests {
     #[test]
     fn a_streamed_header_stays_riff_while_32_bits_are_enough() {
         for data_len in [0u64, 4, 4_000, 0xFFFF_FFB4, 0xFFFF_FFB6] {
-            let header = stream_header(2, 48_000, WavFormat::Int16, Some(data_len), false);
+            let header = stream_header(2, 48_000, WavFormat::Int16, Some(data_len), false, 0);
             let sizes = sizes(&header);
             assert_eq!(&sizes.form, b"RIFF", "{data_len}");
             assert_eq!(&sizes.reserved, b"JUNK", "{data_len}");
@@ -688,8 +752,8 @@ mod tests {
             assert!(header[20..48].iter().all(|&byte| byte == 0));
         }
         // The largest size a RIFF header can state: one below all ones.
-        assert!(!needs_rf64(0xFFFF_FFB6));
-        assert!(needs_rf64(0xFFFF_FFB7));
+        assert!(!needs_rf64(0xFFFF_FFB6, 0));
+        assert!(needs_rf64(0xFFFF_FFB7, 0));
     }
 
     #[test]
@@ -701,7 +765,7 @@ mod tests {
                 let channels = 32u16;
                 let block_align = u64::from(channels) * format.bytes_per_sample() as u64;
                 let data_len = data_len.next_multiple_of(block_align);
-                let header = stream_header(channels, 192_000, format, Some(data_len), false);
+                let header = stream_header(channels, 192_000, format, Some(data_len), false, 0);
                 let sizes = sizes(&header);
                 assert_eq!(&sizes.form, b"RF64");
                 assert_eq!(&sizes.reserved, b"ds64");
@@ -718,7 +782,7 @@ mod tests {
 
     #[test]
     fn a_streamed_header_can_be_rf64_at_any_length_and_reads_back() {
-        let header = stream_header(1, 8_000, WavFormat::Int24, Some(9), true);
+        let header = stream_header(1, 8_000, WavFormat::Int24, Some(9), true, 0);
         let sizes = sizes(&header);
         assert_eq!(&sizes.form, b"RF64");
         assert_eq!(sizes.long_data_size, 9);
@@ -738,7 +802,7 @@ mod tests {
 
     #[test]
     fn an_unfinished_streamed_header_reads_to_the_end_of_the_file() {
-        let header = stream_header(1, 8_000, WavFormat::Int16, None, false);
+        let header = stream_header(1, 8_000, WavFormat::Int16, None, false, 0);
         let sizes = sizes(&header);
         assert_eq!(&sizes.form, b"RIFF");
         assert_eq!(sizes.riff_size, 0xFFFF_FFFF);

@@ -19,9 +19,10 @@
 //!
 //! # What comes out
 //!
-//! - ID3v2 tags at the start of a file are stepped over, and so is anything
-//!   between or after the frames that is not a frame, such as an ID3v1 or
-//!   APE tag at the end.
+//! - ID3v2 tags at the start of a file, of versions 2.2, 2.3 and 2.4, and
+//!   an ID3v1 tag at its end, are read into [`Mp3File::metadata`]. Anything
+//!   between or after the frames that is not a frame, such as an APE tag,
+//!   is stepped over.
 //! - Many encoders put a frame of silence first that holds a Xing, Info or
 //!   VBRI header, which says how many frames follow. That frame is not
 //!   audio and is not decoded. When it also holds a LAME tag, which LAME and
@@ -55,10 +56,13 @@
 
 use std::fmt;
 use std::fs::File;
-use std::io::{self, BufReader, Cursor, Read};
+use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use manguebyte_core::AudioBuffer;
+
+use crate::metadata::{Budget, MAX_CHUNK, Metadata, read_id3v1, read_id3v2};
+use crate::pcm::read_up_to;
 
 mod bits;
 mod header;
@@ -78,6 +82,8 @@ pub struct Mp3File {
     pub buffer: AudioBuffer<f32>,
     /// Sample rate in hertz.
     pub sample_rate: u32,
+    /// What the ID3v2 and ID3v1 tags say.
+    pub metadata: Metadata,
 }
 
 /// What went wrong while reading an MP3 file.
@@ -134,7 +140,44 @@ pub fn read_file<P: AsRef<Path>>(path: P) -> Result<Mp3File, Mp3Error> {
     read(BufReader::new(File::open(path)?))
 }
 
+/// Reads the ID3v2 tags at the start of a stream, and the ID3v1 tag at its
+/// end, into one [`Metadata`]: where both say something, ID3v2 is taken.
+/// A tag larger than 16 MiB is stepped over, and damage to a tag leaves
+/// out what it damaged.
+pub(crate) fn read_tags<R: Read + Seek>(reader: &mut R) -> io::Result<Metadata> {
+    let len = reader.seek(SeekFrom::End(0))?;
+    let mut metadata = Metadata::default();
+    let mut budget = Budget::new();
+    let mut start = 0u64;
+    while start < len {
+        reader.seek(SeekFrom::Start(start))?;
+        let mut head = [0u8; 10];
+        let have = read_up_to(reader, &mut head)?;
+        let Some(tag_len) = id3v2_len(&head[..have]) else {
+            break;
+        };
+        let keep = tag_len.min(len - start);
+        if keep <= MAX_CHUNK {
+            reader.seek(SeekFrom::Start(start))?;
+            let mut tag = vec![0u8; keep as usize];
+            reader.read_exact(&mut tag)?;
+            read_id3v2(&tag, &mut metadata, &mut budget);
+        }
+        start = start.saturating_add(tag_len);
+    }
+    if len >= start.saturating_add(128) {
+        reader.seek(SeekFrom::End(-128))?;
+        let mut last = [0u8; 128];
+        reader.read_exact(&mut last)?;
+        if let Some(v1) = read_id3v1(&last) {
+            metadata.fill_from(v1);
+        }
+    }
+    Ok(metadata)
+}
+
 fn decode(bytes: &[u8]) -> Result<Mp3File, Mp3Error> {
+    let metadata = read_tags(&mut Cursor::new(bytes))?;
     let mut reader = Mp3Reader::new(Cursor::new(bytes))?;
     let channels = reader.num_channels();
     // The length a header states is trusted only as far as the data could
@@ -166,5 +209,6 @@ fn decode(bytes: &[u8]) -> Result<Mp3File, Mp3Error> {
     Ok(Mp3File {
         buffer,
         sample_rate: reader.sample_rate(),
+        metadata,
     })
 }

@@ -4,6 +4,10 @@
 //! or little-endian (`sowt`), and 32 and 64-bit float. Writes 16 and 24-bit
 //! PCM and 32-bit float.
 //!
+//! The `NAME`, `AUTH`, `(c) `, `ANNO`, `MARK` and `INST` chunks are read
+//! into [`AiffFile::metadata`] and written by [`write_with_metadata`];
+//! every other chunk is kept as it is. See [`metadata`](crate::metadata).
+//!
 //! The functions here hold a whole file in memory. To read or write block by
 //! block, use [`AudioReader`](crate::AudioReader) and
 //! [`AudioWriter`](crate::AudioWriter).
@@ -30,6 +34,7 @@ use std::path::Path;
 
 use manguebyte_core::AudioBuffer;
 
+use crate::metadata::{IffMetadata, Metadata, build_iff};
 use crate::pcm::{self, PcmLayout, PcmReader, SampleDecoder, SampleEncoder};
 
 /// How samples are stored in an AIFF file.
@@ -89,6 +94,8 @@ pub struct AiffFile {
     pub bits_per_sample: u16,
     /// Whether the samples were stored as floating point.
     pub is_float: bool,
+    /// Text, markers, loops and the other chunks of the file.
+    pub metadata: Metadata,
 }
 
 /// What went wrong while reading or writing an AIFF file.
@@ -225,8 +232,12 @@ pub(crate) struct AiffStream {
     pub bits_per_sample: u16,
     pub is_float: bool,
     pub layout: PcmLayout,
+    pub metadata: Metadata,
     encoding: Encoding,
 }
+
+/// The most chunk headers an AIFF file is searched through.
+const MAX_CHUNKS: u32 = 1 << 16;
 
 impl AiffStream {
     pub(crate) fn decoder(&self) -> AiffDecoder {
@@ -257,12 +268,16 @@ pub(crate) fn open<R: Read + Seek>(reader: &mut R) -> Result<AiffStream, AiffErr
     let mut common: Option<(usize, u64, u32, f64, Encoding)> = None;
     // Where the samples start, and how many bytes of them there are.
     let mut sound: Option<(u64, u64)> = None;
+    let mut metadata = IffMetadata::new();
     let mut position = 12u64;
-    while position.checked_add(8).is_some_and(|end| end <= len) {
+    let mut chunks = 0;
+    while position.checked_add(8).is_some_and(|end| end <= len) && chunks < MAX_CHUNKS {
+        chunks += 1;
         reader.seek(SeekFrom::Start(position))?;
         let mut header = [0u8; 8];
         reader.read_exact(&mut header)?;
-        let id = &header[..4];
+        let id = [header[0], header[1], header[2], header[3]];
+        let id = &id;
         let size = u64::from(u32_at(&header, 4));
         let start = position + 8;
         // A sound chunk that claims to run past the end is read as far as
@@ -270,7 +285,7 @@ pub(crate) fn open<R: Read + Seek>(reader: &mut R) -> Result<AiffStream, AiffErr
         let end = start.saturating_add(size).min(len);
         let body_len = end - start;
         match id {
-            b"COMM" => {
+            b"COMM" if common.is_none() => {
                 // The fields of interest end with the compression type.
                 let mut body = [0u8; 22];
                 let have = body_len.min(22) as usize;
@@ -297,7 +312,7 @@ pub(crate) fn open<R: Read + Seek>(reader: &mut R) -> Result<AiffStream, AiffErr
                 };
                 common = Some((channels, frames, bits, rate, encoding));
             }
-            b"SSND" => {
+            b"SSND" if sound.is_none() => {
                 if body_len < 8 {
                     return Err(AiffError::Malformed("sound chunk too short"));
                 }
@@ -311,7 +326,15 @@ pub(crate) fn open<R: Read + Seek>(reader: &mut R) -> Result<AiffStream, AiffErr
                     (end, 0)
                 });
             }
-            _ => {}
+            _ => {
+                if metadata.wants(id, body_len) {
+                    // No more than the file holds, and no more than the
+                    // metadata may keep.
+                    let mut body = vec![0u8; body_len as usize];
+                    reader.read_exact(&mut body)?;
+                    metadata.chunk(*id, &body);
+                }
+            }
         }
         // Chunks are padded to an even length.
         position = start.saturating_add(size).saturating_add(size % 2);
@@ -353,16 +376,18 @@ pub(crate) fn open<R: Read + Seek>(reader: &mut R) -> Result<AiffStream, AiffErr
             data_start,
             frames,
         },
+        metadata: metadata.finish(),
         encoding,
     })
 }
 
 fn parse(bytes: &[u8]) -> Result<AiffFile, AiffError> {
     let mut cursor = Cursor::new(bytes);
-    let stream = open(&mut cursor)?;
+    let mut stream = open(&mut cursor)?;
     // The samples are in memory, so their count fits in a `usize`.
     let frames = usize::try_from(stream.layout.frames).map_err(|_| AiffError::TooLarge)?;
     let mut buffer = AudioBuffer::new(stream.layout.channels, frames);
+    let metadata = std::mem::take(&mut stream.metadata);
     PcmReader::new(cursor, stream.decoder(), stream.layout).read(&mut buffer)?;
 
     Ok(AiffFile {
@@ -370,11 +395,15 @@ fn parse(bytes: &[u8]) -> Result<AiffFile, AiffError> {
         sample_rate: stream.sample_rate,
         bits_per_sample: stream.bits_per_sample,
         is_float: stream.is_float,
+        metadata,
     })
 }
 
 /// Length of the longest header [`header`] builds, the AIFF-C one.
 pub(crate) const MAX_HEADER_LEN: usize = 60;
+
+/// Length of the header of the sound chunk, with its offset and block size.
+pub(crate) const SOUND_HEADER_LEN: usize = 16;
 
 /// Whether `frames` frames taking `data_len` bytes fit the 32-bit sizes of
 /// the format, with room for the header.
@@ -400,11 +429,16 @@ const UNFINISHED_FRAMES: u32 = 0x7FFF_FFFF;
 /// frames is [`UNFINISHED_FRAMES`], all of which this crate reads as "up to
 /// the end of the file", so that a recording cut short before its header
 /// was completed can still be read.
+///
+/// `extra` is the length of the metadata chunks the file holds, before the
+/// sound chunk, whose header is the last [`SOUND_HEADER_LEN`] bytes of what
+/// this builds, or after the samples.
 pub(crate) fn header(
     channels: u16,
     sample_rate: u32,
     format: AiffFormat,
     sizes: Option<(u32, u32)>,
+    extra: u32,
 ) -> ([u8; MAX_HEADER_LEN], usize) {
     let is_float = format.is_float();
     let bits = (format.bytes_per_sample() * 8) as u16;
@@ -413,7 +447,7 @@ pub(crate) fn header(
     let (frames, sound_len, form_len) = match sizes {
         Some((frames, data_len)) => {
             let padding = data_len % 2;
-            let form_len = 4 + (8 + common_len) + (8 + 8 + data_len) + padding;
+            let form_len = 4 + (8 + common_len) + (8 + 8 + data_len) + padding + extra;
             (frames, 8 + data_len, form_len)
         }
         None => (UNFINISHED_FRAMES, u32::MAX, u32::MAX),
@@ -447,19 +481,43 @@ pub(crate) fn header(
 ///
 /// Integer formats clip to full scale.
 pub fn write<W: Write>(
-    mut writer: W,
+    writer: W,
     buffer: &AudioBuffer<f32>,
     sample_rate: u32,
     format: AiffFormat,
 ) -> Result<(), AiffError> {
+    write_with_metadata(writer, buffer, sample_rate, format, &Metadata::default())
+}
+
+/// Writes `buffer` to `writer` as an AIFF file that also holds `metadata`.
+///
+/// The metadata chunks come after the common chunk and before the samples,
+/// in the layout [`metadata`](crate::metadata) describes. Integer formats
+/// clip to full scale.
+///
+/// # Errors
+///
+/// [`AiffError::Io`] of kind [`InvalidInput`](io::ErrorKind::InvalidInput),
+/// with nothing written, for metadata an AIFF file cannot hold: a marker
+/// past frame 2^32 - 1 or with a name over 255 bytes, more than 32767
+/// markers, a loop that does not end after it starts, or a raw chunk that
+/// is one the writer makes itself (`COMM`, `SSND`, `FVER`).
+pub fn write_with_metadata<W: Write>(
+    mut writer: W,
+    buffer: &AudioBuffer<f32>,
+    sample_rate: u32,
+    format: AiffFormat,
+    metadata: &Metadata,
+) -> Result<(), AiffError> {
     let channels = u16::try_from(buffer.num_channels()).map_err(|_| AiffError::TooLarge)?;
     let frames = u32::try_from(buffer.num_frames()).map_err(|_| AiffError::TooLarge)?;
+    let chunks = metadata_chunks(metadata)?;
     let bytes_per_sample = format.bytes_per_sample();
     let frame_bytes = buffer.num_channels() * bytes_per_sample;
     let data_len = buffer
         .num_frames()
         .checked_mul(frame_bytes)
-        .filter(|len| *len < u32::MAX as usize - 64)
+        .filter(|len| len.saturating_add(chunks.len()) < u32::MAX as usize - 64)
         .ok_or(AiffError::TooLarge)?;
 
     let (header, header_len) = header(
@@ -467,8 +525,12 @@ pub fn write<W: Write>(
         sample_rate,
         format,
         Some((frames, data_len as u32)),
+        chunks.len() as u32,
     );
-    writer.write_all(&header[..header_len])?;
+    let sound_at = header_len - SOUND_HEADER_LEN;
+    writer.write_all(&header[..sound_at])?;
+    writer.write_all(&chunks)?;
+    writer.write_all(&header[sound_at..header_len])?;
 
     let mut scratch = vec![0; pcm::scratch_len(frame_bytes, u64::from(frames))];
     pcm::write_planar(&mut writer, format, bytes_per_sample, buffer, &mut scratch)?;
@@ -477,6 +539,13 @@ pub fn write<W: Write>(
     }
     writer.flush()?;
     Ok(())
+}
+
+/// The metadata chunks of a file holding `metadata`, or the error that
+/// says why they cannot be written.
+pub(crate) fn metadata_chunks(metadata: &Metadata) -> Result<Vec<u8>, AiffError> {
+    build_iff(metadata)
+        .map_err(|what| AiffError::Io(io::Error::new(io::ErrorKind::InvalidInput, what)))
 }
 
 /// Writes `buffer` to the file at `path` as an AIFF file.
@@ -599,7 +668,7 @@ mod tests {
     #[test]
     fn an_unfinished_header_reads_to_the_end_of_the_file() {
         for format in [AiffFormat::Int16, AiffFormat::Float32] {
-            let (header, header_len) = header(1, 8_000, format, None);
+            let (header, header_len) = header(1, 8_000, format, None, 0);
             assert_eq!(u32_at(&header, 4), u32::MAX);
             assert_eq!(u32_at(&header, 22), UNFINISHED_FRAMES);
             assert_eq!(u32_at(&header, header_len - 12), u32::MAX);

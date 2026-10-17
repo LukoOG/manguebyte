@@ -8,6 +8,7 @@ use manguebyte_core::AudioBuffer;
 
 use crate::aiff::{self, AiffError, AiffFormat};
 use crate::flac::{FlacOptions, FlacStream};
+use crate::metadata::Metadata;
 use crate::pcm;
 use crate::wav::{self, WavError, WavFormat};
 use crate::{FileFormat, FormatError};
@@ -115,6 +116,8 @@ pub struct AudioWriter<W: Write + Seek> {
     torn: bool,
     /// A whole number of frames, encoded before each write.
     scratch: Vec<u8>,
+    /// Metadata chunks, written after the samples by `finish`.
+    metadata: Vec<u8>,
 }
 
 enum Kind {
@@ -231,7 +234,7 @@ impl<W: Write + Seek> AudioWriter<W> {
                 "a WAV file needs at least one channel",
             )));
         }
-        let header = wav::stream_header(channels, sample_rate, format, None, always_rf64);
+        let header = wav::stream_header(channels, sample_rate, format, None, always_rf64, 0);
         let kind = Kind::Wav {
             format,
             always_rf64,
@@ -257,7 +260,7 @@ impl<W: Write + Seek> AudioWriter<W> {
                 "an AIFF file needs at least one channel",
             )));
         }
-        let (header, header_len) = aiff::header(channels, sample_rate, format, None);
+        let (header, header_len) = aiff::header(channels, sample_rate, format, None, 0);
         let kind = Kind::Aiff { format };
         Self::start(writer, kind, channels, sample_rate, &header[..header_len])
     }
@@ -340,6 +343,7 @@ impl<W: Write + Seek> AudioWriter<W> {
             frames: 0,
             torn: false,
             scratch: Vec::new(),
+            metadata: Vec::new(),
         })
     }
 
@@ -363,7 +367,43 @@ impl<W: Write + Seek> AudioWriter<W> {
             frames: 0,
             torn: false,
             scratch: vec![0; pcm::scratch_len(frame_bytes, u64::MAX)],
+            metadata: Vec::new(),
         })
+    }
+
+    /// Sets the metadata to write with the file: tags, markers, loops and
+    /// the other chunks of [`Metadata`], laid out as the
+    /// [`metadata`](crate::metadata) module says. It replaces what an
+    /// earlier call set, and may be called at any time before
+    /// [`finish`](Self::finish), which writes it after the samples.
+    ///
+    /// RIFF and AIFF allow chunks in any order, and this crate and most
+    /// software read them after the samples, which is where a recorder
+    /// that learns its cue points while it records has to put them. A
+    /// reader that stops at the sound data misses them; to put metadata
+    /// before the samples, write the whole file with
+    /// [`wav::write_with_metadata`] or [`aiff::write_with_metadata`].
+    ///
+    /// # Errors
+    ///
+    /// For WAV and AIFF, the errors of [`wav::write_with_metadata`] and
+    /// [`aiff::write_with_metadata`], before anything is written; the
+    /// metadata set before stays. For FLAC, whose metadata comes before the
+    /// audio, [`FormatError::Unsupported`]: put it in the options with
+    /// [`FlacOptions::with_metadata`].
+    pub fn set_metadata(&mut self, metadata: &Metadata) -> Result<(), FormatError> {
+        self.metadata = match &self.kind {
+            Kind::Wav { .. } => {
+                wav::metadata_chunks(metadata, self.sample_rate).map_err(FormatError::Wav)?
+            }
+            Kind::Aiff { .. } => aiff::metadata_chunks(metadata).map_err(FormatError::Aiff)?,
+            Kind::Flac(_) => {
+                return Err(FormatError::Unsupported(
+                    "FLAC metadata goes in the options, with FlacOptions::with_metadata",
+                ));
+            }
+        };
+        Ok(())
     }
 
     /// The format being written.
@@ -563,7 +603,14 @@ impl<W: Write + Seek> AudioWriter<W> {
     /// is still completed on a disk that has no room left. If this returns
     /// an error after a write has failed, look at the file all the same: the
     /// one thing that can then be missing is the padding byte that follows
-    /// an odd number of sample bytes.
+    /// an odd number of sample bytes, and the
+    /// [metadata](Self::set_metadata), which comes after it. The header
+    /// counts the metadata in the length of the file; a reader that finds
+    /// the file shorter, as this crate's does, reads it as it is.
+    ///
+    /// An AIFF file whose metadata would take it past 4 GiB is finished
+    /// without the metadata, and this returns
+    /// [`AiffError::TooLarge`](crate::aiff::AiffError::TooLarge).
     pub fn finish(mut self) -> Result<W, FormatError> {
         if let Kind::Flac(stream) = &mut self.kind {
             stream.finish(&mut self.writer)?;
@@ -573,6 +620,7 @@ impl<W: Write + Seek> AudioWriter<W> {
         let data_len = self.frames * self.frame_bytes();
         // Where the samples end, which is where the writer stands.
         let end = self.data_start + data_len;
+        let mut too_large = false;
         self.writer.seek(SeekFrom::Start(self.origin))?;
         match self.kind {
             Kind::Wav {
@@ -585,25 +633,39 @@ impl<W: Write + Seek> AudioWriter<W> {
                     format,
                     Some(data_len),
                     always_rf64,
+                    self.metadata.len() as u64,
                 );
                 self.writer.write_all(&header)?;
             }
             Kind::Flac(_) => {}
             Kind::Aiff { format } => {
+                if !aiff::fits(self.frames, data_len + self.metadata.len() as u64) {
+                    self.metadata.clear();
+                    too_large = true;
+                }
                 // `make_room` kept both within 32 bits.
                 let sizes = (self.frames as u32, data_len as u32);
-                let (header, header_len) =
-                    aiff::header(self.channels, self.sample_rate, format, Some(sizes));
+                let (header, header_len) = aiff::header(
+                    self.channels,
+                    self.sample_rate,
+                    format,
+                    Some(sizes),
+                    self.metadata.len() as u32,
+                );
                 self.writer.write_all(&header[..header_len])?;
             }
         }
         self.writer.seek(SeekFrom::Start(end))?;
-        // Chunks are padded to an even length. This is the only byte added
-        // here, and so the only one a full disk can refuse.
+        // Chunks are padded to an even length. This byte and the metadata
+        // are all that is added here, and so all a full disk can refuse.
         if data_len % 2 == 1 {
             self.writer.write_all(&[0])?;
         }
+        self.writer.write_all(&self.metadata)?;
         self.writer.flush()?;
+        if too_large {
+            return Err(FormatError::Aiff(AiffError::TooLarge));
+        }
         Ok(self.writer)
     }
 }
