@@ -90,7 +90,9 @@ Nothing has been published to crates.io yet. Everything below is on `main`.
   callback or the connection the host set; parameters with their units,
   value strings and text both ways; `ScheduleParameters` and
   `MusicDeviceMIDIEvent` (and `StartNote`, `StopNote`) on their frames; the transport from the host's
-  callbacks; `ClassInfo` holding the codes and the state text; latency,
+  callbacks; `ClassInfo` holding the codes, the present preset's name and
+  the state text; the present preset (`PresentPreset` and the deprecated
+  `CurrentPreset`, -1 and "Untitled" until the host sets one); latency,
   tail, maximum frames per slice, channel layouts, bypass for effects,
   property listeners and render notifications. Render allocates nothing
   and never waits. The wrapper builds on every system: elsewhere than
