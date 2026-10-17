@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # A branch named `ci/...` runs the whole CI when pushed, so a change can
+    # be checked on every system before it is merged.
+    branches: [main, "ci/**"]
   pull_request:
 
 env:
