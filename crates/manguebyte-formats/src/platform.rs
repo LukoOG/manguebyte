@@ -274,6 +274,7 @@ impl Pending {
     }
 
     /// Drops the frames before `frame`, if they are held.
+    #[cfg(windows)]
     pub(crate) fn skip_to(&mut self, frame: u64, channels: usize) {
         let held = (self.samples.len() / channels) as u64;
         let skip = frame.saturating_sub(self.first).min(held);

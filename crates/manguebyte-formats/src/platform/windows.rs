@@ -690,10 +690,15 @@ impl<D: Decoder> Reader<D> {
             FileFormat::Mp4 => self.frames.map(|frames| frames + self.skip),
             _ => None,
         };
-        // After a seek in WMA, the decoder's first block does not start
-        // where its time stamp says (two frames out, measured on Windows
-        // 11), so there too the decoder walks or starts again.
-        self.exact_seeks = !matches!(format, FileFormat::Aac | FileFormat::Wma);
+        // Media Foundation's own seeks are not trusted in any format. After
+        // a seek in WMA the decoder's first block does not start where its
+        // time stamp says (two frames out, measured on Windows 11), and on
+        // Windows Server the AAC decoder stamps the blocks of an MPEG-4 file
+        // wrongly after a seek (measured in CI: what a seek read differed
+        // from a whole decode by 0.93). So the decoder always walks on to
+        // the frame wanted, or starts again from the first: exact on every
+        // version, at the cost of decoding up to the place.
+        self.exact_seeks = false;
     }
 
     pub(crate) fn sample_rate(&self) -> u32 {
