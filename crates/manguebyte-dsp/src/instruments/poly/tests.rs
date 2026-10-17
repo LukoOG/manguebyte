@@ -1049,7 +1049,11 @@ fn the_library_is_large_covers_every_category_and_is_documented_in_order() {
             preset.category.name(),
             preset.description
         );
-        assert!(docs.contains(&row), "{} is not in the table as it is", preset.name);
+        assert!(
+            docs.contains(&row),
+            "{} is not in the table as it is",
+            preset.name
+        );
     }
 }
 

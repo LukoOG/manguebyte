@@ -941,7 +941,7 @@ pub static PRESETS: [Preset; 68] = [
                 ..lfo(Lfo::Sine, 0.12)
             }),
             matrix: matrix(&[slot(Src::Lfo1, Dst::Cutoff, 2.5)]),
-            level: 0.77,
+            level: 0.45,
             ..BASE
         },
     ),
@@ -1028,7 +1028,7 @@ pub static PRESETS: [Preset; 68] = [
                 env(0.0, 0.02, 0.0, 0.01),
             ),
             matrix: matrix(&[slot(Src::Env3, Dst::NoiseLevel, 1.0)]),
-            level: 4.0,
+            level: 3.0,
             ..BASE
         },
     ),
@@ -1409,7 +1409,7 @@ pub static PRESETS: [Preset; 68] = [
                 slot(Src::Env3, Dst::Pitch, 12.0),
                 slot(Src::Env3, Dst::Cutoff, 6.0),
             ]),
-            level: 0.40,
+            level: 0.80,
             ..BASE
         },
     ),
@@ -1448,7 +1448,7 @@ pub static PRESETS: [Preset; 68] = [
                 ..lfo(Lfo::Sine, 0.2)
             }),
             matrix: matrix(&[slot(Src::Lfo1, Dst::Cutoff, 2.5)]),
-            level: 3.01,
+            level: 1.80,
             ..BASE
         },
     ),
