@@ -141,9 +141,12 @@ test('loadSfz measures an instrument between quanta, and two recorded 12 dB apar
     await engine.createPart(0, 'sampler', 'none');
     await engine.createPart(1, 'sampler', 'none');
     for (const [part, name] of [[0, 'loud'], [1, 'quiet']]) {
-      const { error, quanta } = await runUntil(context, engine.loadSfz(part, `https://samples.test/${name}/voice.sfz`, { fetch }));
+      const loading = engine.loadSfz(part, `https://samples.test/${name}/voice.sfz`, { fetch });
+      const { error } = await runUntil(context, loading);
       assert.equal(error, undefined);
-      // Two files, then 4.5 s of the phrase measured 8 192 frames a quantum.
+      // Playable, then 4.5 s of the phrase measured 8 192 frames a quantum.
+      const { error: unmeasured, quanta } = await runUntil(context, loading.normalized);
+      assert.equal(unmeasured, undefined);
       assert.ok(quanta >= 27, `${quanta} quanta`);
     }
     const [loud, quiet] = [await level(0), await level(1)];
@@ -154,6 +157,68 @@ test('loadSfz measures an instrument between quanta, and two recorded 12 dB apar
     const recorded = await level(0);
     assert.ok(Math.abs(recorded - 0.8 * 0.5 * (102 / 127) ** 2) < 0.005, `${recorded}`);
     assert.ok(recorded > 2 * loud);
+    await engine.close();
+  } finally {
+    engine.release();
+  }
+});
+
+test('a note played as soon as loadSfz resolves sounds, and normalized settles later', { skip: skipWithoutWasm }, async () => {
+  const context = new FakeContext(0);
+  context.state = 'running';
+  const engine = await make(context);
+  try {
+    await engine.createPart(0, 'sampler', 'none');
+    const loading = engine.loadSfz(0, `${BASE}voice.sfz`, { fetch: server().fetch });
+    let normalizedAt = null;
+    loading.normalized.then(() => (normalizedAt = context.frame));
+    const { value: summary, quanta: playable } = await runUntil(context, loading);
+    assert.equal(summary.regions, 2);
+    // Two files decoded, the instrument handed over: a few quanta.
+    assert.ok(playable <= 6, `playable after ${playable} quanta`);
+    assert.equal(normalizedAt, null, 'not measured yet');
+    // Played at once, with no time: it lands on the next quantum's first frame.
+    engine.noteOn(0, 69, 1);
+    const { left: early } = await context.run(2);
+    assert.ok(firstSound(early) >= 0 && firstSound(early) <= QUANTUM, `first sound at ${firstSound(early)}`);
+    const { value: normalized, quanta } = await runUntil(context, loading.normalized);
+    // 4.5 s of the phrase, 8 192 frames a quantum, after the hand-over.
+    assert.ok(quanta >= 25, `normalised ${quanta} quanta later`);
+    assert.ok(normalized.makeUp < -6, `a loud sine is turned down: ${normalized.makeUp}`);
+    const { left: late } = await context.run(4);
+    // The estimate it played at first is within a decibel of the make-up
+    // measured: the note, looping, is as loud before as after.
+    const apart = 20 * Math.log10(peak(early.subarray(QUANTUM)) / peak(late));
+    assert.ok(Math.abs(apart) < 1, `${apart.toFixed(2)} dB apart`);
+    await engine.close();
+  } finally {
+    engine.release();
+  }
+});
+
+test('normalized rejects when the part plays something else before it is measured', { skip: skipWithoutWasm }, async () => {
+  const context = new FakeContext(0);
+  context.state = 'running';
+  const engine = await make(context);
+  try {
+    await engine.createPart(0, 'sampler', 'none');
+    const { fetch } = server();
+    const first = engine.loadSfz(0, `${BASE}voice.sfz`, { fetch });
+    await runUntil(context, first);
+    const second = engine.loadSfz(0, `${BASE}voice.sfz`, { fetch });
+    await runUntil(context, second);
+    const { error } = await runUntil(context, first.normalized);
+    assert.match(String(error), /later load/);
+    // Made again while measured.
+    await engine.createPart(0, 'sampler', 'none');
+    const { error: replaced } = await runUntil(context, second.normalized);
+    assert.match(String(replaced), /made again/);
+    // And a load that fails fails both.
+    const broken = engine.loadSfz(0, `${BASE}broken.sfz`, { fetch });
+    const { error: failed } = await runUntil(context, broken);
+    const { error: unmeasured } = await runUntil(context, broken.normalized);
+    assert.match(String(failed), /junk\.wav/);
+    assert.equal(String(unmeasured), String(failed));
     await engine.close();
   } finally {
     engine.release();

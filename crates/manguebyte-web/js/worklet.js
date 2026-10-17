@@ -35,19 +35,26 @@
 //
 // Loading an SFZ instrument (engine.js loadSfz) takes sfzBegin, which
 // parses the text at once and answers with the sample files it names, then
-// one sfzFile per file and an sfzFinish, answered once the instrument has
-// been handed to its part. Decoding the files is the costly part, so the
-// files and the finish wait in a queue, and after each render quantum
-// process() works through it until it has decoded LOAD_BYTES_PER_QUANTUM
-// bytes of files (always at least one step): the audio is never held up by
-// more than about one file's decoding, and mb_render itself never
-// allocates. The finish then measures the instrument for the part's
-// loudness normalisation, MEASURE_FRAMES_PER_QUANTUM frames of its phrase
-// a quantum (mb_sfz_measure), before handing it over. A message marked
-// `now`, sent while the context is not running and process() is not being
-// called, works through the whole queue at once instead. Each load carries
-// a token; an sfzBegin for the same part makes the steps of an earlier load
-// stale, and they are dropped.
+// one sfzFile per file and an sfzFinish. Decoding the files is the costly
+// part, so the files and the finish wait in a queue, and after each render
+// quantum process() works through it until it has decoded
+// LOAD_BYTES_PER_QUANTUM bytes of files (always at least one step): the
+// audio is never held up by more than about one file's decoding, and
+// mb_render itself never allocates. The finish hands the instrument to its
+// part at once (mb_sfz_install), at a provisional make-up, and answers:
+// the part is playable. Its loudness normalisation then measures a clone
+// of it, MEASURE_FRAMES_PER_QUANTUM frames of its phrase a quantum
+// (mb_sampler_measure), in quanta with no load step to take, so that other
+// instruments become playable first; when it is done the part glides to
+// the make-up measured, and a second answer goes to the id the finish
+// named as `normalized`. A message marked `now`, sent while the context is
+// not running and process() is not being called, works through the whole
+// queue, and every measurement, at once instead. Each load carries a
+// token; an sfzBegin for the same part makes the steps of an earlier load
+// stale, and they are dropped, and a later install, or a part made, given
+// another instrument or removed, makes a measurement under way stale. A
+// module without mb_sfz_install measures first (mb_sfz_measure) and hands
+// the instrument over measured (mb_sfz_finish), answering both at once.
 
 import { EventRing, RECORD_SIZE } from './ring.js';
 
@@ -79,6 +86,10 @@ const BAD_INPUT = -12;
 const STALE = -100;
 /** The module predates sampler parts. */
 const UNSUPPORTED = -101;
+/** The part was made again, given another kind or removed before its instrument was measured. */
+const REPLACED = -102;
+/** The most frames mb_sampler_measure takes, for a measurement done at once. */
+const ALL_FRAMES = 0xffffffff;
 /** The module predates the effects (`ffi::status::NO_SUCH_EFFECT`). */
 const NO_EFFECTS = -14;
 /** The module predates setting a part's instrument (`ffi::status::BAD_INSTRUMENT`). */
@@ -115,6 +126,10 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
     this.jobs = [];
     this.loadTokens = new Map();
     this.loadErrors = new Map();
+    // Instruments playing at a provisional make-up: the measurements to
+    // step, in order, and by part the token of the one under way.
+    this.measures = [];
+    this.measuring = new Map();
     this.quanta = 0;
     try {
       const module = o.wasm instanceof WebAssembly.Module ? o.wasm : new WebAssembly.Module(o.wasm);
@@ -190,15 +205,20 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
   }
 
   /**
-   * One step of a load: decodes a file, measures some of the instrument
-   * for the part's loudness normalisation, or finishes. Returns false when
-   * the measurement has more to do: the job stays first in the queue.
+   * One step of a load: decodes a file, or finishes, handing the
+   * instrument to its part to be measured while it plays (or, with a
+   * module from before that, measures some of it first). Returns false
+   * when a measurement before the hand-over has more to do: the job stays
+   * first in the queue.
    */
   step(job) {
     const x = this.exports;
     const { part, token } = job;
     if (!this.current(part, token)) {
-      if (job.type === 'finish') this.reply(job.id, { status: STALE, error: null });
+      if (job.type === 'finish') {
+        this.reply(job.id, { status: STALE, error: null });
+        this.reply(job.normalized, { status: STALE });
+      }
       return true;
     }
     if (job.type === 'file') {
@@ -218,6 +238,21 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
       this.loadErrors.delete(part);
       x.mb_sfz_abandon(this.engine, part);
       this.reply(job.id, failed);
+      this.reply(job.normalized, { status: failed.status });
+      return true;
+    }
+    if (typeof x.mb_sfz_install === 'function') {
+      this.loadTokens.delete(part);
+      const status = x.mb_sfz_install(this.engine, part);
+      const text = this.textBuffer();
+      if (status !== 0) {
+        this.reply(job.id, { status, error: text });
+        this.reply(job.normalized, { status });
+        return true;
+      }
+      this.reply(job.id, { status, summary: text });
+      this.measuring.set(part, token);
+      this.measures.push({ part, token, id: job.normalized });
       return true;
     }
     // A module from before loudness normalisation finishes in one step.
@@ -230,6 +265,7 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
       if (measured !== 0) {
         this.loadTokens.delete(part);
         this.reply(job.id, { status: measured, error: this.textBuffer() });
+        this.reply(job.normalized, { status: measured });
         return true;
       }
     }
@@ -237,13 +273,45 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
     const status = x.mb_sfz_finish(this.engine, part);
     const text = this.textBuffer();
     this.reply(job.id, status === 0 ? { status, summary: text } : { status, error: text });
+    this.reply(job.normalized, status === 0 ? { status, makeUp: this.makeUp(part) } : { status });
     return true;
+  }
+
+  /** The make-up the part's instrument was measured at, in dB, or null. */
+  makeUp(part) {
+    const x = this.exports;
+    if (typeof x.mb_sampler_make_up_db !== 'function') return null;
+    const makeUp = x.mb_sampler_make_up_db(this.engine, part);
+    return Number.isNaN(makeUp) ? null : makeUp;
+  }
+
+  /**
+   * One step of the first measurement under way, of `frames` frames:
+   * answers its `normalized` id once it is over, or once the part plays
+   * something else.
+   */
+  measureStep(frames) {
+    const x = this.exports;
+    const job = this.measures[0];
+    const current = this.measuring.get(job.part);
+    if (current !== job.token) {
+      this.measures.shift();
+      this.reply(job.id, { status: current === undefined ? REPLACED : STALE });
+      return;
+    }
+    const status = x.mb_sampler_measure(this.engine, job.part, frames);
+    if (status === MEASURING) return;
+    this.measures.shift();
+    this.measuring.delete(job.part);
+    this.reply(job.id, status === 0 ? { status, makeUp: this.makeUp(job.part) } : { status });
   }
 
   /**
    * Works through the queued load steps, until `budget` bytes of files are
-   * decoded (always one step). A step of a measurement counts as the whole
-   * budget, and comes first in its quantum.
+   * decoded (always one step). A finish, which makes the instrument, its
+   * clone and the estimate of its make-up, counts as the whole budget, and
+   * comes first in its quantum, as does a step of a measurement. With no
+   * budget, every measurement is done too.
    */
   work(budget) {
     let used = 0;
@@ -253,8 +321,12 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
       if (job.type === 'finish' && steps > 0 && budget !== Infinity) break;
       this.jobs.shift();
       if (job.type === 'file') used += job.bytes.byteLength;
-      if (!this.step(job)) used += LOAD_BYTES_PER_QUANTUM;
+      this.step(job);
+      if (job.type === 'finish') used += LOAD_BYTES_PER_QUANTUM;
       steps += 1;
+    }
+    if (budget === Infinity) {
+      while (this.measures.length > 0) this.measureStep(ALL_FRAMES);
     }
     this.refresh();
   }
@@ -308,8 +380,10 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
         x.mb_engine_free(engine);
         result = 0;
         break;
+      // Each of the next three drops a measurement under way on the part.
       case 'createPart':
         result = x.mb_create_part(engine, message.part, message.kind, message.chain);
+        if (result === 0) this.measuring.delete(message.part);
         break;
       case 'setInstrument':
         // A module from before the export cannot change a part's
@@ -317,9 +391,11 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
         result = typeof x.mb_set_instrument === 'function'
           ? x.mb_set_instrument(engine, message.part, message.kind)
           : BAD_INSTRUMENT;
+        if (result === 0) this.measuring.delete(message.part);
         break;
       case 'removePart':
         result = x.mb_remove_part(engine, message.part);
+        if (result === 0) this.measuring.delete(message.part);
         break;
       case 'setChain':
         result = x.mb_set_chain(engine, message.part, message.chain);
@@ -467,7 +543,13 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
       done += n;
     }
     this.frame += done;
+    // Instruments become playable first; measurements fill the quanta with
+    // nothing to load.
     if (this.jobs.length > 0) this.work(LOAD_BYTES_PER_QUANTUM);
+    else if (this.measures.length > 0) {
+      this.measureStep(MEASURE_FRAMES_PER_QUANTUM);
+      this.refresh();
+    }
     this.quanta += 1;
     if (this.quanta % COLLECT_EVERY === 0 && typeof x.mb_collect === 'function') {
       x.mb_collect(this.engine);

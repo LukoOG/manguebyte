@@ -242,6 +242,7 @@ export const STATUS = Object.freeze({
   [-14]: 'no such effect',
   [-100]: 'a later load of the same part took over',
   [-101]: 'the module has no sampler parts',
+  [-102]: 'the part was made again, given another kind or removed before its instrument was measured',
 });
 
 const PROCESSOR_NAME = 'manguebyte-engine';
@@ -709,8 +710,40 @@ export class ManguebyteEngine {
    *
    * Rejects, naming the file, if a fetch fails or a file is not valid SFZ,
    * WAV, AIFF or FLAC; the part keeps the instrument it had.
+   *
+   * The part plays the instrument as soon as its samples are decoded,
+   * before its loudness is measured (`sampler.normalize`): until then at a
+   * provisional make-up, an estimate, and then at the make-up measured,
+   * gliding there over 20 ms. The promise returned has a second one,
+   * `normalized`, that resolves with `{ makeUp }` (the make-up measured,
+   * dB, or null if the instrument was not measured) once the part plays at
+   * that level, some 28 render quanta later, and rejects if the load fails
+   * or the part is given another instrument first:
+   *
+   *   const loading = engine.loadSfz(4, 'piano/voice.sfz');
+   *   await loading;              // playable
+   *   await loading.normalized;   // at the loudness target
+   *
+   * Code that awaited loadSfz before works as it did: the instrument plays
+   * from then on, only sooner, and for its first few tens of milliseconds
+   * at the estimate.
    */
-  async loadSfz(part, url, options = {}) {
+  loadSfz(part, url, options = {}) {
+    let settle;
+    const normalized = new Promise((resolve, reject) => {
+      settle = { resolve, reject };
+    });
+    // Handled, so that a caller who never looks at it hears of a failure
+    // once, from the load itself.
+    normalized.catch(() => {});
+    const playable = this.loadSfzSteps(part, url, options, settle);
+    playable.catch((error) => settle.reject(error));
+    playable.normalized = normalized;
+    return playable;
+  }
+
+  /** The steps of loadSfz, which settles `normalized` once the worklet says. */
+  async loadSfzSteps(part, url, options, normalized) {
     if (this.closed) throw new Error('the engine is closed');
     const get = options.fetch ?? globalThis.fetch;
     if (typeof get !== 'function') throw new TypeError('loadSfz needs fetch, or options.fetch');
@@ -745,8 +778,26 @@ export class ManguebyteEngine {
       if (!this.closed) this.node.port.postMessage({ type: 'sfzAbandon', part, token });
       throw error;
     }
-    const finished = await this.request('sfzFinish', { part, token, now: now() });
-    if (finished.status !== 0) throw failure(finished);
+    // The worklet answers a second id once the instrument is measured.
+    const measured = this.nextId++;
+    this.waiting.set(measured, {
+      resolve: (result) => {
+        if (result.status === 0) normalized.resolve({ makeUp: result.makeUp ?? null });
+        else normalized.reject(failure(result));
+      },
+      reject: normalized.reject,
+    });
+    let finished;
+    try {
+      finished = await this.request('sfzFinish', { part, token, now: now(), normalized: measured });
+    } catch (error) {
+      this.waiting.delete(measured);
+      throw error;
+    }
+    if (finished.status !== 0) {
+      this.waiting.delete(measured);
+      throw failure(finished);
+    }
     return JSON.parse(new TextDecoder().decode(finished.summary));
   }
 
