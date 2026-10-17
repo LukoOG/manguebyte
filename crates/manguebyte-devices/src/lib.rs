@@ -46,13 +46,18 @@ mod blocks;
 mod device;
 mod duplex;
 mod error;
+mod host;
 #[cfg(feature = "midi")]
 pub mod midi;
 mod settings;
+mod timing;
 
 pub use device::{
-    DeviceInfo, InputDevice, InputStream, OutputDevice, OutputStream, input_devices, output_devices,
+    DeviceInfo, Direction, InputDevice, InputStream, OutputDevice, OutputStream, input_devices,
+    output_devices,
 };
 pub use duplex::{DuplexSettings, DuplexStream};
 pub use error::DeviceError;
+pub use host::{AudioHost, HostInfo, audio_hosts};
 pub use settings::{ConfigRange, StreamSettings};
+pub use timing::CallbackInfo;

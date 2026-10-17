@@ -10,6 +10,9 @@ pub enum DeviceError {
     NoInputDevice,
     /// No device with this identifier is connected.
     DeviceNotFound(String),
+    /// No audio host by this name was built in, or it cannot be used now,
+    /// for example JACK while its server is not running.
+    HostUnavailable(String),
     /// The device wants a sample format this crate cannot convert.
     UnsupportedSampleFormat(String),
     /// The device cannot run with the requested [`StreamSettings`].
@@ -47,6 +50,7 @@ impl fmt::Display for DeviceError {
             Self::NoOutputDevice => f.write_str("no default audio output device"),
             Self::NoInputDevice => f.write_str("no default audio input device"),
             Self::DeviceNotFound(id) => write!(f, "no audio device with id \"{id}\""),
+            Self::HostUnavailable(name) => write!(f, "the audio host \"{name}\" is not available"),
             Self::UnsupportedSampleFormat(format) => {
                 write!(f, "unsupported device sample format: {format}")
             }

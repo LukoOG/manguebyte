@@ -1,16 +1,31 @@
+use std::sync::Arc;
+
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample, StreamConfig};
 use manguebyte_core::AudioBuffer;
 
-use crate::blocks::{BlockCapturer, BlockRenderer};
+use crate::blocks::{BlockCapturer, BlockClock, BlockRenderer};
 use crate::settings::{ConfigRange, Resolved, resolve};
-use crate::{DeviceError, StreamSettings};
+use crate::timing::{StreamHealth, input_timing, output_timing};
+use crate::{AudioHost, CallbackInfo, DeviceError, StreamSettings};
 
-/// Which side of a device we are talking about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Direction {
+/// Which side of a device, or of a MIDI port, something is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Direction {
+    /// Capturing: an audio input, or a MIDI port that is received from.
     Input,
+    /// Playing: an audio output, or a MIDI port that is sent to.
     Output,
+}
+
+impl Direction {
+    /// `"input"` or `"output"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Output => "output",
+        }
+    }
 }
 
 /// Runs `$build!(T)` with `T` set to the Rust type of a device sample format.
@@ -77,32 +92,45 @@ impl DeviceInfo {
 }
 
 /// Lists the audio output devices of the system's default audio host.
+///
+/// [`AudioHost::output_devices`] lists those of another host.
 pub fn output_devices() -> Result<Vec<DeviceInfo>, DeviceError> {
-    list(Direction::Output)
+    AudioHost::default_host().output_devices()
 }
 
 /// Lists the audio input devices of the system's default audio host.
+///
+/// [`AudioHost::input_devices`] lists those of another host.
 pub fn input_devices() -> Result<Vec<DeviceInfo>, DeviceError> {
-    list(Direction::Input)
+    AudioHost::default_host().input_devices()
 }
 
-fn list(direction: Direction) -> Result<Vec<DeviceInfo>, DeviceError> {
-    let host = cpal::default_host();
-    let default_id = match direction {
+fn default_device_id(host: &cpal::Host, direction: Direction) -> Option<String> {
+    match direction {
         Direction::Output => host.default_output_device(),
         Direction::Input => host.default_input_device(),
     }
-    .and_then(|device| device_id(&device));
+    .and_then(|device| device_id(&device))
+}
 
-    let devices = match direction {
-        Direction::Output => host.output_devices()?,
-        Direction::Input => host.input_devices()?,
-    };
-    Ok(devices
+fn devices_of(host: &cpal::Host, direction: Direction) -> Result<Vec<cpal::Device>, DeviceError> {
+    Ok(match direction {
+        Direction::Output => host.output_devices()?.collect(),
+        Direction::Input => host.input_devices()?.collect(),
+    })
+}
+
+pub(crate) fn list(
+    host: &cpal::Host,
+    direction: Direction,
+) -> Result<Vec<DeviceInfo>, DeviceError> {
+    let default_id = default_device_id(host, direction);
+    Ok(devices_of(host, direction)?
+        .iter()
         .map(|device| {
-            let id = device_id(&device);
-            let default = default_config(&device, direction);
-            let mut configs: Vec<ConfigRange> = supported_ranges(&device, direction)
+            let id = device_id(device);
+            let default = default_config(device, direction);
+            let mut configs: Vec<ConfigRange> = supported_ranges(device, direction)
                 .unwrap_or_default()
                 .iter()
                 .map(ConfigRange::from_backend)
@@ -112,7 +140,7 @@ fn list(direction: Direction) -> Result<Vec<DeviceInfo>, DeviceError> {
             DeviceInfo {
                 is_default: id.is_some() && id == default_id,
                 id: id.unwrap_or_default(),
-                name: device_name(&device),
+                name: device_name(device),
                 default_sample_rate: default.map(|config| config.sample_rate()),
                 default_channels: default.map(|config| config.channels()),
                 configs,
@@ -163,8 +191,7 @@ pub(crate) struct Opened {
 }
 
 impl Opened {
-    fn default_device(direction: Direction) -> Result<Self, DeviceError> {
-        let host = cpal::default_host();
+    fn default_device(host: &cpal::Host, direction: Direction) -> Result<Self, DeviceError> {
         let device = match direction {
             Direction::Output => host
                 .default_output_device()
@@ -271,6 +298,25 @@ fn report_to_stderr(error: DeviceError) {
     eprintln!("manguebyte: audio stream error: {error}");
 }
 
+/// Wraps an error handler so that a lost device is also recorded where
+/// [`OutputStream::is_device_lost`] and the device manager look.
+pub(crate) fn watch_errors<E>(
+    health: &Arc<StreamHealth>,
+    mut on_error: E,
+) -> impl FnMut(cpal::Error) + Send + 'static
+where
+    E: FnMut(DeviceError) + Send + 'static,
+{
+    let health = Arc::clone(health);
+    move |error| {
+        let error = DeviceError::Backend(error);
+        if error.is_device_lost() {
+            health.mark_lost();
+        }
+        on_error(error);
+    }
+}
+
 /// An audio output device, opened and configured but not yet playing.
 ///
 /// ```no_run
@@ -288,9 +334,15 @@ pub struct OutputDevice {
 impl OutputDevice {
     /// Opens the system's default output device with its preferred
     /// configuration.
+    ///
+    /// [`AudioHost::default_output_device`] opens that of another host.
     pub fn open_default() -> Result<Self, DeviceError> {
+        Self::open_default_of(&cpal::default_host())
+    }
+
+    pub(crate) fn open_default_of(host: &cpal::Host) -> Result<Self, DeviceError> {
         Ok(Self {
-            opened: Opened::default_device(Direction::Output)?,
+            opened: Opened::default_device(host, Direction::Output)?,
         })
     }
 
@@ -335,15 +387,42 @@ impl OutputDevice {
     pub fn start_with_error_handler<F, E>(
         &self,
         max_block_size: usize,
-        callback: F,
+        mut callback: F,
         on_error: E,
     ) -> Result<OutputStream, DeviceError>
     where
         F: FnMut(&mut AudioBuffer<f32>) + Send + 'static,
         E: FnMut(DeviceError) + Send + 'static,
     {
+        self.start_timed(max_block_size, move |buffer, _| callback(buffer), on_error)
+    }
+
+    /// Starts playback, telling the callback when each block will be
+    /// heard.
+    ///
+    /// The same as
+    /// [`start_with_error_handler`](Self::start_with_error_handler), except
+    /// that `callback` also receives a [`CallbackInfo`]: the frame position,
+    /// the backend's clock and the output latency it reports.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_block_size` is zero.
+    pub fn start_timed<F, E>(
+        &self,
+        max_block_size: usize,
+        callback: F,
+        on_error: E,
+    ) -> Result<OutputStream, DeviceError>
+    where
+        F: FnMut(&mut AudioBuffer<f32>, &CallbackInfo) + Send + 'static,
+        E: FnMut(DeviceError) + Send + 'static,
+    {
         assert!(max_block_size > 0, "max_block_size must be non-zero");
-        let renderer = BlockRenderer::new(self.num_channels(), max_block_size, callback);
+        let health = StreamHealth::new();
+        let clock = BlockClock::new(self.sample_rate(), Arc::clone(&health));
+        let renderer = BlockRenderer::new(self.num_channels(), max_block_size, clock, callback);
+        let on_error = watch_errors(&health, on_error);
         macro_rules! build {
             ($sample:ty) => {
                 self.build::<$sample, _, _>(renderer, on_error)
@@ -351,23 +430,26 @@ impl OutputDevice {
         }
         let stream = with_sample_type!(self.opened.resolved.format, build)?;
         stream.play()?;
-        Ok(OutputStream { stream })
+        Ok(OutputStream { stream, health })
     }
 
     fn build<T, F, E>(
         &self,
         mut renderer: BlockRenderer<F>,
-        mut on_error: E,
+        on_error: E,
     ) -> Result<cpal::Stream, DeviceError>
     where
         T: SizedSample + FromSample<f32>,
-        F: FnMut(&mut AudioBuffer<f32>) + Send + 'static,
-        E: FnMut(DeviceError) + Send + 'static,
+        F: FnMut(&mut AudioBuffer<f32>, &CallbackInfo) + Send + 'static,
+        E: FnMut(cpal::Error) + Send + 'static,
     {
         Ok(self.opened.device.build_output_stream(
             self.opened.config(),
-            move |data: &mut [T], _: &cpal::OutputCallbackInfo| renderer.render(data),
-            move |error| on_error(DeviceError::Backend(error)),
+            move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
+                let (time, latency) = output_timing(info);
+                renderer.render(data, time, latency);
+            },
+            on_error,
             None,
         )?)
     }
@@ -393,9 +475,15 @@ pub struct InputDevice {
 impl InputDevice {
     /// Opens the system's default input device with its preferred
     /// configuration.
+    ///
+    /// [`AudioHost::default_input_device`] opens that of another host.
     pub fn open_default() -> Result<Self, DeviceError> {
+        Self::open_default_of(&cpal::default_host())
+    }
+
+    pub(crate) fn open_default_of(host: &cpal::Host) -> Result<Self, DeviceError> {
         Ok(Self {
-            opened: Opened::default_device(Direction::Input)?,
+            opened: Opened::default_device(host, Direction::Input)?,
         })
     }
 
@@ -440,15 +528,42 @@ impl InputDevice {
     pub fn start_with_error_handler<F, E>(
         &self,
         max_block_size: usize,
-        callback: F,
+        mut callback: F,
         on_error: E,
     ) -> Result<InputStream, DeviceError>
     where
         F: FnMut(&AudioBuffer<f32>) + Send + 'static,
         E: FnMut(DeviceError) + Send + 'static,
     {
+        self.start_timed(max_block_size, move |buffer, _| callback(buffer), on_error)
+    }
+
+    /// Starts recording, telling the callback when each block was
+    /// captured.
+    ///
+    /// The same as
+    /// [`start_with_error_handler`](Self::start_with_error_handler), except
+    /// that `callback` also receives a [`CallbackInfo`]: the frame position,
+    /// the backend's clock and the input latency it reports.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_block_size` is zero.
+    pub fn start_timed<F, E>(
+        &self,
+        max_block_size: usize,
+        callback: F,
+        on_error: E,
+    ) -> Result<InputStream, DeviceError>
+    where
+        F: FnMut(&AudioBuffer<f32>, &CallbackInfo) + Send + 'static,
+        E: FnMut(DeviceError) + Send + 'static,
+    {
         assert!(max_block_size > 0, "max_block_size must be non-zero");
-        let capturer = BlockCapturer::new(self.num_channels(), max_block_size, callback);
+        let health = StreamHealth::new();
+        let clock = BlockClock::new(self.sample_rate(), Arc::clone(&health));
+        let capturer = BlockCapturer::new(self.num_channels(), max_block_size, clock, callback);
+        let on_error = watch_errors(&health, on_error);
         macro_rules! build {
             ($sample:ty) => {
                 self.build::<$sample, _, _>(capturer, on_error)
@@ -456,24 +571,27 @@ impl InputDevice {
         }
         let stream = with_sample_type!(self.opened.resolved.format, build)?;
         stream.play()?;
-        Ok(InputStream { stream })
+        Ok(InputStream { stream, health })
     }
 
     fn build<T, F, E>(
         &self,
         mut capturer: BlockCapturer<F>,
-        mut on_error: E,
+        on_error: E,
     ) -> Result<cpal::Stream, DeviceError>
     where
         T: SizedSample,
         f32: FromSample<T>,
-        F: FnMut(&AudioBuffer<f32>) + Send + 'static,
-        E: FnMut(DeviceError) + Send + 'static,
+        F: FnMut(&AudioBuffer<f32>, &CallbackInfo) + Send + 'static,
+        E: FnMut(cpal::Error) + Send + 'static,
     {
         Ok(self.opened.device.build_input_stream(
             self.opened.config(),
-            move |data: &[T], _: &cpal::InputCallbackInfo| capturer.capture(data),
-            move |error| on_error(DeviceError::Backend(error)),
+            move |data: &[T], info: &cpal::InputCallbackInfo| {
+                let (time, latency) = input_timing(info);
+                capturer.capture(data, time, latency);
+            },
+            on_error,
             None,
         )?)
     }
@@ -496,12 +614,24 @@ macro_rules! stream_controls {
         pub fn buffer_size(&self) -> Option<u32> {
             self.stream.buffer_size().ok()
         }
+
+        /// How many frames have gone through the callback so far.
+        pub fn frames_processed(&self) -> u64 {
+            self.health.frames()
+        }
+
+        /// Whether the backend reported that the device went away. The
+        /// stream will not produce audio again.
+        pub fn is_device_lost(&self) -> bool {
+            self.health.is_lost()
+        }
     };
 }
 
 /// A running output stream. Playback stops when it is dropped.
 pub struct OutputStream {
     stream: cpal::Stream,
+    health: Arc<StreamHealth>,
 }
 
 impl OutputStream {
@@ -511,6 +641,7 @@ impl OutputStream {
 /// A running input stream. Recording stops when it is dropped.
 pub struct InputStream {
     stream: cpal::Stream,
+    health: Arc<StreamHealth>,
 }
 
 impl InputStream {
