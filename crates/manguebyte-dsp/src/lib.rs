@@ -48,6 +48,7 @@ mod ladder;
 mod limiter;
 mod mix;
 mod modulation;
+pub mod note_input;
 mod numeric;
 mod onepole;
 mod oscillator;

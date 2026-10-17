@@ -1221,3 +1221,144 @@ fn the_poly_synth_does_not_use_the_heap() {
         );
     }
 }
+
+#[test]
+fn reading_mpe_and_midi_2_does_not_use_the_heap() {
+    use manguebyte_dsp::note_input::{Mpe, NoteInput};
+    use manguebyte_midi::MidiMessage;
+    use manguebyte_midi::mpe::{Configuration, ZoneKind};
+    use manguebyte_midi::ump::{ChannelVoice2, Message, NoteAttribute};
+
+    let mut synth = Synth::with_voices(4, || ToneVoice {
+        oscillator: Oscillator::new(Waveform::Saw, 220.0),
+        envelope: Adsr::new(AdsrParams::default()),
+    });
+    synth.prepare(&SPEC);
+    // A small capacity, so that notes are also pushed out.
+    let mut input = NoteInput::with_capacity(Mpe::Follow, 8);
+    let mut events = EventBuffer::with_capacity(1_024);
+    let mut buffer = AudioBuffer::<f32>::new(2, 256);
+    let transport = Transport::playing_at(120.0);
+    let configure = Configuration {
+        zone: ZoneKind::Lower,
+        members: 15,
+    }
+    .messages();
+    assert_no_heap_use("NoteInput", || {
+        for round in 0..32u8 {
+            events.clear();
+            let mut push = |event| {
+                let _ = events.push(event);
+            };
+            if round % 8 == 0 {
+                // Zones come and go, releasing what they hold.
+                let members = if round % 16 == 0 { 15 } else { 0 };
+                for &message in configure.as_slice() {
+                    let message = match message {
+                        MidiMessage::ControlChange {
+                            controller: 6,
+                            channel,
+                            ..
+                        } => MidiMessage::ControlChange {
+                            channel,
+                            controller: 6,
+                            value: members,
+                        },
+                        other => other,
+                    };
+                    input.midi1(0, message, &mut push);
+                }
+            }
+            for step in 0..12u8 {
+                let channel = 1 + step % 15;
+                let key = 40 + (round + step) % 24;
+                let offset = u32::from(step) * 20;
+                input.midi1(
+                    offset,
+                    MidiMessage::PitchBend {
+                        channel,
+                        value: 300 * i16::from(step),
+                    },
+                    &mut push,
+                );
+                input.midi1(
+                    offset,
+                    MidiMessage::NoteOn {
+                        channel,
+                        note: key,
+                        velocity: 90,
+                    },
+                    &mut push,
+                );
+                input.midi1(
+                    offset + 5,
+                    MidiMessage::ChannelPressure {
+                        channel,
+                        pressure: step * 9,
+                    },
+                    &mut push,
+                );
+                input.midi1(
+                    offset + 6,
+                    MidiMessage::ControlChange {
+                        channel,
+                        controller: 74,
+                        value: step * 10,
+                    },
+                    &mut push,
+                );
+                let two = Message::Midi2 {
+                    group: 0,
+                    message: ChannelVoice2::NoteOn {
+                        channel: 0,
+                        note: key,
+                        velocity: 40_000,
+                        attribute: NoteAttribute::pitch(f32::from(key) + 0.5),
+                    },
+                }
+                .to_packet();
+                input.packet(offset + 7, &two, &mut push);
+                input.midi2(
+                    offset + 8,
+                    ChannelVoice2::PerNotePitchBend {
+                        channel: 0,
+                        note: key,
+                        value: 0x9000_0000,
+                    },
+                    &mut push,
+                );
+                input.midi2(
+                    offset + 9,
+                    ChannelVoice2::PerNoteManagement {
+                        channel: 0,
+                        note: key,
+                        detach: step % 2 == 0,
+                        reset: step % 3 == 0,
+                    },
+                    &mut push,
+                );
+                input.midi2(
+                    offset + 10,
+                    ChannelVoice2::RegisteredPerNoteController {
+                        channel: 0,
+                        note: key,
+                        controller: 74,
+                        value: u32::from(step) << 28,
+                    },
+                    &mut push,
+                );
+                input.midi1(
+                    offset + 15,
+                    MidiMessage::NoteOff {
+                        channel,
+                        note: key,
+                        velocity: 0,
+                    },
+                    &mut push,
+                );
+            }
+            synth.process_with(&mut buffer, &ProcessContext::new(&events, &transport));
+        }
+    });
+    assert!(input.held_notes() <= 8);
+}
