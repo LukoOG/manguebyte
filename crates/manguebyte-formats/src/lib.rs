@@ -40,6 +40,11 @@
 //! and [`AudioWriter::set_metadata`] when writing. The [`metadata`] module
 //! says where each format keeps each field.
 //!
+//! [`Thumbnail`](thumbnail::Thumbnail) keeps the waveform overview an
+//! editor draws a file with: the lowest, highest and RMS level of every
+//! stretch, at every zoom, built while the file is read and cached in a
+//! compact file of its own.
+//!
 //! Every reader treats its input as untrusted: damaged or hostile data
 //! produces an error, never a panic.
 
@@ -54,6 +59,7 @@ mod pcm;
 mod player;
 mod reader;
 mod recorder;
+pub mod thumbnail;
 pub mod vorbis;
 pub mod wav;
 mod window;
