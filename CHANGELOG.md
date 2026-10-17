@@ -588,6 +588,26 @@ display, and no editor has been opened inside a real host yet.
   `mb_sfz_measure`, 8 192 frames a quantum (`PROBE_STEP_FRAMES`), 28
   quanta for a load. `manguebyte-analysis` is now a dependency of
   `manguebyte-web`. The ABI version stays 2.
+- A sampler or sampler kit part plays its instrument as soon as the
+  samples are decoded, before its loudness is measured: Aratu's first
+  preview of a freshly loaded kit was silent, the notes landing before the
+  instrument. Until the measurement ends, some 75 ms later in a worklet,
+  the part plays at a provisional make-up estimated from the energy the
+  phrase's notes read from the samples (within 0.22 dB of the measured
+  one on every fixture), then glides to the make-up measured over 20 ms.
+  A clone of the instrument is measured, so the part's round robins never
+  hear it and its output does not depend on the measurement's steps.
+  `loadSfz` resolves once the part plays the instrument, with the same
+  summary, and its promise has `normalized`, which resolves with
+  `{ makeUp }` when the measurement is done; natively
+  `Engine::install_instrument`, `measure_instrument`,
+  `sampler_measuring` and `sampler_provisional_make_up_db`; the new exports
+  `mb_sfz_install`, `mb_sampler_measure` and `mb_sampler_make_up_db`, and
+  status -102 in JavaScript. The ABI version stays 2.
+- `manguebyte-sampler`: an `Instrument` is `Clone`, cheaply, its clones
+  sharing the decoded samples and regions and keeping round robins and
+  random numbers of their own; `Instrument::note_energy` estimates the
+  energy of what a note plays, without rendering it.
 
 ### Hosting
 

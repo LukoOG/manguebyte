@@ -546,6 +546,20 @@ new parameter id; the export `mb_sfz_measure` and its status 1
 finishing a load in one step without it; `mb_sfz_finish` still finishes a
 load in one call, measuring the instrument there if no step did.
 
+Playing an instrument before it is measured keeps it at 2 as well. The
+exports `mb_sfz_install`, `mb_sampler_measure` and `mb_sampler_make_up_db`
+are new, and `js/worklet.js` looks for them by name, loading the older way
+without them (measured, then handed over, both promises settling at once).
+`mb_sfz_measure` and `mb_sfz_finish` mean what they did; the one thing
+they do differently is that the part now plays an instrument with round
+robins and random choices as they were when it was loaded, a clone being
+measured, where before it went on from where the measurement had left
+them. In JavaScript, `loadSfz` resolves sooner, once the part plays the
+instrument rather than once it is measured, with the same summary; code
+that awaited it and then played notes works as it did, the first few tens
+of milliseconds of them at the provisional make-up. Code that wants the
+level measured awaits `loading.normalized`. The status -102 is new.
+
 ## Instruments
 
 A part plays one of ten kinds of instrument, named by a code in the
@@ -862,12 +876,26 @@ engine.noteOn(4, 60, 0.8, context.currentTime + 0.05);
 engine.setParam(4, 'sampler.normalize', 0); // as recorded, off the loudness target
 ```
 
-`loadSfz` resolves once the part plays the instrument: a note scheduled
-after that uses it, while the notes of the instrument it replaces ring on
-with that one to their end. It rejects, naming the file, if a fetch fails
-or a file is not valid SFZ, WAV, AIFF or FLAC, and the part keeps what it
-had. Natively, `SfzLoad` does the same work and `Engine::load_instrument`
-installs the result.
+`loadSfz` resolves once the part plays the instrument, as soon as its
+samples are decoded: a note scheduled after that uses it, while the notes
+of the instrument it replaces ring on with that one to their end. The
+instrument's [loudness](#sampler-instruments) is measured after that, while
+it plays, and the promise has a second one, `normalized`, for when it is
+done (see [How an instrument is loaded](#how-an-instrument-is-loaded)):
+
+```js
+const loading = engine.loadSfz(4, 'samples/kit/voice.sfz');
+await loading;                              // playable: notes from now on use it
+const { makeUp } = await loading.normalized; // at the loudness target, makeUp dB
+```
+
+`loadSfz` rejects, naming the file, if a fetch fails or a file is not valid
+SFZ, WAV, AIFF or FLAC, and the part keeps what it had; `normalized`
+rejects then too, and if the part is given another instrument, made again
+or removed before the measurement ends. Natively, `SfzLoad` does the same
+work and `Engine::load_instrument` installs the result, measured;
+`Engine::install_instrument` and `Engine::measure_instrument` do it the
+way the worklet does, the instrument playing while it is measured.
 
 - A sample plays at its own rate, read at the ratio of that rate to the
   context's: a 24 kHz sample in a 48 kHz context is read at half speed,
@@ -938,16 +966,37 @@ at once and answers with the sample files it names; the page fetches them,
 relative to the SFZ file, and transfers each to the worklet as it arrives.
 Decoding is the costly part, so the worklet keeps the files in a queue and,
 after each render quantum, decodes up to 64 KiB of them
-(`LOAD_BYTES_PER_QUANTUM`, always at least one file). When the last is in,
-it makes the instrument and, if the part normalises, measures it for its
-[loudness](#sampler-instruments): one quantum makes the instrument and the
-measurement, and each one after renders 8 192 frames of the phrase
-(`MEASURE_FRAMES_PER_QUANTUM`, `mb_sfz_measure`), 28 quanta in all, 75 ms
-at 48 kHz. Then it hands the instrument to the part through the sampler's
-lock-free single-producer single-consumer loader, which the sampler reads
-when it next renders; the instrument it replaces goes back the same way
-and is freed by `mb_collect`, which the worklet calls between quanta. The
-render call never allocates, frees, waits or measures.
+(`LOAD_BYTES_PER_QUANTUM`, always at least one file). A load then goes
+through three moments:
+
+```text
+decode          a file or so a quantum, between render quanta
+  → playable    one quantum: the instrument is made and handed to the part,
+                at a provisional make-up; loadSfz resolves
+  → normalised  27 quanta of 8 192 frames of the phrase measured, 75 ms at
+                48 kHz; the part glides to the make-up measured over 20 ms,
+                and loading.normalized resolves
+```
+
+When the last file is in, one quantum makes the instrument and hands it to
+the part (`mb_sfz_install`) through the sampler's lock-free
+single-producer single-consumer loader, which the sampler reads when it
+next renders, so a note on the very next frame plays it. The same quantum
+sets up the measurement of the part's [loudness](#sampler-instruments) on
+a clone of the instrument, which shares its samples, and estimates the
+make-up, which the part plays at until the measurement is done. Each
+quantum after that with no file to decode renders 8 192 frames of the
+phrase (`MEASURE_FRAMES_PER_QUANTUM`, `mb_sampler_measure`), so that
+instruments loading together all become playable before any is measured;
+the last step brings the part to the make-up measured, gliding over the
+20 ms that switching `sampler.normalize` takes (at once if nothing
+sounds). Notes that start before the hand-over play the instrument the
+part had, and ring on with it; notes after it play the new one, at the
+provisional make-up and then at the measured one, and so do the old
+instrument's notes still ringing, since the make-up is a part gain. The
+instrument a part replaces goes back through the loader and is freed by
+`mb_collect`, which the worklet calls between quanta. The render call never
+allocates, frees, waits or measures.
 
 The alternative was to decode on the main thread, in a second instance of
 the module, and send the finished instrument over. But a worklet's
@@ -1116,12 +1165,45 @@ is not measured, and plays as recorded even if it is switched on later;
 switch says, for instruments whose levels are set already.
 
 The measurement renders 4.5 s of sound and allocates, so it is never the
-render call's work (`tests/realtime.rs` proves it): natively
-`Engine::load_instrument` does it at once, and in a browser the worklet
-does it between render quanta, a step at a time (see
+render call's work (`tests/realtime.rs` proves it, with the part playing
+while it is measured): natively `Engine::load_instrument` does it at once,
+`Engine::measure_instrument` a step at a time, and in a browser the
+worklet does it between render quanta (see
 [How an instrument is loaded](#how-an-instrument-is-loaded)). In a debug
 build in Node.js, a step took 8 to 9 ms against 10 to 13 ms for decoding
 a 64 KiB file, which is what the steps were sized to.
+
+**Before the measurement ends** the part already plays the instrument, at
+a provisional make-up. Three were possible: 0 dB, the samples as
+recorded, is off by the whole make-up, -11 to +11 dB on the fixtures; the
+make-up of the instrument the part had before says nothing about this one
+(a quiet piano followed by a hot kit would start some 30 dB too loud); so
+the part plays at an estimate, which costs almost nothing. It is the
+energy each note of the phrase reads from the samples
+(`Instrument::note_energy` of `manguebyte-sampler`: the regions' gains,
+velocity tracking, pan, pitch, loops and layers, round robins and random
+ranges averaged), a melodic note held for its length and a drum for a
+beat, spread over the phrase's two bars and taken as loud as a signal of
+that power is by BS.1770 with its K-weighting flat. It leaves out the
+envelopes, the K-weighting, the gate and the hold-back for the peaks.
+Working it out reads each frame the phrase's distinct notes play once,
+a small part of one step of the measurement, in the quantum that hands
+the instrument over. On the eight fixture instruments of
+`tests/loudness.rs` (two recorded instruments, melodic and a kit, at
+three levels, looped sines and a kit like Aratu's), it lands within
+0.22 dB of the make-up measured; the test allows 1 dB.
+
+The measurement plays a clone of the instrument, which shares its decoded
+samples and has round robins and random choices of its own, so what the
+part plays never depends on how far the measurement has got:
+`tests/loudness.rs` plays an instrument whose regions take turns, replacing
+one still ringing, in quanta of 1 to 672 frames and with the measurement
+stepped between the quanta or not at all until its last step, and gets
+the same samples, bit for bit; the output depends only on the frame the
+last step is taken before. It measures the glide that follows, 960 frames
+in a straight line at 48 kHz from the provisional gain to the measured
+one, within 0.01% at every frame, and that with `sampler.normalize` off
+nothing changes, bit for bit, whether the measurement ends or not.
 
 ### For Aratu
 
