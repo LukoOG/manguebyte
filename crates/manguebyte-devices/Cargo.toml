@@ -15,6 +15,13 @@ homepage.workspace = true
 default = ["midi"]
 ## MIDI input and output ports.
 midi = ["dep:midir", "dep:manguebyte-midi"]
+## The JACK audio host (`cpal`'s `jack` feature), listed by `audio_hosts`
+## while a JACK server runs. The JACK library is loaded at run time, but on
+## Linux `jack-sys` looks for it with pkg-config while building, so the
+## JACK development files are needed there (`libjack-jackd2-dev` on Debian
+## and Ubuntu). `jack` and `jack-sys` are under MIT and MIT OR Apache-2.0,
+## `libloading` under ISC.
+jack = ["cpal/jack"]
 
 [dependencies]
 manguebyte-core.workspace = true

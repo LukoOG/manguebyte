@@ -19,8 +19,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Install ALSA headers
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      # `--all-features` turns on the JACK host, whose build looks for the
+      # JACK development files with pkg-config on Linux.
+      - name: Install ALSA and JACK headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libjack-jackd2-dev
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features
       - run: cargo doc --workspace --no-deps
@@ -258,8 +260,13 @@ jobs:
         with:
           node-version: 22
       # The browser engine and the sampler build for the web with no
-      # system around them.
+      # system around them, and so do the crates under them, and the
+      # facade without its device, analysis and OSC features.
       - run: cargo build -p manguebyte-web -p manguebyte-sampler --target wasm32-unknown-unknown
+      - run: |
+          cargo build -p manguebyte-core -p manguebyte-dsp -p manguebyte-midi \
+            -p manguebyte-formats --target wasm32-unknown-unknown
+          cargo build -p manguebyte --no-default-features --target wasm32-unknown-unknown
       # The sampler's module plays notes in Node.js and checks their pitch;
       # it fails if the module imports anything. A debug build, because its
       # hostile-file check relies on overflow traps.
@@ -278,6 +285,43 @@ jobs:
           node --test --test-reporter=tap "crates/manguebyte-web/js/tests/*.test.mjs" | tee node-tests.txt
           grep -Eq "^# fail 0$" node-tests.txt
           grep -Eq "^# skipped 0$" node-tests.txt
+
+  android:
+    name: Android (build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      # Builds, does not run: there is no device to run on. The audio
+      # crates, the device crate on AAudio and AMidi, and the facade with
+      # its default features. GitHub's Ubuntu images carry the Android NDK
+      # (ANDROID_NDK_LATEST_HOME); its clang is the C compiler and linker
+      # for the target. Libraries are not linked, so the API level only
+      # has to be one the NDK has; 29 is the first with AMidi.
+      - name: Build for aarch64-linux-android
+        run: |
+          bin="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_aarch64_linux_android="$bin/aarch64-linux-android29-clang"
+          export AR_aarch64_linux_android="$bin/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$bin/aarch64-linux-android29-clang"
+          cargo build --target aarch64-linux-android -p manguebyte-core -p manguebyte-dsp \
+            -p manguebyte-midi -p manguebyte-formats -p manguebyte-devices -p manguebyte
+
+  ios:
+    name: iOS (build)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      # Builds, does not run: the device crate on CoreAudio and CoreMIDI,
+      # with the SDK of the runner's Xcode.
+      - run: |
+          cargo build --target aarch64-apple-ios -p manguebyte-core -p manguebyte-dsp \
+            -p manguebyte-midi -p manguebyte-formats -p manguebyte-devices -p manguebyte
 
   lv2:
     name: LV2 bundles
@@ -377,6 +421,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.85
-      - name: Install ALSA headers
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Install ALSA and JACK headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libjack-jackd2-dev
       - run: cargo check --workspace --all-targets
+      # `jack` and `jack-sys`, behind the device crate's `jack` feature,
+      # declare no minimum Rust version: check that they build with ours.
+      - run: cargo check -p manguebyte-devices --all-targets --all-features

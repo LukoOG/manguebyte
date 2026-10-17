@@ -22,10 +22,14 @@ pub struct HostInfo {
 ///
 /// | System | Hosts |
 /// |---|---|
-/// | Windows | WASAPI (default); ASIO when built with it (see below) |
-/// | macOS, iOS | CoreAudio |
-/// | Linux, BSD | ALSA (default); JACK with the `jack` feature, when a JACK server runs |
+/// | Windows | WASAPI (default); ASIO when built with it (see below); JACK |
+/// | macOS | CoreAudio (default); JACK |
+/// | iOS | CoreAudio |
+/// | Linux, BSD | ALSA (default); JACK |
 /// | Android | AAudio |
+///
+/// JACK needs this crate's `jack` feature, which on Linux needs the JACK
+/// development files to build (`libjack-jackd2-dev` on Debian and Ubuntu).
 ///
 /// A host is listed only when it is usable: JACK only while its server
 /// runs, ASIO only when a driver is installed.
