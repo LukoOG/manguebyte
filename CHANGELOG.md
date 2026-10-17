@@ -957,6 +957,65 @@ display, and no editor has been opened inside a real host yet.
   downlifter, sweeps, zap, wind, impact). `cargo run --release -p
   manguebyte-dsp --example poly_synth_presets -- <directory>` plays each
   in a phrase of its category to WAV files.
+- `MalletVoice`: struck bars, tines, plates and tubes by modal synthesis
+  (Fletcher and Rossing; Rossing): up to ten modes in a bank of complex
+  resonators, each with its ratio, level and decay, weighted by the mode
+  shapes of a free bar or a clamped tine where the mallet lands, struck
+  by a smooth contact whose length is the mallet's hardness (velocity
+  makes it harder, so louder and brighter), a resonator tube tuned to the
+  note that blooms after the strike, the vibraphone's motor opening and
+  closing the tubes and its damper on release, a steel pan's notes
+  driving their octave harder the harder they are struck, a knock, and
+  the box of a kalimba. Presets: marimba (1:4:10), xylophone (1:3:6),
+  vibraphone, glockenspiel, celesta, kalimba, steel pan, tubular bells.
+  Measured: the worst mode within 0.0074 % of its ratio, decays as set
+  (a marimba's 1.60 s, tubular bells' 7.72 s), 13 to 16 dB and a higher
+  centroid from soft to loud, an accent 3 dB louder and brighter, the
+  tube's bloom 8.1 dB after the strike against 8.3 dB designed, the motor
+  at 5.42 Hz for 5.5 Hz set, the damper's decay the release. A ringing
+  voice costs 0.1 to 0.5 % of a core at 48 kHz.
+- `BowedString`: a bowed string by digital waveguide (McIntyre,
+  Schumacher and Woodhouse; Smith): two delay lines either side of the
+  bow, the friction of rosin as a hyperbolic curve solved exactly each
+  sample with its hysteresis, the bow's force, speed and position
+  (Schelleng's window), losses and dispersion from the string and the
+  finger, a player's ear that corrects the half sample by which friction
+  flattens the note, a body of six modes, vibrato that waits and then
+  grows, legato that keeps the string or moves to the next, sections of
+  up to four players tuned apart, and pizzicato. Presets: violin, viola,
+  cello, double bass, string section, and violin, cello and bass
+  pizzicato. Measured: Helmholtz motion (one slip a period) at every bow
+  force across the window, 113 of 117 notes within 2 cents across the
+  four instruments (the worst 3.7), the level of a held note steady to
+  1.1 dB. A voice costs about 1.7 % of a core, a section of four 5 %.
+- `WindVoice`: wind instruments by digital waveguide: a reed or the lips
+  as a mass and spring with Bernoulli flow (Guillemain, Kergomard and
+  Voinier), or an air jet with its delay and breath noise (Fletcher),
+  driving a bore with a bell and losses, brass that brightens as it is
+  blown harder (Hirschberg et al.), breath from velocity, pressure, the
+  breath controller and the expression pedal, vibrato and tremolo that
+  wait, legato, and a player's ear. Presets: flute, clarinet (a cylinder,
+  odd harmonics), saxophone, trumpet, trombone. Measured: the worst note
+  1.16 cents out across each instrument's range, a held note steady to
+  0.24 dB and 1.5 cents at soft, middle and full breath. A voice costs
+  about 1.4 to 2 % of a core.
+- `ChoirVoice`: sung vowels by formant synthesis (Fant's source and
+  filter): a glottal pulse after Klatt and Klatt with a band-limited
+  closure and breath noise, darker and more open the softer it is sung,
+  through five formants in cascade (Klatt's resonators) with the vowels
+  a, e, i, o and u from Peterson and Barney's averages for men and
+  women, blended from basses to sopranos across the keyboard, the first
+  formant raised above a high note (Sundberg); a choir of up to six
+  singers to a note, tuned apart and starting a few milliseconds apart,
+  each with a vocal tract, a vibrato and a wobble of their own. The
+  brightness expression moves the vowel. Presets: "aah" choir, "ooh"
+  choir, solo voice. Measured: every formant within 5 % of its target,
+  tuning within 0.0001 cents, vibrato at 5.61 Hz and 39.6 cents for 5.6
+  and 40 set, a choir's level swaying 5.8 dB where a single singer's is
+  steady. Six singers cost about 4.5 % of a core.
+- `cargo run --release -p manguebyte-dsp --example physical_model_wavs --
+  <directory>` renders every preset of the four in a phrase of its own
+  idiom, normalised to -3 dBFS, and prints what a voice of each costs.
 
 ### Parameters
 
