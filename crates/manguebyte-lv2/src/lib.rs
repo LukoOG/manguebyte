@@ -27,7 +27,7 @@
 //! | Features | `urid:map` is required. `options:options` with `buf-size:maxBlockLength` sets the longest block the plugin is prepared for (4096 frames without it, never more than 65536); `log:log`, when offered, is told why an instance or a state was refused |
 //! | Audio ports | The main inputs and outputs of the plugin's layout, and the sidechain as more inputs with `lv2:isSideChain`. In-place processing is allowed |
 //! | Control ports | One input per parameter, in the parameter's own unit and range. A port the host changes becomes a parameter event on frame 0 of the block |
-//! | Atom ports | A `control` input sequence of MIDI events, each on its frame, and `time:Position` objects for the transport; a `notify` output sequence, written empty |
+//! | Atom ports | A `control` input sequence of MIDI events, each on its frame, read through a [`NoteInput`](manguebyte_dsp::note_input::NoteInput) so that MPE arrives as per-note events, and `time:Position` objects for the transport; a `notify` output sequence, written empty |
 //! | Latency | A control output with `lv2:designation lv2:latency`, written on every block |
 //! | State | `state:interface`, holding the text of [`save_state`](manguebyte_plugin::save_state) as an `atom:String` under [`STATE_KEY_URI`]. Another plugin's state is refused and changes nothing |
 //!

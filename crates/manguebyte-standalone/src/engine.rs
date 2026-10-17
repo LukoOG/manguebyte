@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use manguebyte_core::spsc::Consumer;
 use manguebyte_core::{AudioBuffer, NoDenormals};
-use manguebyte_devices::midi::{MidiInputMessage, MidiReceiver};
+use manguebyte_devices::midi::MidiReceiver;
 use manguebyte_dsp::event::EventBuffer;
+use manguebyte_dsp::note_input::NoteInput;
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Transport};
 use manguebyte_midi::MidiMessage;
 use manguebyte_params::ParamSet;
@@ -29,6 +30,9 @@ pub struct Engine<P: Plugin> {
     sample_rate: f64,
     midi: Vec<MidiReceiver>,
     notes: Consumer<MidiMessage>,
+    /// Reads the MIDI of the ports and the program, as [`Plugin::MPE`]
+    /// says.
+    input: NoteInput,
     /// The block in the plugin's own channel layout.
     work: AudioBuffer<f32>,
 }
@@ -63,6 +67,7 @@ impl<P: Plugin> Engine<P> {
             sample_rate,
             midi,
             notes,
+            input: NoteInput::new(P::MPE),
             work: AudioBuffer::new(P::LAYOUT.outputs, max_block_size),
         })
     }
@@ -87,16 +92,23 @@ impl<P: Plugin> Engine<P> {
         self.events.clear();
         self.watcher.emit_changes(params, &mut self.events);
         let announced = self.events.len();
-        while let Some(message) = self.notes.pop() {
-            let _ = self.events.push_midi(0, message);
-        }
-        for receiver in &mut self.midi {
-            let events = &mut self.events;
-            receiver.read(frames, self.sample_rate, |offset, message| {
-                if let MidiInputMessage::Channel(message) = message {
-                    let _ = events.push_midi(offset, message);
-                }
+        // All of it is read through one `NoteInput`, as one stream, so that
+        // MPE and the notes it holds are followed as the plugin asked.
+        let Self {
+            events,
+            input: reader,
+            notes,
+            midi,
+            sample_rate,
+            ..
+        } = self;
+        while let Some(message) = notes.pop() {
+            reader.midi1(0, message, |event| {
+                let _ = events.push(event);
             });
+        }
+        for receiver in midi {
+            receiver.read_events(frames, *sample_rate, reader, events);
         }
         // Only what came after the announcements is stored: the announced
         // values were read from the parameters, and storing them again
@@ -356,6 +368,52 @@ mod tests {
             .unwrap();
         engine.render(None, &mut device);
         assert_eq!(device.channel(0), &[32.0; 8]);
+    }
+
+    #[test]
+    fn mpe_sent_by_the_program_is_read_as_per_note_events() {
+        use manguebyte_midi::mpe::{Configuration, ZoneKind};
+
+        let (mut engine, mut notes) = engine::<Keys>();
+        let mut device = AudioBuffer::<f32>::new(2, 8);
+        let lower = Configuration {
+            zone: ZoneKind::Lower,
+            members: 15,
+        };
+        for &message in lower.messages().as_slice() {
+            notes.push(message).unwrap();
+        }
+        // The same key on two member channels: two notes, which end one
+        // at a time.
+        for channel in [1, 2] {
+            notes
+                .push(MidiMessage::NoteOn {
+                    channel,
+                    note: 30,
+                    velocity: 100,
+                })
+                .unwrap();
+        }
+        engine.render(None, &mut device);
+        assert_eq!(device.channel(0), &[60.0; 8]);
+        notes
+            .push(MidiMessage::NoteOff {
+                channel: 2,
+                note: 30,
+                velocity: 0,
+            })
+            .unwrap();
+        engine.render(None, &mut device);
+        assert_eq!(device.channel(0), &[30.0; 8]);
+        notes
+            .push(MidiMessage::NoteOff {
+                channel: 1,
+                note: 30,
+                velocity: 0,
+            })
+            .unwrap();
+        engine.render(None, &mut device);
+        assert_eq!(device.peak(), 0.0);
     }
 
     #[test]

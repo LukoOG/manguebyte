@@ -42,6 +42,7 @@ use std::sync::Arc;
 
 use manguebyte_core::{AudioBuffer, NoDenormals};
 use manguebyte_dsp::event::{Event, EventBuffer, EventKind};
+use manguebyte_dsp::note_input::NoteInput;
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Transport};
 use manguebyte_midi::MidiMessage;
 use manguebyte_params::ParamSet;
@@ -611,6 +612,8 @@ struct Audio<P> {
     events: EventBuffer,
     /// The events of the piece being processed, counted from its start.
     piece: EventBuffer,
+    /// Reads the host's MIDI, MPE included, as every wrapper does.
+    input: NoteInput,
     /// Parameter values as the plugin last saw them.
     watcher: ParamWatcher,
     position: Position,
@@ -720,6 +723,7 @@ unsafe extern "C" fn instantiate<P: Plugin>(
                 sidechain: AudioBuffer::new(layout.sidechain, max_block),
                 events: EventBuffer::with_capacity(EVENTS_PER_BLOCK),
                 piece: EventBuffer::with_capacity(EVENTS_PER_BLOCK),
+                input: NoteInput::new(P::MPE),
                 watcher: ParamWatcher::new(&*params),
                 position: Position::default(),
                 resend_values: false,
@@ -806,6 +810,7 @@ unsafe extern "C" fn deactivate<P: Plugin>(handle: LV2_Handle) {
         if audio.active {
             audio.active = false;
             audio.plugin.reset();
+            audio.input.reset();
         }
     });
 }
@@ -1011,9 +1016,13 @@ impl<P: Plugin> Instance<P> {
                     continue;
                 }
                 if let Some(message) = MidiMessage::from_bytes(event.body) {
-                    // A full buffer drops the event; allocating is not an
-                    // option.
-                    let _ = audio.events.push(Event::from_midi(frame, message));
+                    // Read as every wrapper reads MIDI, so that MPE becomes
+                    // per-note events. A full buffer drops the event;
+                    // allocating is not an option.
+                    let Audio { events, input, .. } = audio;
+                    input.midi1(frame, message, |event| {
+                        let _ = events.push(event);
+                    });
                 }
             }
         }

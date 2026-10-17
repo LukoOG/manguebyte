@@ -75,8 +75,10 @@ use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::version::{CLAP_VERSION, clap_version_is_compatible};
 use manguebyte_core::{AudioBuffer, NoDenormals, ParamId};
 use manguebyte_dsp::event::{Event, EventBuffer, EventKind, Expression, NoteRef};
+use manguebyte_dsp::note_input::NoteInput;
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Transport};
 use manguebyte_midi::MidiMessage;
+use manguebyte_midi::ump::Packet;
 use manguebyte_params::{Param, ParamSet};
 use manguebyte_plugin::editor::{GestureCounters, GestureReader};
 use manguebyte_plugin::{ParamWatcher, Plugin, PluginKind, load_state, save_state};
@@ -347,6 +349,7 @@ unsafe extern "C" fn factory_create<P: Plugin>(
                 buffer: AudioBuffer::new(P::LAYOUT.outputs, 0),
                 sidechain: AudioBuffer::new(P::LAYOUT.sidechain, 0),
                 events: EventBuffer::new(),
+                input: NoteInput::new(P::MPE),
                 resend_values: false,
             }),
             params,
@@ -392,6 +395,10 @@ struct Audio<P> {
     buffer: AudioBuffer<f32>,
     sidechain: AudioBuffer<f32>,
     events: EventBuffer,
+    /// Reads the host's MIDI 1.0, MPE and MIDI 2.0 events as per-note
+    /// events, as every wrapper does. Notes in CLAP's own dialect, and
+    /// its note expressions, need no reading and do not go through it.
+    input: NoteInput,
     /// Parameter values as the plugin last saw them.
     watcher: ParamWatcher,
     /// Parameter values as the host last knew them, in index order.
@@ -558,6 +565,7 @@ unsafe extern "C" fn plugin_deactivate<P: Plugin>(plugin: *const clap_plugin) {
         // stopped, so no other thread is using the audio state.
         let audio = unsafe { &mut *instance.audio.get() };
         audio.plugin.reset();
+        audio.input.reset();
     });
 }
 
@@ -606,6 +614,8 @@ unsafe extern "C" fn plugin_reset<P: Plugin>(plugin: *const clap_plugin) {
         // using the audio state while the plugin is active.
         let audio = unsafe { &mut *instance.audio.get() };
         audio.plugin.reset();
+        // The voices are gone, so the notes the reader followed are too.
+        audio.input.reset();
     });
 }
 
@@ -1048,7 +1058,29 @@ impl<P: Plugin> Instance<P> {
                 let Some(message) = MidiMessage::from_bytes(&event.data) else {
                     return;
                 };
-                Event::from_midi(head.time, message).kind
+                let Audio { events, input, .. } = audio;
+                // A full buffer drops the event; allocating here is not
+                // an option.
+                input.midi1(head.time, message, |event| {
+                    let _ = events.push(event);
+                });
+                return;
+            }
+            CLAP_EVENT_MIDI2 => {
+                // SAFETY: this type carries a `clap_event_midi2`.
+                let Some(event) = (unsafe { read::<clap_event_midi2>(header) }) else {
+                    return;
+                };
+                // One Universal MIDI Packet, in as many of the four words
+                // as its type takes.
+                let Ok(packet) = Packet::from_words(&event.data) else {
+                    return;
+                };
+                let Audio { events, input, .. } = audio;
+                input.packet(head.time, &packet, |event| {
+                    let _ = events.push(event);
+                });
+                return;
             }
             _ => return,
         };
@@ -1615,7 +1647,12 @@ unsafe extern "C" fn note_ports_get<P: Plugin>(
             return false;
         }
         info.id = 0;
-        info.supported_dialects = CLAP_NOTE_DIALECT_CLAP | CLAP_NOTE_DIALECT_MIDI;
+        // MIDI of every kind ends in the same events as CLAP's own notes
+        // and expressions, through the plugin's `NoteInput`.
+        info.supported_dialects = CLAP_NOTE_DIALECT_CLAP
+            | CLAP_NOTE_DIALECT_MIDI
+            | CLAP_NOTE_DIALECT_MIDI_MPE
+            | CLAP_NOTE_DIALECT_MIDI2;
         info.preferred_dialect = CLAP_NOTE_DIALECT_CLAP;
         copy_text("Notes", &mut info.name);
         true

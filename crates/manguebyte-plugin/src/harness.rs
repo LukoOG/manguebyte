@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use manguebyte_core::{AudioBuffer, NoDenormals};
 use manguebyte_dsp::event::{Event, EventBuffer, EventKind, NoteRef};
+use manguebyte_dsp::note_input::NoteInput;
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Transport};
+use manguebyte_midi::MidiMessage;
+use manguebyte_midi::ump::Packet;
 use manguebyte_params::{LoadReport, ParamSet};
 
 use crate::editor::EditorSpec;
@@ -34,8 +37,11 @@ pub struct Harness<P: Plugin> {
     pattern: Vec<usize>,
     next_in_pattern: usize,
     /// Events not yet delivered, sorted by frame.
-    scheduled: Vec<(u64, EventKind)>,
+    scheduled: Vec<(u64, Scheduled)>,
     events: EventBuffer,
+    /// Reads scheduled MIDI as a wrapper reads a host's, following
+    /// [`Plugin::MPE`].
+    input: NoteInput,
     /// The stretch of the sidechain that goes with the block being rendered.
     sidechain: AudioBuffer<f32>,
     watcher: ParamWatcher,
@@ -81,6 +87,7 @@ impl<P: Plugin> Harness<P> {
             next_in_pattern: 0,
             scheduled: Vec::new(),
             events: EventBuffer::with_capacity(EVENTS_PER_BLOCK),
+            input: NoteInput::new(P::MPE),
             sidechain: AudioBuffer::new(P::LAYOUT.sidechain, max_block_size),
             watcher: ParamWatcher::new(&*params),
             params,
@@ -150,8 +157,29 @@ impl<P: Plugin> Harness<P> {
     /// An event scheduled for a frame that has already been rendered is
     /// delivered at the start of the next block.
     pub fn schedule(&mut self, frame: u64, kind: EventKind) {
+        self.schedule_item(frame, Scheduled::Event(kind));
+    }
+
+    /// Schedules a MIDI 1.0 message at `frame`, read as the plugin
+    /// wrappers read a host's MIDI: through a
+    /// [`NoteInput`](manguebyte_dsp::note_input::NoteInput) that follows
+    /// [`Plugin::MPE`], so that MPE arrives as per-note events. A message
+    /// passed to [`schedule`](Self::schedule) as [`EventKind::Midi`]
+    /// reaches the plugin as it is instead.
+    pub fn schedule_midi(&mut self, frame: u64, message: MidiMessage) {
+        self.schedule_item(frame, Scheduled::Midi(message));
+    }
+
+    /// Schedules a Universal MIDI Packet at `frame`, read as
+    /// [`schedule_midi`](Self::schedule_midi) reads MIDI 1.0: MIDI 2.0
+    /// notes and per-note messages arrive as per-note events.
+    pub fn schedule_ump(&mut self, frame: u64, packet: Packet) {
+        self.schedule_item(frame, Scheduled::Packet(packet));
+    }
+
+    fn schedule_item(&mut self, frame: u64, item: Scheduled) {
         let index = self.scheduled.partition_point(|&(at, _)| at <= frame);
-        self.scheduled.insert(index, (frame, kind));
+        self.scheduled.insert(index, (frame, item));
     }
 
     /// Schedules a note on channel 0 that starts at `start` and is released
@@ -301,13 +329,34 @@ impl<P: Plugin> Harness<P> {
     fn gather_events(&mut self, length: usize) {
         let end = self.position + length as u64;
         let due = self.scheduled.partition_point(|&(at, _)| at < end);
-        for (at, kind) in self.scheduled.drain(..due) {
-            let offset = at.saturating_sub(self.position) as u32;
-            self.events
-                .push(Event { offset, kind })
+        let Self {
+            events,
+            input,
+            scheduled,
+            position,
+            ..
+        } = self;
+        let mut push = |event| {
+            events
+                .push(event)
                 .expect("more events in one block than the harness can deliver");
+        };
+        for (at, item) in scheduled.drain(..due) {
+            let offset = at.saturating_sub(*position) as u32;
+            match item {
+                Scheduled::Event(kind) => push(Event { offset, kind }),
+                Scheduled::Midi(message) => input.midi1(offset, message, &mut push),
+                Scheduled::Packet(packet) => input.packet(offset, &packet, &mut push),
+            }
         }
     }
+}
+
+/// Something waiting to be delivered.
+enum Scheduled {
+    Event(EventKind),
+    Midi(MidiMessage),
+    Packet(Packet),
 }
 
 #[cfg(test)]
@@ -640,6 +689,98 @@ mod tests {
         assert_eq!(harness.render(4).channel(0), &[72.0; 4]);
         harness.reset();
         assert_eq!(harness.render(4).peak(), 0.0);
+    }
+
+    /// `Keys`, made to be played from an MPE controller.
+    struct MpeKeys(Keys);
+
+    impl Plugin for MpeKeys {
+        const INFO: PluginInfo = Keys::INFO;
+        const LAYOUT: AudioLayout = Keys::LAYOUT;
+        const MPE: crate::Mpe = crate::Mpe::LOWER_ZONE;
+        type Params = NoParams;
+
+        fn new() -> Self {
+            Self(Keys::new())
+        }
+        fn params(&self) -> Arc<NoParams> {
+            self.0.params()
+        }
+        fn prepare(&mut self, spec: &ProcessSpec) {
+            self.0.prepare(spec);
+        }
+        fn process(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+            self.0.process(buffer, context);
+        }
+    }
+
+    #[test]
+    fn mpe_and_midi_2_reach_an_instrument_as_per_note_events() {
+        use manguebyte_midi::translate::scale_7_to_32;
+        use manguebyte_midi::ump::{ChannelVoice2, Message, NoteAttribute};
+
+        let on = |channel, note| MidiMessage::NoteOn {
+            channel,
+            note,
+            velocity: 100,
+        };
+        let off = |channel, note| MidiMessage::NoteOff {
+            channel,
+            note,
+            velocity: 0,
+        };
+        // Two notes on member channels; the second one's channel pressure
+        // halves it, and the first one's does nothing to it.
+        let mut mpe = Harness::<MpeKeys>::new(48_000.0, 16).with_block_pattern(&[5, 16]);
+        mpe.schedule_midi(10, on(1, 60));
+        mpe.schedule_midi(20, on(2, 64));
+        mpe.schedule_midi(
+            30,
+            MidiMessage::ChannelPressure {
+                channel: 2,
+                pressure: 64,
+            },
+        );
+        mpe.schedule_midi(40, off(1, 60));
+        mpe.schedule_midi(50, off(2, 64));
+        let from_mpe = mpe.render(60);
+        let left = from_mpe.channel(0);
+        assert_eq!(&left[20..30], &[124.0; 10]);
+        assert!((left[35] - (60.0 + 64.0 * 0.5)).abs() < 1e-3);
+        assert_eq!(&left[50..], &[0.0; 10]);
+
+        // The same in MIDI 2.0 packets, per note on channel 1.
+        let packet = |message| Message::Midi2 { group: 0, message }.to_packet();
+        let on2 = |note| {
+            packet(ChannelVoice2::NoteOn {
+                channel: 0,
+                note,
+                velocity: manguebyte_midi::translate::scale_7_to_16(100),
+                attribute: NoteAttribute::NONE,
+            })
+        };
+        let off2 = |note| {
+            packet(ChannelVoice2::NoteOff {
+                channel: 0,
+                note,
+                velocity: 0,
+                attribute: NoteAttribute::NONE,
+            })
+        };
+        let mut two = Harness::<Keys>::new(48_000.0, 16).with_block_pattern(&[16, 3]);
+        two.schedule_ump(10, on2(60));
+        two.schedule_ump(20, on2(64));
+        two.schedule_ump(
+            30,
+            packet(ChannelVoice2::PolyPressure {
+                channel: 0,
+                note: 64,
+                pressure: scale_7_to_32(64),
+            }),
+        );
+        two.schedule_ump(40, off2(60));
+        two.schedule_ump(50, off2(64));
+        assert_eq!(two.render(60), from_mpe);
     }
 
     #[test]

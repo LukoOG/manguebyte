@@ -344,6 +344,7 @@ enum Sent {
     Value(clap_event_param_value),
     Modulation(clap_event_param_mod),
     Midi(clap_event_midi),
+    Midi2(clap_event_midi2),
 }
 
 impl Sent {
@@ -357,6 +358,7 @@ impl Sent {
             Self::Value(event) => ptr::from_ref(event).cast(),
             Self::Modulation(event) => ptr::from_ref(event).cast(),
             Self::Midi(event) => ptr::from_ref(event).cast(),
+            Self::Midi2(event) => ptr::from_ref(event).cast(),
         }
     }
 }
@@ -1085,6 +1087,93 @@ fn note_pan_arrives_in_the_framework_unit() {
     assert_eq!(&out[8..12], &[60.0; 4], "the middle is the centre");
     assert_eq!(&out[12..16], &[70.0; 4], "the top is fully right");
     assert_eq!(&out[16..], &[50.0; 4], "the bottom is fully left");
+}
+
+fn midi2(time: u32, words: &[u32]) -> Sent {
+    let mut data = [0; 4];
+    data[..words.len()].copy_from_slice(words);
+    Sent::Midi2(clap_event_midi2 {
+        header: header::<clap_event_midi2>(time, CLAP_EVENT_MIDI2),
+        port_index: 0,
+        data,
+    })
+}
+
+#[test]
+fn clap_notes_mpe_and_midi_2_end_in_the_same_events() {
+    let host = Host::new(plugin_entry::<Keys>(), Keys::INFO.id);
+    host.activate(48_000.0, 32);
+    let notes: &clap_plugin_note_ports = host.extension(CLAP_EXT_NOTE_PORTS).unwrap();
+    unsafe {
+        let mut info: clap_note_port_info = std::mem::zeroed();
+        assert!(notes.get.unwrap()(host.plugin, 0, true, &raw mut info));
+        let all = CLAP_NOTE_DIALECT_CLAP
+            | CLAP_NOTE_DIALECT_MIDI
+            | CLAP_NOTE_DIALECT_MIDI_MPE
+            | CLAP_NOTE_DIALECT_MIDI2;
+        assert_eq!(info.supported_dialects, all);
+    }
+
+    // Two notes on key 60 at once, the second halved by pressure while
+    // the first is not, then released one after the other: first in
+    // CLAP's own dialect, with note identifiers and an expression...
+    let pressure = Sent::Expression(clap_event_note_expression {
+        header: header::<clap_event_note_expression>(8, CLAP_EVENT_NOTE_EXPRESSION),
+        expression_id: CLAP_NOTE_EXPRESSION_PRESSURE,
+        note_id: 2,
+        port_index: 0,
+        channel: 0,
+        key: -1,
+        value: 0.5,
+    });
+    let clap = vec![
+        note(0, CLAP_EVENT_NOTE_ON, 60, 1),
+        note(4, CLAP_EVENT_NOTE_ON, 60, 2),
+        pressure,
+        note(12, CLAP_EVENT_NOTE_OFF, 60, 1),
+        note(16, CLAP_EVENT_NOTE_OFF, 60, 2),
+    ];
+    // ...then as MPE, on two member channels of a lower zone the stream
+    // configures...
+    let mpe = vec![
+        midi(0, [0xB0, 100, 6]),
+        midi(0, [0xB0, 101, 0]),
+        midi(0, [0xB0, 6, 15]),
+        midi(0, [0x91, 60, 100]),
+        midi(4, [0x92, 60, 100]),
+        midi(8, [0xD2, 64, 0]),
+        midi(12, [0x81, 60, 0]),
+        midi(16, [0x82, 60, 0]),
+    ];
+    // ...and as MIDI 2.0 packets on one channel, the first note detached
+    // from its number before the second starts, so that the pressure
+    // reaches the second alone.
+    let midi_2 = vec![
+        midi2(0, &[0x4090_3C00, 0xFFFF_0000]),
+        // Per-note management: detach the first note.
+        midi2(4, &[0x40F0_3C02, 0]),
+        midi2(4, &[0x4090_3C00, 0xFFFF_0000]),
+        midi2(8, &[0x40A0_3C00, 0x8000_0000]),
+        midi2(12, &[0x4080_3C00, 0]),
+        midi2(16, &[0x4080_3C00, 0]),
+    ];
+    let mut outputs = Vec::new();
+    for events in [clap, mpe, midi_2] {
+        let processed = host.process(&mut [vec![0.0f32; 24]], None, events, None);
+        assert_eq!(processed.heap_calls, 0, "reading notes used the heap");
+        outputs.push(processed.output[0].clone());
+    }
+    let expected = [
+        [60.0; 4].as_slice(),
+        &[120.0; 4],
+        &[90.0; 4],
+        &[30.0; 4],
+        &[0.0; 8],
+    ]
+    .concat();
+    assert_eq!(outputs[0], expected);
+    assert_eq!(outputs[1], expected, "MPE");
+    assert_eq!(outputs[2], expected, "MIDI 2.0");
 }
 
 #[test]

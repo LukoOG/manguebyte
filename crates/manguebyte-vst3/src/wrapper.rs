@@ -70,6 +70,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 use manguebyte_core::{AtomicF64, AudioBuffer, NoDenormals, ParamId};
 use manguebyte_dsp::event::{Event, EventBuffer, EventKind, Expression, NoteRef};
+use manguebyte_dsp::note_input::NoteInput;
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Transport};
 use manguebyte_midi::MidiMessage;
 use manguebyte_params::{Param, ParamSet};
@@ -241,6 +242,12 @@ struct Audio<P> {
     /// Controller moves and notes that arrived in a block with no audio,
     /// for the next block that has some.
     held: EventBuffer,
+    /// What the host sent for the coming block, as it sent it, in time
+    /// order, before it is read into `events`.
+    raw: EventBuffer,
+    /// Reads notes on the channels of an MPE zone, and the controller
+    /// moves the hidden parameters stand for, as every wrapper does.
+    input: NoteInput,
     /// Parameter values as the plugin last saw them.
     watcher: ParamWatcher,
     /// Whether the plugin panicked in the last block, so that the next one
@@ -399,6 +406,8 @@ impl<P: Plugin> Component<P> {
                 sidechain: AudioBuffer::new(P::LAYOUT.sidechain, 0),
                 events: EventBuffer::new(),
                 held: EventBuffer::new(),
+                raw: EventBuffer::new(),
+                input: NoteInput::new(P::MPE),
                 resend_values: false,
             }),
             params,
@@ -523,13 +532,44 @@ impl<P: Plugin> Component<P> {
     /// same parameter for all of them, so a plugin that keeps controllers
     /// per channel (as `Synth` does) has to hear it on every channel to
     /// apply it to every note. A full buffer drops what does not fit.
-    fn push_controller(events: &mut EventBuffer, offset: u32, message: MidiMessage) {
+    ///
+    /// Each message is read through `input`, so that on the channels of an
+    /// MPE zone the pitch bend, pressure and controller 74 of a member
+    /// channel become per-note expressions. That needs the channel the
+    /// move came from: an MPE instrument declares its controllers
+    /// [`per_channel`](MidiControllers::per_channel).
+    /// Queues one event as the host sent it, reading notes and controller
+    /// moves through `input`. Everything else is queued as it is.
+    fn read(input: &mut NoteInput, event: Event, events: &mut EventBuffer) {
+        let offset = event.offset;
+        let mut push = |event| {
+            let _ = events.push(event);
+        };
+        match event.kind {
+            EventKind::Midi(message) if MidiController::of(&message).is_some() => {
+                Self::push_controller(input, events, offset, message);
+            }
+            EventKind::NoteOn { note, velocity } => input.note_on(offset, note, velocity, push),
+            EventKind::NoteOff { note, velocity } => input.note_off(offset, note, velocity, push),
+            _ => push(event),
+        }
+    }
+
+    fn push_controller(
+        input: &mut NoteInput,
+        events: &mut EventBuffer,
+        offset: u32,
+        message: MidiMessage,
+    ) {
+        let mut push = |event| {
+            let _ = events.push(event);
+        };
         if Self::MIDI.is_per_channel() {
-            let _ = events.push(Event::from_midi(offset, message));
+            input.midi1(offset, message, &mut push);
             return;
         }
         for channel in 0..MIDI_CHANNELS as u8 {
-            let _ = events.push(Event::from_midi(offset, on_channel(message, channel)));
+            input.midi1(offset, on_channel(message, channel), &mut push);
         }
     }
 
@@ -556,14 +596,7 @@ impl<P: Plugin> Component<P> {
             // moves were held once each, and are spread over the channels
             // now.
             for &event in &audio.held {
-                match event.kind {
-                    EventKind::Midi(message) if MidiController::of(&message).is_some() => {
-                        Self::push_controller(&mut audio.events, event.offset, message);
-                    }
-                    _ => {
-                        let _ = audio.events.push(event);
-                    }
-                }
+                Self::read(&mut audio.input, event, &mut audio.events);
             }
             audio.held.clear();
             // Then changes the plugin has not seen yet, on frame 0: a
@@ -608,17 +641,14 @@ impl<P: Plugin> Component<P> {
                                 value: param.normalized_to_plain(value),
                             }
                         } else if let Some(message) = Self::midi_from_param(id, value) {
-                            if has_audio {
-                                Self::push_controller(&mut audio.events, offset, message);
-                                continue;
-                            }
-                            // Held once, and spread over the channels when
-                            // it is delivered.
+                            // Queued once, and spread over the channels
+                            // when it is read below, or when it is
+                            // delivered after a block with no audio.
                             Event::from_midi(offset, message).kind
                         } else {
                             continue;
                         };
-                        let _ = audio.events.push(Event { offset, kind });
+                        let _ = audio.raw.push(Event { offset, kind });
                     }
                 }
             }
@@ -632,13 +662,23 @@ impl<P: Plugin> Component<P> {
                 for index in 0..list.getEventCount() {
                     let mut event: vst::Event = std::mem::zeroed();
                     if list.getEvent(index, &mut event) == kResultOk {
-                        convert_event(&event, &mut audio.events);
+                        convert_event(&event, &mut audio.raw);
                     }
                 }
             }
         }
 
         if has_audio {
+            // The host's parameter changes and its events come in two
+            // lists, and are now in one, in time order: that is the order
+            // the notes and controllers have to be read in.
+            let Audio {
+                raw, input, events, ..
+            } = audio;
+            for &event in raw.iter() {
+                Self::read(input, event, events);
+            }
+            raw.clear();
             // Only the host's values are stored. The announced ones were
             // read from the parameters, and the main thread may have stored
             // a newer value since (a state load, or an editor's edit while
@@ -647,17 +687,18 @@ impl<P: Plugin> Component<P> {
             audio.watcher.apply_and_remember(params, from_host);
             return;
         }
-        apply_param_events(params, &audio.events);
+        apply_param_events(params, &audio.raw);
         // The values are stored, and the watcher has not been told, so it
         // announces them on the next block with audio. A controller move
-        // or a note has no stored value to be found again, so it is kept.
-        for event in &audio.events {
+        // or a note has no stored value to be found again, so it is kept,
+        // as the host sent it, to be read when it is delivered.
+        for event in &audio.raw {
             if !matches!(event.kind, EventKind::ParamValue { .. }) {
                 let kind = event.kind;
                 let _ = audio.held.push(Event { offset: 0, kind });
             }
         }
-        audio.events.clear();
+        audio.raw.clear();
     }
 }
 
@@ -986,6 +1027,7 @@ impl<P: Plugin> vst::IComponentTrait for Component<P> {
                 audio.sidechain = AudioBuffer::new(P::LAYOUT.sidechain, max_block);
                 audio.events = EventBuffer::with_capacity(EVENTS_PER_BLOCK);
                 audio.held = EventBuffer::with_capacity(HELD_EVENTS);
+                audio.raw = EventBuffer::with_capacity(EVENTS_PER_BLOCK);
                 audio.plugin.prepare(&ProcessSpec {
                     sample_rate: audio.sample_rate,
                     max_block_size: max_block,
@@ -999,6 +1041,7 @@ impl<P: Plugin> vst::IComponentTrait for Component<P> {
                 if audio.prepared {
                     audio.plugin.reset();
                     audio.held.clear();
+                    audio.input.reset();
                 }
             }
             kResultOk

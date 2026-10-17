@@ -1169,6 +1169,29 @@ fn midi_lands_on_its_frame() {
     assert_eq!(ran.output[0], vec![0.25; 64]);
 }
 
+#[test]
+fn mpe_notes_belong_to_their_zone() {
+    let _guard = one_at_a_time();
+    let mut host = keys_host(Offer::USUAL);
+    // A lower zone, configured by the stream, and the same key on two of
+    // its member channels: two notes of the zone, which the master
+    // channel's "all sound off" stops together. As plain MIDI it would
+    // not reach them.
+    let notes = Seq::new()
+        .midi(0, &[0xB0, 100, 6])
+        .midi(0, &[0xB0, 101, 0])
+        .midi(0, &[0xB0, 6, 15])
+        .midi(10, &[0x91, 60, 100])
+        .midi(20, &[0x92, 60, 100])
+        .midi(30, &[0xB0, 120, 0]);
+    let ran = host.run(&[], 40, &notes);
+    assert_eq!(ran.heap_calls, 0);
+    assert_eq!(
+        ran.output[0],
+        steps(&[(0.0, 10), (60.0, 10), (120.0, 10), (0.0, 10)])
+    );
+}
+
 /// Exactly 2^-15 quarter notes per frame at 48 kHz.
 const TEMPO: f64 = 87.890625;
 const BEAT: f64 = 1.0 / 32_768.0;

@@ -78,6 +78,23 @@ impl DeviceIo<'_> {
         let frames = self.output.num_frames();
         self.midi.read(frames, self.info.sample_rate, handle);
     }
+
+    /// Hands over the MIDI that arrived since the last block as the
+    /// framework's events, read through `input` so that MPE becomes
+    /// per-note events (see [`MidiReceiver::read_events`]). Call it once
+    /// per block, instead of [`read_midi`](Self::read_midi).
+    ///
+    /// Real-time safe.
+    #[cfg(feature = "midi")]
+    pub fn read_midi_events(
+        &mut self,
+        input: &mut manguebyte_dsp::note_input::NoteInput,
+        events: &mut manguebyte_dsp::event::EventBuffer,
+    ) {
+        let frames = self.output.num_frames();
+        self.midi
+            .read_events(frames, self.info.sample_rate, input, events);
+    }
 }
 
 /// What a [`DeviceManager`] runs.

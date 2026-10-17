@@ -176,3 +176,62 @@ fn duplex_streams_do_not_use_the_heap() {
         });
     }
 }
+
+#[cfg(feature = "midi")]
+#[test]
+fn mpe_from_a_port_becomes_per_note_events_without_the_heap() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use manguebyte_dsp::event::{EventBuffer, EventKind, Expression};
+    use manguebyte_dsp::note_input::{Mpe, NoteInput};
+
+    let mock = mock();
+    let mut manager = DeviceManager::headless(&mock);
+    manager.set_max_block_size(512);
+    // What the callback saw: notes started with an identifier on the
+    // master channel, and the tuning of the last expression, in cents.
+    let notes = Arc::new(AtomicU64::new(0));
+    let cents = Arc::new(AtomicU64::new(0));
+    let (seen_notes, seen_cents) = (Arc::clone(&notes), Arc::clone(&cents));
+    let mut input = NoteInput::new(Mpe::LOWER_ZONE);
+    let mut events = EventBuffer::with_capacity(256);
+    manager
+        .start(&setup(), move |io: &mut DeviceIo<'_>| {
+            events.clear();
+            io.read_midi_events(&mut input, &mut events);
+            for event in &events {
+                match event.kind {
+                    EventKind::NoteOn { note, .. } if note.id.is_some() && note.channel == 0 => {
+                        seen_notes.fetch_add(1, Ordering::Relaxed);
+                    }
+                    EventKind::NoteExpression {
+                        expression: Expression::Tuning,
+                        value,
+                        ..
+                    } => seen_cents.store((value * 100.0).round() as u64, Ordering::Relaxed),
+                    _ => {}
+                }
+            }
+            io.output.clear();
+        })
+        .unwrap();
+    let mut out = vec![0.0f32; 2 * 1_500];
+    // Member channel 3 bends up all the way, plays, and comes half way
+    // back; then member channel 4 plays.
+    mock.send_midi(
+        "keys",
+        &[
+            0xE2, 0x7F, 0x7F, 0x92, 60, 100, 0xE2, 0x00, 0x60, 0x93, 64, 90,
+        ],
+    );
+    assert_no_heap_use("MPE from a MIDI port", || {
+        for frames in SIZES {
+            assert!(mock.render(&mut out[..2 * frames]));
+        }
+    });
+    assert_eq!(notes.load(Ordering::Relaxed), 2);
+    // 0x60 << 7 is a bend of 4096 above the centre: half of 48 semitones,
+    // widened as MIDI 2.0 widens it.
+    assert_eq!(cents.load(Ordering::Relaxed), 2_400);
+}

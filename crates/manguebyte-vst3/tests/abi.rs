@@ -2556,3 +2556,89 @@ fn random_host_traffic_is_heard_exactly_as_declared() {
     sent += fuzz::<EffectWithAll>(0xBF58_476D_1CE4_E5B9);
     assert!(sent > 7 * ROUNDS, "only {sent} points were sent");
 }
+
+// --- An MPE instrument ---------------------------------------------------------
+
+/// An `Ensemble` made to be played from an MPE controller: a lower zone
+/// from the start, and controllers kept per channel, as MPE needs.
+struct MpeEnsemble {
+    synth: Synth<KeyVoice>,
+    params: Arc<ProbeParams>,
+}
+
+impl Plugin for MpeEnsemble {
+    const INFO: PluginInfo = PluginInfo {
+        id: "org.manguebyte.test.mpe",
+        name: "MPE ensemble",
+        vendor: "Manguebyte",
+        version: "0.1.0",
+        description: "Plays key numbers, one note per channel",
+        kind: PluginKind::Instrument,
+    };
+    const LAYOUT: AudioLayout = AudioLayout {
+        inputs: 0,
+        outputs: 1,
+        sidechain: 0,
+    };
+    const MIDI_CONTROLLERS: MidiControllers = MidiControllers::MUSICAL.per_channel();
+    const MPE: manguebyte_plugin::Mpe = manguebyte_plugin::Mpe::LOWER_ZONE;
+    type Params = ProbeParams;
+
+    fn new() -> Self {
+        Self {
+            synth: Synth::with_voices(4, KeyVoice::default),
+            params: Arc::new(ProbeParams {
+                gain: FloatParam::new("gain", "Gain", FloatRange::linear(0.0, 1.0), 0.5),
+            }),
+        }
+    }
+    fn params(&self) -> Arc<ProbeParams> {
+        Arc::clone(&self.params)
+    }
+    fn prepare(&mut self, spec: &ProcessSpec) {
+        self.synth.prepare(spec);
+    }
+    fn process(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+        self.synth.process_with(buffer, context);
+    }
+}
+
+/// A note-on or note-off on `channel` with the host's identifier `id`.
+fn note_with_id(offset: i32, on: bool, channel: i16, pitch: i16, id: i32) -> vst::Event {
+    let mut event = note_on_channel(offset, on, channel, pitch);
+    // `note_on_channel` wrote the member of the union that `on` names.
+    if on {
+        event.__field0.noteOn.noteId = id;
+    } else {
+        event.__field0.noteOff.noteId = id;
+    }
+    event
+}
+
+#[test]
+fn an_mpe_instrument_bends_one_note_by_its_member_channel() {
+    let host = Host::new::<MpeEnsemble>(plugin_factory::<MpeEnsemble>());
+    host.activate(48_000.0, 32);
+    // The wheel of member channel 3, as the host's MIDI mapping routes it.
+    let wheel = mapping_of(&host, 0, 2, WHEEL).unwrap();
+    // Notes on member channels 2 and 3 with the host's identifiers; the
+    // wheel of channel 3 goes all the way up on frame 4.
+    let out = play(
+        &host,
+        vec![(wheel, vec![(4, 1.0)])],
+        vec![
+            note_with_id(0, true, 1, 60, 10),
+            note_with_id(0, true, 2, 64, 11),
+        ],
+    );
+    // Up 48 semitones, the member channels' range, on the note of channel
+    // 3 alone; the note of channel 2 is not moved.
+    assert_eq!(
+        out,
+        [124.0, 124.0, 124.0, 124.0, 172.0, 172.0, 172.0, 172.0]
+    );
+
+    // The note-off on channel 3 ends that note only.
+    let out = play(&host, vec![], vec![note_with_id(2, false, 2, 64, 11)]);
+    assert_eq!(out, [172.0, 172.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0]);
+}

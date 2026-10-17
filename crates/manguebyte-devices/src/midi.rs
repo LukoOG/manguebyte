@@ -47,6 +47,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use manguebyte_core::spsc::{self, Consumer, Producer};
+use manguebyte_dsp::event::EventBuffer;
+use manguebyte_dsp::note_input::NoteInput;
 use manguebyte_midi::{MidiMessage, StreamEvent, StreamParser, SystemMessage};
 
 /// How many messages can wait for the audio thread. A dense performance
@@ -349,6 +351,35 @@ impl MidiReceiver {
         handle: impl FnMut(u32, MidiInputMessage),
     ) {
         self.read_at(Instant::now(), frames, sample_rate, handle);
+    }
+
+    /// Hands over every channel message that has arrived as the
+    /// framework's events, read through `input`, each on its frame inside
+    /// the coming block. Call it once per block, instead of
+    /// [`read`](Self::read).
+    ///
+    /// `input` turns MPE and plain MIDI into notes, per-note expressions
+    /// and the channel-wide messages that remain, as every plugin wrapper
+    /// does (see [`NoteInput`]). Keep one `NoteInput` per stream of
+    /// messages: it remembers the zones and the notes that are held. What
+    /// the buffer has no room for is dropped. System messages are not
+    /// events and are dropped too; use [`read`](Self::read) for them.
+    ///
+    /// Real-time safe.
+    pub fn read_events(
+        &mut self,
+        frames: usize,
+        sample_rate: f64,
+        input: &mut NoteInput,
+        events: &mut EventBuffer,
+    ) {
+        self.read(frames, sample_rate, |offset, message| {
+            if let MidiInputMessage::Channel(message) = message {
+                input.midi1(offset, message, |event| {
+                    let _ = events.push(event);
+                });
+            }
+        });
     }
 
     /// Forgets when the previous block was read, for a stream that

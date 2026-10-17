@@ -76,6 +76,7 @@ use std::sync::Arc;
 
 use manguebyte_core::AudioBuffer;
 use manguebyte_dsp::event::{Event, EventBuffer, EventKind};
+pub use manguebyte_dsp::note_input::Mpe;
 use manguebyte_dsp::{ProcessContext, ProcessSpec};
 use manguebyte_params::ParamSet;
 
@@ -302,6 +303,23 @@ pub trait Plugin: Send + 'static {
     /// assert!(!Organ::MIDI_CONTROLLERS.wants(&wheel));
     /// ```
     const MIDI_CONTROLLERS: MidiControllers = MidiControllers::MUSICAL;
+
+    /// How MIDI from the host is read as MPE. [`Mpe::Follow`] unless
+    /// overridden: zones exist once the stream configures them, and a
+    /// stream that never does is plain MIDI.
+    ///
+    /// Every wrapper, the standalone runner and the [`Harness`] read the
+    /// MIDI they are given through a
+    /// [`NoteInput`](manguebyte_dsp::note_input::NoteInput) set up with
+    /// this, so a note of an MPE zone or of MIDI 2.0 reaches
+    /// [`process`](Self::process) as a [`NoteOn`](EventKind::NoteOn) with
+    /// an identifier, shaped by per-note
+    /// [`NoteExpression`](EventKind::NoteExpression)s, exactly as a CLAP
+    /// host's own notes and expressions do. An instrument made to be
+    /// played from an MPE controller says [`Mpe::LOWER_ZONE`], because
+    /// many hosts never pass the configuration message on; one that reads
+    /// MPE from raw MIDI itself says [`Mpe::Off`].
+    const MPE: Mpe = Mpe::Follow;
 
     /// How many frames late the output is compared with the input.
     fn latency_samples(&self) -> usize {

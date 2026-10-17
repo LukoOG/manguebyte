@@ -20,7 +20,7 @@
 //! | Audio buses | Main input and output from the plugin's layout, plus a sidechain input if it has one. The layout is fixed |
 //! | Event bus | For instruments and note effects |
 //! | Automation | Every point of a parameter's queue is delivered on its frame, so automation is sample-accurate |
-//! | Notes | Note on and off with their ids, note tuning, polyphonic pressure, and the volume, pan, tuning, vibrato and brightness note expressions |
+//! | Notes | Note on and off with their ids, note tuning, polyphonic pressure, and the volume, pan, tuning, vibrato and brightness note expressions. On the channels of an MPE zone ([`Plugin::MPE`](manguebyte_plugin::Plugin::MPE)) notes are read through a [`NoteInput`](manguebyte_dsp::note_input::NoteInput), keeping the host's ids, and their member channel's pitch bend, pressure and controller 74 become per-note expressions; that needs controllers declared per channel |
 //! | MIDI controllers | Controllers, channel pressure and pitch bend, which VST 3 delivers only as parameters, arrive as MIDI events again, on their frames. Only the ones in [`Plugin::MIDI_CONTROLLERS`](manguebyte_plugin::Plugin::MIDI_CONTROLLERS) are exposed: one hidden parameter each, which `IMidiMapping` gives for every channel and whose moves arrive on all 16 channels, or, for a plugin that asked for channels, one per controller and channel, whose moves arrive on their own channel. See [MIDI controllers](#midi-controllers) |
 //! | Parameters | Listing, values, text both ways. The hidden parameters that carry MIDI controllers come after the plugin's own and are filed in a unit of their own |
 //! | State | Saved and restored as text; another plugin's state is refused |
