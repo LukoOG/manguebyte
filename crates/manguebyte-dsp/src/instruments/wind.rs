@@ -116,8 +116,8 @@ const JET_FOLLOW_SECONDS: f64 = 0.005;
 /// amplifies and the pipe colours (P. R. Cook's flute puts the breath's
 /// noise there, "A meta-wind-instrument physical model", ICMC 1992), and
 /// how much is heard directly from the embouchure.
-const JET_NOISE: f64 = 0.08;
-const FLUTE_BREATH: f64 = 0.09;
+const JET_NOISE: f64 = 0.065;
+const FLUTE_BREATH: f64 = 0.075;
 /// How much of the jet's drive the embouchure radiates directly, against
 /// what the pipe's open end lets out.
 const EMBOUCHURE: f64 = 1.0;
@@ -135,7 +135,7 @@ const VORTEX: f64 = 0.7;
 /// (the eddies of a faster jet are smaller and quicker), from the first of
 /// [`BREATH_HIGH`] at no breath by the second at a breath of 1.
 const BREATH_LOW: f64 = 500.0;
-const BREATH_HIGH: (f64, f64) = (2_000.0, 4_000.0);
+const BREATH_HIGH: (f64, f64) = (3_000.0, 7_000.0);
 /// The flute's radiated tilt, as [`BRASS_TILT`] is the brass's: soft, the
 /// tone is little more than its first harmonics; loud, the jet's switching
 /// reaches the bell.
