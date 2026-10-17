@@ -184,7 +184,7 @@ fn every_note_is_in_tune_across_the_keyboard() {
         OscParams::table(TableShape::Basic, 0.7, 1.0),
     ];
     for osc in shapes {
-        for key in (21u8..=108).step_by(11) {
+        for key in [21u8, 28, 33, 45, 52, 57, 64, 69, 76, 81, 93, 100, 108] {
             let signal = hold(plain(osc), key, 0.6, 0.6);
             let expected = key_hz(f64::from(key));
             let measured = frequency_near(between(&signal, 0.1, 0.6), expected);
