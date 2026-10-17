@@ -959,15 +959,23 @@ fn formats_change_only_while_uninitialized_and_listeners_hear_it() {
         noErr,
         "no change"
     );
+    // The longest slice may change at any time, as Apple's base classes
+    // allow: the unit is prepared again, and renders the new length.
+    let mut main = Feed {
+        audio: signal(2, 4_096, 0.1),
+        position: 0,
+    };
+    assert_eq!(fx.feed(0, &mut main), noErr);
+    let mut out = AudioBuffer::<f32>::new(2, 2_048);
     assert_eq!(
-        fx.set(
-            kAudioUnitProperty_MaximumFramesPerSlice,
-            kAudioUnitScope_Global,
-            0,
-            &1024u32
-        ),
-        kAudioUnitErr_Initialized
+        fx.render(1_024, &mut out, 0, false),
+        kAudioUnitErr_TooManyFramesToProcess
     );
+    let max = kAudioUnitProperty_MaximumFramesPerSlice;
+    assert_eq!(fx.info(max, kAudioUnitScope_Global, 0), Ok((4, true)));
+    assert_eq!(fx.set(max, kAudioUnitScope_Global, 0, &1024u32), noErr);
+    assert_eq!(fx.get::<u32>(max, kAudioUnitScope_Global, 0), Ok(1_024));
+    assert_eq!(fx.render(1_024, &mut out, 0, false), noErr);
     assert_eq!(fx.simple(kAudioUnitUninitializeSelect), noErr);
 
     let remove: RemoveListener = fx.method(kAudioUnitRemovePropertyListenerSelect);
@@ -1355,4 +1363,50 @@ fn the_codes_are_the_ones_the_plist_names() {
         CFRelease(key);
         CFRelease(saved);
     }
+}
+
+#[test]
+fn start_note_and_stop_note_play_as_midi_does() {
+    let _serial = serial();
+    type StartNote = unsafe extern "C" fn(
+        *mut c_void,
+        u32,
+        u32,
+        *mut u32,
+        u32,
+        *const MusicDeviceNoteParams,
+    ) -> OSStatus;
+    type StopNote = unsafe extern "C" fn(*mut c_void, u32, u32, u32) -> OSStatus;
+    let keys = Host::new::<Keys>();
+    assert!(
+        Host::new::<Fx>()
+            .lookup(kMusicDeviceStartNoteSelect)
+            .is_null()
+    );
+    assert_eq!(keys.simple(kAudioUnitInitializeSelect), noErr);
+    let start: StartNote = keys.method(kMusicDeviceStartNoteSelect);
+    let stop: StopNote = keys.method(kMusicDeviceStopNoteSelect);
+    let params = MusicDeviceNoteParams {
+        argCount: 2,
+        mPitch: 64.2,
+        mVelocity: 127.0,
+    };
+    let mut note = 0u32;
+    // SAFETY: the methods, with the note's parameters and a place for its id.
+    let (started, stopped) = unsafe {
+        (
+            start(keys.this, 0, 3, &mut note, 100, &params),
+            stop(keys.this, 3, note, 200),
+        )
+    };
+    assert_eq!((started, stopped), (noErr, noErr));
+    let mut output = AudioBuffer::<f32>::new(2, 256);
+    assert_eq!(keys.render(256, &mut output, 0, false), noErr);
+    let mut harness = Harness::<Keys>::new(44_100.0, 256);
+    for (frame, bytes) in [(100, [0x93, 64, 127]), (200, [0x83, 64, 0])] {
+        let message = MidiMessage::from_bytes(&bytes).unwrap();
+        harness.schedule(frame, Event::from_midi(0, message).kind);
+    }
+    assert_same_bits(&output, &harness.render(256), "a note started and stopped");
+    assert!(output.channel(0)[150] > 0.0 && output.channel(0)[250] == 0.0);
 }

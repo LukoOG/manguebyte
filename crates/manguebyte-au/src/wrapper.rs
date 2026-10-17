@@ -3,22 +3,27 @@
 //! # Threads
 //!
 //! Apple's interface leaves most of the threading to convention, so the
-//! wrapper keeps its state behind locks that the audio thread never waits
-//! on:
+//! wrapper keeps its state where the audio thread never waits for it and
+//! never touches a system lock:
 //!
 //! - Parameters are atomics, so `GetParameter`, `SetParameter`, saving the
 //!   state and the parameter properties work from any thread at any time.
-//! - The configuration (formats, connections, the host's callbacks) and
-//!   the audio state (the plugin, its buffers, the events waiting for the
-//!   next render) each sit behind a mutex. `Initialize`, `Uninitialize`,
-//!   `Reset` and the properties take them as any code does. `Render`,
+//! - The configuration (formats, connections, the host's callbacks), the
+//!   audio state (the plugin, its buffers, the events waiting for the next
+//!   render) and the render notifications each sit in an
+//!   [`Exclusive`]: a flag taken with one
+//!   compare-and-swap, not a mutex, which on macOS allocates the first time
+//!   it is locked. `Initialize`, `Uninitialize`, `Reset` and the properties
+//!   take them, yielding until they are free. `Render`,
 //!   `ScheduleParameters` and `MusicDeviceMIDIEvent`, which run on the
 //!   audio thread, only ever try them: should another thread hold one at
 //!   that moment, which a host keeping to the conventions never makes
 //!   happen, the slice is silent or the event is dropped and counted,
 //!   and nothing waits.
-//! - Property listeners are called with no lock held, so that a listener
-//!   may call back into the unit.
+//! - Property listeners live behind a mutex, which only the threads that
+//!   change properties take, and are called with nothing held; render
+//!   notifications are copied out and called with nothing held, so that
+//!   either may call back into the unit.
 //!
 //! # One event stream
 //!
@@ -46,6 +51,7 @@ use manguebyte_plugin::{ParamWatcher, Plugin, PluginKind, load_state, save_state
 
 use crate::cf::{self, Owned};
 use crate::codes::{as_os_type, codes};
+use crate::exclusive::Exclusive;
 use crate::sys::AudioBuffer as AuBuffer;
 use crate::sys::*;
 
@@ -180,10 +186,11 @@ pub(crate) struct Instance<P: Plugin> {
     last_error: AtomicI32,
     /// Events dropped on the audio thread, for the tests.
     dropped: AtomicU64,
-    config: Mutex<Config>,
-    audio: Mutex<Audio<P>>,
+    config: Exclusive<Config>,
+    audio: Exclusive<Audio<P>>,
+    /// Only ever taken off the audio thread.
     listeners: Mutex<Vec<Listener>>,
-    notifications: Mutex<Vec<Notification>>,
+    notifications: Exclusive<Vec<Notification>>,
 }
 
 fn takes_midi<P: Plugin>() -> bool {
@@ -224,7 +231,7 @@ pub(crate) fn factory<P: Plugin>() -> *mut c_void {
             latency: AtomicU32::new(0),
             last_error: AtomicI32::new(noErr),
             dropped: AtomicU64::new(0),
-            config: Mutex::new(Config {
+            config: Exclusive::new(Config {
                 sample_rate: DEFAULT_SAMPLE_RATE,
                 max_frames: DEFAULT_MAX_FRAMES,
                 sources: [Source::None; 2],
@@ -232,7 +239,7 @@ pub(crate) fn factory<P: Plugin>() -> *mut c_void {
                 in_place: 0,
                 bypass: false,
             }),
-            audio: Mutex::new(Audio {
+            audio: Exclusive::new(Audio {
                 watcher: ParamWatcher::new(&*params),
                 plugin,
                 prepared: None,
@@ -240,7 +247,7 @@ pub(crate) fn factory<P: Plugin>() -> *mut c_void {
                 events: EventBuffer::with_capacity(EVENTS_PER_BLOCK),
             }),
             listeners: Mutex::new(Vec::new()),
-            notifications: Mutex::new(Vec::new()),
+            notifications: Exclusive::new(Vec::with_capacity(MAX_RENDER_NOTIFICATIONS)),
             params,
         };
         Box::into_raw(Box::new(instance)).cast()
@@ -363,6 +370,13 @@ unsafe extern "C" fn lookup<P: Plugin>(selector: i16) -> *const c_void {
         kMusicDeviceMIDIEventSelect if takes_midi::<P>() => {
             method!(midi_event::<P>, fn(This, u32, u32, u32, u32))
         }
+        kMusicDeviceStartNoteSelect if takes_midi::<P>() => method!(
+            start_note::<P>,
+            fn(This, u32, u32, *mut u32, u32, *const MusicDeviceNoteParams)
+        ),
+        kMusicDeviceStopNoteSelect if takes_midi::<P>() => {
+            method!(stop_note::<P>, fn(This, u32, u32, u32))
+        }
         kMusicDeviceSysExSelect if takes_midi::<P>() => {
             method!(sysex, fn(This, *const u8, u32))
         }
@@ -422,13 +436,22 @@ impl<P: Plugin> Instance<P> {
         if self.initialized.load(Ordering::Acquire) {
             return noErr;
         }
+        self.prepare();
+        self.initialized.store(true, Ordering::Release);
+        noErr
+    }
+
+    /// Prepares the plugin for the configuration as it is and allocates
+    /// what rendering needs, then tells the listeners if the latency
+    /// changed.
+    fn prepare(&self) {
         let (sample_rate, max_frames) = {
-            let config = lock(&self.config);
+            let config = self.config.take();
             (config.sample_rate, config.max_frames)
         };
         let frames = max_frames as usize;
         let latency = {
-            let mut audio = lock(&self.audio);
+            let mut audio = self.audio.take();
             audio.plugin.prepare(&ProcessSpec {
                 sample_rate,
                 max_block_size: frames,
@@ -448,16 +471,14 @@ impl<P: Plugin> Instance<P> {
             audio.pending.clear();
             audio.plugin.latency_samples()
         };
-        self.initialized.store(true, Ordering::Release);
         let latency = u32::try_from(latency).unwrap_or(u32::MAX);
         if self.latency.swap(latency, Ordering::Relaxed) != latency {
             self.changed(kAudioUnitProperty_Latency, kAudioUnitScope_Global, 0);
         }
-        noErr
     }
 
     fn uninitialize(&self) -> OSStatus {
-        let mut audio = lock(&self.audio);
+        let mut audio = self.audio.take();
         audio.prepared = None;
         self.initialized.store(false, Ordering::Release);
         noErr
@@ -497,7 +518,7 @@ unsafe extern "C" fn reset<P: Plugin>(
         let Some(this) = (unsafe { instance::<P>(this) }) else {
             return paramErr;
         };
-        let mut audio = lock(&this.audio);
+        let mut audio = this.audio.take();
         audio.plugin.reset();
         audio.pending.clear();
         noErr
@@ -719,7 +740,7 @@ unsafe extern "C" fn schedule_parameters<P: Plugin>(
         if events.is_null() && count > 0 {
             return paramErr;
         }
-        let Ok(mut audio) = this.audio.try_lock() else {
+        let Some(mut audio) = this.audio.try_take() else {
             this.dropped.fetch_add(u64::from(count), Ordering::Relaxed);
             return noErr;
         };
@@ -814,7 +835,7 @@ unsafe extern "C" fn midi_event<P: Plugin>(
         let Some(message) = MidiMessage::from_bytes(&bytes[..length]) else {
             return noErr;
         };
-        let Ok(mut audio) = this.audio.try_lock() else {
+        let Some(mut audio) = this.audio.try_take() else {
             this.dropped.fetch_add(1, Ordering::Relaxed);
             return noErr;
         };
@@ -827,6 +848,51 @@ unsafe extern "C" fn midi_event<P: Plugin>(
         }
         noErr
     })
+}
+
+/// `MusicDeviceStartNote`: a note on the channel of the group (its low four
+/// bits), at the pitch rounded to a key, as a MIDI note-on on its frame.
+/// The note's instance id is its channel and key, which `StopNote` takes.
+unsafe extern "C" fn start_note<P: Plugin>(
+    this: *mut c_void,
+    _instrument: u32,
+    group: u32,
+    note: *mut u32,
+    offset: u32,
+    params: *const MusicDeviceNoteParams,
+) -> OSStatus {
+    guard(paramErr, || {
+        if params.is_null() {
+            return paramErr;
+        }
+        // SAFETY: the host passes the note's parameters.
+        let params = unsafe { params.read_unaligned() };
+        if params.argCount < 2 || !params.mPitch.is_finite() || !params.mVelocity.is_finite() {
+            return paramErr;
+        }
+        let key = params.mPitch.round().clamp(0.0, 127.0) as u32;
+        let velocity = params.mVelocity.round().clamp(1.0, 127.0) as u32;
+        let channel = group & 0x0F;
+        if !note.is_null() {
+            // SAFETY: the host passes a place for the note's id.
+            unsafe { note.write_unaligned((channel << 8) | key) };
+        }
+        // SAFETY: the same instance, with a note-on.
+        unsafe { midi_event::<P>(this, 0x90 | channel, key, velocity, offset) }
+    })
+}
+
+/// `MusicDeviceStopNote`: the note `StartNote` gave this id, ended as a
+/// MIDI note-off on its frame.
+unsafe extern "C" fn stop_note<P: Plugin>(
+    this: *mut c_void,
+    _group: u32,
+    note: u32,
+    offset: u32,
+) -> OSStatus {
+    let (channel, key) = ((note >> 8) & 0x0F, note & 0x7F);
+    // SAFETY: the same instance, with a note-off.
+    unsafe { midi_event::<P>(this, 0x80 | channel, key, 0, offset) }
 }
 
 unsafe extern "C" fn sysex(_this: *mut c_void, _data: *const u8, _length: u32) -> OSStatus {
@@ -1061,10 +1127,21 @@ impl<P: Plugin> Instance<P> {
         frames: u32,
         list: *mut AudioBufferList,
     ) {
-        let Ok(notifications) = self.notifications.try_lock() else {
-            return;
+        // Copied out, so that a notification may add or remove one.
+        let mut copied = [Notification {
+            proc_: None,
+            user: ptr::null_mut(),
+        }; MAX_RENDER_NOTIFICATIONS];
+        let count = {
+            let Some(notifications) = self.notifications.try_take() else {
+                return;
+            };
+            for (slot, notification) in copied.iter_mut().zip(notifications.iter()) {
+                *slot = *notification;
+            }
+            notifications.len().min(MAX_RENDER_NOTIFICATIONS)
         };
-        for notification in notifications.iter() {
+        for notification in &copied[..count] {
             let Some(call) = notification.proc_ else {
                 continue;
             };
@@ -1114,7 +1191,8 @@ impl<P: Plugin> Instance<P> {
                 list,
             )
         };
-        let (Ok(mut audio), Ok(config)) = (self.audio.try_lock(), self.config.try_lock()) else {
+        let (Some(mut audio), Some(config)) = (self.audio.try_take(), self.config.try_take())
+        else {
             // SAFETY: the host's list and flags.
             unsafe { silence(list, flags) };
             return noErr;
@@ -1359,7 +1437,7 @@ unsafe extern "C" fn add_render_notify<P: Plugin>(
         if proc_.is_none() {
             return paramErr;
         }
-        let mut notifications = lock(&this.notifications);
+        let mut notifications = this.notifications.take();
         let notification = Notification { proc_, user };
         if !notifications.iter().any(|known| known.is(proc_, user)) {
             if notifications.len() >= MAX_RENDER_NOTIFICATIONS {
@@ -1381,7 +1459,9 @@ unsafe extern "C" fn remove_render_notify<P: Plugin>(
         let Some(this) = (unsafe { instance::<P>(this) }) else {
             return paramErr;
         };
-        lock(&this.notifications).retain(|notification| !notification.is(proc_, user));
+        this.notifications
+            .take()
+            .retain(|notification| !notification.is(proc_, user));
         noErr
     })
 }
@@ -1493,7 +1573,9 @@ impl<P: Plugin> Instance<P> {
             },
             kAudioUnitProperty_Latency | kAudioUnitProperty_TailTime => global(8, false),
             kAudioUnitProperty_SupportedNumChannels => global(size_of::<AUChannelInfo>(), false),
-            kAudioUnitProperty_MaximumFramesPerSlice => global(4, !initialized),
+            // Writable at any time, as in Apple's base classes: an
+            // initialised unit is prepared again for the new length.
+            kAudioUnitProperty_MaximumFramesPerSlice => global(4, true),
             kAudioUnitProperty_LastRenderError => global(4, false),
             kAudioUnitProperty_HostCallbacks => global(size_of::<HostCallbackInfo>(), true),
             kAudioUnitProperty_InPlaceProcessing => global(4, true),
@@ -1678,7 +1760,7 @@ impl<P: Plugin> Instance<P> {
             unsafe { *size = needed as u32 };
             return noErr;
         }
-        let config = || lock(&self.config);
+        let config = || self.config.take();
         // SAFETY: per this function's contract, for each `put`.
         unsafe {
             match property {
@@ -1876,14 +1958,16 @@ impl<P: Plugin> Instance<P> {
                     if frames == 0 || frames > LARGEST_MAX_FRAMES {
                         return kAudioUnitErr_InvalidPropertyValue;
                     }
-                    let mut config = lock(&self.config);
-                    if config.max_frames == frames {
-                        return noErr;
+                    {
+                        let mut config = self.config.take();
+                        if config.max_frames == frames {
+                            return noErr;
+                        }
+                        config.max_frames = frames;
                     }
                     if initialized {
-                        return kAudioUnitErr_Initialized;
+                        self.prepare();
                     }
-                    config.max_frames = frames;
                     noErr
                 }
                 kAudioUnitProperty_ClassInfo => {
@@ -1937,7 +2021,7 @@ impl<P: Plugin> Instance<P> {
                             given - given % size_of::<*const c_void>(),
                         );
                     }
-                    lock(&self.config).host = (!data.is_null()).then_some(host);
+                    self.config.take().host = (!data.is_null()).then_some(host);
                     noErr
                 }
                 kAudioUnitProperty_InPlaceProcessing => {
@@ -1946,7 +2030,7 @@ impl<P: Plugin> Instance<P> {
                     };
                     // The plugin is always given its own memory; this only
                     // records what the host asked.
-                    lock(&self.config).in_place = u32::from(value != 0);
+                    self.config.take().in_place = u32::from(value != 0);
                     noErr
                 }
                 kAudioUnitProperty_BypassEffect => {
@@ -1954,10 +2038,10 @@ impl<P: Plugin> Instance<P> {
                         return kAudioUnitErr_InvalidPropertyValue;
                     };
                     let bypass = value != 0;
-                    let was = std::mem::replace(&mut lock(&self.config).bypass, bypass);
+                    let was = std::mem::replace(&mut self.config.take().bypass, bypass);
                     if was && !bypass {
                         // Coming back in, the plugin starts from silence.
-                        lock(&self.audio).plugin.reset();
+                        self.audio.take().plugin.reset();
                     }
                     noErr
                 }
@@ -1995,7 +2079,7 @@ impl<P: Plugin> Instance<P> {
 
     /// Sets the one sample rate every element runs at.
     fn set_sample_rate(&self, rate: f64, initialized: bool) -> OSStatus {
-        let mut config = lock(&self.config);
+        let mut config = self.config.take();
         if config.sample_rate == rate {
             return noErr;
         }
@@ -2007,7 +2091,7 @@ impl<P: Plugin> Instance<P> {
     }
 
     fn set_source(&self, element: AudioUnitElement, source: Source) -> OSStatus {
-        match lock(&self.config).sources.get_mut(element as usize) {
+        match self.config.take().sources.get_mut(element as usize) {
             Some(slot) => {
                 *slot = source;
                 noErr

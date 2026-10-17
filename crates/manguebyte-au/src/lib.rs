@@ -33,17 +33,18 @@
 //! | Input | Pulled from the render callback or the connection the host set; the main input must have one, the sidechain is silent without |
 //! | Output | Into the host's buffers, or the unit's own when the host gives none |
 //! | Parameters | Listed in their own unit and range, with their names and value text both ways; stepped ones with names are indexed, with their names listed; switches are booleans. `SetParameter` reaches the plugin on the first frame of the next render, and `ScheduleParameters` on its frame, a ramp as points 32 frames apart |
-//! | MIDI | For instruments and note effects, `MusicDeviceMIDIEvent` on its frame |
+//! | MIDI | For instruments and note effects, `MusicDeviceMIDIEvent`, and `MusicDeviceStartNote` and `StopNote` as MIDI notes, on their frames |
 //! | Transport | From the host's callbacks: tempo and beat, the bar's start and the time signature, playing, recording, the position in frames and the cycle |
 //! | State | `ClassInfo`: a dictionary with the unit's codes and the text of [`save_state`](manguebyte_plugin::save_state); another unit's state is refused and changes nothing |
 //! | Latency | Reported from the plugin when initialised and on every render; tail time 0 |
-//! | Other properties | Maximum frames per slice, element count, element names, supported channel layouts and the layout itself, last render error, host callbacks, bypass (for effects), in-place processing and buffer allocation (recorded) |
+//! | Other properties | Maximum frames per slice (changeable while initialised, which prepares the plugin again), element count, element names, supported channel layouts and the layout itself, last render error, host callbacks, bypass (for effects), in-place processing and buffer allocation (recorded) |
 //! | Listeners | Property listeners are called for what changes; render notifications before and after each render |
 //!
 //! Nothing that `Render`, `ScheduleParameters` or `MusicDeviceMIDIEvent`
 //! does allocates, waits or blocks: everything is allocated by
-//! `Initialize`, and the audio thread only ever tries the locks that the
-//! other calls take (see the module documentation of the wrapper, in the
+//! `Initialize`, and the audio thread takes none of the system's locks: it
+//! only tries the ownership flags the other calls take (see the module
+//! documentation of the wrapper, in the
 //! source). A panic inside the plugin is caught at the boundary, and the
 //! slice is silent.
 //!
@@ -63,6 +64,7 @@
 
 mod cf;
 mod codes;
+mod exclusive;
 #[cfg(not(target_os = "macos"))]
 #[doc(hidden)]
 #[allow(missing_docs)]

@@ -156,6 +156,19 @@ pub const kAudioUnitScheduleParametersSelect: i16 = 0x0011;
 pub const kAudioUnitRemovePropertyListenerWithUserDataSelect: i16 = 0x0012;
 pub const kMusicDeviceMIDIEventSelect: i16 = 0x0101;
 pub const kMusicDeviceSysExSelect: i16 = 0x0102;
+pub const kMusicDeviceStartNoteSelect: i16 = 0x0105;
+pub const kMusicDeviceStopNoteSelect: i16 = 0x0106;
+
+/// The head of `MusicDeviceNoteParams`: how many arguments there are, then
+/// the pitch (a MIDI key, possibly fractional) and the velocity (0 to
+/// 127), then `argCount - 2` controls the wrapper does not read.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct MusicDeviceNoteParams {
+    pub argCount: u32,
+    pub mPitch: f32,
+    pub mVelocity: f32,
+}
 
 // Properties (`AudioUnitProperties.h`).
 pub const kAudioUnitProperty_ClassInfo: AudioUnitPropertyID = 0;
