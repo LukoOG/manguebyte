@@ -519,7 +519,8 @@ fn coupled_pair(ratio: f64, coupling: f64) -> [(f64, f64, f64); 2] {
 /// sign of the snare head's displacement, which buzzes at its frequency,
 /// in an envelope that starts a moment after the strike, rises over tens
 /// of milliseconds and decays more slowly than the heads, band-limited to
-/// 2 to 10 kHz.
+/// about 1.5 to 8 kHz (a second-order high-pass and two low-passes), where
+/// the recorded snare's wires put their energy.
 #[derive(Debug, Clone)]
 pub(crate) struct Heads {
     rate: f64,
@@ -950,10 +951,10 @@ struct CymbalSpec {
     level: f64,
 }
 
-/// The decay of a crash cymbal's modes by frequency, from a real 17-inch
-/// crash recorded for the project (the octave bands' 60 dB decay times,
-/// measured from their peaks): the low end dies within half a second, the
-/// middle rings longest, 3.6 s at 2 to 4 kHz.
+/// The decay of a crash cymbal's modes by frequency, after a real crash
+/// recorded for the project (the octave bands' 60 dB decay times, measured
+/// from their first 20 dB, set a little apart where the cascade lengthens
+/// them): the low end dies within half a second, the middle rings longest.
 const CRASH_T60: [(f64, f64); 8] = [
     (89.0, 0.1),
     (177.0, 0.18),
