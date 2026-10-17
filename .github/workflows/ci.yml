@@ -55,6 +55,30 @@ jobs:
             target/tmp/gui-golden-failures
           if-no-files-found: ignore
 
+  platform-codecs:
+    name: Platform codecs (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      # Media Foundation is an optional feature of Windows Server, which
+      # the Windows runner is; the tests skip, saying so, where it is
+      # missing. Everywhere else a codec that cannot start fails them.
+      MANGUEBYTE_SYSTEM_CODECS_OPTIONAL: ${{ matrix.os == 'windows-latest' && '1' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # The system's codecs behind `platform-codecs`: Media Foundation on
+      # Windows, AudioToolbox on macOS, where this is the only build of
+      # that code (the framework is developed on Windows), and none on
+      # Linux, where the formats must be refused by name.
+      - run: cargo clippy -p manguebyte-formats --features platform-codecs --all-targets
+      - run: cargo test -p manguebyte-formats --features platform-codecs --lib --test platform -- --nocapture
+
   features:
     name: Without default features
     runs-on: ubuntu-latest

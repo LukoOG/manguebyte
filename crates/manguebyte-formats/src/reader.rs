@@ -11,6 +11,7 @@ use crate::flac::FlacReader;
 use crate::metadata::Metadata;
 use crate::mp3::{self, Mp3Reader};
 use crate::pcm::{PcmReader, read_up_to};
+use crate::platform::{self, PlatformReader};
 use crate::vorbis::VorbisReader;
 use crate::wav::{self, WavDecoder};
 use crate::{FileFormat, FormatError, LOSSY_BITS};
@@ -121,14 +122,29 @@ enum Inner<R> {
     Flac(Box<FlacReader<R>>),
     Vorbis(Box<VorbisReader<R>>),
     Mp3(Box<Mp3Reader<R>>),
+    /// The system's codecs, which read the file themselves; the reader it
+    /// was opened from is kept for `into_inner`.
+    Platform(Box<PlatformReader>, R),
 }
 
 impl AudioReader<File> {
     /// Opens the audio file at `path`.
     ///
     /// The format is recognised from the file's contents, not from its name.
+    /// A format the system's codecs decode is read from the file by them,
+    /// with the `platform-codecs` feature: see [`platform`](crate::platform).
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, FormatError> {
-        Self::new(File::open(path)?)
+        let path = path.as_ref();
+        let mut file = File::open(path)?;
+        let mut magic = [0u8; FileFormat::DETECT_LEN];
+        let have = read_up_to(&mut file, &mut magic)?;
+        match FileFormat::detect(&magic[..have]) {
+            Some(format) if format.is_platform() => {
+                let stream = PlatformReader::open_path(path, format)?;
+                Ok(Self::platform(stream, format, file))
+            }
+            _ => Self::new(file),
+        }
     }
 }
 
@@ -140,10 +156,30 @@ impl<R: Read + Seek> AudioReader<R> {
     /// `reader` can be a plain [`File`].
     pub fn new(mut reader: R) -> Result<Self, FormatError> {
         reader.seek(SeekFrom::Start(0))?;
-        let mut magic = [0u8; 10];
+        let mut magic = [0u8; FileFormat::DETECT_LEN];
         let have = read_up_to(&mut reader, &mut magic)?;
         let format = FileFormat::detect(&magic[..have]).ok_or(FormatError::Unrecognized)?;
         Ok(match format {
+            FileFormat::Mp4 | FileFormat::Aac | FileFormat::Wma | FileFormat::Caf => {
+                // The system's codecs read from memory here, so the whole
+                // stream is read in; a file opened with `open` is read by
+                // them from the file instead. Not with the feature off, or
+                // where there are none.
+                if !platform::AVAILABLE {
+                    return Err(platform::unavailable());
+                }
+                let len = reader.seek(SeekFrom::End(0))?;
+                if len > u64::from(u32::MAX) {
+                    return Err(FormatError::Unsupported(
+                        "a compressed file of more than 4 GiB from a reader; open it by its path",
+                    ));
+                }
+                reader.seek(SeekFrom::Start(0))?;
+                let mut bytes = Vec::with_capacity(len as usize);
+                (&mut reader).take(len).read_to_end(&mut bytes)?;
+                let stream = PlatformReader::open_bytes(bytes, format)?;
+                Self::platform(stream, format, reader)
+            }
             FileFormat::Wav => {
                 let mut stream = wav::open(&mut reader).map_err(FormatError::Wav)?;
                 Self {
@@ -211,6 +247,17 @@ impl<R: Read + Seek> AudioReader<R> {
         })
     }
 
+    fn platform(stream: PlatformReader, format: FileFormat, reader: R) -> Self {
+        Self {
+            format,
+            sample_rate: stream.sample_rate(),
+            bits_per_sample: LOSSY_BITS,
+            is_float: true,
+            metadata: Metadata::default(),
+            inner: Inner::Platform(Box::new(stream), reader),
+        }
+    }
+
     /// What the file says beside its audio: tags, markers, loops, pictures,
     /// and the chunks this crate keeps without interpreting them. The
     /// [`metadata`](crate::metadata) module says where each format keeps
@@ -247,6 +294,7 @@ impl<R: Read + Seek> AudioReader<R> {
             Inner::Flac(stream) => stream.num_channels(),
             Inner::Vorbis(stream) => stream.num_channels(),
             Inner::Mp3(stream) => stream.num_channels(),
+            Inner::Platform(stream, _) => stream.num_channels(),
         }
     }
 
@@ -275,6 +323,7 @@ impl<R: Read + Seek> AudioReader<R> {
             Inner::Flac(stream) => stream.frames(),
             Inner::Vorbis(stream) => stream.frames(),
             Inner::Mp3(stream) => stream.frames(),
+            Inner::Platform(stream, _) => stream.frames(),
         }
     }
 
@@ -286,6 +335,7 @@ impl<R: Read + Seek> AudioReader<R> {
             Inner::Flac(stream) => stream.position(),
             Inner::Vorbis(stream) => stream.position(),
             Inner::Mp3(stream) => stream.position(),
+            Inner::Platform(stream, _) => stream.position(),
         }
     }
 
@@ -322,6 +372,7 @@ impl<R: Read + Seek> AudioReader<R> {
             Inner::Flac(stream) => stream.read(buffer).map_err(FormatError::Flac),
             Inner::Vorbis(stream) => stream.read(buffer).map_err(FormatError::Vorbis),
             Inner::Mp3(stream) => stream.read(buffer).map_err(FormatError::Mp3),
+            Inner::Platform(stream, _) => stream.read(buffer),
         }
     }
 
@@ -377,6 +428,7 @@ impl<R: Read + Seek> AudioReader<R> {
             Inner::Flac(stream) => stream.seek(frame).map_err(FormatError::Flac),
             Inner::Vorbis(stream) => stream.seek(frame).map_err(FormatError::Vorbis),
             Inner::Mp3(stream) => stream.seek(frame).map_err(FormatError::Mp3),
+            Inner::Platform(stream, _) => stream.seek(frame),
         }
     }
 
@@ -388,6 +440,7 @@ impl<R: Read + Seek> AudioReader<R> {
             Inner::Flac(stream) => stream.into_inner(),
             Inner::Vorbis(stream) => stream.into_inner(),
             Inner::Mp3(stream) => stream.into_inner(),
+            Inner::Platform(_, reader) => reader,
         }
     }
 }

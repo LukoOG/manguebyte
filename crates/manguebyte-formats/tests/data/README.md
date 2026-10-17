@@ -301,6 +301,28 @@ every file decodes to the same number of samples, from the same first
 sample, within 84 to 86 dB of FFmpeg's decode and never further from it
 than 3.2e-5, which is FFmpeg's own rounding to 16 bits.
 
+### Formats the system decodes
+
+For `tests/platform.rs`, from the same sources, with FFmpeg 7.1's own
+encoders:
+
+```bash
+ffmpeg -i tones-2ch-44100.wav -map_metadata -1 -bitexact -c:a aac -b:a 128k aac-tones-2ch-44100.m4a
+ffmpeg -i tones-2ch-44100.wav -t 0.25 -map_metadata -1 -bitexact -c:a alac -sample_fmt s16p alac-tones-2ch-44100.m4a
+ffmpeg -i signal-1ch-22050.wav -map_metadata -1 -bitexact -c:a aac -b:a 64k -f adts aac-1ch-22050.aac
+ffmpeg -i tones-2ch-44100.wav -map_metadata -1 -bitexact -c:a wmav2 -b:a 128k wma-tones-2ch-44100.wma
+```
+
+FFmpeg rounds the float samples to 16 bits for ALAC, half to even, which
+is how the test works out the samples the ALAC file must give back. Its
+AAC encoder puts 1024 frames of priming first, which the MPEG-4 file's
+edit list states and the ADTS file cannot, and uses noise substitution
+(PNS), which Media Foundation decodes with noise of its own after every
+seek: the same file encoded with `-aac_pns 0` seeks to within 1e-4 of a
+decode from the start everywhere (checked by hand), where this one comes
+within 4.2e-2 in its last few hundred frames. The WMA decoder gives 43008
+frames of the 44100 the file states.
+
 ## Metadata
 
 The `meta-*` files hold tags that another program wrote, for

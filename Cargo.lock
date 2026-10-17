@@ -671,6 +671,7 @@ name = "manguebyte-formats"
 version = "0.1.0"
 dependencies = [
  "manguebyte-core",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
