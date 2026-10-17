@@ -213,6 +213,75 @@ fn the_player_never_uses_the_heap_on_the_audio_side() {
 }
 
 #[test]
+fn the_transport_never_uses_the_heap_on_the_audio_side() {
+    use manguebyte_core::source::{AudioSource, PositionableSource};
+    use manguebyte_formats::TransportSource;
+
+    let config = PlayerConfig {
+        block_frames: 256,
+        blocks: 4,
+    };
+    let (mut transport, mut worker, control) = TransportSource::new(wav_reader(2, 20_000), config);
+    let mut out = AudioBuffer::<f32>::new(2, 512);
+    let mut rng = Rng::new(5);
+    for round in 0..400u64 {
+        if round % 5 != 0 {
+            worker.fill_ahead().unwrap();
+        }
+        // The control's commands are sent unwatched: its side may lock
+        // and allocate. Pulling, which applies them, is watched.
+        match round % 23 {
+            1 => {
+                control.play();
+            }
+            5 => {
+                control.pause();
+            }
+            8 => {
+                control.seek(rng.below(21_000));
+            }
+            13 => {
+                control.set_loop(Some(100..900));
+            }
+            17 => {
+                control.set_gain(0.5);
+                control.set_declick(round % 2 == 0);
+            }
+            19 => {
+                control.stop();
+            }
+            _ => {}
+        }
+        let size = rng.between(0, 512) as usize;
+        assert_no_heap_use("TransportSource", || {
+            out.set_num_frames(size);
+            transport.pull(&mut out);
+            if round % 31 == 0 {
+                transport.seek(rng.below(20_000));
+                transport.play();
+                transport.set_loop(None);
+            }
+            let _ = (
+                transport.position(),
+                transport.len_frames(),
+                transport.is_looping(),
+            );
+        });
+    }
+    // Far more commands than the queue holds: the rest wait their turn.
+    for _ in 0..100 {
+        control.play();
+        control.pause();
+    }
+    assert_no_heap_use("TransportSource commands", || {
+        for _ in 0..10 {
+            transport.pull(&mut out);
+        }
+    });
+    assert!(control.position() <= 20_000);
+}
+
+#[test]
 fn the_player_never_uses_the_heap_while_a_real_thread_feeds_it() {
     let frames = 200_000u64;
     let (mut player, worker) = StreamingPlayer::new(

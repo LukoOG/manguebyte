@@ -549,3 +549,42 @@ fn the_graph_can_be_edited_from_one_thread_while_another_runs_it() {
     // Round 299 built a chain of 299 % 5 = 4 doublers.
     assert_eq!(last, vec![16.0; 8]);
 }
+
+#[test]
+fn sources_play_into_the_graph_as_nodes() {
+    use manguebyte_core::source::BufferSource;
+    use manguebyte_dsp::sources::SourceProcessor;
+
+    let spec = ProcessSpec {
+        sample_rate: 48_000.0,
+        max_block_size: 8,
+        num_channels: 1,
+    };
+    let (mut graph, mut engine) = Graph::<f32>::new(spec);
+    let mut first = AudioBuffer::<f32>::new(1, 6);
+    first
+        .channel_mut(0)
+        .copy_from_slice(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let mut second = AudioBuffer::<f32>::new(1, 3);
+    second.channel_mut(0).fill(10.0);
+    let a = graph.add(SourceProcessor::new(BufferSource::new(first)));
+    let b = graph.add(SourceProcessor::new(
+        BufferSource::new(second).looping(true),
+    ));
+    let half = graph.add(Scale(0.5));
+    graph.connect(a, half).unwrap();
+    graph.connect(b, half).unwrap();
+    graph.connect(half, Graph::<f32>::OUTPUT).unwrap();
+    graph.commit().unwrap();
+
+    let mut block = AudioBuffer::<f32>::new(1, 4);
+    let mut heard = Vec::with_capacity(8);
+    let calls = heap_calls_during(|| {
+        for _ in 0..2 {
+            engine.process(&mut block);
+            heard.extend_from_slice(block.channel(0));
+        }
+    });
+    assert_eq!(calls, 0);
+    assert_eq!(heard, [5.5, 6.0, 6.5, 7.0, 7.5, 8.0, 5.0, 5.0]);
+}

@@ -1362,3 +1362,48 @@ fn reading_mpe_and_midi_2_does_not_use_the_heap() {
     });
     assert!(input.held_notes() <= 8);
 }
+
+#[test]
+fn pulling_from_sources_does_not_use_the_heap() {
+    use manguebyte_core::source::{AudioSource, BufferSource, PositionableSource};
+    use manguebyte_dsp::sources::{
+        ChannelRemapSource, MixerSource, ProcessedSource, ResamplingSource, SourceProcessor,
+    };
+
+    let mut loop_a = AudioBuffer::<f32>::new(1, 1_000);
+    loop_a.channel_mut(0).fill(0.25);
+    let mut loop_b = AudioBuffer::<f32>::new(2, 333);
+    loop_b.channel_mut(1).fill(-0.5);
+    // A mono loop at 44.1 kHz on both channels, a stereo one at 96 kHz
+    // through a filter, mixed.
+    let mono = ResamplingSource::new(BufferSource::new(loop_a).looping(true), 44_100.0, 1);
+    let both = ChannelRemapSource::new(mono, 1, &[Some(0), Some(0)]);
+    let filtered = ProcessedSource::new(
+        ResamplingSource::new(BufferSource::new(loop_b).looping(true), 96_000.0, 2),
+        Filter::<f32>::new(FilterShape::Lowpass, 2_000.0, 0.707),
+        2,
+    );
+    let mut mixer = MixerSource::new(2);
+    mixer.add(both, 1.0);
+    mixer.add(filtered, 0.5);
+    let mut player = SourceProcessor::new(mixer);
+    player.prepare(&SPEC);
+    let mut buffer = AudioBuffer::<f32>::new(2, 256);
+    let mut memory = BufferSource::new(AudioBuffer::<f32>::new(2, 10));
+    assert_no_heap_use("sources", || {
+        for round in 0..20 {
+            for frames in [256, 1, 64, 255, 0, 17] {
+                buffer.set_num_frames(frames);
+                player.process(&mut buffer);
+            }
+            let mixer = player.source_mut();
+            mixer.set_gain(1, 0.1 * round as f32);
+            if let Some(input) = mixer.input_mut(0) {
+                input.reset();
+            }
+        }
+        memory.seek(5);
+        memory.pull(&mut buffer);
+    });
+    assert!(buffer.peak().is_finite());
+}

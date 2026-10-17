@@ -12,6 +12,8 @@
 //! - [`decibels`]: gain conversions.
 //! - [`NoDenormals`]: stops near-silence from slowing the processor down.
 //! - [`ParamId`]: a compact, stable number standing for a parameter.
+//! - [`source`]: sources of audio that are pulled a block at a time, and
+//!   audio in memory as one.
 
 mod atomic;
 mod buffer;
@@ -21,6 +23,7 @@ pub mod log;
 mod param_id;
 mod sample;
 mod smoothing;
+pub mod source;
 pub mod spsc;
 
 pub use atomic::{AtomicF32, AtomicF64};

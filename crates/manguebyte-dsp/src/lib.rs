@@ -58,6 +58,7 @@ mod phaser;
 mod resample;
 mod reverb;
 mod shaper;
+pub mod sources;
 mod svf;
 mod synth;
 #[cfg(test)]

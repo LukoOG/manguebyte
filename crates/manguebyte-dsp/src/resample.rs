@@ -182,7 +182,7 @@ impl<S: Sample> Resampler<S> {
     /// before it. The converter then produces nothing until it has seen
     /// enough input, and its output is lined up with the input exactly,
     /// whatever the ratio. For converting a whole recording.
-    fn align_to_input(&mut self) {
+    pub(crate) fn align_to_input(&mut self) {
         self.index = 2 * self.half_width;
         self.fraction = 0.0;
     }

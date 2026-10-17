@@ -45,6 +45,12 @@
 //! stretch, at every zoom, built while the file is read and cached in a
 //! compact file of its own.
 //!
+//! [`TransportSource`] puts a transport around the player: play, pause,
+//! stop, seek and loop, worked from any thread through a
+//! [`TransportControl`], and an
+//! [`AudioSource`](manguebyte_core::source::AudioSource) that a device
+//! callback, a graph or a mixer pulls from.
+//!
 //! Every reader treats its input as untrusted: damaged or hostile data
 //! produces an error, never a panic.
 
@@ -64,6 +70,7 @@ mod player;
 mod reader;
 mod recorder;
 pub mod thumbnail;
+mod transport;
 pub mod vorbis;
 pub mod wav;
 mod window;
@@ -73,6 +80,7 @@ pub use metadata::Metadata;
 pub use player::{PlayerConfig, PlayerThread, PlayerWorker, StreamingPlayer};
 pub use reader::AudioReader;
 pub use recorder::{RecorderConfig, RecorderThread, RecorderWorker, RecordingWriter};
+pub use transport::{TransportControl, TransportSource};
 pub use writer::AudioWriter;
 
 use std::fmt;

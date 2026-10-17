@@ -93,3 +93,28 @@ fn posting_never_allocates() {
     assert_eq!(drained.records.len(), SLOTS);
     assert!(drained.lost > 0);
 }
+
+#[test]
+fn pulling_audio_from_memory_never_allocates() {
+    use manguebyte_core::AudioBuffer;
+    use manguebyte_core::source::{AudioSource, BufferSource, PositionableSource};
+
+    let mut buffer = AudioBuffer::<f32>::new(2, 1_000);
+    buffer.channel_mut(0).fill(0.5);
+    let mut memory = BufferSource::new(buffer).looping(true);
+    memory.prepare(48_000.0, 512);
+    let mut out = AudioBuffer::<f32>::new(3, 512);
+    let calls = heap_calls(|| {
+        for frames in [512, 1, 300, 511, 0, 512] {
+            out.set_num_frames(frames);
+            memory.pull(&mut out);
+        }
+        memory.set_loop(Some(100..200));
+        memory.seek(150);
+        memory.pull(&mut out);
+        memory.set_loop(None);
+        memory.seek(u64::MAX);
+        memory.pull(&mut out);
+    });
+    assert_eq!(calls, 0, "pulling from memory used the heap");
+}

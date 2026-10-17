@@ -235,3 +235,57 @@ fn mpe_from_a_port_becomes_per_note_events_without_the_heap() {
     // widened as MIDI 2.0 widens it.
     assert_eq!(cents.load(Ordering::Relaxed), 2_400);
 }
+
+#[test]
+fn a_source_plays_in_the_device_callback_without_the_heap() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use manguebyte_core::AudioBuffer;
+    use manguebyte_core::source::{AudioSource, BufferSource};
+    use manguebyte_devices::{AudioCallback, StreamFormat};
+    use manguebyte_dsp::sources::{ChannelRemapSource, MixerSource, ResamplingSource};
+
+    /// Pulls a mixer into the device's buffer, prepared for the device's
+    /// format, and says how loud the last block was.
+    struct Player {
+        mixer: MixerSource,
+        peak: Arc<AtomicU32>,
+    }
+
+    impl AudioCallback for Player {
+        fn prepare(&mut self, format: &StreamFormat) {
+            self.mixer
+                .prepare(format.sample_rate, format.max_block_size);
+        }
+        fn process(&mut self, io: &mut DeviceIo<'_>) {
+            self.mixer.pull(io.output);
+            self.peak
+                .store(io.output.peak().to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    let mock = mock();
+    let mut manager = DeviceManager::headless(&mock);
+    manager.set_max_block_size(512);
+    // A mono loop recorded at 44.1 kHz, on both channels of the 48 kHz
+    // device.
+    let mut recording = AudioBuffer::<f32>::new(1, 4_410);
+    recording.channel_mut(0).fill(0.5);
+    let mono = ResamplingSource::new(BufferSource::new(recording).looping(true), 44_100.0, 1);
+    let mut mixer = MixerSource::new(2);
+    mixer.add(ChannelRemapSource::new(mono, 1, &[Some(0), Some(0)]), 1.0);
+    let peak = Arc::new(AtomicU32::new(0));
+    let player = Player {
+        mixer,
+        peak: Arc::clone(&peak),
+    };
+    manager.start(&setup(), player).unwrap();
+    let mut out = vec![0.0f32; 2 * 1_500];
+    assert_no_heap_use("a source in a device callback", || {
+        for frames in SIZES {
+            assert!(mock.render(&mut out[..2 * frames]));
+        }
+    });
+    assert!((f32::from_bits(peak.load(Ordering::Relaxed)) - 0.5).abs() < 1e-3);
+}
