@@ -63,7 +63,7 @@
 //!
 //! # Writing
 //!
-//! [`write`] and [`AudioWriter::mp3`](crate::AudioWriter::mp3) encode
+//! [`write`](fn@write) and [`AudioWriter::mp3`](crate::AudioWriter::mp3) encode
 //! MPEG-1 layer III at 32, 44.1 and 48 kHz, mono or stereo, at a constant
 //! bitrate of 32 to 320 kbit/s or at a variable one set by a quality from 0
 //! to 10 ([`Mp3Options`]), with an ID3v2.4 tag of a [`Metadata`]:

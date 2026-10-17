@@ -63,7 +63,7 @@
 //!
 //! # Writing
 //!
-//! [`write`] and [`AudioWriter::vorbis`](crate::AudioWriter::vorbis) encode
+//! [`write`](fn@write) and [`AudioWriter::vorbis`](crate::AudioWriter::vorbis) encode
 //! at a quality from 0 to 10 ([`VorbisOptions`]), with the comments and
 //! pictures of a [`Metadata`]. The encoder is variable-bitrate:
 //!
