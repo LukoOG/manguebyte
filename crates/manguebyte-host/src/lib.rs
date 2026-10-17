@@ -14,6 +14,9 @@
 //! - [`any`]: any of them through the same types, for an application
 //!   that lists, loads, restores and runs plugins without caring which
 //!   format each one is.
+//! - [`scan`]: finding the plugins installed on a system and listing them
+//!   in a process of their own, so that one that crashes or hangs cannot
+//!   take the host down, with a cache of what was found.
 //!
 //! Whatever the format, a hosted plugin comes in two halves. The half that
 //! loads, activates, lists parameters and saves state stays on the thread
@@ -33,6 +36,8 @@ mod bundle;
 pub mod clap;
 #[cfg(feature = "lv2")]
 pub mod lv2;
+#[cfg(any(feature = "clap", feature = "vst3", feature = "lv2"))]
+pub mod scan;
 #[cfg(any(feature = "clap", feature = "vst3", feature = "lv2"))]
 mod threads;
 #[cfg(feature = "vst3")]
