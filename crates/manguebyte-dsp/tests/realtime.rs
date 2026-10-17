@@ -1082,3 +1082,30 @@ fn the_instruments_do_not_use_the_heap() {
     });
     assert!(all_finite(&buffer));
 }
+
+#[test]
+fn the_poly_synth_does_not_use_the_heap() {
+    use manguebyte_dsp::instruments::poly::{self, PolySynthParams, PolySynthVoice, VoiceMode};
+
+    // Every preset in turn, on the voices of a poly synth and of a legato
+    // one, switched while notes sound: shapes, filter models, unison counts
+    // and modes all change under the notes.
+    let presets = &poly::PRESETS;
+    for mode in [VoiceMode::Poly, VoiceMode::Legato] {
+        let first = PolySynthParams {
+            mode,
+            ..presets[0].params
+        };
+        flood(
+            "PolySynthVoice",
+            PolySynthVoice::synth(&first, 4),
+            |synth, round| {
+                let params = presets[usize::from(round) % presets.len()].params;
+                synth.voices_mut().for_each(|voice| {
+                    voice.set_params(params);
+                    voice.set_tempo(90.0 + f64::from(round));
+                });
+            },
+        );
+    }
+}

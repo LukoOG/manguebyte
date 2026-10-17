@@ -10,6 +10,7 @@
 //! | [`AnalogKitVoice`] | sixteen drums of a classic analogue drum machine, on the General MIDI keys | one [setting](DrumSettings) per drum |
 //! | [`KickBassVoice`] | that machine's long kick played as a bass, with slides | [the classic](KickBassParams::default) |
 //! | [`AcidVoice`] | the acid bass: an oscillator, a diode ladder and envelopes, with accent and slide | [classic](AcidParams::classic), [squelch](AcidParams::squelch), [square](AcidParams::square) |
+//! | [`PolySynthVoice`] | a deep polyphonic synthesiser: three oscillators of classic shapes and wavetables with sixteen-voice unison, sync, FM and ring modulation, two filters of fifteen models, four envelopes, three LFOs and a modulation matrix | the [library](poly::PRESETS) of basses, leads, pads, plucks, keys, brass and effects |
 //!
 //! [`RotarySpeaker`] is not a voice but a [`Processor`](crate::Processor)
 //! to put after the organ: the rotating horn and drum it is usually heard
@@ -101,6 +102,7 @@ mod machines;
 pub(crate) mod measure;
 mod modal;
 mod organ;
+pub mod poly;
 mod rotary;
 mod string;
 
@@ -119,5 +121,6 @@ pub use organ::{
     DRAWBAR_FOOTAGES, DRAWBARS, OrganManual, OrganParams, OrganVoice, Percussion, PercussionDecay,
     PercussionHarmonic,
 };
+pub use poly::{PolySynthParams, PolySynthVoice};
 pub use rotary::{RotaryParams, RotarySpeaker, RotarySpeed};
 pub use string::{BodyMode, PluckedString, StringParams};
