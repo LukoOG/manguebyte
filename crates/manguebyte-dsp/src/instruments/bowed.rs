@@ -491,6 +491,7 @@ impl BowedParams {
             delay: self.vibrato_delay,
             rise: self.vibrato_rise,
             wander: 0.6,
+            develop: 0.0,
         }
     }
 }

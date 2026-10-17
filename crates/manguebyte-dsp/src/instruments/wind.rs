@@ -10,7 +10,9 @@ use super::common::{
     Handover, Noise, SILENCE, Tone, add_to_every_channel, db, flush, key_hz, setting, t60_factor,
     velocity_gain,
 };
-use super::modelling::{DcBlock, Dynamics, Glide, Loss, Vibrato, VibratoShape, cubic_delay_for};
+use super::modelling::{
+    Bump, DcBlock, Dynamics, Glide, Life, Loss, Switch, Vibrato, VibratoShape, cubic_delay_for,
+};
 use crate::event::{Expression, NoteRef};
 use crate::{DelayLine, ProcessSpec, Processor, StateVariableFilter, SvfMode, Voice};
 
@@ -76,35 +78,117 @@ const LIPS_REST: f64 = 0.1;
 const LIPS_LIFT: f64 = 0.12;
 
 /// How much the breath's turbulence moves the pressure at a reed or the
-/// lips.
+/// lips, and how much of it is heard directly, as air.
 const TURBULENCE: f64 = 0.05;
+const REED_AIR: f64 = 0.01;
 
 /// The flute's jet: how long it takes to reach the edge as a fraction of the
 /// period (a quarter, which with the drive's quarter period of lead puts
-/// the drive in phase at the fundamental), how sharply it switches between
-/// in and out, how strongly it drives the pipe at the least embouchure and
-/// over the embouchure's range (as a multiple of what the pipe loses in a
-/// trip), and how much of its noise is heard directly.
+/// the drive in phase at the fundamental), and how sharply it switches
+/// between in and out (the slope of its profile, a hyperbolic tangent, at
+/// its centre).
 const JET_RATIO: f64 = 0.25;
 /// The corner of the jet's response, as a multiple of the note: a jet's
 /// waves grow on it most near the fundamental and are damped above (N. H.
 /// Fletcher and T. D. Rossing, section 16.3), so it does not cancel the
 /// harmonics its own split makes.
-const JET_FILTER: f64 = 1.5;
+const JET_FILTER: f64 = 0.7;
 const JET_GAIN: f64 = 3.0;
-const JET_LEAST: f64 = 4.0;
-const JET_RANGE: f64 = 8.0;
-const FLUTE_BREATH: f64 = 0.3;
-/// How much of the breath's noise disturbs the jet: more knocks a low note
-/// into its octave, which then stays.
-const JET_NOISE: f64 = 0.3;
+/// How far the jet's aim ([`WindParams::jet_offset`]) moves it off the edge,
+/// in the units of its profile, played softly and loudly: a flautist
+/// centres the jet for a pure soft tone and lets it ride off the edge for a
+/// strong one, which brings the even harmonics up (N. H. Fletcher and L. M.
+/// Douglas, "Harmonic generation in organ pipes, recorders, and flutes",
+/// JASA 68, 1980: the second harmonic grows with the jet's offset).
+const JET_OFFSET: (f64, f64) = (0.3, 0.7);
+/// How far above the threshold of oscillation the jet drives the pipe, at
+/// the softest breath and at the loudest, for an embouchure of one half: at
+/// the threshold the tone is a sine, and the further above it the harder
+/// the jet switches between in and out, and the richer the tone. The
+/// drive is set against what the pipe loses in a trip at the note, so every
+/// note of the range answers the breath alike; a wider embouchure drives it
+/// up to half as hard again, a narrower one down to a half less.
+const JET_DRIVE: (f64, f64) = (1.4, 2.4);
+/// How fast the jet's travel time follows the note: the player's lips and
+/// breath, not a key, set it.
+const JET_FOLLOW_SECONDS: f64 = 0.005;
+/// How much of the breath's turbulence disturbs the jet, which the jet then
+/// amplifies and the pipe colours (P. R. Cook's flute puts the breath's
+/// noise there, "A meta-wind-instrument physical model", ICMC 1992), and
+/// how much is heard directly from the embouchure.
+const JET_NOISE: f64 = 0.08;
+const FLUTE_BREATH: f64 = 0.09;
+/// How much of the jet's drive the embouchure radiates directly, against
+/// what the pipe's open end lets out.
+const EMBOUCHURE: f64 = 1.0;
+/// How hard the tongue's release kicks a flute's pipe at the start of a note,
+/// at full articulation, against the swing the pipe settles to: the jet
+/// reaching the edge at once is a step of flow, which sets the pipe ringing
+/// before the jet has taken it over, so the note speaks in a few tens of
+/// milliseconds rather than growing out of the breath's noise.
+const TONGUE_KICK: f64 = 2.0;
+/// How much energy the vortices shed at the embouchure's edge take, in the
+/// units where the jet's own drive at the threshold is 1.
+const VORTEX: f64 = 0.7;
+/// The breath's noise is turbulence: broad, between a high-pass at
+/// [`BREATH_LOW`] and a low-pass whose corner rises with the jet's speed
+/// (the eddies of a faster jet are smaller and quicker), from the first of
+/// [`BREATH_HIGH`] at no breath by the second at a breath of 1.
+const BREATH_LOW: f64 = 500.0;
+const BREATH_HIGH: (f64, f64) = (2_000.0, 4_000.0);
+/// The flute's radiated tilt, as [`BRASS_TILT`] is the brass's: soft, the
+/// tone is little more than its first harmonics; loud, the jet's switching
+/// reaches the bell.
+const FLUTE_TILT: (f64, f64) = (3.0, 10.0);
+
+/// How long a key or a tone hole takes to change the bore's length at a slur
+/// (a [`Switch`]), and a valve, which travels for longer: for a moment the
+/// bore is two lengths at once.
+const KEY_SECONDS: f64 = 0.003;
+const VALVE_SECONDS: f64 = 0.004;
+
+/// The break in the air at a slur without portamento: how long it lasts,
+/// and how far it lowers the breath at the least articulation and over the
+/// articulation's range. A player's breath carries on through a slur, but
+/// the bore's new length takes a few trips to speak, and the breath dips
+/// as the fingers move.
+const BREAK_SECONDS: f64 = 0.03;
+const BREAK_LEAST: f64 = 0.1;
+const BREAK_RANGE: f64 = 0.25;
+
+/// The tongue: how far above its level the breath is pushed at the start of
+/// a note at full articulation and velocity (falling away over
+/// [`PUSH_SECONDS`]), how long the burst of air at the start lasts (its 60 dB
+/// fall: the flute's chiff, the air before a reed or the lips speak), and how
+/// many times louder it makes the breath's noise at its start.
+const TONGUE_PUSH: f64 = 0.3;
+const CHIFF_SECONDS: f64 = 0.08;
+/// How long the burst of air takes to rise: quick, but not a click.
+const CHIFF_RISE: f64 = 0.002;
+const CHIFF_GAIN: f64 = 4.0;
+
+/// The lips' buzz before a brass note speaks: how far below the note it
+/// starts at full articulation and velocity, in cents, and how long it takes
+/// to rise into the note (its 60 dB fall).
+const SCOOP_CENTS: f64 = 40.0;
+const SCOOP_SECONDS: f64 = 0.08;
+
+/// How many times more than the breath its noise wavers.
+const NOISE_WAVER: f64 = 3.0;
+
+/// How long the extra pressure a high note takes moves to a slurred note's.
+const LIFT_SECONDS: f64 = 0.01;
+
+/// How long after a slur the ear starts to listen again: soon, so that it
+/// has done its work while the note is still speaking.
+const EAR_WAIT_SLUR: f64 = 0.04;
 
 /// The most the dynamics may push the breath past its loudest, and how much
 /// faster an accented note's breath builds.
 const BREATH_MOST: f64 = 1.5;
 const ACCENT_ATTACK: f64 = 0.5;
 
-/// How long an accent's push takes to fall away.
+/// How long the tongue's push takes to fall away.
 const PUSH_SECONDS: f64 = 0.08;
 
 /// How far the crests of a blaring brass note can run ahead, as a fraction
@@ -112,14 +196,24 @@ const PUSH_SECONDS: f64 = 0.08;
 /// they run half that far.
 const STEEPENING: f64 = 0.04;
 const STEEP_MOST: f64 = 120.0;
-const BLARE_SCALE: f64 = 8.0;
+const BLARE_SCALE: f64 = 12.0;
 
 /// The tilt of the sound a brass instrument or a reed radiates, as the
 /// cut-off of a low-pass in multiples of the note, at no breath and at
 /// full: softly blown, little reaches the bell above the first harmonics
 /// (the steepening that makes a loud note blare is the other end of it).
 const BRASS_TILT: (f64, f64) = (2.0, 14.0);
-const SAXOPHONE_TILT: (f64, f64) = (4.0, 20.0);
+/// Below its cut-off a bell or an open end radiates less the lower the
+/// frequency (N. H. Fletcher and T. D. Rossing, sections 8.7 and 14.5): a
+/// high-pass at this multiple of the note, of the first order for the
+/// saxophone's open holes and bell, of the second for a brass bell, which
+/// reflects nearly all of the lowest harmonics, so that a brass
+/// instrument's fundamental is heard below the harmonics above it, as it
+/// is. None for the clarinet, whose open holes radiate its low register
+/// well, nor for the flute, heard from its embouchure.
+const BRASS_RADIATION: f64 = 2.0;
+const SAXOPHONE_RADIATION: f64 = 1.0;
+const SAXOPHONE_TILT: (f64, f64) = (3.0, 20.0);
 const CLARINET_TILT: (f64, f64) = (3.0, 16.0);
 
 /// What blows a [`WindVoice`]: the mechanism at the mouth and the shape of
@@ -176,8 +270,11 @@ pub struct WindParams {
     /// For the flute, how far off the edge the jet points, -1 to 1: off
     /// centre the jet gives even harmonics as well as odd.
     pub jet_offset: f64,
-    /// How much noise the breath carries, 0 to 1: turbulence at the reed, the
-    /// lips or the jet, heard as breathiness.
+    /// How much noise the breath carries, 0 to 1: turbulence at the reed or
+    /// the lips, heard as breathiness; for the flute, the turbulence of the
+    /// jet, which the jet amplifies and the pipe colours, and the breath
+    /// heard from the embouchure. It grows with the breath, more slowly
+    /// than the tone, so a soft note is breathier.
     pub noise: f64,
     /// How long the breath takes to build at the start of a note, 0.002 to
     /// 1.
@@ -195,9 +292,32 @@ pub struct WindParams {
     pub vibrato_delay: f64,
     /// How long it then takes to grow, 0.01 to 4.
     pub vibrato_rise: f64,
-    /// How long the pitch takes to move to a slurred note, 0 to 1: a key or
-    /// valve change is quick, a trombone's slide slower.
+    /// How long the pitch takes to slide to a slurred note when
+    /// [`portamento`](Self::portamento) is on, 0 to 1.
     pub legato_time: f64,
+    /// Whether slurred notes slide into each other, the bore's length
+    /// gliding over [`legato_time`](Self::legato_time), as a trombone's
+    /// slide can. Off, a slur changes the bore's length at once, as a key or
+    /// a valve does (and as a trombonist does, tonguing softly as the slide
+    /// moves), with a short break in the air while the new note speaks.
+    pub portamento: bool,
+    /// How hard the tongue starts a note, 0 to 1: the breath's push and the
+    /// burst of air before the tone speaks (the flute's chiff), more at a
+    /// higher velocity and on an accent; for brass, also how far below the
+    /// note the lips start, buzzing up into it. At a slur, how much the air
+    /// breaks.
+    pub articulation: f64,
+    /// How far the pitch drifts, slowly, as a player's does, in cents (its
+    /// RMS), 0 to 20.
+    pub drift: f64,
+    /// How much the breath wavers, slowly, as a fraction of it (its RMS), 0
+    /// to 0.3; the breath's noise wavers three times as much. A louder
+    /// breath is brighter, so the tone's colour wavers with it.
+    pub fluctuation: f64,
+    /// How much a held note swells after its attack, at its height about
+    /// 0.9 s in, and then eases back over a few seconds, as a fraction of
+    /// the breath, 0 to 0.5.
+    pub swell: f64,
     /// For brass, how much the sound steepens as it travels down the bore
     /// at high levels, 0 to 1: the blare of a loud trumpet.
     pub brassiness: f64,
@@ -242,6 +362,11 @@ impl WindParams {
             vibrato_delay: 0.4,
             vibrato_rise: 0.4,
             legato_time: 0.015,
+            portamento: false,
+            articulation: 0.5,
+            drift: 1.5,
+            fluctuation: 0.02,
+            swell: 0.08,
             brassiness: 0.0,
             tone: 8_000.0,
             velocity_range_db: 12.0,
@@ -266,8 +391,11 @@ impl WindParams {
             vibrato_depth: 15.0,
             vibrato_delay: 0.3,
             legato_time: 0.02,
+            drift: 3.0,
+            fluctuation: 0.04,
+            swell: 0.1,
             breath_soft: 0.2,
-            level: 1.4,
+            level: 1.1,
             ..Self::clarinet()
         }
     }
@@ -291,7 +419,11 @@ impl WindParams {
             vibrato_depth: 8.0,
             tremolo: 0.25,
             vibrato_delay: 0.25,
-            level: 0.035,
+            articulation: 0.6,
+            drift: 3.0,
+            fluctuation: 0.035,
+            swell: 0.12,
+            level: 0.21,
             ..Self::clarinet()
         }
     }
@@ -315,14 +447,19 @@ impl WindParams {
             vibrato_depth: 6.0,
             vibrato_delay: 0.4,
             legato_time: 0.02,
+            articulation: 0.6,
+            drift: 2.5,
+            fluctuation: 0.03,
+            swell: 0.1,
             brassiness: 0.6,
-            level: 1.8,
+            level: 1.4,
             ..Self::clarinet()
         }
     }
 
-    /// A trombone: a darker bell, a slower attack, and a slide that glides
-    /// between slurred notes.
+    /// A trombone: a darker bell and a slower attack. Its slide can glide
+    /// between slurred notes over 150 ms: turn
+    /// [`portamento`](Self::portamento) on for that.
     pub fn trombone() -> Self {
         Self {
             bell: 900.0,
@@ -331,6 +468,7 @@ impl WindParams {
             brassiness: 0.45,
             vibrato_depth: 4.0,
             tone: 6_000.0,
+            level: 1.55,
             ..Self::trumpet()
         }
     }
@@ -362,6 +500,11 @@ impl WindParams {
             vibrato_delay: setting(self.vibrato_delay, 0.0, 4.0, default.vibrato_delay),
             vibrato_rise: setting(self.vibrato_rise, 0.01, 4.0, default.vibrato_rise),
             legato_time: setting(self.legato_time, 0.0, 1.0, default.legato_time),
+            portamento: self.portamento,
+            articulation: setting(self.articulation, 0.0, 1.0, default.articulation),
+            drift: setting(self.drift, 0.0, 20.0, 0.0),
+            fluctuation: setting(self.fluctuation, 0.0, 0.3, 0.0),
+            swell: setting(self.swell, 0.0, 0.5, 0.0),
             brassiness: setting(self.brassiness, 0.0, 1.0, 0.0),
             tone: setting(self.tone, 500.0, 20_000.0, default.tone),
             velocity_range_db: setting(
@@ -382,7 +525,8 @@ impl WindParams {
             depth_cents: 1.0,
             delay: self.vibrato_delay,
             rise: self.vibrato_rise,
-            wander: 0.5,
+            wander: 0.8,
+            develop: 1.0,
         }
     }
 }
@@ -484,24 +628,43 @@ struct WindTone {
     /// The jet's low-pass, its memory, and the jet's delay at the pitch
     /// aimed at, that low-pass's taken off.
     jet_filter: Loss,
-    jet_memory: f64,
+    jet_memory: [f64; 2],
     jet_offset_delay: f64,
+    /// The jet's travel time, in periods' worth of samples, following the
+    /// note; how fast; and how strongly the jet drives the pipe.
+    jet_period: f64,
+    jet_follow: f64,
+    jet_strength: f64,
+    jet_over: f64,
+    jet_unit: f64,
+    kick: Bump,
+    kick_level: f64,
+    vortex: f64,
+    embouchure: f64,
     dc: DcBlock,
+    radiation: [DcBlock; 2],
     valve: Valve,
     /// The embouchure, the flute's jet's aim, the bore's gain, and the
-    /// pressure a high brass note adds.
+    /// pressure a high note adds, as aimed at and as it follows.
     opening: f64,
     jet_offset: f64,
     bore_gain: f64,
     lift: f64,
-    /// The pitch, gliding between slurred notes, the bend, and the ear's
-    /// correction of the bore's length.
+    lift_target: f64,
+    lift_follow: f64,
+    /// The pitch, gliding between slurred notes with portamento, the bend,
+    /// and the ear's correction of the bore's length.
     glide: Glide,
     bend: f64,
     ear: f64,
     /// What the bore's read needs on top of its share of the period, at the
     /// pitch aimed at.
     bore_offset: f64,
+    /// A slur's change of length: the fade from the old length's read, the
+    /// key it was at and its read's offset.
+    switch: Switch,
+    from_key: f64,
+    from_offset: f64,
     /// The ear: what it hears (the pressure at the mouth, its mean taken
     /// out and its harmonics turned down by two low-passes at the note, so
     /// that it crosses zero once a period), the last of it, and how long
@@ -516,7 +679,7 @@ struct WindTone {
     heard_last: f64,
     since_mark: f64,
     /// The breath: how far it has built, 0 to 1, how fast it comes and
-    /// goes, whether the key is held, and the accent's push.
+    /// goes, whether the key is held, and the tongue's push.
     breath: f64,
     breath_rise: f64,
     breath_fall: f64,
@@ -532,9 +695,29 @@ struct WindTone {
     vibrato: Vibrato,
     vibrato_depth: f64,
     tremolo: f64,
-    /// The breath's turbulence: noise, its low-pass, and how much.
+    /// The player's drift, waver and swell, and how much of each.
+    life: Life,
+    drift: f64,
+    fluctuation: f64,
+    swell: f64,
+    /// The tongue: how hard, the burst of air at the start and how fast it
+    /// falls, the lips' buzz below the note (brass) and how fast it rises.
+    articulation: f64,
+    chiff: f64,
+    chiff_fall: f64,
+    onset: f64,
+    onset_rise: f64,
+    scoop: f64,
+    scoop_fall: f64,
+    /// A slur's break in the air, and how deep it goes.
+    gap: Bump,
+    gap_depth: f64,
+    /// The breath's turbulence: noise, its filters' memories, and how much.
     noise: Noise,
     turbulence: f64,
+    noise_high: f64,
+    noise_low: f64,
+    noise_low_pole: f64,
     noise_level: f64,
     /// The jet's last flow, and the scale that makes its rate of change
     /// as strong as itself at the fundamental.
@@ -544,9 +727,10 @@ struct WindTone {
     steep: DelayLine<f64>,
     brassiness: f64,
     /// The radiated sound's tilt with the breath: the cut-offs at no breath
-    /// and at full, in hertz (zero for none), and the low-pass's memory.
+    /// and at full, in hertz, and the low-pass's memory.
     tilt: (f64, f64),
     tilt_memory: f64,
+    tilt_second: f64,
     tone: StateVariableFilter<f64>,
     out_dc: DcBlock,
     level: f64,
@@ -566,18 +750,33 @@ impl WindTone {
             bell: Loss::NONE,
             bell_memory: 0.0,
             jet_filter: Loss::NONE,
-            jet_memory: 0.0,
+            jet_memory: [0.0; 2],
             jet_offset_delay: 0.0,
+            jet_period: 100.0,
+            jet_follow: 1.0,
+            jet_strength: 1.0,
+            jet_over: 1.0,
+            jet_unit: 1.0,
+            kick: Bump::new(),
+            kick_level: 0.0,
+            vortex: VORTEX,
+            embouchure: EMBOUCHURE,
             dc: DcBlock::default(),
+            radiation: [DcBlock::default(); 2],
             valve: Valve::default(),
             opening: 0.5,
             jet_offset: 0.0,
             bore_gain: 0.95,
             lift: 0.0,
+            lift_target: 0.0,
+            lift_follow: 1.0,
             glide: Glide::new(),
             bend: 0.0,
             ear: 1.0,
             bore_offset: 0.0,
+            switch: Switch::new(),
+            from_key: 60.0,
+            from_offset: 0.0,
             ear_dc: DcBlock::default(),
             ear_filter: Loss::NONE,
             ear_memory: [0.0; 2],
@@ -597,8 +796,24 @@ impl WindTone {
             vibrato: Vibrato::new(),
             vibrato_depth: 0.0,
             tremolo: 0.0,
+            life: Life::new(),
+            drift: 0.0,
+            fluctuation: 0.0,
+            swell: 0.0,
+            articulation: 0.0,
+            chiff: 0.0,
+            chiff_fall: 0.0,
+            onset: 0.0,
+            onset_rise: 1.0,
+            scoop: 0.0,
+            scoop_fall: 0.0,
+            gap: Bump::new(),
+            gap_depth: 0.0,
             noise: Noise::for_note(0, 0.0, 0),
             turbulence: 0.0,
+            noise_high: 0.0,
+            noise_low: 0.0,
+            noise_low_pole: 0.0,
             noise_level: 0.0,
             jet_last: 0.0,
             jet_scale: 1.0,
@@ -606,6 +821,7 @@ impl WindTone {
             brassiness: 0.0,
             tilt: (0.0, 0.0),
             tilt_memory: 0.0,
+            tilt_second: 0.0,
             tone: StateVariableFilter::new(SvfMode::Lowpass, 8_000.0, 0.707),
             out_dc: DcBlock::default(),
             level: 0.0,
@@ -635,6 +851,12 @@ impl WindTone {
         self.ear_dc = DcBlock::new(20.0, rate);
         self.dynamics.prepare(rate, BREATH_SECONDS);
         self.push_fall = t60_factor(PUSH_SECONDS, rate);
+        self.chiff_fall = t60_factor(CHIFF_SECONDS, rate);
+        self.onset_rise = 1.0 - (-1.0 / (CHIFF_RISE * rate)).exp();
+        self.scoop_fall = t60_factor(SCOOP_SECONDS, rate);
+        self.lift_follow = 1.0 - (-1.0 / (LIFT_SECONDS * rate)).exp();
+        self.jet_follow = 1.0 - (-1.0 / (JET_FOLLOW_SECONDS * rate)).exp();
+        self.noise_low_pole = (-TAU * BREATH_LOW / rate).exp();
         self.ear_wait = (EAR_WAIT * rate) as u32;
         self.follower_fall = t60_factor(0.3, rate);
         self.silence();
@@ -650,6 +872,10 @@ impl WindTone {
         self.vibrato_depth = params.vibrato_depth;
         self.tremolo = params.tremolo;
         self.noise_level = params.noise;
+        self.drift = params.drift;
+        self.fluctuation = params.fluctuation;
+        self.swell = params.swell;
+        self.articulation = params.articulation;
         self.brassiness = if params.kind == WindKind::Brass {
             params.brassiness
         } else {
@@ -679,9 +905,10 @@ impl WindTone {
         } else if params.kind == WindKind::Flute {
             bell = bell.clamp(BELL_LEAST * f0, FLUTE_BELL_HARMONICS * f0);
         }
-        // High notes take more pressure, as a player's do.
+        // High notes take more pressure, as a player's do; the pressure
+        // moves there smoothly at a slur.
         let octaves = (f0 / 220.0).log2().max(0.0);
-        self.lift = match params.kind {
+        self.lift_target = match params.kind {
             WindKind::Brass => LIPS_LIFT * octaves,
             WindKind::Clarinet | WindKind::Saxophone => REED_LIFT * octaves,
             WindKind::Flute => 0.0,
@@ -698,6 +925,14 @@ impl WindTone {
         // follows the note leaves that loop no gain, for a little lead at
         // the fundamental, which is taken off with the bell's delay.
         self.dc.set_frequency(LOOP_HIGHPASS * f0, rate);
+        let radiation = match params.kind {
+            WindKind::Brass => BRASS_RADIATION,
+            WindKind::Saxophone => SAXOPHONE_RADIATION,
+            WindKind::Clarinet | WindKind::Flute => 0.0,
+        };
+        for stage in &mut self.radiation {
+            stage.set_frequency(radiation * f0, rate);
+        }
         let mut filters = self.bell.delay(w0);
         if params.kind != WindKind::Clarinet {
             filters += self.dc.delay(w0);
@@ -715,14 +950,24 @@ impl WindTone {
                 b0: 1.0 + pole,
                 a: pole,
             };
-            self.jet_offset_delay = -self.jet_filter.delay(w0);
+            self.jet_offset_delay = -2.0 * self.jet_filter.delay(w0);
             self.jet_scale = 1.0 / (2.0 * (0.5 * w0).sin()).max(1e-6);
+            // The jet's drive is set against what the pipe loses in a trip
+            // at the note, over the jet's gain there for small deflections
+            // (its profile's slope, taken where it is aimed as it plays, and
+            // its filter).
+            let trip = self.bell.gain(w0) * self.dc.gain(w0);
+            let loss = (1.0 - trip).max(1e-3);
+            let slope = JET_GAIN * self.jet_filter.gain(w0).powi(2);
+            self.jet_strength = loss / slope.max(1e-3);
+            self.jet_unit = slope.max(1e-3);
+            self.jet_over = 0.5 + params.opening;
         }
         let tilt = match params.kind {
             WindKind::Brass => BRASS_TILT,
             WindKind::Saxophone => SAXOPHONE_TILT,
             WindKind::Clarinet => CLARINET_TILT,
-            WindKind::Flute => (0.0, 0.0),
+            WindKind::Flute => FLUTE_TILT,
         };
         self.tilt = (tilt.0 * f0, tilt.1 * f0);
         match params.kind {
@@ -754,11 +999,61 @@ impl WindTone {
         }
     }
 
-    fn start(&mut self, params: &WindParams, key: f64, level: f64, accent: bool, seed: Noise) {
-        let rate = self.rate;
-        let fresh = !self.sounding;
+    /// How long this bore takes to change its length at a slur.
+    fn change_seconds(&self) -> f64 {
+        if self.kind == WindKind::Brass {
+            VALVE_SECONDS
+        } else {
+            KEY_SECONDS
+        }
+    }
+
+    /// The bore jumps to `key`: the old length's read fades out over a few
+    /// milliseconds, and the breath breaks as the new note speaks.
+    fn change_to(&mut self, params: &WindParams, key: f64) {
+        self.from_key = self.glide.key;
+        self.from_offset = self.bore_offset;
         self.glide.set(key);
         self.aim(params, key);
+        self.switch.start(self.change_seconds(), self.rate);
+        self.gap.start(BREAK_SECONDS, self.rate);
+        self.gap_depth = BREAK_LEAST + BREAK_RANGE * self.articulation;
+        // The new note speaks through a breath of air and a soft tongue.
+        self.chiff = self.chiff.max(0.15 * self.articulation);
+        self.push = self.push.max(0.3 * TONGUE_PUSH * self.articulation);
+        self.ear_wait = (EAR_WAIT_SLUR * self.rate) as u32;
+    }
+
+    /// How hard the tongue starts a note at `velocity`, with an accent.
+    fn tongue(&self, velocity: f64, accent: bool) -> f64 {
+        let tongue = self.articulation * (0.4 + 0.6 * velocity.clamp(0.0, 1.0));
+        if accent { 1.5 * tongue } else { tongue }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start(
+        &mut self,
+        params: &WindParams,
+        key: f64,
+        level: f64,
+        velocity: f64,
+        accent: bool,
+        seed: Noise,
+    ) {
+        let rate = self.rate;
+        let fresh = !self.sounding;
+        if fresh {
+            self.glide.set(key);
+            self.switch.finish();
+            self.gap.stop();
+            self.aim(params, key);
+            self.lift = self.lift_target;
+            self.jet_period = rate / key_hz(key + self.bend).clamp(LOWEST_HZ, HIGHEST_RATIO * rate);
+            self.ear_wait = (EAR_WAIT * rate) as u32;
+        } else {
+            // Tongued again while it sounds: the bore jumps to the note.
+            self.change_to(params, key);
+        }
         self.dynamics.strike(level, fresh);
         self.held = true;
         let attack = if accent {
@@ -767,10 +1062,26 @@ impl WindTone {
             params.attack
         };
         self.breath_rise = 1.0 - (-3.0 / (attack * rate)).exp();
-        self.push = if accent { params.accent_push } else { 0.0 };
+        let tongue = self.tongue(velocity, accent);
+        self.push = TONGUE_PUSH * tongue;
+        if accent {
+            self.push = self.push.max(params.accent_push);
+        }
+        self.chiff = self.chiff.max(tongue);
         if fresh {
+            if params.kind == WindKind::Flute {
+                let period = rate / key_hz(key + self.bend).clamp(LOWEST_HZ, HIGHEST_RATIO * rate);
+                self.kick.start(0.5 * period / rate, rate);
+                self.kick_level = TONGUE_KICK * tongue / self.jet_unit;
+            }
             self.noise = seed;
             self.vibrato.start(&params.vibrato(), rate, seed);
+            self.life.start(seed, rate);
+            self.scoop = if params.kind == WindKind::Brass {
+                tongue.min(1.5)
+            } else {
+                0.0
+            };
             // The ear starts where it settles: the lips pull a brass note
             // sharp by a constant fraction (measured).
             self.ear = if params.kind == WindKind::Brass {
@@ -786,8 +1097,13 @@ impl WindTone {
 
     fn slur(&mut self, params: &WindParams, key: f64, level: f64) {
         self.age = 0;
-        self.glide.to(key, params.legato_time, self.rate);
-        self.aim(params, key);
+        if params.portamento {
+            self.glide.to(key, params.legato_time, self.rate);
+            self.aim(params, key);
+            self.ear_wait = (EAR_WAIT * self.rate) as u32;
+        } else {
+            self.change_to(params, key);
+        }
         self.dynamics.strike(level, false);
         self.held = true;
     }
@@ -796,10 +1112,18 @@ impl WindTone {
     fn next(&mut self) -> f64 {
         let rate = self.rate;
         let wave = self.vibrato.next(self.dynamics.vibrato);
-        let key = self.glide.next() + self.bend + 0.01 * self.vibrato_depth * wave;
+        let life = self.life.next();
+        self.scoop = flush(self.scoop * self.scoop_fall);
+        // Everything that moves the pitch from the note's: the bend, the
+        // vibrato, the drift, the lips' buzz rising into a brass note.
+        let wobble = self.bend
+            + 0.01
+                * (self.vibrato_depth * wave + self.drift * life.drift - SCOOP_CENTS * self.scoop);
+        let key = self.glide.next() + wobble;
         let period = rate / key_hz(key);
 
-        // The breath, with the accent's push and the breath's own vibrato.
+        // The breath, with the tongue's push, the break of a slur, the
+        // player's swell and waver, and the breath's own vibrato.
         let dynamics = self.dynamics.next();
         if self.held {
             self.breath += (1.0 - self.breath) * self.breath_rise;
@@ -807,26 +1131,55 @@ impl WindTone {
             self.breath = flush(self.breath * (1.0 - self.breath_fall));
         }
         self.push = flush(self.push * self.push_fall);
+        self.chiff = flush(self.chiff * self.chiff_fall);
+        self.onset += (1.0 - self.onset) * self.onset_rise;
+        let dip = self.gap_depth * self.gap.next();
         let range = self.breath_loud - self.breath_soft;
         // Under a tenth of full dynamics the breath fades out, so that the
         // breath controller or the expression pedal at nothing is silence.
         let fade = (dynamics * 10.0).min(1.0);
         // The breath the player asks for, and how much of it the mouth
-        // passes on now: the attack and release, the accent's push, the
-        // breath's vibrato.
-        let level = self.breath_soft + range * dynamics.min(BREATH_MOST);
-        let envelope = fade * self.breath * (1.0 + self.push) * (1.0 + 0.5 * self.tremolo * wave);
+        // passes on now: the attack and release, the tongue's push, the
+        // break, the breath's vibrato.
+        let player = (1.0 + self.swell * life.swell + self.fluctuation * life.waver).max(0.0);
+        let level = (self.breath_soft + range * dynamics.min(BREATH_MOST)) * player;
+        let envelope = fade
+            * self.breath
+            * (1.0 + self.push)
+            * (1.0 - dip)
+            * (1.0 + 0.5 * self.tremolo * wave);
         let blow = level * envelope;
-        self.turbulence += (self.noise.next() - self.turbulence) * 0.3;
-        let turbulence = self.noise_level * self.turbulence * blow;
+        // The breath's noise: louder at the tongue's burst and at a slur,
+        // wavering more than the breath.
+        let waver = (1.0 + NOISE_WAVER * self.fluctuation * life.waver).max(0.0);
+        let chiff = fade * CHIFF_GAIN * self.chiff * self.onset;
+        let air = self.noise_level * level * (envelope + chiff) * waver;
+        self.lift += (self.lift_target - self.lift) * self.lift_follow;
 
         let bore_delay = (self.length(period * self.ear) + self.bore_offset).max(1.0);
-        let inc = self.bore.read_cubic(bore_delay);
+        let mut inc = self.bore.read_cubic(bore_delay);
+        if self.switch.fading() {
+            // The old length's read, fading out.
+            let old = rate / key_hz(self.from_key + wobble);
+            let old_delay = (self.length(old * self.ear) + self.from_offset).max(1.0);
+            let share = self.switch.next();
+            inc = share * inc + (1.0 - share) * self.bore.read_cubic(old_delay);
+        }
         let reflected = self.bell.step(&mut self.bell_memory, inc);
+        // What the bell lets out: the incident wave less what the bell
+        // itself reflects. The bore's wall losses are in the reflection's
+        // gain, and are not sound: taken out, the bell radiates little of the
+        // fundamental, and nothing of the bore's mean pressure, which a step
+        // of the breath or a slur would otherwise let out as a thump.
+        let radiated = inc - reflected / self.bore_gain.max(0.5);
         let opening = OPENING_LEAST + OPENING_RANGE * self.opening;
 
-        let (pressure, out) = match self.kind {
+        // The pressure the ear hears, the sound the bell lets out (the
+        // incident wave less what it reflects), and the air heard directly.
+        let (pressure, out, heard) = match self.kind {
             WindKind::Clarinet | WindKind::Saxophone => {
+                self.turbulence += (self.noise.next() - self.turbulence) * 0.3;
+                let turbulence = air * self.turbulence;
                 // The reed. Closed at the reed end, the cylinder's wave comes
                 // back inverted (clarinet); the harmonic bore's does not
                 // (saxophone).
@@ -848,16 +1201,11 @@ impl WindTone {
                 let p = 2.0 * incoming + u;
                 self.valve.drive(gamma - p);
                 self.bore.push(flush(incoming + u));
-                // What the open end lets out: the incident wave less what
-                // comes back.
-                let out = if self.kind == WindKind::Clarinet {
-                    inc + incoming
-                } else {
-                    inc - incoming
-                };
-                (p, out)
+                (p, radiated, REED_AIR * turbulence)
             }
             WindKind::Brass => {
+                self.turbulence += (self.noise.next() - self.turbulence) * 0.3;
+                let turbulence = air * self.turbulence;
                 let incoming = self.dc.step(reflected);
                 let x = self.valve.position();
                 let gamma = (LIPS_LEAST + self.lift + LIPS_RANGE * level) * envelope
@@ -868,36 +1216,83 @@ impl WindTone {
                 let p = 2.0 * incoming + u;
                 self.valve.drive(gamma - p);
                 self.bore.push(flush(incoming + u));
-                (p, inc - incoming)
+                (p, radiated, REED_AIR * turbulence)
             }
             WindKind::Flute => {
+                // The breath's turbulence: white noise between a high-pass
+                // and a low-pass whose corner rises with the jet's speed,
+                // which by Bernoulli's law is the square root of the
+                // blowing pressure.
+                let speed = blow.max(0.0).sqrt();
+                let high = BREATH_HIGH.0 + (BREATH_HIGH.1 - BREATH_HIGH.0) * speed.min(1.5);
+                let x = (core::f64::consts::PI * high / rate).min(0.9);
+                // The pole of a one-pole low-pass at `high`, by the bilinear
+                // transform: no exponential a sample.
+                let pole = (1.0 - x) / (1.0 + x);
+                let white = self.noise.next();
+                self.noise_high = flush(white + pole * (self.noise_high - white));
+                self.noise_low = flush(
+                    self.noise_high + self.noise_low_pole * (self.noise_low - self.noise_high),
+                );
+                let turbulence = air * (self.noise_high - self.noise_low);
+
                 let incoming = self.dc.step(reflected);
                 // The jet is deflected by the flow in and out of the hole,
-                // which the wave coming back sets, and reaches the edge a
-                // quarter of a period later. It splits there, part in and
-                // part out, as the hyperbolic tangent of its deflection, and
-                // drives the pipe by the rate at which the flow it puts in
-                // changes (N. H. Fletcher, "Jet drive mechanism in organ
-                // pipes", JASA 60, 1976): a jet that switches drives the
-                // pipe with pulses, rich in harmonics. Off centre, part of it
-                // enters the pipe at rest, and its onset sets the pipe
-                // ringing.
+                // which the wave coming back sets, and by its own
+                // turbulence, and reaches the edge a quarter of a period
+                // later. It splits there, part in and part out, as the
+                // hyperbolic tangent of its deflection (the profile of a
+                // Bickley jet), and drives the pipe by the rate at which the
+                // flow it puts in changes: the jet-drive model of N. H.
+                // Fletcher ("Jet drive mechanism in organ pipes", JASA 60,
+                // 1976) and of M.-P. Verge, B. Fabre, A. Hirschberg and A.
+                // P. J. Wijnands ("Sound production in recorderlike
+                // instruments", JASA 101, 1997), with the jet's speed from
+                // the blowing pressure. Blown harder, the jet switches
+                // harder and the tone grows richer, as a flute's does (N. H.
+                // Fletcher, "Acoustical correlates of flute performance
+                // technique", JASA 57, 1975). Off centre, part of it enters
+                // the pipe at rest, which gives the even harmonics.
+                let [first, second] = &mut self.jet_memory;
                 let deflection = self
                     .jet_filter
-                    .step(&mut self.jet_memory, incoming + JET_NOISE * turbulence);
+                    .step(first, incoming + JET_NOISE * turbulence);
+                let deflection = self.jet_filter.step(second, deflection);
                 self.jet.push(deflection);
+                self.jet_period += (period * self.ear - self.jet_period) * self.jet_follow;
                 let eta = self
                     .jet
-                    .read_cubic((JET_RATIO * period * self.ear + self.jet_offset_delay).max(1.0));
-                let strength = (JET_LEAST + JET_RANGE * self.opening) * (1.0 - self.bore_gain);
-                let flow = strength * blow * (JET_GAIN * eta + self.jet_offset).tanh();
+                    .read_cubic((JET_RATIO * self.jet_period + self.jet_offset_delay).max(1.0));
+                // How loud the player is blowing, from softest to loudest,
+                // sets how hard the jet drives the pipe and where it is
+                // aimed; the breath's envelope brings it in and out.
+                let loud = ((level - self.breath_soft) / range.max(1e-3)).clamp(0.0, 1.0);
+                let aim = self.jet_offset * (JET_OFFSET.0 + (JET_OFFSET.1 - JET_OFFSET.0) * loud);
+                let centre = aim.tanh();
+                let slope = (1.0 - centre * centre).max(0.05);
+                let over = self.jet_over * (JET_DRIVE.0 + (JET_DRIVE.1 - JET_DRIVE.0) * loud);
+                let flow =
+                    self.jet_strength / slope * over * envelope * (JET_GAIN * eta + aim).tanh();
                 // The pipe is driven by how fast that flow changes (the
                 // momentum it brings), scaled to be as strong at the
                 // fundamental as the flow itself.
                 let drive = (flow - self.jet_last) * self.jet_scale;
                 self.jet_last = flow;
-                self.bore.push(flush(incoming + drive));
-                (incoming, inc + FLUTE_BREATH * turbulence)
+                // Vortices shed at the edge of the hole take energy out of the
+                // flow in and out of it, as its square: the loss that holds
+                // a flue's swing down before its jet saturates (B. Fabre, A.
+                // Hirschberg and A. P. J. Wijnands, "Vortex shedding in
+                // steady oscillation of a flue organ pipe", Acustica 82,
+                // 1996), and keeps a soft note pure.
+                let x = self.jet_unit * incoming;
+                let shed = self.vortex * self.jet_strength * x * x.abs();
+                let kick = self.kick_level * self.kick.next();
+                self.bore.push(flush(incoming + drive - shed + kick));
+                (
+                    incoming,
+                    radiated + self.embouchure * drive,
+                    FLUTE_BREATH * turbulence,
+                )
             }
         };
 
@@ -916,8 +1311,11 @@ impl WindTone {
             let heard = self.since_mark - 1.0 + fraction;
             if heard > 0.75 * period {
                 let error = heard / period - 1.0;
-                let settled = self.age >= self.ear_wait;
-                if settled && error.abs() < 0.1 && self.breath > 0.9 && !self.glide.moving() {
+                let settled = self.age >= self.ear_wait
+                    && !self.glide.moving()
+                    && !self.switch.fading()
+                    && !self.gap.running();
+                if settled && error.abs() < 0.1 && self.breath > 0.9 {
                     let gain = (period / (EAR_SECONDS * rate)).clamp(1e-3, 0.05);
                     let limit = (1.5 / period).max(0.01);
                     self.ear = (self.ear - gain * error.clamp(-limit, limit)).clamp(0.8, 1.25);
@@ -927,13 +1325,27 @@ impl WindTone {
         }
         self.heard_last = pressure;
 
-        let mut out = out;
+        let mut out = match self.kind {
+            WindKind::Brass => {
+                let [first, second] = &mut self.radiation;
+                second.step(first.step(out))
+            }
+            WindKind::Saxophone => self.radiation[0].step(out),
+            WindKind::Clarinet | WindKind::Flute => out,
+        };
         if self.tilt.1 > 0.0 {
             let breath = blow.clamp(0.0, 1.0);
             let cutoff = self.tilt.0 + (self.tilt.1 - self.tilt.0) * breath * breath;
             let pole = (-TAU * cutoff.min(0.45 * rate) / rate).exp();
             self.tilt_memory = flush(out + pole * (self.tilt_memory - out));
             out = self.tilt_memory;
+            if self.kind == WindKind::Saxophone {
+                // The saxophone's tilt is two poles: with one, its reed's
+                // beating brightens a soft note about as much as a loud one
+                // (measured).
+                self.tilt_second = flush(out + pole * (self.tilt_second - out));
+                out = self.tilt_second;
+            }
         }
         if self.brassiness > 0.0 {
             // Crests travel faster than troughs, so at high levels the wave
@@ -947,9 +1359,19 @@ impl WindTone {
             let lead = self.brassiness * most * (BLARE_SCALE * out).tanh();
             out = self.steep.read_cubic(most + 2.0 - lead);
         }
-        let out = self.out_dc.step(self.tone.process_sample(0, out));
-        // A tongued accent is heard louder at its start.
-        let out = out * self.level * self.gain * self.dynamics.volume * (1.0 + 0.5 * self.push);
+        let out = self.out_dc.step(self.tone.process_sample(0, out + heard));
+        // A tongued note is heard louder at its start.
+        // A beating reed or buzzing lips hardly grow louder with the breath
+        // alone (a player swells with the embouchure too), so the player's
+        // swell and waver are heard in their level as well as their colour;
+        // a flute's tone follows its breath by itself.
+        let swaying = if self.kind == WindKind::Flute {
+            1.0
+        } else {
+            player
+        };
+        let out =
+            out * self.level * self.gain * self.dynamics.volume * swaying * (1.0 + 0.5 * self.push);
         self.follower = (self.follower * self.follower_fall).max(out.abs());
         if !self.held && self.breath < 1e-4 && self.follower < SILENCE {
             self.silence();
@@ -969,9 +1391,13 @@ impl Tone for WindTone {
         self.steep.clear();
         self.bell_memory = 0.0;
         self.tilt_memory = 0.0;
-        self.jet_memory = 0.0;
+        self.tilt_second = 0.0;
+        self.jet_memory = [0.0; 2];
         self.jet_last = 0.0;
         self.dc.reset();
+        for stage in &mut self.radiation {
+            stage.reset();
+        }
         self.out_dc.reset();
         self.ear_dc.reset();
         self.ear_memory = [0.0; 2];
@@ -979,7 +1405,15 @@ impl Tone for WindTone {
         Processor::<f64>::reset(&mut self.tone);
         self.breath = 0.0;
         self.push = 0.0;
+        self.chiff = 0.0;
+        self.onset = 0.0;
+        self.scoop = 0.0;
+        self.switch.finish();
+        self.gap.stop();
+        self.kick.stop();
         self.turbulence = 0.0;
+        self.noise_high = 0.0;
+        self.noise_low = 0.0;
         self.heard_last = 0.0;
         self.since_mark = 0.0;
         self.ear = 1.0;
@@ -1024,32 +1458,53 @@ impl Tone for WindTone {
 ///   mouthpiece make them. A loud note steepens on its way down the bore
 ///   and blares ([`WindParams::brassiness`]).
 /// - **The jet** (flute) is deflected by the flow in and out of the
-///   embouchure hole and reaches the edge a quarter of a period later,
-///   where it splits as the hyperbolic tangent of its deflection; it drives
-///   the pipe by how fast the flow it puts in changes, Fletcher's momentum
-///   drive, so a jet that switches drives it with pulses rich in harmonics.
-///   Aimed off centre ([`WindParams::jet_offset`]) it gives even harmonics
-///   as well.
+///   embouchure hole and by its own turbulence, and reaches the edge a
+///   quarter of a period later, where it splits as the hyperbolic tangent
+///   of its deflection; it drives the pipe by how fast the flow it puts in
+///   changes, the jet-drive model of N. H. Fletcher and of M.-P. Verge, B.
+///   Fabre and A. Hirschberg. The vortices shed at the edge hold its swing
+///   down, so a soft note is nearly a sine; blown harder the jet is driven
+///   further above its threshold and aimed further off the edge
+///   ([`WindParams::jet_offset`]), and the tone grows richer, the second
+///   harmonic first, as a flute's does. The embouchure radiates the jet's
+///   drive as well as the pipe's open end its wave. The breath's
+///   turbulence, shaped and growing with the blowing pressure, is heard
+///   through the jet and directly: a soft continuous breath, and a burst of
+///   it (the chiff) as the tongue releases the note, which speaks some
+///   80 ms later.
 /// - **The breath** is velocity, then pressure on the key, the breath
 ///   controller (controller 2) and the expression pedal (controller 11) as
 ///   the note sounds: it moves the blowing pressure between
 ///   [`WindParams::breath_soft`] and [`WindParams::breath_loud`], so a
 ///   louder note is also brighter. It carries turbulence, heard as
-///   breathiness. An accent tongues the note harder: its breath builds
-///   twice as fast and overshoots ([`WindParams::accent_push`]).
+///   breathiness. The tongue starts every note ([`WindParams::articulation`]):
+///   a push of breath and a burst of air, harder at a higher velocity; the
+///   lips of a brass player start below the note and buzz up into it. An
+///   accent tongues the note harder still: its breath builds twice as fast
+///   and overshoots ([`WindParams::accent_push`]).
+/// - **The player** is never quite still: the pitch drifts by a few cents
+///   ([`WindParams::drift`]), the breath and its noise waver
+///   ([`WindParams::fluctuation`]), and a held note swells after its attack
+///   and eases back ([`WindParams::swell`]), each from slow noise seeded by
+///   the note.
 /// - **In tune.** The bore's read is tuned at the fundamental, the bell's
 ///   and the high-pass's delays taken off. The reed, the lips and the jet
 ///   pull the pitch (the lips by tens of cents), so the player has an ear:
 ///   the time between the upward crossings of the pressure at the mouth is
 ///   the period played, and the bore is lengthened or shortened, slowly,
 ///   until it is the note's.
-/// - **Vibrato** waits, grows and wanders, in pitch and, for the flute,
-///   in the breath ([`WindParams::tremolo`]); [`Expression::Vibrato`] and
-///   the modulation wheel scale it.
+/// - **Vibrato** waits, then grows, quickening to its rate as it does, and
+///   wanders, in pitch and, for the flute, in the breath
+///   ([`WindParams::tremolo`]); [`Expression::Vibrato`] and the modulation
+///   wheel scale it.
 /// - **Legato**: in a [`Synth`](crate::Synth) set to legato, a note struck
-///   while another is held slurs to it: the breath goes on and the bore
-///   glides to the new length ([`WindParams::legato_time`]), slowly for the
-///   trombone's slide.
+///   while another is held slurs to it: the breath goes on, and the bore
+///   changes its length at once, as a key or a valve does: the old length's
+///   read fades into the new one's in 3 ms (4 ms for a valve), the air
+///   breaks briefly and the new note speaks through a soft tongue, without
+///   gliding through the pitches between. With
+///   [`WindParams::portamento`] the bore glides instead
+///   ([`WindParams::legato_time`]), as a trombone's slide can.
 ///
 /// Releasing the key stops the breath ([`WindParams::release`]) and the bore
 /// rings down. Every source of noise is seeded by the note.
@@ -1178,6 +1633,7 @@ impl<S: Sample> Voice<S> for WindVoice {
             &params,
             f64::from(self.key),
             Self::breath(velocity, accent),
+            f64::from(velocity),
             accent,
             seed,
         );
@@ -1242,12 +1698,14 @@ impl<S: Sample> Voice<S> for WindVoice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::instruments::common::db;
     use crate::instruments::measure::{
-        self, Act, RATE, accented, amplitude_at, between, cents, decibels, frequency_near,
-        largest_jump, note, off, on, play, rms, synth_of, t60_at,
+        self, Act, RATE, accented, amplitude_at, band_passed, between, cents, decibels,
+        frequency_near, inharmonic_db, largest_jump, note, off, on, play, rms, synth_of, t60_at,
     };
     use crate::instruments::modelling::probe::{
-        harmonic_centroid, harmonics, levels, modulation, pitch_track,
+        harmonic_centroid, harmonics, high_band_levels, levels, modulation, period_track,
+        pitch_track,
     };
 
     /// The presets and the range each plays.
@@ -1272,6 +1730,81 @@ mod tests {
             tremolo: 0.0,
             ..params
         }
+    }
+
+    /// The same settings with none of the player's drift, waver or swell.
+    fn lifeless(params: WindParams) -> WindParams {
+        WindParams {
+            drift: 0.0,
+            fluctuation: 0.0,
+            swell: 0.0,
+            ..params
+        }
+    }
+
+    /// The same settings with no vibrato and none of the player's drift,
+    /// waver or swell: the model alone, for what they would blur. A drift of
+    /// a few cents moves the upper harmonics further than the width of a
+    /// spectrum's bin over most of a second, so the harmonics are measured
+    /// without it.
+    fn steady(params: WindParams) -> WindParams {
+        lifeless(still(params))
+    }
+
+    /// How long after `at` seconds the pitch of `signal` settles within
+    /// `tolerance` cents of `target` hertz and stays there for the next
+    /// 100 ms, period by period, and how many periods before that lay
+    /// between the old note, `from` hertz, and the new one, more than
+    /// `tolerance` from both: a glide passes through them, a change of
+    /// length jumps over them.
+    fn settling(signal: &[f64], at: f64, from: f64, target: f64, tolerance: f64) -> (f64, usize) {
+        let (low, high) = (from.min(target), from.max(target));
+        let track = period_track(between(signal, at - 0.05, at + 0.3), 0.7 * low, 1.4 * high);
+        let start = 0.05;
+        let mut settled = f64::INFINITY;
+        for (n, &(t, _)) in track.iter().enumerate() {
+            if t < start {
+                continue;
+            }
+            let stays = track[n..]
+                .iter()
+                .take_while(|&&(u, _)| u < t + 0.1)
+                .all(|&(_, f)| cents(f, target).abs() < tolerance);
+            if stays {
+                settled = t - start;
+                break;
+            }
+        }
+        let between_notes = track
+            .iter()
+            .filter(|&&(t, f)| {
+                t >= start
+                    && t - start < settled
+                    && f > low
+                    && f < high
+                    && cents(f, from).abs() > tolerance
+                    && cents(f, target).abs() > tolerance
+            })
+            .count();
+        (settled, between_notes)
+    }
+
+    /// A slur from `first` to `second` at 1 s on a fresh legato synth, the
+    /// first note released just after.
+    fn slurred(params: WindParams, first: u8, second: u8, velocity: f32) -> Vec<f64> {
+        let mut synth = synth_of(voice(params));
+        synth.set_legato(true);
+        let at = (1.0 * RATE) as usize;
+        play(
+            &mut synth,
+            &[
+                (0, on(first, velocity)),
+                (at, on(second, velocity)),
+                (at + 10, off(first)),
+            ],
+            (2.0 * RATE) as usize,
+            256,
+        )
     }
 
     #[test]
@@ -1316,15 +1849,32 @@ mod tests {
 
     #[test]
     fn every_note_is_in_tune_across_its_range() {
+        // The player's drift is on: a note's pitch wanders by its drift's
+        // RMS, slowly, and its tuning is the average over two seconds of its
+        // steady part. A drift on a time scale of 0.35 s averaged over 2 s
+        // keeps about 0.6 of its RMS (the averaging window is six of its
+        // time constants), so a note is held to the model's own 3 cents plus
+        // three times that; the notes' mean error, to the model's own 3
+        // cents.
         let mut worst = 0.0f64;
         for (name, params, low, high) in presets() {
+            let (mut total, mut count) = (0.0, 0.0);
             for key in (low..=high).step_by(2) {
                 let f0 = key_hz(f64::from(key));
-                let signal = note(voice(still(params)), on(key, 0.7), 2.0, 1.5);
-                let error = cents(frequency_near(between(&signal, 0.8, 1.5), f0), f0);
+                let signal = note(voice(still(params)), on(key, 0.7), 3.0, 2.8);
+                let error = cents(frequency_near(between(&signal, 0.8, 2.8), f0), f0);
                 worst = worst.max(error.abs());
-                assert!(error.abs() < 3.0, "{name} key {key}: {error:.2} cents");
+                total += error.abs();
+                count += 1.0;
+                let bound = 3.0 + 3.0 * 0.6 * params.drift;
+                assert!(error.abs() < bound, "{name} key {key}: {error:.2} cents");
             }
+            let mean = total / count;
+            println!(
+                "{name}: mean tuning error {mean:.2} cents with a drift of {}",
+                params.drift
+            );
+            assert!(mean < 3.0, "{name}: {mean:.2} cents on average");
         }
         println!("winds: worst tuning {worst:.2} cents");
     }
@@ -1336,7 +1886,9 @@ mod tests {
             for velocity in [0.0f32, 0.5, 1.0] {
                 for key in (low..=high).step_by(4) {
                     let f0 = key_hz(f64::from(key));
-                    let signal = note(voice(still(params)), on(key, velocity), 2.0, 1.6);
+                    // The model alone: the player's swell and waver are
+                    // measured on their own.
+                    let signal = note(voice(steady(params)), on(key, velocity), 2.0, 1.6);
                     let windows = levels(between(&signal, 0.6, 1.6), 0.1);
                     let (quiet, loud) = windows
                         .iter()
@@ -1373,7 +1925,7 @@ mod tests {
         for (name, params, low, _) in presets() {
             for key in [low, low + 5, low + 10] {
                 let f0 = key_hz(f64::from(key));
-                let signal = note(voice(still(params)), on(key, 0.8), 2.0, 1.2);
+                let signal = note(voice(steady(params)), on(key, 0.8), 2.0, 1.2);
                 let h: Vec<f64> = harmonics(between(&signal, 0.6, 1.2), f0, 4)
                     .into_iter()
                     .map(decibels)
@@ -1399,8 +1951,8 @@ mod tests {
         for (name, params, low, high) in presets() {
             let key = (low + high) / 2;
             let f0 = key_hz(f64::from(key));
-            let loud = note(voice(still(params)), on(key, 1.0), 2.0, 1.2);
-            let soft = note(voice(still(params)), on(key, 0.4), 2.0, 1.2);
+            let loud = note(voice(steady(params)), on(key, 1.0), 2.0, 1.2);
+            let soft = note(voice(steady(params)), on(key, 0.4), 2.0, 1.2);
             let (loud, soft) = (between(&loud, 0.6, 1.2), between(&soft, 0.6, 1.2));
             let difference = decibels(rms(loud) / rms(soft));
             let (bright, dark) = (harmonic_centroid(loud, f0), harmonic_centroid(soft, f0));
@@ -1435,7 +1987,7 @@ mod tests {
         // The saxophone's jaw vibrato, in pitch.
         let params = WindParams {
             noise: 0.0,
-            ..WindParams::saxophone()
+            ..lifeless(WindParams::saxophone())
         };
         let key = 61;
         let f0 = key_hz(f64::from(key));
@@ -1450,7 +2002,7 @@ mod tests {
         // The flute's, in the breath as well: its level swings at the rate.
         let params = WindParams {
             noise: 0.0,
-            ..WindParams::flute()
+            ..lifeless(WindParams::flute())
         };
         let key = 72;
         let f0 = key_hz(f64::from(key));
@@ -1483,49 +2035,287 @@ mod tests {
     }
 
     #[test]
-    fn legato_slurs_without_a_new_attack_and_the_slide_glides() {
+    fn legato_changes_the_note_at_once_and_only_the_slide_glides() {
         for (name, params, low, high) in presets() {
-            let params = still(params);
-            let (first, second) = ((low + high) / 2, (low + high) / 2 + 2);
+            let params = steady(params);
+            let middle = (low + high) / 2;
+            for (first, second) in [(middle, middle + 2), (high - 7, high - 12)] {
+                let signal = slurred(params, first, second, 0.8);
+                let before = rms(between(&signal, 0.8, 1.0));
+                let after = rms(between(&signal, 1.6, 1.8));
+                let through = levels(between(&signal, 1.0, 1.2), 0.01);
+                let dip =
+                    decibels(through.iter().fold(f64::MAX, |m, &x| m.min(x)) / before.min(after));
+                let (f0, f1) = (key_hz(f64::from(first)), key_hz(f64::from(second)));
+                let error = cents(frequency_near(between(&signal, 1.5, 2.0), f1), f1);
+                // A key or a valve changes the length at once: the pitch is
+                // the new note's (within 20 cents, a tenth of a whole tone)
+                // within 10 ms, with at most two periods in between, for a
+                // key; the lips take up to 40 ms and eight periods to move
+                // to the new resonance as the valve travels and the old
+                // standing wave dies away, a brass slur's break, not a glide
+                // (a glide spends dozens of periods between the notes; see
+                // below).
+                let (settled, gliding) = settling(&signal, 1.0, f0, f1, 20.0);
+                let (most, soonest) = if params.kind == WindKind::Brass {
+                    (8, 0.04)
+                } else {
+                    (2, 0.01)
+                };
+                println!(
+                    "{name} {first} to {second}: dip {dip:.1} dB, at the new pitch after {:.1} ms with {gliding} periods between, then {error:.2} cents",
+                    1000.0 * settled
+                );
+                // The breath breaks as the new note speaks (for 30 ms, by at
+                // most 35% of the breath), but the note goes on.
+                assert!(dip > -9.0, "{name}: {dip} dB");
+                assert!(error.abs() < 3.0, "{name}: {error} cents");
+                assert!(settled < soonest, "{name}: {settled} s");
+                assert!(
+                    gliding <= most,
+                    "{name}: {gliding} periods between the notes"
+                );
+            }
             let mut synth = synth_of(voice(params));
             synth.set_legato(true);
-            let at = (1.0 * RATE) as usize;
-            let signal = play(
+            play(
                 &mut synth,
-                &[
-                    (0, on(first, 0.8)),
-                    (at, on(second, 0.8)),
-                    (at + 10, off(first)),
-                ],
-                (2.0 * RATE) as usize,
+                &[(0, on(low, 0.8)), (4_800, on(low + 2, 0.8))],
+                9_600,
                 256,
             );
-            let before = rms(between(&signal, 0.8, 1.0));
-            let after = rms(between(&signal, 1.6, 1.8));
-            let through = levels(between(&signal, 1.0, 1.2), 0.01);
-            let dip = decibels(through.iter().fold(f64::MAX, |m, &x| m.min(x)) / before.min(after));
-            let f1 = key_hz(f64::from(second));
-            let error = cents(frequency_near(between(&signal, 1.5, 2.0), f1), f1);
-            println!("{name}: dip {dip:.1} dB, then {error:.2} cents");
-            assert!(dip > -6.0, "{name}: {dip} dB");
-            assert!(error.abs() < 3.0, "{name}: {error} cents");
             assert_eq!(synth.active_voices(), 1);
         }
-        // The trombone's slide passes through the pitches between.
-        let params = still(WindParams::trombone());
-        let mut synth = synth_of(voice(params));
-        synth.set_legato(true);
-        let at = (0.8 * RATE) as usize;
-        let signal = play(
-            &mut synth,
-            &[(0, on(50, 0.8)), (at, on(55, 0.8))],
-            (1.4 * RATE) as usize,
-            256,
+        // The trombone's slide glides only when asked to: with portamento
+        // on, 25 ms into a slide of a fourth the pitch is between the notes,
+        // and it passes through them for tens of milliseconds.
+        for portamento in [true, false] {
+            let params = WindParams {
+                portamento,
+                ..steady(WindParams::trombone())
+            };
+            let signal = slurred(params, 50, 55, 0.8);
+            let middle = frequency_near(between(&signal, 1.01, 1.04), key_hz(52.5));
+            let semitones = 12.0 * (middle / key_hz(50.0)).log2();
+            let (settled, gliding) = settling(&signal, 1.0, key_hz(50.0), key_hz(55.0), 20.0);
+            println!(
+                "trombone, portamento {portamento}: {semitones:.2} semitones up 25 ms in, settled after {:.0} ms with {gliding} periods between",
+                1000.0 * settled
+            );
+            if portamento {
+                assert!(semitones > 0.5 && semitones < 4.0, "{semitones}");
+                assert!(gliding >= 5 && settled > 0.05, "{gliding} {settled}");
+            } else {
+                assert!(semitones > 4.5, "{semitones}");
+                assert!(gliding <= 8 && settled < 0.04, "{gliding} {settled}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_note_change_has_no_click_thump_or_burst() {
+        // At a slur the bore's read fades from the old length to the new in
+        // a few milliseconds and the breath breaks smoothly: no sample jumps
+        // further than the notes' own largest steps by more than half again,
+        // no 2 ms window above 8 kHz is more than 10 dB over the notes' own
+        // level there (the air of the slur is a few decibels), and nothing
+        // below half the lower note (a thump) comes within 20 dB of the
+        // tone.
+        for (name, params, low, high) in presets() {
+            let middle = (low + high) / 2;
+            for (first, second) in [(middle, middle + 2), (middle, middle - 5)] {
+                let signal = slurred(still(params), first, second, 0.8);
+                let steps = largest_jump(between(&signal, 0.6, 0.98))
+                    .max(largest_jump(between(&signal, 1.3, 1.9)));
+                let change = largest_jump(between(&signal, 0.995, 1.06));
+                let hf = high_band_levels(&signal, 8_000.0, 0.002);
+                let quiet: Vec<f64> = hf[300..490].iter().chain(&hf[650..950]).copied().collect();
+                let reference = quiet.iter().sum::<f64>() / quiet.len() as f64;
+                let burst = hf[495..530].iter().fold(0.0f64, |m, &x| m.max(x));
+                let lowest = key_hz(f64::from(first.min(second)));
+                let thump = levels(&band_passed(&signal, 10.0, 0.5 * lowest), 0.005);
+                let thump = thump[195..230].iter().fold(0.0f64, |m, &x| m.max(x));
+                let tone = rms(between(&signal, 0.6, 0.98));
+                println!(
+                    "{name} {first} to {second}: largest step {:.2} of the notes', high band {:.1} dB, low band {:.1} dB under the tone",
+                    change / steps,
+                    decibels(burst / reference),
+                    -decibels(thump / tone)
+                );
+                assert!(change < 1.5 * steps, "{name}: {change} against {steps}");
+                assert!(decibels(burst / reference) < 10.0, "{name}");
+                assert!(decibels(thump / tone) < -20.0, "{name}");
+            }
+        }
+    }
+
+    /// The flute's tone and breath at `velocity`, held from the start for
+    /// 1.5 s at D5, the model alone (no vibrato, drift, waver or swell).
+    fn flute_note(velocity: f32) -> Vec<f64> {
+        note(
+            voice(steady(WindParams::flute())),
+            on(74, velocity),
+            1.5,
+            1.5,
+        )
+    }
+
+    /// The share of `signal`'s energy that lies off the harmonics of `f0`
+    /// (by more than 20 Hz), in decibels: for a flute, its breath.
+    fn breathiness(signal: &[f64], f0: f64) -> f64 {
+        let len = if signal.len() >= 32_768 {
+            32_768
+        } else {
+            2_048
+        };
+        inharmonic_db(signal, f0, 20.0, len)
+    }
+
+    #[test]
+    fn the_flute_breathes_into_its_tone() {
+        // A real flute's breath sits some 30 to 40 dB under its tone, always
+        // heard, and more in a soft note than a loud one (N. H. Fletcher and
+        // T. D. Rossing, section 16.10; the breath is the turbulence of the
+        // jet). Measured as the share of the energy off the harmonics over
+        // the held note.
+        let f0 = key_hz(74.0);
+        let shares: Vec<f64> = [0.2f32, 0.6, 1.0]
+            .iter()
+            .map(|&velocity| breathiness(between(&flute_note(velocity), 0.6, 1.3), f0))
+            .collect();
+        println!(
+            "flute breath: {:.1} dB soft, {:.1} dB mezzo-forte, {:.1} dB loud",
+            shares[0], shares[1], shares[2]
         );
-        let middle = frequency_near(between(&signal, 0.81, 0.84), key_hz(52.5));
-        let semitones = 12.0 * (middle / key_hz(50.0)).log2();
-        println!("trombone slide: {semitones:.2} semitones up, 25 ms into a slide of 5");
-        assert!(semitones > 0.5 && semitones < 4.0, "{semitones}");
+        assert!(shares[1] < -28.0 && shares[1] > -40.0, "{}", shares[1]);
+        assert!(shares.iter().all(|&x| x < -25.0 && x > -45.0), "{shares:?}");
+        assert!(shares[0] > shares[2] + 2.0, "{shares:?}");
+
+        // In the attack the breath is heard before the tone (the chiff):
+        // over the first 40 ms it is at least 15 dB more of the sound than
+        // once the note is held, and the tone is within 6 dB of its held
+        // level by 120 ms (a flute speaks in some 30 to 80 ms at
+        // mezzo-forte; measured about 80).
+        let signal = flute_note(0.6);
+        let attack = breathiness(between(&signal, 0.0, 0.0427), f0);
+        let held = rms(between(&signal, 0.6, 1.3));
+        let spoken = (0..30)
+            .map(|k| 0.01 * f64::from(k))
+            .find(|&t| rms(between(&signal, t, t + 0.01)) > held * db(-6.0))
+            .unwrap_or(1.0);
+        println!(
+            "flute attack: breath {attack:.1} dB of the sound against {:.1} held; tone within 6 dB after {:.0} ms",
+            shares[1],
+            1000.0 * spoken
+        );
+        assert!(attack > shares[1] + 15.0, "{attack}");
+        assert!(spoken > 0.02 && spoken < 0.12, "{spoken}");
+    }
+
+    #[test]
+    fn the_flutes_harmonics_follow_its_dynamics() {
+        // The second harmonic is strong at mezzo-forte, some 6 to 15 dB
+        // under the fundamental; soft, the tone is purer and loud richer
+        // (N. H. Fletcher, "Acoustical correlates of flute performance
+        // technique", JASA 57, 1975); and the upper harmonics fall away
+        // steadily, by more than 10 dB an octave, not as a flat comb.
+        let f0 = key_hz(74.0);
+        let spectrum = |velocity: f32| {
+            let signal = flute_note(velocity);
+            let h = harmonics(between(&signal, 0.6, 1.3), f0, 12);
+            h.iter().map(|&a| decibels(a / h[0])).collect::<Vec<f64>>()
+        };
+        let (soft, mezzo, loud) = (spectrum(0.2), spectrum(0.6), spectrum(1.0));
+        let centroid =
+            |velocity: f32| harmonic_centroid(between(&flute_note(velocity), 0.6, 1.3), f0);
+        let (dark, bright) = (centroid(0.2), centroid(1.0));
+        // The fall of harmonics 2 to 10, by a straight line through their
+        // levels against the octave they are in.
+        let fall = |levels: &[f64]| {
+            let points: Vec<(f64, f64)> = (2..=10)
+                .map(|n| ((n as f64).log2(), levels[n - 1]))
+                .collect();
+            let count = points.len() as f64;
+            let (mx, my) = (
+                points.iter().map(|p| p.0).sum::<f64>() / count,
+                points.iter().map(|p| p.1).sum::<f64>() / count,
+            );
+            points.iter().map(|p| (p.0 - mx) * (p.1 - my)).sum::<f64>()
+                / points.iter().map(|p| (p.0 - mx).powi(2)).sum::<f64>()
+        };
+        println!(
+            "flute: second harmonic {:.1} dB soft, {:.1} mezzo-forte, {:.1} loud; third {:.1}, {:.1}, {:.1}; centroid {dark:.0} Hz soft, {bright:.0} loud; harmonics fall {:.1} dB an octave at mezzo-forte",
+            soft[1],
+            mezzo[1],
+            loud[1],
+            soft[2],
+            mezzo[2],
+            loud[2],
+            fall(&mezzo)
+        );
+        assert!(mezzo[1] > -15.0 && mezzo[1] < -5.0, "{}", mezzo[1]);
+        assert!(soft[1] < mezzo[1] - 2.0 && loud[1] > mezzo[1] + 2.0);
+        assert!(bright > 1.25 * dark, "{bright} against {dark}");
+        assert!(fall(&mezzo) < -10.0, "{}", fall(&mezzo));
+    }
+
+    #[test]
+    fn a_held_note_drifts_wavers_and_swells_as_designed() {
+        for (name, params, low, high) in presets() {
+            let key = (low + high) / 2;
+            let f0 = key_hz(f64::from(key));
+            let params = still(params);
+            // The drift: the pitch over windows of 50 ms, about its mean,
+            // has the drift's RMS, within a factor of two either way (a few
+            // seconds of a slow random motion), and none without it.
+            let drifting = note(voice(params), on(key, 0.7), 6.0, 6.0);
+            let track = pitch_track(&drifting, f0, 1.0, 5.9, 0.05, 0.025);
+            let cents_track: Vec<f64> = track.iter().map(|&f| cents(f, f0)).collect();
+            let mean = cents_track.iter().sum::<f64>() / cents_track.len() as f64;
+            let drift = (cents_track.iter().map(|c| (c - mean).powi(2)).sum::<f64>()
+                / cents_track.len() as f64)
+                .sqrt();
+            let plain = note(voice(steady(params)), on(key, 0.7), 6.0, 6.0);
+            let track = pitch_track(&plain, f0, 1.0, 5.9, 0.05, 0.025);
+            let still_drift = track
+                .iter()
+                .map(|&f| cents(f, f0).abs())
+                .fold(0.0f64, f64::max);
+            // The waver: the level over windows of 50 ms moves, slowly, and
+            // the swell lifts a long note's middle above its end.
+            let swaying = levels(between(&drifting, 1.0, 5.9), 0.05);
+            let level_mean =
+                swaying.iter().map(|&x| decibels(x)).sum::<f64>() / swaying.len() as f64;
+            let waver = (swaying
+                .iter()
+                .map(|&x| (decibels(x) - level_mean).powi(2))
+                .sum::<f64>()
+                / swaying.len() as f64)
+                .sqrt();
+            let swelling = note(
+                voice(WindParams {
+                    drift: 0.0,
+                    fluctuation: 0.0,
+                    ..params
+                }),
+                on(key, 0.7),
+                6.0,
+                6.0,
+            );
+            let swell =
+                decibels(rms(between(&swelling, 0.7, 1.1)) / rms(between(&swelling, 5.0, 5.9)));
+            println!(
+                "{name}: drift {drift:.2} cents (set {}), {still_drift:.2} without; waver {waver:.2} dB; swell {swell:.2} dB",
+                params.drift
+            );
+            assert!(
+                drift > 0.5 * params.drift && drift < 2.0 * params.drift,
+                "{name}: {drift}"
+            );
+            assert!(still_drift < 0.5, "{name}: {still_drift}");
+            assert!(waver > 0.05 && waver < 2.0, "{name}: {waver}");
+            assert!(swell > 0.2 && swell < 4.0, "{name}: {swell}");
+        }
     }
 
     #[test]
@@ -1558,7 +2348,7 @@ mod tests {
 
     #[test]
     fn the_breath_follows_the_controllers() {
-        let params = still(WindParams::clarinet());
+        let params = steady(WindParams::clarinet());
         let key = 58;
         let run = |shape: &dyn Fn(&mut WindVoice)| {
             let mut synth = synth_of(voice(params));
@@ -1597,7 +2387,7 @@ mod tests {
         let upper = |brassiness: f64| {
             let params = WindParams {
                 brassiness,
-                ..still(WindParams::trumpet())
+                ..steady(WindParams::trumpet())
             };
             let signal = note(voice(params), on(60, 1.0), 2.0, 1.2);
             let h = harmonics(between(&signal, 0.6, 1.2), f0, 10);
@@ -1692,6 +2482,11 @@ mod tests {
                     vibrato_delay: -1.0,
                     vibrato_rise: 0.0,
                     legato_time: f64::NAN,
+                    portamento: true,
+                    articulation: f64::INFINITY,
+                    drift: 1e9,
+                    fluctuation: f64::NAN,
+                    swell: -1e9,
                     brassiness: f64::INFINITY,
                     tone: 0.0,
                     velocity_range_db: -5.0,
@@ -1712,6 +2507,10 @@ mod tests {
                     brassiness: 1.0,
                     vibrato_depth: 100.0,
                     tremolo: 1.0,
+                    articulation: 1.0,
+                    drift: 20.0,
+                    fluctuation: 0.3,
+                    swell: 0.5,
                     ..WindParams::trumpet()
                 },
             ];

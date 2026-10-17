@@ -168,6 +168,13 @@ impl DcBlock {
         self.output
     }
 
+    /// The gain at `w` radians per sample.
+    pub(crate) fn gain(&self, w: f64) -> f64 {
+        let numerator = 2.0 * (0.5 * w).sin();
+        let denominator = (1.0 - 2.0 * self.pole * w.cos() + self.pole * self.pole).sqrt();
+        numerator / denominator.max(1e-12)
+    }
+
     /// The phase delay at `w`, in samples: negative, a high-pass leads.
     pub(crate) fn delay(&self, w: f64) -> f64 {
         let w = w.max(1e-9);
@@ -193,7 +200,15 @@ pub(crate) struct VibratoShape {
     pub(crate) rise: f64,
     /// How much the rate and depth wander, 0 to 1.
     pub(crate) wander: f64,
+    /// How much the vibrato develops as it grows, 0 to 1: at 1 it starts
+    /// [`DEVELOP_RATE`] slower than its rate and quickens to it as it
+    /// reaches its depth, as a player's hand loosens into it. At 0 its rate
+    /// is its rate from the start.
+    pub(crate) develop: f64,
 }
+
+/// How much slower than its rate a vibrato that develops starts.
+pub(crate) const DEVELOP_RATE: f64 = 0.2;
 
 /// A vibrato as a player makes it: it waits, grows, and wanders a little
 /// in rate and depth, by a repeatable amount seeded by the note.
@@ -206,6 +221,7 @@ pub(crate) struct Vibrato {
     grow: f64,
     ramp: f64,
     wander: f64,
+    develop: f64,
     /// A slowly moving random value and the noise it follows.
     drift: f64,
     drift_target: f64,
@@ -225,6 +241,7 @@ impl Vibrato {
             grow: 1.0,
             ramp: 0.0,
             wander: 0.0,
+            develop: 0.0,
             drift: 0.0,
             drift_target: 0.0,
             drift_follow: 0.0,
@@ -252,6 +269,7 @@ impl Vibrato {
         self.depth = shape.depth_cents;
         self.grow = 1.0 / (shape.rise * rate).max(1.0);
         self.wander = shape.wander;
+        self.develop = shape.develop.clamp(0.0, 1.0);
         // A new random target five times a second, followed smoothly.
         self.drift_period = ((0.2 * rate) as u32).max(1);
         self.drift_follow = 1.0 - (-1.0 / (0.15 * rate)).exp();
@@ -268,10 +286,6 @@ impl Vibrato {
         self.drift_countdown -= 1;
         self.drift += (self.drift_target - self.drift) * self.drift_follow;
         let wobble = self.wander * self.drift;
-        self.phase += self.step * (1.0 + 0.08 * wobble);
-        if self.phase >= 1.0 {
-            self.phase -= 1.0;
-        }
         if self.wait > 0.0 {
             self.wait -= 1.0;
         } else if self.ramp < 1.0 {
@@ -279,6 +293,11 @@ impl Vibrato {
         }
         // An eased ramp, so the vibrato grows in without a corner.
         let ease = self.ramp * self.ramp * (3.0 - 2.0 * self.ramp);
+        let developing = 1.0 - DEVELOP_RATE * self.develop * (1.0 - ease);
+        self.phase += self.step * developing * (1.0 + 0.08 * wobble);
+        if self.phase >= 1.0 {
+            self.phase -= 1.0;
+        }
         self.depth * scale * ease * (1.0 + 0.2 * wobble) * (TAU * self.phase).sin()
     }
 }
@@ -330,6 +349,262 @@ impl Glide {
     /// Whether the glide is still moving.
     pub(crate) fn moving(&self) -> bool {
         self.key != self.target
+    }
+}
+
+/// A change of a waveguide's length that happens at once, as a key, a valve
+/// or a finger changes it: the read at the old length fades into the read at
+/// the new one over a few milliseconds, instead of gliding through the
+/// lengths between (which is heard as a portamento).
+///
+/// The wave already in the line is the old note's; read at the new length it
+/// no longer fits, and the loop reorganises itself over a few trips round,
+/// as the air in a bore or a string does when its length jumps. The fade
+/// only keeps the read from stepping, which would be a click.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Switch {
+    /// How far the fade has gone, 0 to 1 (1 when there is none), and how far
+    /// it goes a sample.
+    progress: f64,
+    step: f64,
+}
+
+impl Switch {
+    pub(crate) fn new() -> Self {
+        Self {
+            progress: 1.0,
+            step: 1.0,
+        }
+    }
+
+    /// Starts a fade of `seconds`.
+    pub(crate) fn start(&mut self, seconds: f64, rate: f64) {
+        self.progress = 0.0;
+        self.step = 1.0 / (seconds * rate).max(1.0);
+    }
+
+    /// Ends any fade.
+    pub(crate) fn finish(&mut self) {
+        self.progress = 1.0;
+    }
+
+    /// Whether a fade is under way.
+    #[inline]
+    pub(crate) fn fading(&self) -> bool {
+        self.progress < 1.0
+    }
+
+    /// The share of the new read for this sample, eased so that the fade
+    /// starts and ends without a corner, and the fade moved on.
+    #[inline]
+    pub(crate) fn next(&mut self) -> f64 {
+        let x = self.progress;
+        self.progress = (self.progress + self.step).min(1.0);
+        x * x * (3.0 - 2.0 * x)
+    }
+}
+
+/// A raised-cosine bump: 0, up to 1 half way through `seconds`, and back to
+/// 0, once, when started.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Bump {
+    left: u32,
+    length: u32,
+}
+
+impl Bump {
+    pub(crate) fn new() -> Self {
+        Self { left: 0, length: 1 }
+    }
+
+    pub(crate) fn start(&mut self, seconds: f64, rate: f64) {
+        self.length = ((seconds * rate) as u32).max(2);
+        self.left = self.length;
+    }
+
+    pub(crate) fn stop(&mut self) {
+        self.left = 0;
+    }
+
+    pub(crate) fn running(&self) -> bool {
+        self.left > 0
+    }
+
+    #[inline]
+    pub(crate) fn next(&mut self) -> f64 {
+        if self.left == 0 {
+            return 0.0;
+        }
+        self.left -= 1;
+        let x = f64::from(self.length - self.left) / f64::from(self.length);
+        let s = (core::f64::consts::PI * x).sin();
+        s * s
+    }
+}
+
+/// How long a [`Wander`] holds each random value before it draws the next,
+/// as a fraction of its time scale.
+const WANDER_HOLD: f64 = 0.25;
+
+/// A slow, smooth random motion with an RMS of 1: what makes a held note
+/// move as a player's does, never quite still in pitch or level.
+///
+/// Random values from the note's own noise, each held a quarter of the time
+/// scale, through two one-pole low-passes of that time constant: noise
+/// whose spectrum is flat below `1 / (2π τ)` hertz and falls by 12 dB an
+/// octave above, so it drifts rather than jitters. Held values of variance
+/// `σ²` for `T` seconds have a spectral density of `σ² T` at low
+/// frequencies, and the two poles pass `1 / (4τ)` hertz of it, so the
+/// output's variance is `σ² T / (4τ)`; the scale makes it 1 (measured
+/// within a few percent; see the tests). It starts at 0, so a note starts at
+/// its pitch and level and wanders off as it is held.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Wander {
+    noise: Noise,
+    target: f64,
+    first: f64,
+    second: f64,
+    follow: f64,
+    countdown: u32,
+    hold: u32,
+}
+
+impl Wander {
+    pub(crate) fn new() -> Self {
+        Self {
+            noise: Noise::for_note(0, 0.0, 0),
+            target: 0.0,
+            first: 0.0,
+            second: 0.0,
+            follow: 0.0,
+            countdown: 0,
+            hold: 1,
+        }
+    }
+
+    /// Starts from 0 with `seed`, on a time scale of `seconds`.
+    pub(crate) fn start(&mut self, seed: Noise, seconds: f64, rate: f64) {
+        let seconds = seconds.max(1e-3);
+        self.noise = seed;
+        self.first = 0.0;
+        self.second = 0.0;
+        self.countdown = 0;
+        self.hold = ((WANDER_HOLD * seconds * rate) as u32).max(1);
+        self.follow = 1.0 - (-1.0 / (seconds * rate)).exp();
+    }
+
+    /// The value for this sample, about -3 to 3 at the most.
+    #[inline]
+    pub(crate) fn next(&mut self) -> f64 {
+        if self.countdown == 0 {
+            self.countdown = self.hold;
+            // Uniform from -1 to 1 has a variance of a third; held a
+            // quarter of the time constant, two poles leave a sixteenth.
+            self.target = self.noise.next() * (3.0f64 * 16.0).sqrt();
+        }
+        self.countdown -= 1;
+        self.first = flush(self.first + (self.target - self.first) * self.follow);
+        self.second = flush(self.second + (self.first - self.second) * self.follow);
+        self.second
+    }
+}
+
+/// How a held note breathes: it swells after its attack and eases back, as
+/// a player leans into a long note and then lets it settle. The difference
+/// of two decays, `e^(-t/τ₂) - e^(-t/τ₁)`, normalised to peak at 1: 0 at
+/// the start, 1 after 0.87 s, back towards 0 over several seconds.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Swell {
+    rise: f64,
+    ease: f64,
+    rise_factor: f64,
+    ease_factor: f64,
+}
+
+/// The time constants of a [`Swell`]'s two decays, and where and how high
+/// their difference peaks (`t* = τ₁ τ₂ ln(τ₂/τ₁) / (τ₂ - τ₁)`).
+const SWELL_RISE: f64 = 0.4;
+const SWELL_EASE: f64 = 2.5;
+#[cfg(test)]
+const SWELL_PEAK: f64 = SWELL_RISE * SWELL_EASE * 1.832_581_463_748_31 / (SWELL_EASE - SWELL_RISE);
+const SWELL_HEIGHT: f64 = 0.592_492_820_647_535;
+
+impl Swell {
+    pub(crate) fn new() -> Self {
+        Self {
+            rise: 0.0,
+            ease: 0.0,
+            rise_factor: 0.0,
+            ease_factor: 0.0,
+        }
+    }
+
+    pub(crate) fn start(&mut self, rate: f64) {
+        self.rise = 1.0;
+        self.ease = 1.0;
+        self.rise_factor = (-1.0 / (SWELL_RISE * rate)).exp();
+        self.ease_factor = (-1.0 / (SWELL_EASE * rate)).exp();
+    }
+
+    /// The swell for this sample, 0 to 1.
+    #[inline]
+    pub(crate) fn next(&mut self) -> f64 {
+        self.rise = flush(self.rise * self.rise_factor);
+        self.ease = flush(self.ease * self.ease_factor);
+        (self.ease - self.rise) / SWELL_HEIGHT
+    }
+}
+
+/// What makes a held note sound played rather than generated: a slow drift
+/// of pitch, a slow waver of level and the swell of a long note, each from
+/// its own noise, seeded by the note so that a render is the same every
+/// time.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Life {
+    pitch: Wander,
+    level: Wander,
+    swell: Swell,
+}
+
+/// The time scales of the pitch's drift and the level's waver: under a
+/// hertz, slower than any vibrato.
+pub(crate) const DRIFT_SECONDS: f64 = 0.35;
+pub(crate) const WAVER_SECONDS: f64 = 0.15;
+
+/// One sample of [`Life`]: the drift and the waver, each of RMS 1, and the
+/// swell, 0 to 1.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Lively {
+    pub(crate) drift: f64,
+    pub(crate) waver: f64,
+    pub(crate) swell: f64,
+}
+
+impl Life {
+    pub(crate) fn new() -> Self {
+        Self {
+            pitch: Wander::new(),
+            level: Wander::new(),
+            swell: Swell::new(),
+        }
+    }
+
+    /// Starts a fresh note's life from `seed`.
+    pub(crate) fn start(&mut self, mut seed: Noise, rate: f64) {
+        let pitch = Noise::for_note(0, seed.next(), 7);
+        let level = Noise::for_note(0, seed.next(), 11);
+        self.pitch.start(pitch, DRIFT_SECONDS, rate);
+        self.level.start(level, WAVER_SECONDS, rate);
+        self.swell.start(rate);
+    }
+
+    #[inline]
+    pub(crate) fn next(&mut self) -> Lively {
+        Lively {
+            drift: self.pitch.next(),
+            waver: self.level.next(),
+            swell: self.swell.next(),
+        }
     }
 }
 
@@ -464,6 +739,36 @@ pub(crate) mod probe {
             t += hop;
         }
         track
+    }
+
+    /// The pitch period by period: `signal` through a band-pass from
+    /// `low` to `high` hertz (around the fundamentals of the notes it
+    /// plays, so that only they cross zero), then the time of each upward
+    /// crossing of zero, to a fraction of a sample, and the frequency the
+    /// time since the last makes. Each entry is `(seconds, hertz)`, at the
+    /// crossing that ends the period.
+    pub(crate) fn period_track(signal: &[f64], low: f64, high: f64) -> Vec<(f64, f64)> {
+        let filtered = crate::instruments::measure::band_passed(signal, low, high);
+        let mut track = Vec::new();
+        let mut last: Option<f64> = None;
+        for (n, pair) in filtered.windows(2).enumerate() {
+            if pair[0] < 0.0 && pair[1] >= 0.0 {
+                let at = n as f64 + pair[0] / (pair[0] - pair[1]);
+                if let Some(before) = last {
+                    track.push((at / RATE, RATE / (at - before)));
+                }
+                last = Some(at);
+            }
+        }
+        track
+    }
+
+    /// The RMS level of `signal` above `corner` hertz in successive windows
+    /// of `seconds`: where a click or a burst of noise would show.
+    pub(crate) fn high_band_levels(signal: &[f64], corner: f64, seconds: f64) -> Vec<f64> {
+        let filtered =
+            crate::instruments::measure::band_passed(signal, corner, (0.45 * RATE).max(corner));
+        levels(&filtered, seconds)
     }
 
     /// The amplitudes of the first `count` harmonics of `f0`.
@@ -617,6 +922,7 @@ mod tests {
             delay: 0.5,
             rise: 0.5,
             wander: 0.0,
+            develop: 0.0,
         };
         let mut vibrato = Vibrato::new();
         vibrato.start(&shape, rate, Noise::for_note(60, 0.5, 3));
@@ -630,6 +936,104 @@ mod tests {
         let crossings = late.windows(2).filter(|p| p[0] * p[1] < 0.0).count();
         // Two seconds at 5 Hz: twenty periods.
         assert!((crossings as f64 - 20.0).abs() <= 1.0, "{crossings}");
+    }
+
+    #[test]
+    fn a_developing_vibrato_starts_slower_and_quickens_to_its_rate() {
+        let rate = 48_000.0;
+        let shape = VibratoShape {
+            rate: 5.0,
+            depth_cents: 20.0,
+            delay: 0.0,
+            rise: 4.0,
+            wander: 0.0,
+            develop: 1.0,
+        };
+        let mut vibrato = Vibrato::new();
+        vibrato.start(&shape, rate, Noise::for_note(60, 0.5, 3));
+        let cents: Vec<f64> = (0..(9.0 * rate) as usize)
+            .map(|_| vibrato.next(1.0))
+            .collect();
+        let rate_over = |from: f64, to: f64| {
+            let part = &cents[(from * rate) as usize..(to * rate) as usize];
+            let crossings = part.windows(2).filter(|p| p[0] * p[1] < 0.0).count();
+            crossings as f64 / (2.0 * (to - from))
+        };
+        let (early, late) = (rate_over(0.05, 1.65), rate_over(5.0, 9.0));
+        println!("developing vibrato: {early:.2} Hz as it grows, {late:.2} Hz grown");
+        // Over its first 1.6 s the vibrato's ease rises to about 0.37: it
+        // runs at 0.8 to 0.87 of its rate, then at its rate.
+        assert!(early < 0.92 * 5.0 && early > 0.75 * 5.0, "{early}");
+        assert!((late - 5.0).abs() < 0.2, "{late}");
+    }
+
+    #[test]
+    fn a_wander_moves_slowly_with_an_rms_of_one() {
+        let rate = 48_000.0;
+        let mut total = 0.0;
+        let mut count = 0.0;
+        let mut fast = 0.0f64;
+        for seed in 0..8 {
+            let mut wander = Wander::new();
+            wander.start(Noise::for_note(60, 0.0, seed), DRIFT_SECONDS, rate);
+            let values: Vec<f64> = (0..(60.0 * rate) as usize).map(|_| wander.next()).collect();
+            // It starts at nothing, then wanders.
+            assert!(values[0].abs() < 1e-3);
+            total += values.iter().map(|x| x * x).sum::<f64>();
+            count += values.len() as f64;
+            // Slowly: from one millisecond to the next it moves by a tiny
+            // fraction of its swing.
+            let step = values
+                .windows(48)
+                .step_by(48)
+                .map(|w| (w[47] - w[0]).abs())
+                .fold(0.0f64, f64::max);
+            fast = fast.max(step);
+        }
+        let rms = (total / count).sqrt();
+        println!("wander: RMS {rms:.3}, largest change in a millisecond {fast:.4}");
+        assert!((rms - 1.0).abs() < 0.15, "{rms}");
+        assert!(fast < 0.05, "{fast}");
+    }
+
+    #[test]
+    fn a_swell_peaks_once_and_eases_back() {
+        let rate = 48_000.0;
+        let mut swell = Swell::new();
+        swell.start(rate);
+        let values: Vec<f64> = (0..(8.0 * rate) as usize).map(|_| swell.next()).collect();
+        let (at, peak) = values
+            .iter()
+            .enumerate()
+            .fold((0, 0.0f64), |b, (n, &x)| if x > b.1 { (n, x) } else { b });
+        assert!(values[0] < 1e-3);
+        assert!((peak - 1.0).abs() < 1e-3, "{peak}");
+        assert!((at as f64 / rate - SWELL_PEAK).abs() < 0.01, "{at}");
+        assert!(values[values.len() - 1] < 0.1);
+    }
+
+    #[test]
+    fn a_switch_fades_smoothly_and_a_bump_rises_and_falls() {
+        let rate = 48_000.0;
+        let mut switch = Switch::new();
+        assert!(!switch.fading());
+        switch.start(0.003, rate);
+        let shares: Vec<f64> = (0..200).map(|_| switch.next()).collect();
+        assert_eq!(shares[0], 0.0);
+        assert!(
+            shares
+                .windows(2)
+                .all(|p| p[1] >= p[0] && p[1] - p[0] < 0.011)
+        );
+        assert_eq!(shares[199], 1.0);
+        assert!(!switch.fading());
+        let mut bump = Bump::new();
+        bump.start(0.01, rate);
+        let values: Vec<f64> = (0..600).map(|_| bump.next()).collect();
+        let peak = values.iter().fold(0.0f64, |m, &x| m.max(x));
+        assert!((peak - 1.0).abs() < 1e-6);
+        assert!(values[0] < 1e-3 && values[479].abs() < 1e-9 && values[599] == 0.0);
+        assert!(!bump.running());
     }
 
     #[test]
