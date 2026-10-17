@@ -44,6 +44,7 @@
 
 mod blocks;
 mod device;
+mod drift;
 mod duplex;
 mod error;
 mod host;

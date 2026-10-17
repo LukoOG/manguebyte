@@ -19,6 +19,9 @@ midi = ["dep:midir", "dep:manguebyte-midi"]
 [dependencies]
 manguebyte-core.workspace = true
 manguebyte-midi = { workspace = true, optional = true }
+# For its `Resampler`, which duplex streams use to follow the drift between
+# two devices' clocks. An audio crate like this one, so the layering holds.
+manguebyte-dsp.workspace = true
 cpal = "0.18"
 midir = { version = "0.11", optional = true }
 
