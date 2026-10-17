@@ -689,6 +689,9 @@ struct MalletTone {
     knock: Noise,
     knock_gain: f64,
     knock_filter: StateVariableFilter<f64>,
+    /// How many samples the knock's filter still rings for.
+    knock_left: u32,
+    knock_tail: f64,
     tube: [Resonance; 2],
     /// The mode the first one drives, and how strongly.
     coupled: Resonance,
@@ -728,6 +731,8 @@ impl MalletTone {
             knock: Noise::for_note(0, 0.0, 0),
             knock_gain: 0.0,
             knock_filter: band(),
+            knock_left: 0,
+            knock_tail: 0.0,
             tube: [Resonance::default(); 2],
             coupled: Resonance::default(),
             coupling: 0.0,
@@ -780,7 +785,11 @@ impl MalletTone {
         }
         self.knock_filter
             .set_frequency(params.knock_frequency.min(0.45 * self.rate));
-        self.knock_filter.set_q(1.2);
+        self.knock_filter.set_q(KNOCK_Q);
+        // Thirty of the band's time constants, Q / (π f): the knock has
+        // fallen by 260 dB.
+        let knock = params.knock_frequency.min(0.45 * self.rate);
+        self.knock_tail = (30.0 * KNOCK_Q / (core::f64::consts::PI * knock)).max(0.01);
         self.motor_step = params.motor_rate / self.rate;
         self.motor_depth = params.motor_depth;
         self.level = params.level;
@@ -846,6 +855,7 @@ impl MalletTone {
         // its length.
         self.knock = seed;
         self.knock_gain = params.knock * gain * (0.001 / contact).sqrt();
+        self.knock_left = ((contact + self.knock_tail) * rate).ceil() as u32;
         // The coupled mode grows to `coupling` times the first mode's level
         // in a tenth of a second when the note is struck at full velocity,
         // and by the square of the strike's level otherwise: the square of
@@ -930,11 +940,21 @@ impl MalletTone {
         if self.coupling > 0.0 && self.coupled.gain > 0.0 {
             out += self.coupled.next(self.coupling * motion * motion);
         }
-        if self.knock_gain > 0.0 && force > 0.0 {
-            let burst = self.knock.next() * force * self.knock_gain;
+        // The knock rings out and its filter is then set to rest: left to
+        // run on silence its state would fall into subnormal numbers, which
+        // cost a processor many times more than normal ones, for as long as
+        // the note rings.
+        if self.knock_left > 0 {
+            self.knock_left -= 1;
+            let burst = if self.knock_gain > 0.0 && force > 0.0 {
+                self.knock.next() * force * self.knock_gain
+            } else {
+                0.0
+            };
             out += self.knock_filter.process_sample(0, burst);
-        } else if self.knock_gain > 0.0 {
-            out += self.knock_filter.process_sample(0, 0.0);
+            if self.knock_left == 0 {
+                Processor::<f64>::reset(&mut self.knock_filter);
+            }
         }
         // The tube, opened and closed by the motor's discs.
         let tube = self.tube[0].next(out) + self.tube[1].next(out);
@@ -1037,6 +1057,9 @@ fn contact_response(seconds: f64, hertz: f64) -> f64 {
     (-0.5 * x * x).exp()
 }
 
+/// The Q of the band the mallet's knock is heard through.
+const KNOCK_Q: f64 = 1.2;
+
 /// How much of a mode at `ratio` of the sample rate is heard.
 fn fade(ratio: f64) -> f64 {
     if ratio <= FADE_FROM {
@@ -1058,6 +1081,7 @@ impl Tone for MalletTone {
         self.bar.clear();
         self.pulse.stop();
         self.knock_gain = 0.0;
+        self.knock_left = 0;
         for resonance in self.tube.iter_mut().chain([&mut self.coupled]) {
             resonance.rest();
         }
