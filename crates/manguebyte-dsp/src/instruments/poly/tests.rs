@@ -755,6 +755,162 @@ fn the_matrix_takes_every_source_to_its_destination() {
 }
 
 #[test]
+fn every_source_reaches_the_matrix() {
+    // Each source moves the pitch by a dozen semitones at full scale, and
+    // the pitch heard says how far the source stood.
+    let with = |source: ModSource| {
+        let mut params = plain(OscParams::new(Wave::Sine, 1.0));
+        params.envelopes[3] = EnvParams::adsr(0.0, 0.0, 0.5, 0.1);
+        params.matrix = matrix(&[ModSlot::new(source, ModDestination::Pitch, 12.0)]);
+        params
+    };
+    let semitones = |params: PolySynthParams,
+                     key: u8,
+                     velocity: f32,
+                     accent: bool,
+                     before: &dyn Fn(&mut Synth<PolySynthVoice, f64>)| {
+        let mut synth = synth(&params, 1, 1);
+        before(&mut synth);
+        synth.note_on_accented(NoteRef::new(0, key), velocity, accent);
+        let mut out = Vec::new();
+        let mut block = AudioBuffer::<f64>::new(1, 256);
+        for _ in 0..75 {
+            synth.process(&mut block);
+            out.extend_from_slice(block.channel(0));
+        }
+        // The strongest bin, then the exact frequency near it.
+        let window = between(&out, 0.1, 0.4);
+        let power = power_spectrum(window, 8_192);
+        let loudest = (1..power.len())
+            .max_by(|&a, &b| power[a].total_cmp(&power[b]))
+            .unwrap_or(1);
+        let measured = frequency_near(window, loudest as f64 * RATE / 8_192.0);
+        12.0 * (measured / key_hz(f64::from(key))).log2()
+    };
+    let midi = |controller: u8, value: u8| {
+        move |synth: &mut Synth<PolySynthVoice, f64>| {
+            synth.voices_mut().for_each(|voice| {
+                Voice::<f64>::midi(
+                    voice,
+                    MidiMessage::ControlChange {
+                        channel: 0,
+                        controller,
+                        value,
+                    },
+                );
+            });
+        }
+    };
+    let none = |_: &mut Synth<PolySynthVoice, f64>| {};
+    let near = |measured: f64, wanted: f64, what: &str| {
+        assert!(
+            (measured - wanted).abs() < 0.01,
+            "{what}: {measured} against {wanted}"
+        );
+    };
+    near(
+        semitones(with(ModSource::Velocity), 57, 0.5, false, &none),
+        6.0,
+        "velocity",
+    );
+    near(
+        semitones(with(ModSource::Accent), 57, 1.0, true, &none),
+        12.0,
+        "accent",
+    );
+    near(
+        semitones(with(ModSource::Accent), 57, 1.0, false, &none),
+        0.0,
+        "no accent",
+    );
+    near(
+        semitones(with(ModSource::Key), 72, 1.0, false, &none),
+        2.4,
+        "key",
+    );
+    near(
+        semitones(with(ModSource::Env4), 57, 1.0, false, &none),
+        6.0,
+        "envelope 4",
+    );
+    near(
+        semitones(with(ModSource::ModWheel), 57, 1.0, false, &midi(1, 127)),
+        12.0,
+        "wheel",
+    );
+    near(
+        semitones(with(ModSource::Brightness), 57, 1.0, false, &midi(74, 127)),
+        12.0,
+        "brightness",
+    );
+    let pressure = |message: MidiMessage| {
+        move |synth: &mut Synth<PolySynthVoice, f64>| {
+            synth
+                .voices_mut()
+                .for_each(|voice| Voice::<f64>::midi(voice, message));
+        }
+    };
+    let channel = pressure(MidiMessage::ChannelPressure {
+        channel: 0,
+        pressure: 127,
+    });
+    near(
+        semitones(with(ModSource::Aftertouch), 57, 1.0, false, &channel),
+        12.0,
+        "pressure",
+    );
+    // Pressure on one key reaches its note only; a note on another key
+    // does not inherit it.
+    let mut synth = synth(&with(ModSource::Aftertouch), 1, 1);
+    synth.note_on(NoteRef::new(0, 57), 1.0);
+    synth.handle_event(&crate::event::Event {
+        offset: 0,
+        kind: crate::event::EventKind::Midi(MidiMessage::PolyPressure {
+            channel: 0,
+            note: 57,
+            pressure: 127,
+        }),
+    });
+    let mut block = AudioBuffer::<f64>::new(1, 256);
+    let mut out = Vec::new();
+    for _ in 0..75 {
+        synth.process(&mut block);
+        out.extend_from_slice(block.channel(0));
+    }
+    let up = key_hz(69.0);
+    near(
+        cents(frequency_near(between(&out, 0.1, 0.4), up), up) / 100.0,
+        0.0,
+        "key pressure",
+    );
+    synth.note_on(NoteRef::new(0, 60), 1.0);
+    out.clear();
+    for _ in 0..75 {
+        synth.process(&mut block);
+        out.extend_from_slice(block.channel(0));
+    }
+    let plain_pitch = key_hz(60.0);
+    let off = cents(
+        frequency_near(between(&out, 0.1, 0.4), plain_pitch),
+        plain_pitch,
+    );
+    assert!(
+        off.abs() < 1.0,
+        "the next key inherited the pressure: {off} cents"
+    );
+    // The random value is the note's: the same note draws the same, others
+    // draw others, all within the range.
+    let random = |velocity: f32| semitones(with(ModSource::Random), 57, velocity, false, &none);
+    let draws: Vec<f64> = [0.5, 0.6, 0.7, 0.8].iter().map(|&v| random(v)).collect();
+    assert!(draws.iter().all(|d| d.abs() <= 12.0));
+    assert_eq!(random(0.5), draws[0]);
+    assert!(
+        draws.windows(2).all(|w| (w[0] - w[1]).abs() > 1e-3),
+        "{draws:?}"
+    );
+}
+
+#[test]
 fn glides_take_their_time_and_the_modes_play_as_they_say() {
     let glide = 0.2;
     let mut params = plain(OscParams::new(Wave::Sine, 1.0));

@@ -1225,14 +1225,25 @@ impl PolySynthVoice {
         }
     }
 
+    /// Takes the key of a new note; the pressure on another key does not
+    /// carry over to it.
+    fn take_key(&mut self, key: u8) {
+        if key != self.shared.key {
+            self.shared.controls.key_pressure = 0.0;
+        }
+        self.shared.key = key;
+    }
+
     /// Back to the state of a new voice, but for the settings and the
-    /// player's controllers.
+    /// player's controllers on the channel. The pressure on the key, which
+    /// belongs to the note, goes.
     fn reset(&mut self) {
         self.now.silence();
         self.old.silence();
         self.fade = 0.0;
         self.decimator.clear();
         self.carried = false;
+        self.shared.controls.key_pressure = 0.0;
     }
 }
 
@@ -1302,7 +1313,7 @@ impl<S: Sample> Voice<S> for PolySynthVoice {
         let fresh = !self.now.is_sounding();
         let cx = shared.context(bank());
         self.now.strike(&cx, key, velocity, accent, fresh, glide);
-        self.shared.key = key;
+        self.take_key(key);
     }
 
     fn legato(&mut self, note: NoteRef, velocity: f32, accent: bool) {
@@ -1315,7 +1326,7 @@ impl<S: Sample> Voice<S> for PolySynthVoice {
         let cx = self.shared.context(bank());
         self.now
             .slur(&cx, key, velocity, accent, self.shared.params.glide);
-        self.shared.key = key;
+        self.take_key(key);
     }
 
     fn note_off(&mut self, _velocity: f32) {
