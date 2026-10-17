@@ -156,11 +156,25 @@ impl DcBlock {
         }
     }
 
+    /// Moves the corner to `frequency`, keeping the state.
+    pub(crate) fn set_frequency(&mut self, frequency: f64, rate: f64) {
+        self.pole = (-TAU * frequency / rate).exp();
+    }
+
     #[inline]
     pub(crate) fn step(&mut self, x: f64) -> f64 {
         self.output = flush(x - self.input + self.pole * self.output);
         self.input = x;
         self.output
+    }
+
+    /// The phase delay at `w`, in samples: negative, a high-pass leads.
+    pub(crate) fn delay(&self, w: f64) -> f64 {
+        let w = w.max(1e-9);
+        let phase = 0.5 * core::f64::consts::PI
+            - 0.5 * w
+            - (self.pole * w.sin()).atan2(1.0 - self.pole * w.cos());
+        -phase / w
     }
 
     pub(crate) fn reset(&mut self) {

@@ -12,6 +12,7 @@
 //! | [`AcidVoice`] | the acid bass: an oscillator, a diode ladder and envelopes, with accent and slide | [classic](AcidParams::classic), [squelch](AcidParams::squelch), [square](AcidParams::square) |
 //! | [`PolySynthVoice`] | a deep polyphonic synthesiser: three oscillators of classic shapes and wavetables with sixteen-voice unison, sync, FM and ring modulation, two filters of fifteen models, four envelopes, three LFOs and a modulation matrix | the [library](poly::PRESETS) of basses, leads, pads, plucks, keys, brass and effects |
 //! | [`BowedString`] | a bowed string by digital waveguide, with the friction of rosin: Helmholtz motion, a player's ear for intonation, vibrato that waits, legato, a body, sections, pizzicato | [violin](BowedParams::violin), [viola](BowedParams::viola), [cello](BowedParams::cello), [double bass](BowedParams::contrabass), [string section](BowedParams::string_ensemble), pizzicato [violin](BowedParams::violin_pizzicato), [cello](BowedParams::cello_pizzicato) and [bass](BowedParams::contrabass_pizzicato) |
+//! | [`WindVoice`] | wind instruments by digital waveguide: a reed, the lips or an air jet driving a bore, with breath control, a player's ear, vibrato and legato | [flute](WindParams::flute), [clarinet](WindParams::clarinet), [saxophone](WindParams::saxophone), [trumpet](WindParams::trumpet), [trombone](WindParams::trombone) |
 //! | [`MalletVoice`] | struck bars, tines, plates and tubes by modal synthesis: mallet hardness, strike position, resonator tubes, the vibraphone's motor and damper | [marimba](MalletParams::marimba), [xylophone](MalletParams::xylophone), [vibraphone](MalletParams::vibraphone), [glockenspiel](MalletParams::glockenspiel), [celesta](MalletParams::celesta), [kalimba](MalletParams::kalimba), [steel pan](MalletParams::steel_pan), [tubular bells](MalletParams::tubular_bells) |
 //!
 //! [`RotarySpeaker`] is not a voice but a [`Processor`](crate::Processor)
@@ -110,6 +111,7 @@ mod organ;
 pub mod poly;
 mod rotary;
 mod string;
+mod wind;
 
 pub use acid::{AcidParams, AcidVoice, AcidWave};
 pub use analog_drums::{
@@ -131,3 +133,4 @@ pub use organ::{
 pub use poly::{PolySynthParams, PolySynthVoice};
 pub use rotary::{RotaryParams, RotarySpeaker, RotarySpeed};
 pub use string::{BodyMode, PluckedString, StringParams};
+pub use wind::{WindKind, WindParams, WindVoice};
