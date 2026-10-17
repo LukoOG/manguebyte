@@ -298,8 +298,9 @@ Two projects from Recife build on Manguebyte:
   its web editor runs in the browser with nothing to install
   ([try it at aratu.live](https://aratu.live/)). Its sounds come from
   Manguebyte's browser engine, `manguebyte-web`: the synths, instruments,
-  drum kits, sampled voices, effects and master bus. Only its Brazilian
-  percussion still plays from Aratu's own provisional sounds.
+  drum kits, sampled voices, effects and master bus. Its Brazilian
+  percussion, the guitar body tap and the hand clap (outside the 808 kit)
+  still play from Aratu's own provisional sounds.
 - **Parabolic** (planned): a tool for musicians to record their own
   instruments and turn them into plugins and samplers without writing code.
 
