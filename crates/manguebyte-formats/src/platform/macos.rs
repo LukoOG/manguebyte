@@ -129,11 +129,17 @@ fn check(status: OsStatus, what: &'static str) -> Result<(), FormatError> {
     }
 }
 
+/// A file held in memory, which the reader keeps in a box so that Core
+/// Audio's callbacks find it at the same address however the reader moves.
+struct Memory {
+    bytes: Vec<u8>,
+}
+
 /// Reads for Core Audio from a file held in memory.
 ///
 /// # Safety
 ///
-/// `client` is the `Vec<u8>` the reader keeps in a box for as long as the
+/// `client` is the [`Memory`] the reader keeps in a box for as long as the
 /// file is open; `buffer` has room for `request` bytes.
 unsafe extern "C" fn read_memory(
     client: *mut c_void,
@@ -143,7 +149,7 @@ unsafe extern "C" fn read_memory(
     actual: *mut u32,
 ) -> OsStatus {
     // SAFETY: as the caller promises.
-    let bytes = unsafe { &*client.cast::<Vec<u8>>() };
+    let bytes = unsafe { &(*client.cast::<Memory>()).bytes };
     let start = usize::try_from(position)
         .unwrap_or(usize::MAX)
         .min(bytes.len());
@@ -164,7 +170,7 @@ unsafe extern "C" fn read_memory(
 /// As for [`read_memory`].
 unsafe extern "C" fn memory_size(client: *mut c_void) -> i64 {
     // SAFETY: as the caller promises.
-    let bytes = unsafe { &*client.cast::<Vec<u8>>() };
+    let bytes = unsafe { &(*client.cast::<Memory>()).bytes };
     bytes.len() as i64
 }
 
@@ -174,7 +180,7 @@ pub(crate) struct Reader {
     /// The file opened with callbacks, when it is held in memory.
     audio_file: AudioFileId,
     /// The bytes the callbacks read, at an address that does not move.
-    bytes: Option<Box<Vec<u8>>>,
+    bytes: Option<Box<Memory>>,
     channels: usize,
     sample_rate: u32,
     frames: Option<u64>,
@@ -222,8 +228,8 @@ impl Reader {
             FileFormat::Caf => CAF_FILE,
             _ => 0,
         };
-        let bytes = Box::new(bytes);
-        let client = (&*bytes as *const Vec<u8>).cast_mut().cast::<c_void>();
+        let bytes = Box::new(Memory { bytes });
+        let client = (&*bytes as *const Memory).cast_mut().cast::<c_void>();
         let mut audio_file = ptr::null_mut();
         // SAFETY: the callbacks read from the boxed bytes, which the reader
         // keeps until after the file is closed; there is no writing.
@@ -258,7 +264,7 @@ impl Reader {
     fn start(
         file: ExtAudioFileRef,
         audio_file: AudioFileId,
-        bytes: Option<Box<Vec<u8>>>,
+        bytes: Option<Box<Memory>>,
         format: FileFormat,
     ) -> Result<Self, FormatError> {
         // From here the reader owns the file and closes it when dropped.
@@ -274,7 +280,9 @@ impl Reader {
             ended: false,
             lost: false,
         };
-        let mut format = StreamDescription::default();
+        // How the file stores its audio; not to be confused with `format`,
+        // the kind of file, which says below whether its length is known.
+        let mut stored = StreamDescription::default();
         let mut size = size_of::<StreamDescription>() as u32;
         // SAFETY: the property that is a stream description, with one to
         // fill and its size.
@@ -283,12 +291,12 @@ impl Reader {
                 file,
                 FILE_DATA_FORMAT,
                 &mut size,
-                (&mut format as *mut StreamDescription).cast(),
+                (&mut stored as *mut StreamDescription).cast(),
             )
         };
         check(status, "read the format")?;
-        let channels = format.channels_per_frame;
-        let rate = format.sample_rate.round();
+        let channels = stored.channels_per_frame;
+        let rate = stored.sample_rate.round();
         if channels == 0 || channels > 255 || !(1.0..=4_294_967_295.0).contains(&rate) {
             return Err(FormatError::Unsupported(
                 "a stream of no channels or no rate",
@@ -298,7 +306,7 @@ impl Reader {
         this.sample_rate = rate as u32;
 
         let client = StreamDescription {
-            sample_rate: format.sample_rate,
+            sample_rate: stored.sample_rate,
             format_id: LINEAR_PCM,
             format_flags: FORMAT_IS_FLOAT | FORMAT_IS_PACKED,
             bytes_per_packet: 4 * channels,
