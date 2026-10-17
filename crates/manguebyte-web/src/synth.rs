@@ -10,6 +10,8 @@ use manguebyte_dsp::{
 };
 use manguebyte_params::ParamId;
 
+use crate::engine::InstrumentKind;
+use crate::level::{gain_of, make_up_db};
 use crate::params::{self, SynthParams};
 
 /// How many notes a synth part plays at once.
@@ -176,8 +178,16 @@ pub const STEAL_FADE_SECONDS: f64 = 0.002;
 pub const RETRIGGER_GLIDE_SECONDS: f64 = 0.005;
 
 /// Scales the sum of the oscillators so that one note at full velocity
-/// peaks around -9 dB, leaving room for chords and other parts.
+/// peaks around -9 dB, leaving room for chords and other parts; the
+/// synth's make-up gain ([`InstrumentKind::calibration`]) is on top.
 const VOICE_LEVEL: f64 = 0.2;
+
+/// [`VOICE_LEVEL`] with the synth's make-up gain, which brings its
+/// standard phrase to the loudness target: what a note at velocity 1 is
+/// multiplied by.
+fn voice_level() -> f64 {
+    VOICE_LEVEL * gain_of(make_up_db(InstrumentKind::Synth, 0))
+}
 
 /// How much louder an accented synth note is, in decibels: its level is
 /// multiplied by `10^(SYNTH_ACCENT_DB / 20)`, about 1.5.
@@ -254,7 +264,7 @@ struct Tone {
     velocity: f64,
     /// [`SYNTH_ACCENT_OCTAVES`] for an accented note, 0 for another.
     accent_octaves: f64,
-    /// `VOICE_LEVEL × velocity`, and the accent's gain, gliding when the
+    /// `voice_level() × velocity`, and the accent's gain, gliding when the
     /// key is struck again.
     gain: Ramp,
     /// The gain is falling to silence for a cancel: the tone ends when it
@@ -388,11 +398,14 @@ pub(crate) struct SynthVoice {
     tail_fade: Ramp,
     steal_frames: u32,
     glide_frames: u32,
+    /// [`voice_level`], worked out once.
+    level: f64,
 }
 
 impl SynthVoice {
     pub(crate) fn new(settings: SynthSettings) -> Self {
         let mut voice = Self {
+            level: voice_level(),
             settings,
             sample_rate: 48_000.0,
             coefficients: Coefficients {
@@ -481,7 +494,7 @@ impl Voice for SynthVoice {
         } else {
             1.0
         };
-        let gain = VOICE_LEVEL * tone.velocity * accent_gain;
+        let gain = self.level * tone.velocity * accent_gain;
         if tone.amplitude.level > 0.0 {
             // Struck again while it sounds: glide to the new level rather
             // than jump to it.

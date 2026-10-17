@@ -69,11 +69,13 @@ fn every_drum_sounds_within_full_scale_and_ends() {
                 strike(InstrumentKind::Drums, chain, entry.note, 1.0, 100, 6.0);
             let name = entry.name;
             assert_eq!(onset(&left), Some(0), "{name}");
+            // The kit plays at the loudness target, its drums' make-up
+            // (-4.8 dB) under the levels they were voiced at.
             let loud = peak(&left);
-            assert!(loud > 0.2 && loud < 0.9, "{name}: peak {loud}");
+            assert!(loud > 0.1 && loud < 0.9, "{name}: peak {loud}");
             assert!(peak(&right) < 0.9, "{name}");
             assert!(
-                rms(&left[..4_800]) > 0.02,
+                rms(&left[..4_800]) > 0.01,
                 "{name}: rms {}",
                 rms(&left[..4_800])
             );
@@ -261,22 +263,21 @@ fn mix(parts: &[(u16, InstrumentKind)], records: &[EventRecord]) -> (Vec<f32>, E
 }
 
 /// Two parts at their default settings: three drums and a three-note
-/// chord struck together. Each part alone stays under the ceiling and is
-/// left exactly as it is; together they go beyond it, and the limiter
-/// turns them down gently, by at most 6 dB, keeping the shape of the
-/// waveform: the gain is a smooth curve that starts down before the peak
-/// it makes room for, by the look-ahead, and comes back up slowly. Before
-/// the engine had a limiter, 90 of these samples were clipped.
+/// chord struck together, at full velocity and accented. Each part alone
+/// stays under the ceiling and is left exactly as it is; together they go
+/// beyond it, and the limiter turns them down gently, by at most 6 dB,
+/// keeping the shape of the waveform: the gain is a smooth curve that
+/// starts down before the peak it makes room for, by the look-ahead, and
+/// comes back up slowly. Before the engine had a limiter, 90 of these
+/// samples (at velocity 0.9, unaccented, and the louder levels the parts
+/// had before their loudness was calibrated) were clipped.
 #[test]
 fn two_parts_at_default_levels_are_limited_gently_not_clipped() {
-    let records = [
-        EventRecord::note_on(0, 0, 36, 0.9),
-        EventRecord::note_on(0, 0, 38, 0.9),
-        EventRecord::note_on(0, 0, 49, 0.9),
-        EventRecord::note_on(0, 1, 45, 0.9),
-        EventRecord::note_on(0, 1, 52, 0.9),
-        EventRecord::note_on(0, 1, 57, 0.9),
-    ];
+    let records = [36, 38, 49]
+        .map(|note| EventRecord::note_on(0, 0, note, 1.0).with_accent(true))
+        .into_iter()
+        .chain([45, 52, 57].map(|note| EventRecord::note_on(0, 1, note, 1.0).with_accent(true)))
+        .collect::<Vec<_>>();
     let (drums, drum_stats) = mix(&[(0, InstrumentKind::Drums)], &records);
     let (synth, synth_stats) = mix(&[(1, InstrumentKind::Synth)], &records);
     assert_eq!((drum_stats.limited, synth_stats.limited), (0, 0));
@@ -546,7 +547,7 @@ fn every_instrument_works_at_every_sample_rate() {
                 first == 0 || (kind == InstrumentKind::Synth && first == 1),
                 "{label}"
             );
-            assert!(peak(&left) > 0.05, "{label}: peak {}", peak(&left));
+            assert!(peak(&left) > 0.03, "{label}: peak {}", peak(&left));
             assert!(
                 left.iter()
                     .chain(&right)

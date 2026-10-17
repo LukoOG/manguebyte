@@ -5,6 +5,8 @@ use core::f64::consts::{LN_2, TAU};
 use manguebyte_dsp::{Oscillator, ProcessSpec, Processor, StateVariableFilter, SvfMode, Waveform};
 use manguebyte_params::ParamId;
 
+use crate::engine::InstrumentKind;
+use crate::level::{gain_of, make_up_db};
 use crate::params::{self, KitParams};
 use crate::synth::{SILENT, decay_coefficient};
 
@@ -982,6 +984,11 @@ pub(crate) struct DrumKit {
     modal: [Slot<Modal>; 5],
     choke_frames: u32,
     damp_frames: u32,
+    /// The drums' make-up gain ([`InstrumentKind::calibration`]), which
+    /// brings the standard groove to the loudness target wherever the kit
+    /// plays: in a drum part, and in a sampler kit or the drum machine
+    /// that borrows its drums.
+    make_up: f64,
 }
 
 /// Where a drum of [`Modal`] sound sits in [`DrumKit::modal`].
@@ -1055,6 +1062,7 @@ impl DrumKit {
             .map(|(shape, seed)| Slot::new(Modal::new(shape, seed), DRUM_ACCENT_SNAP)),
             choke_frames: frames_for(HAT_CHOKE_SECONDS, sample_rate),
             damp_frames: frames_for(DAMP_SECONDS, sample_rate),
+            make_up: gain_of(make_up_db(InstrumentKind::Drums, 0)),
         };
         kit.kick.sound.prepare(sample_rate);
         kit.snare.sound.prepare(sample_rate);
@@ -1187,7 +1195,7 @@ impl DrumKit {
             for slot in &mut self.modal {
                 sum += slot.next();
             }
-            *sample = sum as f32;
+            *sample = (sum * self.make_up) as f32;
         }
     }
 }

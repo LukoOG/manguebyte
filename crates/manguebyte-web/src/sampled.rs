@@ -17,8 +17,7 @@ pub const SAMPLER_VOICES: usize = 32;
 
 /// The level a sampler part plays its samples at, in decibels: a sample
 /// that peaks at full scale, played at full velocity in the centre, peaks
-/// at -6 dB, which leaves room for chords and other parts, as the synth's
-/// -9 dB and the drums' -4.5 dB do.
+/// at -6 dB, which leaves room for chords and other parts.
 pub const SAMPLER_LEVEL_DB: f64 = -6.0;
 
 /// How much louder an accented note of a sampler part is, in decibels: its

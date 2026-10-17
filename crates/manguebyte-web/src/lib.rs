@@ -213,8 +213,9 @@
 //! keeps it under `master.limiter.ceiling`, -0.3 dBTP by default, and every
 //! sample within [`OUTPUT_CEILING`] (about -0.3 dB below full scale).
 //! Below the ceiling it leaves the sound exactly as it is: one note or one
-//! drum at full velocity and default settings stays below it (a single note
-//! of the synth peaks around -9 dB, a drum at -4.5 dB or lower); loud
+//! drum at full velocity and default settings, accented, stays below it on
+//! every kind (see [Loudness](#loudness): the loudest, the drum machine's
+//! snare, peaks at -0.6 dBTP); loud
 //! chords and several loud parts together are turned down in a ramp before
 //! their peaks and let back up over [`LIMITER_RELEASE_SECONDS`], never
 //! clipped. [`EngineStats::limited`] counts the frames it turned down. The
@@ -229,6 +230,23 @@
 //!
 //! See [the master bus](#the-master-bus): every sample stays within
 //! [`OUTPUT_CEILING`], whatever the parts do.
+//!
+//! # Loudness
+//!
+//! Every kind of instrument, and every preset, plays equally loud: its
+//! standard [`Phrase`] (a two-bar melody, a bass line, two chords or a
+//! groove, every note at velocity 0.8) comes out of a part with a neutral
+//! chain at [`LOUDNESS_TARGET_LUFS`], -24 LUFS integrated loudness
+//! (ITU-R BS.1770-4), within [`LOUDNESS_TOLERANCE_LU`]. A make-up gain per
+//! kind and preset, [`InstrumentKind::calibration`], measured with the
+//! loudness meter of `manguebyte-analysis`, does it; it comes on top of
+//! what the voices put out, so velocity and accents keep their dynamics,
+//! and a preset chosen while notes sound brings its make-up with its
+//! settings, on its frame. The target is the loudest at which a single
+//! note of every kind, accented at full velocity, stays under the master
+//! limiter's ceiling. `tests/loudness.rs` measures every row of the table
+//! and fails for one that misses the target, saying what its make-up
+//! should be, and a new kind or preset does not compile without its row.
 //!
 //! # The contract with Aratu
 //!
@@ -344,6 +362,7 @@ mod engine;
 #[allow(unsafe_code)]
 pub mod ffi;
 mod fx;
+mod level;
 mod load;
 mod master;
 mod params;
@@ -365,6 +384,7 @@ pub use engine::{
     LIMITER_RELEASE_SECONDS, OUTPUT_CEILING, Pushed,
 };
 pub use fx::{DELAY_GLIDE_SECONDS, DELAY_MAX_SECONDS, EFFECT_FADE_SECONDS, WAVE_SMOOTHING_SECONDS};
+pub use level::{Calibration, LOUDNESS_TARGET_LUFS, LOUDNESS_TOLERANCE_LU, Phrase, PhraseNote};
 pub use load::{SfzInstrument, SfzLoad};
 pub use manguebyte_params::ParamId;
 pub use manguebyte_sampler;

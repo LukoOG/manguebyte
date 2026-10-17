@@ -34,6 +34,7 @@ use manguebyte_params::{Param, ParamId, ParamSmoother};
 
 use crate::drums::{DAMP_SECONDS, Drum, DrumKit};
 use crate::engine::InstrumentKind;
+use crate::level::{Trim, make_up_db};
 use crate::params::{
     self, AcidKnobs, AnalogKitKnobs, FmKnobs, InstrumentParams, KickBassKnobs, LEVEL_SMOOTHING,
     OrganKnobs, PluckedKnobs,
@@ -63,24 +64,22 @@ pub const SPEAKER_SLEEP_SECONDS: f64 = 0.05;
 const SPEAKER_QUIET: f32 = 1e-6;
 
 /// How loud a plucked part plays its strings, in decibels, on top of the
-/// level each preset gives them. The presets' levels were set for
-/// phrases (one guitar strummed, the other picked note by note); one note
-/// of the finger bass at full velocity, accented, peaks above full scale
-/// without this, and a strummed chord of six strings far above it. With
-/// it the loudest note peaks around -4 dB, under the master limiter's
-/// ceiling, and a strum is turned down gently rather than hard.
+/// level each preset gives them, before the preset's make-up gain. The
+/// presets' levels were set for phrases (one guitar strummed, the other
+/// picked note by note); the make-up gains of
+/// [`InstrumentKind::calibration`], on top of this, bring all four to the
+/// loudness target on one phrase each, where the loudest single note,
+/// accented at full velocity, peaks at -5.4 dBTP (the steel guitar).
 pub const PLUCKED_LEVEL_DB: f64 = -6.0;
 
-/// How loud an FM part plays, in decibels, on top of the presets' levels:
-/// a little room for chords, which the electric piano is mostly played
-/// in. One note of the FM bass at full velocity, accented, peaks around
-/// -6 dB.
+/// How loud an FM part plays, in decibels, on top of the presets' levels,
+/// before the preset's make-up gain ([`InstrumentKind::calibration`]).
 pub const FM_LEVEL_DB: f64 = -3.0;
 
 /// How loud the analogue kit's own drums play, in decibels, on top of the
-/// machine's level: its kick then peaks at -6 dB at full velocity and
-/// about -2 dB accented, as loud as the synthesized kick, which the drums
-/// the machine does not have come from.
+/// machine's level, before its make-up gain
+/// ([`InstrumentKind::calibration`]): with both, its snare, accented at
+/// full velocity, peaks at -0.6 dBTP, the loudest single note of any kind.
 pub const ANALOG_KIT_LEVEL_DB: f64 = 2.0;
 
 /// The gain of `decibels`.
@@ -335,20 +334,32 @@ pub(crate) struct Generations<V> {
     /// The fading synth's sound, for one quantum.
     scratch: AudioBuffer<f32>,
     sample_rate: f64,
-    /// The gain on what the voices put out, and whether it is not 1.
-    level: f32,
-    scaled: bool,
+    /// How much louder than the voices the part plays, in decibels, before
+    /// the make-up gain of its preset.
+    level_db: f64,
+    /// The gain on what the voices put out: the level and the make-up.
+    trim: Trim,
 }
 
 impl<V: Voice<f32>> Generations<V> {
-    /// The same, playing `decibels` louder than the voices do.
-    fn with_level_db(self, decibels: f64) -> Self {
-        let level = gain_of(decibels);
+    /// The same, playing `level_db` louder than the voices do, and the
+    /// make-up gain `make_up_db` on top.
+    fn with_level_db(self, level_db: f64, make_up_db: f64) -> Self {
+        let gain = gain_of(level_db + make_up_db);
         Self {
-            level,
-            scaled: level != 1.0,
+            level_db,
+            trim: Trim::new(gain, self.sample_rate),
             ..self
         }
+    }
+
+    /// Plays the make-up gain `make_up_db` on top of the level, from the
+    /// next frame: a preset's, which comes with the preset's settings, and
+    /// so on the frame they reach the voices, whose own level changes at
+    /// once with them. The presets being as loud as each other, a note
+    /// sounding through the change keeps about its level.
+    fn set_make_up_db(&mut self, make_up_db: f64) {
+        self.trim.set(gain_of(self.level_db + make_up_db), true);
     }
 
     /// Two synths of the voices `make` makes, prepared for one channel
@@ -371,8 +382,8 @@ impl<V: Voice<f32>> Generations<V> {
             fade_length: 1,
             scratch: AudioBuffer::new(1, spec.max_block_size),
             sample_rate: spec.sample_rate,
-            level: 1.0,
-            scaled: false,
+            level_db: 0.0,
+            trim: Trim::new(1.0, spec.sample_rate),
         }
     }
 
@@ -458,11 +469,7 @@ impl<V: Voice<f32>> Generations<V> {
                 Self::clear(&mut self.synths[other]);
             }
         }
-        if self.scaled {
-            for sample in mono.channel_mut(0) {
-                *sample *= self.level;
-            }
-        }
+        self.trim.apply(mono.channel_mut(0));
     }
 }
 
@@ -631,38 +638,47 @@ impl Voiced {
     // Each instrument at the settings of its knobs, prepared under `spec`.
     // They allocate.
 
+    // Each plays at its level, if it has one, and the make-up gain of its
+    // preset (`InstrumentKind::calibration`), which a change of preset
+    // moves.
+
     pub(crate) fn plucked(knobs: &PluckedKnobs, spec: &ProcessSpec) -> Self {
         let settings = string_settings(knobs);
+        let make_up = make_up_db(InstrumentKind::Plucked, knobs.preset.index());
         Self::Plucked(
             Generations::new(
                 || vec![PluckedString::new(settings); PLUCKED_VOICES],
                 false,
                 spec,
             )
-            .with_level_db(PLUCKED_LEVEL_DB),
+            .with_level_db(PLUCKED_LEVEL_DB, make_up),
         )
     }
 
     pub(crate) fn fm(knobs: &FmKnobs, spec: &ProcessSpec) -> Self {
         let settings = fm_settings(knobs);
+        let make_up = make_up_db(InstrumentKind::Fm, knobs.preset.index());
         Self::Fm(
             Generations::new(|| vec![FmVoice::new(settings); FM_VOICES], false, spec)
-                .with_level_db(FM_LEVEL_DB),
+                .with_level_db(FM_LEVEL_DB, make_up),
         )
     }
 
     pub(crate) fn organ(knobs: &OrganKnobs, spec: &ProcessSpec) -> Self {
         let settings = organ_settings(knobs);
+        let make_up = make_up_db(InstrumentKind::Organ, knobs.preset.index());
         Self::Organ(Box::new(OrganPart {
             // Every voice of a generation on one manual of its own, so that
             // the percussion is single-triggered.
-            gens: Generations::new(|| OrganVoice::voices(ORGAN_VOICES, settings), false, spec),
+            gens: Generations::new(|| OrganVoice::voices(ORGAN_VOICES, settings), false, spec)
+                .with_level_db(0.0, make_up),
             speaker: Speaker::new(knobs, spec),
         }))
     }
 
     pub(crate) fn analog_kit(knobs: &AnalogKitKnobs, spec: &ProcessSpec) -> Self {
         let settings = analog_settings(knobs);
+        let make_up = make_up_db(InstrumentKind::AnalogKit, 0);
         Self::AnalogKit(Box::new(AnalogKitPart {
             // One choke group a generation: the closed hat chokes the open
             // one.
@@ -671,7 +687,8 @@ impl Voiced {
                 false,
                 spec,
             )
-            .with_level_db(ANALOG_KIT_LEVEL_DB),
+            .with_level_db(ANALOG_KIT_LEVEL_DB, make_up),
+            // At the drums' own make-up, as in a drum part.
             fallback: DrumKit::new(&knobs.kit, spec.sample_rate),
             scratch: vec![0.0; spec.max_block_size],
         }))
@@ -679,20 +696,20 @@ impl Voiced {
 
     pub(crate) fn kick_bass(knobs: &KickBassKnobs, spec: &ProcessSpec) -> Self {
         let settings = kick_bass_settings(knobs);
-        Self::KickBass(Generations::new(
-            || vec![KickBassVoice::new(settings)],
-            true,
-            spec,
-        ))
+        let make_up = make_up_db(InstrumentKind::KickBass, 0);
+        Self::KickBass(
+            Generations::new(|| vec![KickBassVoice::new(settings)], true, spec)
+                .with_level_db(0.0, make_up),
+        )
     }
 
     pub(crate) fn acid(knobs: &AcidKnobs, spec: &ProcessSpec) -> Self {
         let settings = acid_settings(knobs);
-        Self::Acid(Generations::new(
-            || vec![AcidVoice::new(settings)],
-            true,
-            spec,
-        ))
+        let make_up = make_up_db(InstrumentKind::Acid, knobs.preset.index());
+        Self::Acid(
+            Generations::new(|| vec![AcidVoice::new(settings)], true, spec)
+                .with_level_db(0.0, make_up),
+        )
     }
 
     pub(crate) fn kind(&self) -> InstrumentKind {
@@ -711,14 +728,25 @@ impl Voiced {
     /// and passes the settings they make to every voice. Real-time safe:
     /// the voices take whole settings without allocating.
     pub(crate) fn set_param(&mut self, id: ParamId, value: f64, knobs: &InstrumentParams) {
+        let kind = self.kind();
+        // A preset brings its own make-up gain.
+        let preset = kind
+            .preset_param()
+            .is_some_and(|preset| ParamId::from_name(preset) == id);
         match (self, knobs) {
             (Self::Plucked(gens), InstrumentParams::Plucked(knobs)) => {
                 let settings = string_settings(knobs);
                 gens.each_voice(|voice| voice.set_params(settings));
+                if preset {
+                    gens.set_make_up_db(make_up_db(kind, knobs.preset.index()));
+                }
             }
             (Self::Fm(gens), InstrumentParams::Fm(knobs)) => {
                 let settings = fm_settings(knobs);
                 gens.each_voice(|voice| voice.set_params(settings));
+                if preset {
+                    gens.set_make_up_db(make_up_db(kind, knobs.preset.index()));
+                }
             }
             (Self::Organ(organ), InstrumentParams::Organ(knobs)) => match id {
                 params::ORGAN_ROTARY => organ.speaker.set_speed(knobs.rotary.index()),
@@ -726,6 +754,11 @@ impl Voiced {
                 _ => {
                     let settings = organ_settings(knobs);
                     organ.gens.each_voice(|voice| voice.set_params(settings));
+                    if preset {
+                        organ
+                            .gens
+                            .set_make_up_db(make_up_db(kind, knobs.preset.index()));
+                    }
                 }
             },
             (Self::AnalogKit(kit), InstrumentParams::AnalogKit(knobs)) => {
@@ -742,6 +775,9 @@ impl Voiced {
             (Self::Acid(gens), InstrumentParams::Acid(knobs)) => {
                 let settings = acid_settings(knobs);
                 gens.each_voice(|voice| voice.set_params(settings));
+                if preset {
+                    gens.set_make_up_db(make_up_db(kind, knobs.preset.index()));
+                }
             }
             _ => {}
         }
