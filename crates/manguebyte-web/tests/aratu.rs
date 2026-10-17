@@ -1,5 +1,6 @@
 //! Aratu's own instruments, when they are on this machine: every voice
-//! loads with no warning, file by file, and plays.
+//! loads with no warning, file by file, and plays; the test prints the
+//! make-up gain its loudness normalisation measured for each.
 //!
 //! The samples are Aratu's (`web/public/samples/<voice>/voice.sfz` and its
 //! WAV files, credited in Aratu's `samples/SOURCES.md`) and are not copied
@@ -107,6 +108,12 @@ fn every_aratu_voice_loads_and_plays() {
         };
         let mut engine = engine_with(kind, Chain::NONE);
         engine.load_instrument(0, instrument).unwrap();
+        // What the loudness normalisation measured: how far each voice is
+        // from the target as Aratu recorded it.
+        match engine.sampler_make_up_db(0) {
+            Some(make_up) => println!("{name}: normalised by {make_up:+.2} dB"),
+            None => println!("{name}: not measured, it plays no key"),
+        }
         if is_kit {
             let missing: Vec<u8> = manguebyte_web::DRUM_MAP
                 .iter()
