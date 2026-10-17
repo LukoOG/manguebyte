@@ -980,25 +980,58 @@ display, and no editor has been opened inside a real host yet.
   sample with its hysteresis, the bow's force, speed and position
   (Schelleng's window), losses and dispersion from the string and the
   finger, a player's ear that corrects the half sample by which friction
-  flattens the note, a body of six modes, vibrato that waits and then
-  grows, legato that keeps the string or moves to the next, sections of
-  up to four players tuned apart, and pizzicato. Presets: violin, viola,
-  cello, double bass, string section, and violin, cello and bass
-  pizzicato. Measured: Helmholtz motion (one slip a period) at every bow
-  force across the window, 113 of 117 notes within 2 cents across the
-  four instruments (the worst 3.7), the level of a held note steady to
-  1.1 dB. A voice costs about 1.7 % of a core, a section of four 5 %.
+  flattens the note, a body of eight named modes (for the violin A0, the
+  centre bout, B1-, B1+, C4, a mode near 1 kHz and the bridge hill) and
+  24 narrow, unevenly spread modes of the wood above them (`wood`),
+  radiated only above the air resonance, vibrato that waits and then
+  grows, quickening as it does, legato as a change of finger (the string
+  at its new length within 2 ms, with the finger's knock; `portamento`
+  slides instead) that keeps the string or moves to the next, the bow's
+  scratch as it bites (`scratch`), each player's drift of pitch, the
+  bow's waver and the swell of a held note (`drift`, `fluctuation`,
+  `swell`), sections of up to four players tuned apart, and pizzicato.
+  `BODY_MODES` is 8 and `WOOD_MODES` 24. Presets: violin, viola, cello,
+  double bass, string section, and violin, cello and bass pizzicato.
+  Measured: Helmholtz motion (one slip a period) at every bow force
+  across the window, 112 of 117 notes within 2 cents and their drift
+  averaged over two seconds (the worst 3.9), the level of a held note
+  steady to 1.1 dB without the player's swell; a slurred string at its
+  new pitch within 3 to 14 ms, a portamento passing through 16 periods
+  between; the violin's body peaking within 3% of each named mode and
+  17 times between 800 Hz and 7 kHz (none without the wood); an accented
+  attack 18 to 25 dB under the tone below half the air resonance. A
+  voice costs about 1.8 % of a core, a section of four 4.2 %.
 - `WindVoice`: wind instruments by digital waveguide: a reed or the lips
   as a mass and spring with Bernoulli flow (Guillemain, Kergomard and
   Voinier), or an air jet with its delay and breath noise (Fletcher),
   driving a bore with a bell and losses, brass that brightens as it is
   blown harder (Hirschberg et al.), breath from velocity, pressure, the
   breath controller and the expression pedal, vibrato and tremolo that
-  wait, legato, and a player's ear. Presets: flute, clarinet (a cylinder,
-  odd harmonics), saxophone, trumpet, trombone. Measured: the worst note
-  1.16 cents out across each instrument's range, a held note steady to
-  0.24 dB and 1.5 cents at soft, middle and full breath. A voice costs
-  about 1.4 to 2 % of a core.
+  wait, and a player's ear. The flute is a jet-drive model (Fletcher;
+  Verge, Fabre and Hirschberg): shaped turbulence that grows with the
+  blowing pressure disturbs the jet (as in Cook's flute) and is heard
+  from the embouchure, vortex shedding holds a soft note's swing down,
+  a harder breath drives the jet further over its threshold and further
+  off the edge, and a tongue's release bursts the breath (the chiff).
+  Every note is tongued (`articulation`; the lips start below a brass
+  note), the player drifts, wavers and swells (`drift`, `fluctuation`,
+  `swell`), and legato changes the bore's length at once, as a key or a
+  valve does, with a short break in the air; `portamento` glides
+  instead, as a trombone's slide can. The bell radiates the incident
+  wave less its own reflection, through a high-pass for brass and the
+  saxophone, so nothing comes out below the note as a thump. Presets:
+  flute, clarinet (a cylinder, odd harmonics), saxophone, trumpet,
+  trombone. Measured: each instrument's mean tuning error 1.0 to 2.1
+  cents over two seconds of a note, its drift on; a held note steady to
+  0.4 dB and 1.6 cents without the player's swell, waver and drift; a
+  slur at its new pitch within 3 to 6 ms (up to 40 ms for the lips),
+  no click, high-frequency burst or thump at a slur, the trombone's
+  slide passing through 25 periods only with portamento; the flute's
+  breath 31 dB under its tone at mezzo-forte (29 soft, 34 loud) and 15
+  dB more of the sound in its attack, its tone within 6 dB of its level
+  70 ms in, its second harmonic 7 dB under the fundamental at
+  mezzo-forte (13 soft, 4 loud) and its harmonics falling 27 dB an
+  octave. A voice costs about 1.2 to 1.6 % of a core.
 - `ChoirVoice`: sung vowels by formant synthesis (Fant's source and
   filter): a glottal pulse after Klatt and Klatt with a band-limited
   closure and breath noise, darker and more open the softer it is sung,
