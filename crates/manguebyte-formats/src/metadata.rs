@@ -94,7 +94,8 @@ pub(crate) use id3::{read_id3v1, read_id3v2};
 pub(crate) use iff::{IffMetadata, build_iff};
 pub(crate) use riff::{RiffMetadata, build_riff};
 pub(crate) use vorbis_comment::{
-    flac_picture_block, parse_flac_picture, parse_vorbis_comment_block, vorbis_tags,
+    flac_picture_block, parse_flac_picture, parse_vorbis_comment_block, picture_comment,
+    vorbis_tags,
 };
 
 /// The largest chunk or block whose contents are kept.

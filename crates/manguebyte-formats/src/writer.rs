@@ -10,6 +10,7 @@ use crate::aiff::{self, AiffError, AiffFormat};
 use crate::flac::{FlacOptions, FlacStream};
 use crate::metadata::Metadata;
 use crate::pcm;
+use crate::vorbis::{VorbisOptions, VorbisStream};
 use crate::wav::{self, WavError, WavFormat};
 use crate::{FileFormat, FormatError};
 
@@ -27,7 +28,8 @@ use crate::{FileFormat, FormatError};
 /// extension: writing past its limit is an error.
 ///
 /// A FLAC stream is compressed a block at a time as the samples arrive; see
-/// [`flac`](Self::flac).
+/// [`flac`](Self::flac). So is an Ogg Vorbis stream; see
+/// [`vorbis`](Self::vorbis).
 ///
 /// ```
 /// use std::io::Cursor;
@@ -130,16 +132,17 @@ enum Kind {
     },
     // Boxed because an encoder's state is much larger than the others'.
     Flac(Box<FlacStream>),
+    Vorbis(Box<VorbisStream>),
 }
 
 impl Kind {
-    /// Bytes each sample takes in the file. FLAC samples take no fixed
-    /// number, and none of the code that asks deals with FLAC.
+    /// Bytes each sample takes in the file. FLAC and Vorbis samples take no
+    /// fixed number, and none of the code that asks deals with them.
     fn bytes_per_sample(&self) -> usize {
         match self {
             Self::Wav { format, .. } => format.bytes_per_sample(),
             Self::Aiff { format } => format.bytes_per_sample(),
-            Self::Flac(_) => 0,
+            Self::Flac(_) | Self::Vorbis(_) => 0,
         }
     }
 }
@@ -189,6 +192,23 @@ impl AudioWriter<File> {
     ) -> Result<Self, FormatError> {
         options.check(channels, sample_rate)?;
         Self::flac(File::create(path)?, channels, sample_rate, options)
+    }
+
+    /// Creates an Ogg Vorbis file at `path`, replacing any existing file.
+    ///
+    /// Like [`create_flac`](Self::create_flac), this writes to the file
+    /// directly, a page of about 4 KiB at a time, and checks the options
+    /// before the file is created.
+    pub fn create_vorbis<P: AsRef<Path>>(
+        path: P,
+        channels: usize,
+        sample_rate: u32,
+        options: &VorbisOptions,
+    ) -> Result<Self, FormatError> {
+        options
+            .validate(channels, sample_rate)
+            .map_err(FormatError::Vorbis)?;
+        Self::vorbis(File::create(path)?, channels, sample_rate, options)
     }
 }
 
@@ -347,6 +367,83 @@ impl<W: Write + Seek> AudioWriter<W> {
         })
     }
 
+    /// Starts an Ogg Vorbis stream in `writer`, at its current position.
+    ///
+    /// The three headers are written here. Samples are taken with full
+    /// scale at `±1.0`, NaN as silence, and encoded a block at a time as
+    /// soon as the next block's size can be chosen, about 2,500 frames
+    /// later; pages of about 4 KiB are written as they fill, and
+    /// [`finish`](Self::finish) encodes the rest and writes the last page,
+    /// whose granule position gives the stream exactly the length written.
+    /// The bytes are those [`vorbis::write`](crate::vorbis::write) produces
+    /// for the same audio and options, however the audio is cut into calls.
+    ///
+    /// ```
+    /// use std::io::Cursor;
+    ///
+    /// use manguebyte_core::AudioBuffer;
+    /// use manguebyte_formats::vorbis::{self, VorbisOptions};
+    /// use manguebyte_formats::AudioWriter;
+    ///
+    /// let options = VorbisOptions::new(5.0).with_tag("TITLE", "Maracatu");
+    /// let mut writer = AudioWriter::vorbis(Cursor::new(Vec::new()), 2, 44_100, &options)?;
+    /// let mut block = AudioBuffer::<f32>::new(2, 441);
+    /// for round in 0..10 {
+    ///     for (i, sample) in block.channel_mut(0).iter_mut().enumerate() {
+    ///         *sample = 0.25 * ((round * 441 + i) as f32 * 0.0627).sin();
+    ///     }
+    ///     writer.write(&block)?;
+    /// }
+    /// let bytes = writer.finish()?.into_inner();
+    ///
+    /// let file = vorbis::read(bytes.as_slice())?;
+    /// assert_eq!(file.buffer.num_frames(), 4_410);
+    /// assert_eq!(file.comments, [("TITLE".to_owned(), "Maracatu".to_owned())]);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// Memory, for a few blocks and the codebooks, does not grow with the
+    /// length of the stream.
+    ///
+    /// If writing a page fails, it stays in memory and the rest of the
+    /// samples of that call are not taken:
+    /// [`frames_written`](Self::frames_written) says how many were. The
+    /// next write, or `finish`, writes the pages again where they began.
+    ///
+    /// # Errors
+    ///
+    /// [`FormatError::Vorbis`] holding
+    /// [`VorbisError::Unsupported`](crate::vorbis::VorbisError::Unsupported),
+    /// with nothing written, if
+    /// [`VorbisOptions::validate`] refuses `channels`, `sample_rate` and
+    /// `options`, and [`FormatError::Io`] if `writer` fails.
+    pub fn vorbis(
+        mut writer: W,
+        channels: usize,
+        sample_rate: u32,
+        options: &VorbisOptions,
+    ) -> Result<Self, FormatError> {
+        let stream =
+            VorbisStream::start(&mut writer, channels, sample_rate, options).map_err(|error| {
+                match error {
+                    crate::vorbis::VorbisError::Io(error) => FormatError::Io(error),
+                    error => FormatError::Vorbis(error),
+                }
+            })?;
+        Ok(Self {
+            writer,
+            kind: Kind::Vorbis(Box::new(stream)),
+            channels: channels as u16,
+            sample_rate,
+            origin: 0,
+            data_start: 0,
+            frames: 0,
+            torn: false,
+            scratch: Vec::new(),
+            metadata: Vec::new(),
+        })
+    }
+
     fn start(
         mut writer: W,
         kind: Kind,
@@ -402,6 +499,11 @@ impl<W: Write + Seek> AudioWriter<W> {
                     "FLAC metadata goes in the options, with FlacOptions::with_metadata",
                 ));
             }
+            Kind::Vorbis(_) => {
+                return Err(FormatError::Unsupported(
+                    "Ogg Vorbis metadata goes in the options, with VorbisOptions::with_metadata",
+                ));
+            }
         };
         Ok(())
     }
@@ -412,6 +514,7 @@ impl<W: Write + Seek> AudioWriter<W> {
             Kind::Wav { .. } => FileFormat::Wav,
             Kind::Aiff { .. } => FileFormat::Aiff,
             Kind::Flac(_) => FileFormat::Flac,
+            Kind::Vorbis(_) => FileFormat::OggVorbis,
         }
     }
 
@@ -453,7 +556,7 @@ impl<W: Write + Seek> AudioWriter<W> {
     /// belongs.
     fn mend(&mut self) -> Result<(), FormatError> {
         // FLAC keeps its own account; `torn` is never set for it.
-        if self.torn && !matches!(self.kind, Kind::Flac(_)) {
+        if self.torn && !matches!(self.kind, Kind::Flac(_) | Kind::Vorbis(_)) {
             let reached = self.writer.stream_position()?;
             let frames = reached.saturating_sub(self.data_start) / self.frame_bytes();
             self.writer.seek(SeekFrom::Start(
@@ -482,8 +585,9 @@ impl<W: Write + Seek> AudioWriter<W> {
             }
             (Kind::Wav { .. }, None) => Err(FormatError::Wav(WavError::TooLarge)),
             (Kind::Aiff { .. }, _) => Err(FormatError::Aiff(AiffError::TooLarge)),
-            // FLAC is written by its own stream and never comes here.
-            (Kind::Flac(_), _) => Ok(self.frames),
+            // FLAC and Vorbis are written by their own streams and never
+            // come here.
+            (Kind::Flac(_) | Kind::Vorbis(_), _) => Ok(self.frames),
         }
     }
 
@@ -511,6 +615,11 @@ impl<W: Write + Seek> AudioWriter<W> {
             self.frames = stream.frames();
             return Ok(written?);
         }
+        if let Kind::Vorbis(stream) = &mut self.kind {
+            let written = stream.write_planar(&mut self.writer, buffer);
+            self.frames = stream.frames();
+            return Ok(written?);
+        }
         let frames = self.make_room(buffer.num_frames() as u64)?;
         let (writer, scratch) = (&mut self.writer, self.scratch.as_mut_slice());
         let written = match self.kind {
@@ -520,7 +629,7 @@ impl<W: Write + Seek> AudioWriter<W> {
             Kind::Aiff { format } => {
                 pcm::write_planar(writer, format, format.bytes_per_sample(), buffer, scratch)
             }
-            Kind::Flac(_) => Ok(()),
+            Kind::Flac(_) | Kind::Vorbis(_) => Ok(()),
         };
         self.wrote(written, frames)
     }
@@ -556,6 +665,11 @@ impl<W: Write + Seek> AudioWriter<W> {
             self.frames = stream.frames();
             return Ok(written?);
         }
+        if let Kind::Vorbis(stream) = &mut self.kind {
+            let written = stream.write_interleaved(&mut self.writer, samples);
+            self.frames = stream.frames();
+            return Ok(written?);
+        }
         let frames = self.make_room((samples.len() / self.num_channels()) as u64)?;
         let (writer, scratch) = (&mut self.writer, self.scratch.as_mut_slice());
         let written = match self.kind {
@@ -565,7 +679,7 @@ impl<W: Write + Seek> AudioWriter<W> {
             Kind::Aiff { format } => {
                 pcm::write_interleaved(writer, format, format.bytes_per_sample(), samples, scratch)
             }
-            Kind::Flac(_) => Ok(()),
+            Kind::Flac(_) | Kind::Vorbis(_) => Ok(()),
         };
         self.wrote(written, frames)
     }
@@ -574,6 +688,11 @@ impl<W: Write + Seek> AudioWriter<W> {
     /// hold them in a buffer.
     pub fn write_silence(&mut self, frames: u64) -> Result<(), FormatError> {
         if let Kind::Flac(stream) = &mut self.kind {
+            let written = stream.write_silence(&mut self.writer, frames);
+            self.frames = stream.frames();
+            return Ok(written?);
+        }
+        if let Kind::Vorbis(stream) = &mut self.kind {
             let written = stream.write_silence(&mut self.writer, frames);
             self.frames = stream.frames();
             return Ok(written?);
@@ -616,6 +735,10 @@ impl<W: Write + Seek> AudioWriter<W> {
             stream.finish(&mut self.writer)?;
             return Ok(self.writer);
         }
+        if let Kind::Vorbis(stream) = &mut self.kind {
+            stream.finish(&mut self.writer)?;
+            return Ok(self.writer);
+        }
         self.mend()?;
         let data_len = self.frames * self.frame_bytes();
         // Where the samples end, which is where the writer stands.
@@ -637,7 +760,7 @@ impl<W: Write + Seek> AudioWriter<W> {
                 );
                 self.writer.write_all(&header)?;
             }
-            Kind::Flac(_) => {}
+            Kind::Flac(_) | Kind::Vorbis(_) => {}
             Kind::Aiff { format } => {
                 if !aiff::fits(self.frames, data_len + self.metadata.len() as u64) {
                     self.metadata.clear();

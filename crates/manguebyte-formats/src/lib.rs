@@ -5,7 +5,7 @@
 //! | [`wav`] | 8 to 32-bit PCM, 32 and 64-bit float, RF64 | 16 and 24-bit PCM, 32-bit float; RF64 past 4 GiB when streaming |
 //! | [`aiff`] | 1 to 32-bit PCM, either byte order, 32 and 64-bit float | 16 and 24-bit PCM, 32-bit float |
 //! | [`flac`] | everything the format defines | 4 to 32 bits, 1 to 8 channels, levels 0 to 8 |
-//! | [`vorbis`] | Ogg Vorbis: every stream but those with floors of type 0, 1 to 255 channels | no |
+//! | [`vorbis`] | Ogg Vorbis: every stream but those with floors of type 0, 1 to 255 channels | variable bitrate, qualities 0 to 10, 1 to 255 channels |
 //! | [`opus`] | Ogg Opus: SILK, CELT and hybrid, every frame size and bandwidth, up to 255 channels | no |
 //! | [`mp3`] | MPEG-1, 2 and 2.5 layer III, every rate and stereo coding, gapless with a LAME tag; layers I and II | no |
 //!
@@ -25,7 +25,7 @@
 //! | | Whole file | Block by block | From the audio thread |
 //! |---|---|---|---|
 //! | Read | [`read_file`], [`decode`] | [`AudioReader`] | [`StreamingPlayer`] |
-//! | Write | [`wav::write`], [`aiff::write`], [`flac::write`] | [`AudioWriter`] | [`RecordingWriter`] |
+//! | Write | [`wav::write`], [`aiff::write`], [`flac::write`], [`vorbis::write`] | [`AudioWriter`] | [`RecordingWriter`] |
 //!
 //! [`AudioReader`] and [`AudioWriter`] keep one block in memory whatever the
 //! length of the file, and the reader seeks to any frame. Both do I/O, which
@@ -37,7 +37,8 @@
 //! Broadcast Wave fields and pictures, comes in one model for every format,
 //! [`Metadata`]: in [`AudioFile::metadata`] and [`AudioReader::metadata`]
 //! when reading, and to [`wav::write_with_metadata`],
-//! [`aiff::write_with_metadata`], [`FlacOptions::with_metadata`](flac::FlacOptions::with_metadata)
+//! [`aiff::write_with_metadata`], [`FlacOptions::with_metadata`](flac::FlacOptions::with_metadata),
+//! [`VorbisOptions::with_metadata`](vorbis::VorbisOptions::with_metadata)
 //! and [`AudioWriter::set_metadata`] when writing. The [`metadata`] module
 //! says where each format keeps each field.
 //!

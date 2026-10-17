@@ -12,7 +12,7 @@ use super::setup::{Floor1, Identification, Mode, Residue, Setup};
 /// What a floor of type 1 turns into a gain: `10^(7 (i - 255) / 256)`, a
 /// step of 35/64 dB from -139.45 dB to 0 dB. This is the table of section
 /// 10.1 of the specification, which lists these values to eight figures.
-fn inverse_db_table() -> [f32; 256] {
+pub(super) fn inverse_db_table() -> [f32; 256] {
     let mut table = [0.0f32; 256];
     for (index, value) in table.iter_mut().enumerate() {
         *value = 10f64.powf(7.0 * (index as f64 - 255.0) / 256.0) as f32;
@@ -22,7 +22,7 @@ fn inverse_db_table() -> [f32; 256] {
 
 /// The rising half of the Vorbis window over `len` samples (section 4.3.1):
 /// `sin(pi/2 sin^2((i + 1/2) / len pi/2))`.
-fn slope(len: usize) -> Vec<f32> {
+pub(super) fn slope(len: usize) -> Vec<f32> {
     (0..len)
         .map(|i| {
             let inner = ((i as f64 + 0.5) / len as f64 * PI / 2.0).sin();
@@ -442,7 +442,7 @@ fn render_line(x0: i64, y0: i64, x1: i64, y1: i64, out: &mut [f32], table: &[f32
 
 /// Works out the curve of a floor of type 1 from its points (section 7.2.4)
 /// and writes it into `out` as gains.
-fn render_floor1(
+pub(super) fn render_floor1(
     floor: &Floor1,
     y: &[i32],
     final_y: &mut [i64],

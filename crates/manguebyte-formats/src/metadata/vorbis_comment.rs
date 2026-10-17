@@ -222,9 +222,53 @@ fn base64(text: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// A picture as an Ogg file carries it: the FLAC picture block in base64,
+/// as the value of a `METADATA_BLOCK_PICTURE` comment. `None` for a picture
+/// too large for a block.
+pub(crate) fn picture_comment(picture: &Picture) -> Option<String> {
+    flac_picture_block(picture).map(|block| base64_encode(&block))
+}
+
+/// Base64 with padding (RFC 4648, section 4).
+fn base64_encode(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for group in bytes.chunks(3) {
+        let mut value = 0u32;
+        for (index, &byte) in group.iter().enumerate() {
+            value |= u32::from(byte) << (16 - 8 * index);
+        }
+        for index in 0..4 {
+            if index <= group.len() {
+                out.push(char::from(
+                    DIGITS[((value >> (18 - 6 * index)) & 63) as usize],
+                ));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base64_encodes_the_examples_of_rfc_4648() {
+        for (text, bytes) in [
+            ("", &b""[..]),
+            ("Zg==", b"f"),
+            ("Zm8=", b"fo"),
+            ("Zm9v", b"foo"),
+            ("Zm9vYg==", b"foob"),
+            ("Zm9vYmE=", b"fooba"),
+            ("Zm9vYmFy", b"foobar"),
+        ] {
+            assert_eq!(base64_encode(bytes), text);
+        }
+    }
 
     #[test]
     fn base64_decodes_the_examples_of_rfc_4648() {

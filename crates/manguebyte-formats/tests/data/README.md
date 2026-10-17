@@ -227,6 +227,42 @@ its own for the rest (residues of type 0, codebooks that list their
 vectors, floors of type 0, 255 channels), as `tests/common/vorbis.rs`
 says.
 
+### What this crate's Vorbis encoder wrote
+
+`encoder-signal-1ch-22050-q5.ogg`, `encoder-signal-2ch-48000-q3.ogg` and
+`encoder-signal-6ch-48000-q0.ogg` are what this crate's encoder made of
+the sources of their names at qualities 5, 3 and 0, written by
+
+```bash
+MANGUEBYTE_DUMP_DIR=/some/dir cargo test -p manguebyte-formats --test vorbis_encoder dump_files_for_other_software -- --ignored
+```
+
+and decoded by FFmpeg 7.1 twice, with its own decoder and with libvorbis:
+
+```bash
+ffmpeg -c:a vorbis -i FILE.ogg -f f32le -c:a pcm_f32le FILE.vorbis.raw
+ffmpeg -c:a libvorbis -i FILE.ogg -f f32le -c:a pcm_f32le FILE.libvorbis.raw
+```
+
+The `.ffmpeg.ref` and `.libvorbis.ref` files keep every 64th frame of
+those decodes, laid out as the `.ref` files of Ogg Opus below. FFmpeg's
+libvorbis decoder gives 16-bit samples, and hands on the channels in the
+Vorbis order, not FFmpeg's: the `.libvorbis.ref` of the six-channel file
+was put back in the WAV order (left, right, centre, LFE, rear left, rear
+right) before it was kept.
+
+Both decoders give every file its exact length. FFmpeg's own decoder comes
+within 1.8e-7 of this crate's; libvorbis within 4.6e-5, the rounding to
+16 bits. `tests/vorbis_encoder.rs` checks both, and that the encoder still
+writes these bytes: when it changes, the files are made again.
+
+The first version of the six-channel file had a residue of type 2, the
+six channels interleaved, which the specification allows and which this
+crate's decoder and FFmpeg's read alike; libvorbis read it wrong, as it
+reads any partition of type 2 whose values do not start on the first
+channel. The encoder now codes more than two channels with a residue of
+type 1.
+
 ### MP3
 
 From the same sources, with FFmpeg 7.1 and its LAME (`libmp3lame`):

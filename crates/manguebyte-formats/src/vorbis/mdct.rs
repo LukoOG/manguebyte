@@ -92,8 +92,20 @@ impl Imdct {
     pub(super) fn inverse(&mut self, input: &[f32], output: &mut [f32]) {
         let n = self.n;
         let m = n / 2;
-        let len = m / 2;
         debug_assert!(input.len() >= m && output.len() >= n);
+        self.dct_iv(input, output);
+        unfold(output, m);
+    }
+
+    /// The type IV discrete cosine transform of the `n / 2` values of
+    /// `input`, into the first `n / 2` of `output`: steps 2 and 3 above.
+    /// The transform is its own inverse but for a factor of `n / 4`, which
+    /// is how the encoder's forward transform uses it.
+    pub(super) fn dct_iv(&mut self, input: &[f32], output: &mut [f32]) {
+        let n = self.n;
+        let m = n / 2;
+        let len = m / 2;
+        debug_assert!(input.len() >= m && output.len() >= m);
 
         // Fold the coefficients into complex numbers, twiddle them and put
         // them in the order the FFT takes them.
@@ -136,31 +148,81 @@ impl Imdct {
             output[2 * j] = z.re;
             output[m - 1 - 2 * j] = -z.im;
         }
+    }
+}
 
-        // Unfold `u` into the block. The last quarter and the second half
-        // of the middle read the lower half of `u`, so they are written
-        // first, into the upper half of the block, which is free; the first
-        // quarter and the first half of the middle read the upper half of
-        // `u`, which stays where it is until they have.
-        let (first, rest) = output.split_at_mut(m);
+/// Unfolds the type IV transform `u`, in the first `m` values of `output`,
+/// into the block of `2 m` samples: step 1 above.
+fn unfold(output: &mut [f32], m: usize) {
+    // The last quarter and the second half of the middle read the lower
+    // half of `u`, so they are written first, into the upper half of the
+    // block, which is free; the first quarter and the first half of the
+    // middle read the upper half of `u`, which stays where it is until they
+    // have.
+    let (first, rest) = output.split_at_mut(m);
+    let quarter = m / 2;
+    for t in 0..quarter {
+        // y[3m/2 + t] = -u[t]
+        rest[quarter + t] = -first[t];
+    }
+    for t in 0..quarter {
+        // y[m + t] = -u[m/2 - 1 - t], which was just written above.
+        rest[t] = rest[m - 1 - t];
+    }
+    for t in 0..quarter {
+        // y[t] = u[m/2 + t]
+        first[t] = first[quarter + t];
+    }
+    // y[m/2 + t] = -u[m - 1 - t]: the upper half of `u`, backwards.
+    let middle = &mut first[quarter..];
+    middle.reverse();
+    for value in middle {
+        *value = -*value;
+    }
+}
+
+/// The forward transform the encoder uses, the transpose of the inverse
+/// scaled by `4 / n`, so that the inverse of section 1.3.2, windowed and
+/// overlapped, gives the samples back (the time-domain aliasing
+/// cancellation of Princen and Bradley, 1986): the windowed block is folded
+/// into `n / 2` values, the transpose of the unfolding above, and put
+/// through the same type IV transform.
+#[derive(Debug)]
+pub(super) struct Mdct {
+    transform: Imdct,
+    folded: Vec<f32>,
+}
+
+impl Mdct {
+    /// The transform for blocks of `n` samples, a power of two from 64.
+    pub(super) fn new(n: usize) -> Self {
+        Self {
+            transform: Imdct::new(n),
+            folded: vec![0.0; n / 2],
+        }
+    }
+
+    /// Transforms the `n` samples of `input` into the `n / 2` coefficients
+    /// of `output`.
+    pub(super) fn forward(&mut self, input: &[f32], output: &mut [f32]) {
+        let n = self.transform.n;
+        let m = n / 2;
         let quarter = m / 2;
-        for t in 0..quarter {
-            // y[3m/2 + t] = -u[t]
-            rest[quarter + t] = -first[t];
+        let three = 3 * quarter;
+        // The transpose of `unfold`: each value of `u` collects the samples
+        // of the block that unfolding writes it to, with their signs.
+        for j in 0..quarter {
+            self.folded[j] = -input[three - 1 - j] - input[three + j];
         }
-        for t in 0..quarter {
-            // y[m + t] = -u[m/2 - 1 - t], which was just written above.
-            rest[t] = rest[m - 1 - t];
+        for j in quarter..m {
+            self.folded[j] = input[j - quarter] - input[three - 1 - j];
         }
-        for t in 0..quarter {
-            // y[t] = u[m/2 + t]
-            first[t] = first[quarter + t];
-        }
-        // y[m/2 + t] = -u[m - 1 - t]: the upper half of `u`, backwards.
-        let middle = &mut first[quarter..];
-        middle.reverse();
-        for value in middle {
-            *value = -*value;
+        let buffer = std::mem::take(&mut self.folded);
+        self.transform.dct_iv(&buffer, output);
+        self.folded = buffer;
+        let scale = 4.0 / n as f32;
+        for value in &mut output[..m] {
+            *value *= scale;
         }
     }
 }
@@ -186,6 +248,47 @@ mod tests {
                     .sum()
             })
             .collect()
+    }
+
+    /// The forward transform, windowed, and the inverse, windowed and
+    /// overlapped, give the samples back.
+    #[test]
+    fn the_forward_transform_inverts_with_the_window() {
+        let n = 256;
+        let half = n / 2;
+        let window: Vec<f32> = (0..n)
+            .map(|i| {
+                let j = if i < half { i } else { n - 1 - i };
+                let inner = ((j as f64 + 0.5) / half as f64 * PI / 2.0).sin();
+                (PI / 2.0 * inner * inner).sin() as f32
+            })
+            .collect();
+        let signal: Vec<f32> = (0..n * 8)
+            .map(|i| ((i as f64 * 0.037).sin() + 0.3 * (i as f64 * 0.41).cos()) as f32)
+            .collect();
+        let mut forward = Mdct::new(n);
+        let mut inverse = Imdct::new(n);
+        let mut out = vec![0.0f32; signal.len()];
+        let mut block = vec![0.0f32; n];
+        let mut coefficients = vec![0.0f32; half];
+        for start in (0..signal.len() - n).step_by(half) {
+            for i in 0..n {
+                block[i] = signal[start + i] * window[i];
+            }
+            forward.forward(&block, &mut coefficients);
+            inverse.inverse(&coefficients, &mut block);
+            for i in 0..n {
+                out[start + i] += block[i] * window[i];
+            }
+        }
+        for i in half..signal.len() - n {
+            assert!(
+                (out[i] - signal[i]).abs() < 1e-4,
+                "{i}: {} {}",
+                out[i],
+                signal[i]
+            );
+        }
     }
 
     #[test]
