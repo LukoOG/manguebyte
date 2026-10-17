@@ -130,6 +130,31 @@ impl<S: Sample> Resampler<S> {
         self.ratio
     }
 
+    /// Changes the ratio while the converter runs. The position is kept, so
+    /// the output carries on from where it was, without a jump: this is for
+    /// following a clock that drifts, by a fraction of a percent at a time.
+    ///
+    /// The kernel stays the one [`new`](Self::new) chose. Below the ratio it
+    /// was built with, it no longer removes everything the lower rate cannot
+    /// hold, so build the converter with the lowest ratio it will be set to
+    /// when going down by more than a correction.
+    ///
+    /// Real-time safe.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless `ratio` is positive and finite.
+    pub fn set_ratio(&mut self, ratio: f64) {
+        assert!(
+            ratio.is_finite() && ratio > 0.0,
+            "the ratio must be positive"
+        );
+        self.ratio = ratio;
+        let step = 1.0 / ratio;
+        self.step_index = step.floor() as usize;
+        self.step_fraction = step.fract();
+    }
+
     /// How late the output is, in output frames. The first output frames
     /// correspond to the time before the input started.
     pub fn latency_frames(&self) -> f64 {
@@ -458,6 +483,48 @@ mod tests {
         assert_eq!(resampler.latency_frames(), 32.0);
         assert_eq!(peak, 5 + 32);
         assert!((output.channel(0)[peak] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn changing_the_ratio_while_running_leaves_no_jump() {
+        let rate = 48_000.0;
+        let frequency = 1_000.0;
+        let source = sine(frequency, rate, 48_000);
+        let mut resampler = Resampler::<f64>::new(rate, rate, 1, 64);
+        let mut input = AudioBuffer::<f64>::new(1, 64);
+        let mut piece = AudioBuffer::<f64>::new(1, 80);
+        let mut all = Vec::new();
+        let mut produced_after_change = 0;
+        for (block, chunk) in source.channel(0).chunks(64).enumerate() {
+            // Up by 500 ppm, then down by as much below one: the kind of
+            // correction a drifting clock needs.
+            match block {
+                200 => resampler.set_ratio(1.0005),
+                500 => resampler.set_ratio(0.9995),
+                _ => {}
+            }
+            input.channel_mut(0).copy_from_slice(chunk);
+            let produced = resampler.process(&input, &mut piece);
+            if (200..500).contains(&block) {
+                produced_after_change += produced;
+            }
+            all.extend_from_slice(piece.channel(0));
+        }
+        assert!(
+            (produced_after_change as f64 - 300.0 * 64.0 * 1.0005).abs() <= 1.0,
+            "{produced_after_change}"
+        );
+
+        // A sine obeys y[n] = 2 cos(w) y[n-1] - y[n-2]. A dropped or
+        // repeated sample breaks that by about w, 0.13 here; the shift of
+        // frequency by 500 ppm and the converter's own error (about -100
+        // dB) by a thousand times less.
+        let w = TAU * frequency / rate;
+        let worst = all[200..]
+            .windows(3)
+            .map(|y| (y[2] - 2.0 * w.cos() * y[1] + y[0]).abs())
+            .fold(0.0, f64::max);
+        assert!(worst < 1e-3, "largest step from a pure sine: {worst:e}");
     }
 
     #[test]
