@@ -66,18 +66,78 @@ impl Vowel {
 /// as in a trained singer's voice, the singer's formant around 2.8 kHz (J.
 /// Sundberg, "The Science of the Singing Voice", 1987).
 const MEN: [[(f64, f64); FORMANTS]; 5] = [
-    [(730.0, 80.0), (1_090.0, 90.0), (2_440.0, 120.0), (2_900.0, 150.0), (3_400.0, 200.0)],
-    [(530.0, 60.0), (1_840.0, 100.0), (2_480.0, 120.0), (2_900.0, 150.0), (3_400.0, 200.0)],
-    [(270.0, 60.0), (2_290.0, 100.0), (3_010.0, 120.0), (3_400.0, 150.0), (3_900.0, 200.0)],
-    [(570.0, 70.0), (840.0, 80.0), (2_410.0, 120.0), (2_850.0, 150.0), (3_400.0, 200.0)],
-    [(300.0, 60.0), (870.0, 80.0), (2_240.0, 120.0), (2_800.0, 150.0), (3_400.0, 200.0)],
+    [
+        (730.0, 80.0),
+        (1_090.0, 90.0),
+        (2_440.0, 120.0),
+        (2_900.0, 150.0),
+        (3_400.0, 200.0),
+    ],
+    [
+        (530.0, 60.0),
+        (1_840.0, 100.0),
+        (2_480.0, 120.0),
+        (2_900.0, 150.0),
+        (3_400.0, 200.0),
+    ],
+    [
+        (270.0, 60.0),
+        (2_290.0, 100.0),
+        (3_010.0, 120.0),
+        (3_400.0, 150.0),
+        (3_900.0, 200.0),
+    ],
+    [
+        (570.0, 70.0),
+        (840.0, 80.0),
+        (2_410.0, 120.0),
+        (2_850.0, 150.0),
+        (3_400.0, 200.0),
+    ],
+    [
+        (300.0, 60.0),
+        (870.0, 80.0),
+        (2_240.0, 120.0),
+        (2_800.0, 150.0),
+        (3_400.0, 200.0),
+    ],
 ];
 const WOMEN: [[(f64, f64); FORMANTS]; 5] = [
-    [(850.0, 90.0), (1_220.0, 100.0), (2_810.0, 130.0), (3_800.0, 160.0), (4_500.0, 200.0)],
-    [(610.0, 70.0), (2_330.0, 110.0), (2_990.0, 130.0), (3_900.0, 160.0), (4_500.0, 200.0)],
-    [(310.0, 60.0), (2_790.0, 110.0), (3_310.0, 130.0), (4_100.0, 160.0), (4_700.0, 200.0)],
-    [(590.0, 80.0), (920.0, 90.0), (2_710.0, 130.0), (3_800.0, 160.0), (4_500.0, 200.0)],
-    [(370.0, 70.0), (950.0, 90.0), (2_670.0, 130.0), (3_800.0, 160.0), (4_500.0, 200.0)],
+    [
+        (850.0, 90.0),
+        (1_220.0, 100.0),
+        (2_810.0, 130.0),
+        (3_800.0, 160.0),
+        (4_500.0, 200.0),
+    ],
+    [
+        (610.0, 70.0),
+        (2_330.0, 110.0),
+        (2_990.0, 130.0),
+        (3_900.0, 160.0),
+        (4_500.0, 200.0),
+    ],
+    [
+        (310.0, 60.0),
+        (2_790.0, 110.0),
+        (3_310.0, 130.0),
+        (4_100.0, 160.0),
+        (4_700.0, 200.0),
+    ],
+    [
+        (590.0, 80.0),
+        (920.0, 90.0),
+        (2_710.0, 130.0),
+        (3_800.0, 160.0),
+        (4_500.0, 200.0),
+    ],
+    [
+        (370.0, 70.0),
+        (950.0, 90.0),
+        (2_670.0, 130.0),
+        (3_800.0, 160.0),
+        (4_500.0, 200.0),
+    ],
 ];
 
 /// Below this key the voices are men's, above the next women's, and
@@ -88,6 +148,20 @@ const WOMEN_FROM: f64 = 67.0;
 /// A singer raises the first formant to just above the note when the note
 /// would otherwise be above it (Sundberg), so a high note keeps its power.
 const F1_ABOVE_PITCH: f64 = 1.1;
+
+/// How high the first formant can be raised: about where a soprano's goes
+/// at the top of her range.
+const F1_HIGHEST: f64 = 1_200.0;
+
+/// How many octaves darker the source is at the lowest velocity than at
+/// the highest, and how much more open the glottis.
+const SOFT_OCTAVES: f64 = 3.0;
+const SOFT_OPENING: f64 = 0.2;
+
+/// The frequency at which the source's level is kept as the tilt changes
+/// with effort: the low harmonics', which carry most of a sung vowel's
+/// power, so velocity changes the colour without changing the level twice.
+const TILT_REFERENCE: f64 = 300.0;
 
 /// The settings of a [`ChoirVoice`].
 ///
@@ -136,7 +210,7 @@ pub struct ChoirParams {
     pub formant_shift: f64,
     /// The brightness of the voice at full velocity, as the cut-off of the
     /// glottal source's tilt, 500 to 12 000; softer singing is darker, by
-    /// up to two octaves at the lowest velocity.
+    /// up to three octaves at the lowest velocity, and breathier.
     pub brightness: f64,
     /// How much quieter the lowest velocity is than the highest, 0 to 60.
     pub velocity_range_db: f64,
@@ -278,7 +352,7 @@ fn formants(position: f64, woman: f64, shift: f64, f0: f64) -> [(f64, f64); FORM
         let bandwidth = man.1 + (wife.1 - man.1) * woman;
         *slot = (frequency, bandwidth);
     }
-    out[0].0 = out[0].0.max(F1_ABOVE_PITCH * f0);
+    out[0].0 = out[0].0.max((F1_ABOVE_PITCH * f0).min(F1_HIGHEST));
     // The formants keep their order, a little apart.
     for n in 1..FORMANTS {
         out[n].0 = out[n].0.max(out[n - 1].0 * 1.05);
@@ -305,7 +379,16 @@ struct Formant {
 
 impl Formant {
     fn tune(&mut self, frequency: f64, bandwidth: f64, rate: f64) {
-        let frequency = frequency.min(0.45 * rate);
+        // A formant above what the rate can hold is left out: its
+        // resonance would only be heard above the band, where it is all
+        // but flat.
+        if frequency > 0.45 * rate {
+            *self = Self {
+                a: 1.0,
+                ..Self::default()
+            };
+            return;
+        }
         let r = (-PI * bandwidth / rate).exp();
         self.c = -r * r;
         self.b = 2.0 * r * (TAU * frequency / rate).cos();
@@ -424,6 +507,7 @@ struct ChoirTone {
     /// The glottis: its open quotient, the tilt's pole at full effort and
     /// the effort's, the breath noise.
     open_quotient: f64,
+    effort: f64,
     brightness: f64,
     tilt_pole: f64,
     breathiness: f64,
@@ -460,6 +544,7 @@ impl ChoirTone {
             formant_shift: 1.0,
             retune_left: 0,
             open_quotient: 0.6,
+            effort: 1.0,
             brightness: 4_000.0,
             tilt_pole: 0.0,
             breathiness: 0.0,
@@ -490,7 +575,7 @@ impl ChoirTone {
     }
 
     fn configure(&mut self, params: &ChoirParams) {
-        self.open_quotient = params.open_quotient;
+        self.open_quotient = (params.open_quotient + SOFT_OPENING * (1.0 - self.effort)).min(0.9);
         self.breathiness = params.breathiness;
         self.jitter = params.jitter;
         self.formant_shift = params.formant_shift;
@@ -534,10 +619,16 @@ impl ChoirTone {
         self.glide.set(key);
         self.woman = womanhood(key);
         self.count = params.singers;
-        self.brightness = params.brightness * (2.0 * (effort - 1.0)).exp2();
-        self.tilt_pole = (-TAU * self.brightness.min(0.45 * rate) / rate).exp();
+        self.effort = effort;
+        self.open_quotient = (params.open_quotient + SOFT_OPENING * (1.0 - effort)).min(0.9);
+        let full = params.brightness.min(0.45 * rate);
+        self.brightness = full * (SOFT_OCTAVES * (effort - 1.0)).exp2();
+        self.tilt_pole = (-TAU * self.brightness / rate).exp();
+        // The tilt's loss at the first formants, made up.
+        let loss = |cutoff: f64| (1.0 + (TILT_REFERENCE / cutoff).powi(2)).sqrt();
+        let makeup = loss(self.brightness) / loss(full);
         self.dynamics.strike(level, fresh);
-        self.gain = if accent { db(params.accent_db) } else { 1.0 };
+        self.gain = makeup * if accent { db(params.accent_db) } else { 1.0 };
         self.held = true;
         if fresh {
             self.vowel.set(params.vowel);
@@ -921,7 +1012,12 @@ mod tests {
 
     /// The local maxima of the cascade's response, on a fine grid.
     fn peaks(tract: &[Formant; FORMANTS]) -> Vec<f64> {
-        let response = |f: f64| tract.iter().map(|formant| formant.gain(f, RATE)).product::<f64>();
+        let response = |f: f64| {
+            tract
+                .iter()
+                .map(|formant| formant.gain(f, RATE))
+                .product::<f64>()
+        };
         let grid: Vec<f64> = (1..1_200).map(|n| 5.0 * f64::from(n)).collect();
         let values: Vec<f64> = grid.iter().map(|&f| response(f)).collect();
         (1..values.len() - 1)
@@ -933,7 +1029,7 @@ mod tests {
     #[test]
     fn the_formants_peak_at_the_vowels_targets() {
         for (woman, table, name) in [(0.0, &MEN, "men"), (1.0, &WOMEN, "women")] {
-            for vowel in 0..5 {
+            for (vowel, row) in table.iter().enumerate() {
                 let mut tract = [Formant::default(); FORMANTS];
                 let targets = formants(vowel as f64, woman, 1.0, 100.0);
                 for (formant, (frequency, bandwidth)) in tract.iter_mut().zip(targets) {
@@ -942,11 +1038,14 @@ mod tests {
                 let found = peaks(&tract);
                 // The first three formants, the vowel's own, each have a
                 // peak within 5%.
-                for (n, &(target, _)) in table[vowel].iter().take(3).enumerate() {
-                    let nearest = found
-                        .iter()
-                        .copied()
-                        .fold(f64::MAX, |best, f| if (f - target).abs() < (best - target).abs() { f } else { best });
+                for (n, &(target, _)) in row.iter().take(3).enumerate() {
+                    let nearest = found.iter().copied().fold(f64::MAX, |best, f| {
+                        if (f - target).abs() < (best - target).abs() {
+                            f
+                        } else {
+                            best
+                        }
+                    });
                     let error = nearest / target - 1.0;
                     assert!(
                         error.abs() < 0.05,
@@ -962,7 +1061,11 @@ mod tests {
     fn a_sung_vowel_shows_its_formants() {
         // A low voice, whose harmonics sample the vocal tract finely: the
         // loudest harmonics near F1 and F2 lie at the vowel's formants.
-        for (vowel, f1, f2) in [(Vowel::A, 730.0, 1_090.0), (Vowel::I, 270.0, 2_290.0), (Vowel::U, 300.0, 870.0)] {
+        for (vowel, f1, f2) in [
+            (Vowel::A, 730.0, 1_090.0),
+            (Vowel::I, 270.0, 2_290.0),
+            (Vowel::U, 300.0, 870.0),
+        ] {
             let params = ChoirParams {
                 vowel: vowel.position(),
                 ..steady(ChoirParams::solo_voice())
@@ -977,10 +1080,14 @@ mod tests {
                 let levels: Vec<(f64, f64)> = (first..=last)
                     .map(|n| (n as f64 * f0, decibels(amplitude_at(part, n as f64 * f0))))
                     .collect();
-                let (index, _) = levels
-                    .iter()
-                    .enumerate()
-                    .fold((0, f64::MIN), |best, (i, &(_, l))| if l > best.1 { (i, l) } else { best });
+                let (index, _) =
+                    levels
+                        .iter()
+                        .enumerate()
+                        .fold(
+                            (0, f64::MIN),
+                            |best, (i, &(_, l))| if l > best.1 { (i, l) } else { best },
+                        );
                 // A parabola through the loudest and its neighbours.
                 if index > 0 && index + 1 < levels.len() {
                     let (a, b, c) = (levels[index - 1].1, levels[index].1, levels[index + 1].1);
@@ -1054,7 +1161,11 @@ mod tests {
             breathiness: 0.0,
             ..ChoirParams::aah_choir()
         };
-        let one = ChoirParams { singers: 1, jitter: 0.0, ..choir };
+        let one = ChoirParams {
+            singers: 1,
+            jitter: 0.0,
+            ..choir
+        };
         let (many, single) = (sway(choir), sway(one));
         println!("choir sways {many:.2} dB, one singer {single:.2} dB");
         assert!(many > 1.0 && many > 3.0 * single, "{many} against {single}");
@@ -1082,8 +1193,12 @@ mod tests {
         for (name, params) in presets() {
             let plain = note(voice(steady(params)), on(60, 0.7), 2.0, 1.0);
             let strong = note(voice(steady(params)), accented(60, 0.7), 2.0, 1.0);
-            let difference = decibels(rms(between(&strong, 0.5, 1.0)) / rms(between(&plain, 0.5, 1.0)));
-            assert!((difference - params.accent_db).abs() < 0.5, "{name}: {difference}");
+            let difference =
+                decibels(rms(between(&strong, 0.5, 1.0)) / rms(between(&plain, 0.5, 1.0)));
+            assert!(
+                (difference - params.accent_db).abs() < 0.5,
+                "{name}: {difference}"
+            );
         }
     }
 
@@ -1125,9 +1240,13 @@ mod tests {
                 (2.0 * RATE) as usize,
                 256,
             );
+            // The slur does not dip below the quieter of the two notes.
             let before = rms(between(&signal, 0.8, 1.0));
-            let through = crate::instruments::modelling::probe::levels(between(&signal, 1.0, 1.2), 0.01);
-            let dip = decibels(through.iter().fold(f64::MAX, |m, &x| m.min(x)) / before);
+            let after = rms(between(&signal, 1.5, 2.0));
+            let through =
+                crate::instruments::modelling::probe::levels(between(&signal, 1.0, 1.2), 0.02);
+            let lowest = through.iter().fold(f64::MAX, |m, &x| m.min(x));
+            let dip = decibels(lowest / before.min(after));
             let f1 = key_hz(62.0);
             let error = cents(frequency_near(between(&signal, 1.5, 2.0), f1), f1);
             assert!(dip > -3.0, "{name}: {dip}");
@@ -1136,9 +1255,17 @@ mod tests {
             // A release fades without a click and frees the voice.
             let released = note(voice(params), on(60, 0.8), 0.8, 1.5 + params.release * 3.0);
             let steady_jump = largest_jump(between(&released, 0.5, 0.8));
-            assert!(largest_jump(between(&released, 0.8, 1.5)) <= 1.05 * steady_jump, "{name}");
+            assert!(
+                largest_jump(between(&released, 0.8, 1.5)) <= 1.05 * steady_jump,
+                "{name}"
+            );
             let mut synth = synth_of(voice(params));
-            play(&mut synth, &[(0, on(60, 0.8)), (4_800, off(60))], 4 * 48_000, 256);
+            play(
+                &mut synth,
+                &[(0, on(60, 0.8)), (4_800, off(60))],
+                4 * 48_000,
+                256,
+            );
             assert_eq!(synth.active_voices(), 0, "{name}");
         }
     }
@@ -1151,12 +1278,20 @@ mod tests {
             assert!(alone[0].abs() < 1e-3 * measure::peak(&alone), "{name}");
             let steal = (0.5 * RATE) as usize;
             let mut synth = synth_of(voice(params));
-            let both = play(&mut synth, &[(0, on(64, 1.0)), (steal, on(59, 1.0))], steal * 2, 256);
+            let both = play(
+                &mut synth,
+                &[(0, on(64, 1.0)), (steal, on(59, 1.0))],
+                steal * 2,
+                256,
+            );
             let mut fresh = synth_of(voice(params));
             let second = play(&mut fresh, &[(steal, on(59, 1.0))], steal * 2, 256);
             let residual: Vec<f64> = both.iter().zip(&second).map(|(a, b)| a - b).collect();
             let at_steal = largest_jump(&residual[steal - 64..steal + 512]);
-            assert!(at_steal <= 1.05 * steady_jump, "{name}: {at_steal} against {steady_jump}");
+            assert!(
+                at_steal <= 1.05 * steady_jump,
+                "{name}: {at_steal} against {steady_jump}"
+            );
             assert!(measure::peak(&residual[steal + 400..]) < 1e-9, "{name}");
         }
     }
@@ -1236,7 +1371,11 @@ mod tests {
                 (8_000, off(0)),
             ];
             let signal = play(&mut synth, &script, 24_000, 100);
-            assert!(measure::finite_within(&signal, 1e3), "{}", measure::peak(&signal));
+            assert!(
+                measure::finite_within(&signal, 1e3),
+                "{}",
+                measure::peak(&signal)
+            );
         }
     }
 }

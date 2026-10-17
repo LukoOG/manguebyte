@@ -14,6 +14,7 @@
 //! | [`BowedString`] | a bowed string by digital waveguide, with the friction of rosin: Helmholtz motion, a player's ear for intonation, vibrato that waits, legato, a body, sections, pizzicato | [violin](BowedParams::violin), [viola](BowedParams::viola), [cello](BowedParams::cello), [double bass](BowedParams::contrabass), [string section](BowedParams::string_ensemble), pizzicato [violin](BowedParams::violin_pizzicato), [cello](BowedParams::cello_pizzicato) and [bass](BowedParams::contrabass_pizzicato) |
 //! | [`WindVoice`] | wind instruments by digital waveguide: a reed, the lips or an air jet driving a bore, with breath control, a player's ear, vibrato and legato | [flute](WindParams::flute), [clarinet](WindParams::clarinet), [saxophone](WindParams::saxophone), [trumpet](WindParams::trumpet), [trombone](WindParams::trombone) |
 //! | [`MalletVoice`] | struck bars, tines, plates and tubes by modal synthesis: mallet hardness, strike position, resonator tubes, the vibraphone's motor and damper | [marimba](MalletParams::marimba), [xylophone](MalletParams::xylophone), [vibraphone](MalletParams::vibraphone), [glockenspiel](MalletParams::glockenspiel), [celesta](MalletParams::celesta), [kalimba](MalletParams::kalimba), [steel pan](MalletParams::steel_pan), [tubular bells](MalletParams::tubular_bells) |
+//! | [`ChoirVoice`] | sung vowels and choirs by formant synthesis: a glottal pulse through five formants, from basses to sopranos, several detuned singers to a note | ["aah" choir](ChoirParams::aah_choir), ["ooh" choir](ChoirParams::ooh_choir), [solo voice](ChoirParams::solo_voice) |
 //!
 //! [`RotarySpeaker`] is not a voice but a [`Processor`](crate::Processor)
 //! to put after the organ: the rotating horn and drum it is usually heard
@@ -98,6 +99,7 @@ mod acid;
 mod acoustic;
 mod analog_drums;
 mod bowed;
+mod choir;
 mod common;
 mod fm;
 mod kit;
@@ -119,6 +121,7 @@ pub use analog_drums::{
     KickBassVoice, METAL_HZ,
 };
 pub use bowed::{BODY_MODES, BowedParams, BowedString, MAX_PLAYERS};
+pub use choir::{ChoirParams, ChoirVoice, FORMANTS, MAX_SINGERS, Vowel};
 pub use common::HANDOVER_SECONDS;
 pub use fm::{Algorithm, FM_OPERATORS, FM_VELOCITY_RANGE_DB, FmOperator, FmParams, FmVoice};
 pub use kit::{
