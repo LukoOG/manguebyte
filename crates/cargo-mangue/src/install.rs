@@ -12,6 +12,8 @@
 //! An LV2 bundle goes to `~/.lv2` and `/usr/lib/lv2` on Linux,
 //! `~/Library/Audio/Plug-Ins/LV2` and `/Library/Audio/Plug-Ins/LV2` on
 //! macOS, and `%APPDATA%\LV2` and `%COMMONPROGRAMFILES%\LV2` on Windows.
+//! An Audio Unit goes to `~/Library/Audio/Plug-Ins/Components` and
+//! `/Library/Audio/Plug-Ins/Components`, on macOS only.
 //!
 //! # Sources
 //!
@@ -19,6 +21,8 @@
 //!   CLAP host searches.
 //! - *VST 3 Developer Portal*, "Plug-in Locations" (Steinberg).
 //! - The default `LV2_PATH` of lilv, the LV2 project's host library.
+//! - *Audio Unit Programming Guide* (Apple): where components are
+//!   installed.
 
 use std::ffi::OsString;
 use std::fs;
@@ -79,10 +83,17 @@ pub fn plugin_dir(
             ))
         })
     };
+    if format == Format::Au && os != Os::Macos {
+        return Err(Error::usage(format!(
+            "An Audio Unit is installed on macOS only, and this is {}.",
+            os.name()
+        )));
+    }
     let upper = match format {
         Format::Clap => "CLAP",
         Format::Vst3 => "VST3",
         Format::Lv2 => "LV2",
+        Format::Au => "Components",
     };
     Ok(match (os, scope) {
         // LV2's folder for the user on Windows is in the roaming profile.
@@ -319,6 +330,23 @@ mod tests {
             assert!(error.message().contains(variable), "{error}");
             // Set but empty is the same as not set.
             assert!(dir(os, Format::Clap, scope, &[(variable, "")]).is_err());
+        }
+    }
+
+    #[test]
+    fn an_audio_unit_goes_to_the_components_folders_of_macos_only() {
+        let home = [("HOME", "/Users/ana")];
+        assert_eq!(
+            dir(Os::Macos, Format::Au, Scope::User, &home).unwrap(),
+            Path::new("/Users/ana/Library/Audio/Plug-Ins/Components")
+        );
+        assert_eq!(
+            dir(Os::Macos, Format::Au, Scope::System, &home).unwrap(),
+            Path::new("/Library/Audio/Plug-Ins/Components")
+        );
+        for os in [Os::Windows, Os::Linux] {
+            let error = dir(os, Format::Au, Scope::User, &home).unwrap_err();
+            assert_eq!(error.exit_code(), 2);
         }
     }
 }

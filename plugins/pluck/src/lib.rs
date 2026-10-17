@@ -20,15 +20,16 @@
 //!   [`OUTPUT_KNEE_DB`] smoothly towards [`OUTPUT_CEILING_DB`] without
 //!   flattening it there, and a limiter guarantees the ceiling for
 //!   anything else;
-//! - one line each to export it as a CLAP, a VST 3 and an LV2 plugin, from
-//!   the same library;
+//! - one line each to export it as a CLAP, a VST 3, an LV2 plugin and an
+//!   Audio Unit, from the same library;
 //! - a small editor: a title and a knob for each parameter (see
 //!   [`Pluck::editor_spec`]). Mangue Duck's also has a meter and a switch.
 //!
 //! Run `scripts/bundle-clap.sh mangue-pluck "Mangue Pluck"` to get a `.clap`
 //! file a host can load, and `scripts/bundle-vst3.sh mangue-pluck
 //! "Mangue Pluck"` to get a `.vst3` bundle. `cargo mangue bundle -p
-//! mangue-pluck --format lv2` writes its `.lv2` bundle.
+//! mangue-pluck --format lv2` writes its `.lv2` bundle, and on a Mac
+//! `--format au` its `.component`.
 
 use std::sync::Arc;
 
@@ -714,6 +715,7 @@ impl Plugin for Pluck {
 manguebyte::clap::export_clap!(Pluck);
 manguebyte::vst3::export_vst3!(Pluck);
 manguebyte::lv2::export_lv2!(Pluck);
+manguebyte_au::export_au!(Pluck);
 
 #[cfg(test)]
 mod tests {

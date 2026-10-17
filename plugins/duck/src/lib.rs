@@ -17,8 +17,10 @@
 //!
 //! Run `scripts/bundle-clap.sh mangue-duck "Mangue Duck"` or
 //! `scripts/bundle-vst3.sh mangue-duck "Mangue Duck"` to get a plugin a
-//! host can load, and `cargo mangue bundle -p mangue-duck --format lv2` for
-//! its `.lv2` bundle. The one library is a CLAP, a VST 3 and an LV2 plugin.
+//! host can load, `cargo mangue bundle -p mangue-duck --format lv2` for its
+//! `.lv2` bundle, and on a Mac `cargo mangue bundle -p mangue-duck --format
+//! au` for its `.component`. The one library is a CLAP, a VST 3, an LV2
+//! plugin and, on macOS, an Audio Unit.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -409,6 +411,7 @@ impl Plugin for Duck {
 manguebyte::clap::export_clap!(Duck);
 manguebyte::vst3::export_vst3!(Duck);
 manguebyte::lv2::export_lv2!(Duck);
+manguebyte_au::export_au!(Duck);
 
 #[cfg(test)]
 mod tests {

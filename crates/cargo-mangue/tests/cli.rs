@@ -109,7 +109,7 @@ fn a_wrong_command_line_exits_with_2_and_says_what_to_do() {
         ),
         (
             &["bundle", "--format", "vst2"],
-            "The formats are clap, vst3 and lv2",
+            "The formats are clap, vst3, lv2 and au",
         ),
         (&["bundle", "--target"], "The option --target needs a value"),
         (&["install", "--release", "--profile", "fast"], "Use one"),

@@ -13,6 +13,10 @@
 //!   project, as this project's CI does. For LV2 the functions below name
 //!   lv2lint where they name a program, and have no variable or option to
 //!   give, and a [`Judge`] finds no summary in any output.
+//! - AU: `auval`, which comes with macOS, run as `auval -v <type> <subtype>
+//!   <manufacturer>` with the codes the bundle's `Info.plist` names. It
+//!   ends with `AU VALIDATION SUCCEEDED.` or `AU VALIDATION FAILED.`, which
+//!   count as one test passed or failed.
 //!
 //! The summary line decides, exactly as in this project's CI: a plugin
 //! passes when every summary reports no failed test and at least one that
@@ -57,6 +61,7 @@ pub fn program(format: Format) -> &'static str {
         Format::Clap => "clap-validator",
         Format::Vst3 => "validator",
         Format::Lv2 => "lv2lint",
+        Format::Au => "auval",
     }
 }
 
@@ -67,6 +72,7 @@ pub fn variable(format: Format) -> &'static str {
         Format::Vst3 => "VST3_VALIDATOR",
         // None: no LV2 validator is run.
         Format::Lv2 => "",
+        Format::Au => "AUVAL",
     }
 }
 
@@ -75,8 +81,8 @@ pub fn option(format: Format) -> &'static str {
     match format {
         Format::Clap => "--clap-validator",
         Format::Vst3 => "--vst3-validator",
-        // None: no LV2 validator is run.
-        Format::Lv2 => "",
+        // None: no LV2 validator is run, and auval is the system's.
+        Format::Lv2 | Format::Au => "",
     }
 }
 
@@ -94,6 +100,7 @@ pub fn where_to_get(format: Format) -> &'static str {
             "cargo mangue does not run an LV2 validator; check the bundle with lv2lint, from \
              the OpenMusicKontrollers project"
         }
+        Format::Au => "auval comes with macOS, in /usr/bin",
     }
 }
 
@@ -139,13 +146,26 @@ pub fn locate(
 }
 
 /// The arguments a format's validator is run with on `bundle`.
+///
+/// For an Audio Unit these are the codes the bundle's `Info.plist` names,
+/// read from it; a bundle without them gives `auval -v` alone, which fails
+/// with no result.
 pub fn arguments(format: Format, bundle: &Path) -> Vec<OsString> {
+    if format == Format::Au {
+        let plist = std::fs::read_to_string(bundle.join("Contents").join("Info.plist"));
+        let mut arguments = vec![OsString::from("-v")];
+        if let Some(codes) = plist.ok().as_deref().and_then(crate::au::codes_from_plist) {
+            arguments.extend(codes.into_iter().map(OsString::from));
+        }
+        return arguments;
+    }
     let first = match format {
         Format::Clap => "validate",
         // Run the extensive tests, as CI does.
         Format::Vst3 => "-e",
         // Not run: lv2lint takes the plugin's URI as well as the bundle.
         Format::Lv2 => return vec![bundle.as_os_str().to_owned()],
+        Format::Au => unreachable!("handled above"),
     };
     vec![OsString::from(first), bundle.as_os_str().to_owned()]
 }
@@ -267,6 +287,7 @@ impl Judge {
             Format::Clap => clap_summary(&line),
             Format::Vst3 => vst3_summary(&line),
             Format::Lv2 => None,
+            Format::Au => au_summary(&line),
         };
         if let Some((passed, failed)) = summary {
             self.summaries = self.summaries.saturating_add(1);
@@ -274,7 +295,7 @@ impl Judge {
             self.failed = self.failed.saturating_add(failed);
         }
         match self.format {
-            Format::Clap | Format::Lv2 => true,
+            Format::Clap | Format::Lv2 | Format::Au => true,
             Format::Vst3 => self.shows_vst3(&line),
         }
     }
@@ -351,6 +372,19 @@ fn clap_summary(line: &str) -> Option<(u64, u64)> {
     let (failed, rest) = leading_number(rest.strip_prefix(" passed, ")?)?;
     rest.strip_prefix(" failed")?;
     Some((passed, failed))
+}
+
+/// Reads `AU VALIDATION SUCCEEDED.` as one test passed and `AU VALIDATION
+/// FAILED.` as one failed.
+fn au_summary(line: &str) -> Option<(u64, u64)> {
+    let line = line.trim();
+    if line.starts_with("AU VALIDATION SUCCEEDED") {
+        Some((1, 0))
+    } else if line.starts_with("AU VALIDATION FAILED") {
+        Some((0, 1))
+    } else {
+        None
+    }
 }
 
 /// Reads `Result: <n> tests passed, <n> tests failed`, as (passed, failed).
@@ -833,5 +867,53 @@ mod tests {
         assert_eq!(program(Format::Vst3), "validator");
         assert_eq!(variable(Format::Clap), "CLAP_VALIDATOR");
         assert_eq!(variable(Format::Vst3), "VST3_VALIDATOR");
+    }
+
+    #[test]
+    fn auval_passes_on_its_last_word_and_is_given_the_bundles_codes() {
+        let judged = |lines: &[&str]| {
+            let mut judge = Judge::new(Format::Au);
+            for line in lines {
+                assert!(judge.feed(line));
+            }
+            judge.verdict()
+        };
+        assert_eq!(
+            judged(&["VALIDATING AUDIO UNIT", "AU VALIDATION SUCCEEDED."]),
+            Verdict::Passed { passed: 1 }
+        );
+        assert_eq!(
+            judged(&[
+                "ERROR: something",
+                "AU VALIDATION FAILED: CORRECT THE ERRORS ABOVE."
+            ]),
+            Verdict::Failed {
+                passed: 0,
+                failed: 1
+            }
+        );
+        assert_eq!(judged(&["it crashed"]), Verdict::NoResult);
+        assert_eq!(program(Format::Au), "auval");
+        assert_eq!(variable(Format::Au), "AUVAL");
+
+        let bundle = std::env::temp_dir().join(format!(
+            "cargo-mangue-au-arguments-{}.component",
+            std::process::id()
+        ));
+        let contents = bundle.join("Contents");
+        std::fs::create_dir_all(&contents).unwrap();
+        assert_eq!(arguments(Format::Au, &bundle), [OsString::from("-v")]);
+        std::fs::write(
+            contents.join("Info.plist"),
+            "<key>AudioComponents</key><array><dict><key>manufacturer</key>\
+             <string>Ogvj</string><key>subtype</key><string>h4yl</string>\
+             <key>type</key><string>aumu</string></dict></array>",
+        )
+        .unwrap();
+        assert_eq!(
+            arguments(Format::Au, &bundle),
+            ["-v", "aumu", "h4yl", "Ogvj"]
+        );
+        std::fs::remove_dir_all(&bundle).unwrap();
     }
 }

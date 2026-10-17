@@ -338,7 +338,7 @@ fn each_item(
 fn add_format(formats: &mut Vec<Format>, name: &str) -> Result<(), Error> {
     let Some(format) = Format::from_name(name) else {
         return Err(Error::usage(format!(
-            "\"{name}\" is not a plugin format. The formats are clap, vst3 and lv2."
+            "\"{name}\" is not a plugin format. The formats are clap, vst3, lv2 and au."
         )));
     };
     if !formats.contains(&format) {
@@ -574,7 +574,7 @@ Usage: cargo mangue <command> [options]
 
 Commands:
   new        Create a plugin crate that builds as it is
-  bundle     Build a plugin and write its .clap and its .vst3 (or .lv2)
+  bundle     Build a plugin and write its .clap and .vst3 (or .lv2, .component)
   install    Bundle, then copy into the folders hosts scan
   uninstall  Remove an installed plugin from those folders
   validate   Bundle, then run clap-validator and the VST 3 validator
@@ -597,7 +597,7 @@ Run cargo mangue <command> --help for the options of a command.
 
 const BUNDLE_HELP: &str = "\
 Build a plugin and write its .clap and its .vst3, or with --format lv2 its
-.lv2.
+.lv2, or on a Mac with --format au its .component.
 
 Usage: cargo mangue bundle [options]
 
@@ -614,6 +614,11 @@ or Name.dylib) and its Turtle files, manifest.ttl and one named after the
 plugin's id. Those are written by a small program cargo mangue builds and
 runs against the plugin's crate, which must call export_lv2! at its root
 and have the rlib crate type as well as cdylib.
+
+An Audio Unit is a macOS bundle, Name.component/Contents/MacOS/Name with
+PkgInfo and an Info.plist that names the unit's codes, which a small
+program writes in the same way: the crate must call export_au! at its root.
+It is refused for Windows and Linux.
 
 On macOS several --target options make one universal binary with lipo, and
 the bundle (for LV2, its library) gets an ad-hoc signature with codesign.
@@ -647,6 +652,8 @@ With --system it is installed for everybody, which needs an administrator:
 With --format lv2, an LV2 bundle goes to %APPDATA%\\LV2 on Windows (for
 everybody, %COMMONPROGRAMFILES%\\LV2), ~/.lv2 on Linux (/usr/lib/lv2) and
 ~/Library/Audio/Plug-Ins/LV2 on macOS (/Library/Audio/Plug-Ins/LV2).
+With --format au, an Audio Unit goes to ~/Library/Audio/Plug-Ins/Components
+(/Library/Audio/Plug-Ins/Components), on macOS only.
 
 An installed plugin of the same name is replaced. Close the host first:
 Windows does not let go of a plugin that is loaded.
@@ -666,6 +673,8 @@ Usage: cargo mangue validate [options]
          https://github.com/free-audio/clap-validator
   VST 3  validator, built from the VST 3 SDK,
          https://github.com/steinbergmedia/vst3sdk
+  AU     auval, which comes with macOS, with --format au. It checks the
+         unit installed with the bundle's codes: install it first
 
 Each is taken from its option, else from its environment variable, else
 from PATH. A format whose validator is not found is skipped with a note.
@@ -689,8 +698,8 @@ Options:
       --name <name>         The plugin's name, which names the bundles.
                             Default: name under [package.metadata.manguebyte]
                             in its Cargo.toml, else the package name
-      --format <format>     clap, vst3 or lv2. Repeat it, or write clap,vst3,
-                            for several. Default: clap and vst3
+      --format <format>     clap, vst3, lv2 or au. Repeat it, or write
+                            clap,vst3, for several. Default: clap and vst3
   -r, --release             Build with the release profile
       --profile <name>      Build with this profile. Default: dev
       --target <triple>     Build for this target. Repeat it for several
@@ -729,7 +738,8 @@ Remove an installed plugin from the folders hosts scan.
 
 Usage: cargo mangue uninstall [options]
 
-Removes Name.clap and Name.vst3 (and Name.lv2 with --format lv2) from the
+Removes Name.clap and Name.vst3, and with the formats lv2 and au Name.lv2
+and Name.component, from the
 folders cargo mangue install copies into. A plugin that is not there is
 reported and is not an error.
 
@@ -737,7 +747,7 @@ Options:
   -p, --package <name>      The plugin's package, to read its name from
       --name <name>         The plugin's name. With it, no Cargo.toml is
                             needed
-      --format <format>     clap, vst3 or lv2. Default: clap and vst3
+      --format <format>     clap, vst3, lv2 or au. Default: clap and vst3
       --system              Remove from the folders shared by every user,
                             which needs an administrator
       --manifest-path <path>  The Cargo.toml to use
@@ -1171,7 +1181,7 @@ mod tests {
         assert!(unknown.contains("no option --frmat"), "{unknown}");
         assert!(unknown.contains("cargo mangue bundle --help"), "{unknown}");
 
-        assert!(usage_error(&["bundle", "--format", "vst2"]).contains("clap, vst3 and lv2"));
+        assert!(usage_error(&["bundle", "--format", "vst2"]).contains("clap, vst3, lv2 and au"));
         assert!(usage_error(&["bundle", "--format"]).contains("needs a value"));
         assert!(usage_error(&["bundle", "--format", ","]).contains("needs a value"));
         assert!(usage_error(&["bundle", "--name", "--release"]).contains("--name=VALUE"));

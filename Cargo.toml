@@ -22,6 +22,7 @@ manguebyte-graph = { path = "crates/manguebyte-graph", version = "0.1.0" }
 manguebyte-standalone = { path = "crates/manguebyte-standalone", version = "0.1.0" }
 manguebyte-vst3 = { path = "crates/manguebyte-vst3", version = "0.1.0" }
 manguebyte-lv2 = { path = "crates/manguebyte-lv2", version = "0.1.0" }
+manguebyte-au = { path = "crates/manguebyte-au", version = "0.1.0" }
 manguebyte-midi = { path = "crates/manguebyte-midi", version = "0.1.0" }
 manguebyte-dsp = { path = "crates/manguebyte-dsp", version = "0.1.0" }
 manguebyte-formats = { path = "crates/manguebyte-formats", version = "0.1.0" }

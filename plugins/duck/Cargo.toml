@@ -1,6 +1,6 @@
 [package]
 name = "mangue-duck"
-description = "An example CLAP and VST 3 effect built with Manguebyte: a sidechain ducker."
+description = "An example CLAP, VST 3, LV2 and Audio Unit effect built with Manguebyte: a sidechain ducker."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,6 +19,11 @@ manguebyte = { path = "../../crates/manguebyte", default-features = false, featu
 # thread: the processor only stores the meter's level into an atomic.
 manguebyte-gui.workspace = true
 manguebyte-ui.workspace = true
+# The Audio Unit wrapper, used directly rather than through the facade,
+# whose feature for it comes with its documentation. It exports a unit
+# only on macOS; elsewhere it adds the function that writes the unit's
+# Info.plist, which `cargo mangue bundle --format au` calls.
+manguebyte-au.workspace = true
 
 [dev-dependencies]
 # The tests open the editor headless, through the glue's test hook.

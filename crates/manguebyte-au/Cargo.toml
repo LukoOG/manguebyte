@@ -1,0 +1,24 @@
+[package]
+name = "manguebyte-au"
+description = "Builds Audio Units (version 2) for macOS from the Manguebyte plugin API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+# On macOS the wrapper links CoreFoundation and AudioToolbox, which come
+# with the system; it needs no crate to reach them.
+[dependencies]
+manguebyte-core.workspace = true
+manguebyte-dsp.workspace = true
+manguebyte-midi.workspace = true
+manguebyte-params.workspace = true
+manguebyte-plugin.workspace = true
+
+[lints]
+workspace = true

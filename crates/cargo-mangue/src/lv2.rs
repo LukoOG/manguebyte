@@ -81,6 +81,23 @@ fn main() {
 /// # Ok::<(), cargo_mangue::Error>(())
 /// ```
 pub fn helper_manifest(plugin: &Package, no_default_features: bool) -> String {
+    helper_manifest_for(
+        plugin,
+        no_default_features,
+        HELPER_PACKAGE,
+        "the Turtle files of the LV2 bundle of",
+    )
+}
+
+/// The `Cargo.toml` of a program named `helper_package` that depends on
+/// the plugin's package and writes `what` it, for this module's program
+/// and for [`au`](crate::au)'s.
+pub(crate) fn helper_manifest_for(
+    plugin: &Package,
+    no_default_features: bool,
+    helper_package: &str,
+    what: &str,
+) -> String {
     let folder = plugin
         .manifest_path
         .parent()
@@ -91,10 +108,10 @@ pub fn helper_manifest(plugin: &Package, no_default_features: bool) -> String {
         ""
     };
     format!(
-        "# Writes the Turtle files of {package}'s LV2 bundle. Made by cargo mangue,\n\
+        "# Writes {what} {package}. Made by cargo mangue,\n\
          # and made again on every run.\n\
          [package]\n\
-         name = \"{HELPER_PACKAGE}\"\n\
+         name = \"{helper_package}\"\n\
          version = \"0.0.0\"\n\
          edition = \"2021\"\n\
          publish = false\n\
@@ -132,11 +149,17 @@ pub fn helper_manifest(plugin: &Package, no_default_features: bool) -> String {
 /// # Ok::<(), cargo_mangue::Error>(())
 /// ```
 pub fn helper_features(request: &BuildRequest) -> Result<Vec<String>, Error> {
+    plugin_features(request, "An LV2 bundle")
+}
+
+/// What [`helper_features`] does, for a bundle described as `what` in the
+/// messages.
+pub(crate) fn plugin_features(request: &BuildRequest, what: &str) -> Result<Vec<String>, Error> {
     if request.all_features {
-        return Err(Error::usage(
-            "An LV2 bundle cannot be made with --all-features yet: name the features with \
-             --features instead.",
-        ));
+        return Err(Error::usage(format!(
+            "{what} cannot be made with --all-features yet: name the features with \
+             --features instead."
+        )));
     }
     let mut features = Vec::new();
     for list in &request.features {
@@ -146,8 +169,8 @@ pub fn helper_features(request: &BuildRequest) -> Result<Vec<String>, Error> {
         {
             if feature.contains('/') {
                 return Err(Error::usage(format!(
-                    "An LV2 bundle cannot be made with the feature {feature} of a dependency: \
-                     give the plugin a feature of its own that turns it on."
+                    "{what} cannot be made with the feature {feature} of a dependency: give \
+                     the plugin a feature of its own that turns it on."
                 )));
             }
             features.push(format!("{PLUGIN}/{feature}"));

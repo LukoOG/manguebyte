@@ -582,6 +582,7 @@ version = "0.1.0"
 dependencies = [
  "mangue-pluck",
  "manguebyte",
+ "manguebyte-au",
  "manguebyte-gfx",
  "manguebyte-gui",
  "manguebyte-ui",
@@ -594,6 +595,7 @@ name = "mangue-pluck"
 version = "0.1.0"
 dependencies = [
  "manguebyte",
+ "manguebyte-au",
  "manguebyte-gfx",
  "manguebyte-gui",
  "manguebyte-ui",
@@ -629,6 +631,17 @@ version = "0.1.0"
 dependencies = [
  "manguebyte-core",
  "manguebyte-dsp",
+]
+
+[[package]]
+name = "manguebyte-au"
+version = "0.1.0"
+dependencies = [
+ "manguebyte-core",
+ "manguebyte-dsp",
+ "manguebyte-midi",
+ "manguebyte-params",
+ "manguebyte-plugin",
 ]
 
 [[package]]

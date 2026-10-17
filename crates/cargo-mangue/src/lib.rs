@@ -5,7 +5,7 @@
 //! | Command | What it does |
 //! |---|---|
 //! | `cargo mangue new <name>` | Writes a plugin crate that builds as it is |
-//! | `cargo mangue bundle` | Builds a plugin and writes its `.clap` and `.vst3`, and its `.lv2` when asked |
+//! | `cargo mangue bundle` | Builds a plugin and writes its `.clap` and `.vst3`, and its `.lv2` or, on a Mac, its `.component` when asked |
 //! | `cargo mangue install` | Bundles, then copies into the folders hosts scan |
 //! | `cargo mangue uninstall` | Removes an installed plugin |
 //! | `cargo mangue validate` | Bundles, then runs the CLAP and VST 3 validators |
@@ -31,6 +31,7 @@
 //! | [`install`] | Which folder a plugin is installed into |
 //! | [`validate`] | Whether a validator's output is a pass |
 //! | [`lv2`] | The program that writes an LV2 bundle's Turtle files |
+//! | [`au`] | The program that writes an Audio Unit's `Info.plist`, and the codes in one |
 //! | [`scaffold`] | The files of a new plugin crate |
 //!
 //! [`bundle`], [`tools`] and [`commands`] do the work those decide on:
@@ -89,6 +90,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod au;
 pub mod bundle;
 pub mod cargo;
 pub mod cli;

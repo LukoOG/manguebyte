@@ -9,12 +9,15 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::au;
 use crate::bundle;
 use crate::cargo::{BuiltFor, Cargo, built_for, select_package};
 use crate::cli::{self, BundleArgs, Command, InstallArgs, NewArgs, UninstallArgs, ValidateArgs};
 use crate::error::{Error, Failure};
 use crate::install::{self, Scope};
-use crate::layout::{BundleSpec, Contents, PlannedFile, bundle_version, check_plugin_name, plan};
+use crate::layout::{
+    BundleSpec, Contents, PlannedFile, bundle_version, check_plugin_name, macos_identifier, plan,
+};
 use crate::lv2;
 use crate::platform::{Arch, Format, Os, Target};
 use crate::scaffold::{self, Dependency, NewPlugin};
@@ -154,6 +157,9 @@ fn bundle_plugin(args: &BundleArgs, for_this_machine: Option<&str>) -> Result<Bu
     if formats.contains(&Format::Lv2) {
         lv2::helper_features(&args.request)?;
     }
+    if formats.contains(&Format::Au) {
+        au::helper_features(&args.request)?;
+    }
     let plans_for = |archs: &[Arch]| {
         let planned = formats.iter().map(|&format| {
             plan(&BundleSpec {
@@ -205,6 +211,26 @@ fn bundle_plugin(args: &BundleArgs, for_this_machine: Option<&str>) -> Result<Bu
                 contents: Contents::Bytes(text),
             });
         }
+    }
+    // An Audio Unit's Info.plist, whose codes only the plugin's code knows.
+    for (format, plan) in formats.iter().zip(&mut plans) {
+        if *format != Format::Au {
+            continue;
+        }
+        eprintln!("Writing the Info.plist of {}", plan.root);
+        let text = au::info_plist(
+            &cargo,
+            &metadata,
+            package,
+            &args.request,
+            &name,
+            &macos_identifier(&package.identifier())?,
+            &bundle_version(&package.version),
+        )?;
+        plan.files.push(PlannedFile {
+            path: format!("{}/Contents/Info.plist", plan.root),
+            contents: Contents::Bytes(text),
+        });
     }
 
     let out_dir = match &args.out {
@@ -373,6 +399,8 @@ fn validate_plugin(args: &ValidateArgs) -> Result<(), Error> {
             Format::Vst3 => args.vst3_validator.as_deref(),
             // Refused above.
             Format::Lv2 => None,
+            // The system's own, from the AUVAL variable or PATH.
+            Format::Au => None,
         };
         match validate::locate(format, named, &env_var, &tools)? {
             Some(validator) => found.push((format, validator)),
@@ -498,6 +526,7 @@ fn new_plugin(args: &NewArgs) -> Result<(), Error> {
     eprintln!("  cargo test                      runs its tests, with no host");
     eprintln!("  cargo mangue bundle --release   builds its .clap and its .vst3");
     eprintln!("  cargo mangue bundle --release --format lv2   builds its .lv2");
+    eprintln!("  cargo mangue bundle --release --format au    builds its .component, on a Mac");
     eprintln!("  cargo mangue install --release  and copies them to where hosts look");
     // Whatever was not chosen is a placeholder, and the id is the one that
     // cannot be changed later.

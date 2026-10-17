@@ -25,6 +25,11 @@
 //! library alone, and [`lv2`](crate::lv2) supplies the Turtle files once
 //! the plugin is built.
 //!
+//! An Audio Unit is a macOS bundle, `Name.component/Contents/MacOS/Name`
+//! with `PkgInfo` and an `Info.plist` whose `AudioComponents` entry holds
+//! codes only the plugin's code knows; [`au`](crate::au) supplies that
+//! `Info.plist` once the plugin is built. It is refused for other systems.
+//!
 //! # Sources
 //!
 //! - *VST 3 Developer Portal*, "Plug-in Format Structure" (Steinberg): the
@@ -180,6 +185,13 @@ pub fn plan(spec: &BundleSpec) -> Result<BundlePlan, Error> {
     let mut signed = root.clone();
 
     match (spec.os, spec.format) {
+        (os @ (Os::Windows | Os::Linux), Format::Au) => {
+            return Err(Error::usage(format!(
+                "An Audio Unit is a macOS component, and the bundle is for {}. Bundle it on a \
+                 Mac, for a macOS target, with --format au.",
+                os.name()
+            )));
+        }
         (os, Format::Lv2) => {
             // A plain folder on every system, with the library beside the
             // Turtle files that commands add once the plugin is built.
@@ -221,18 +233,22 @@ pub fn plan(spec: &BundleSpec) -> Result<BundlePlan, Error> {
                 path: format!("{root}/Contents/MacOS/{name}"),
                 contents: binary,
             });
-            if format == Format::Vst3 {
+            if matches!(format, Format::Vst3 | Format::Au) {
                 files.push(PlannedFile {
                     path: format!("{root}/Contents/PkgInfo"),
                     contents: Contents::Bytes(PKG_INFO.to_vec()),
                 });
             }
-            files.push(PlannedFile {
-                path: format!("{root}/Contents/Info.plist"),
-                contents: Contents::Bytes(
-                    info_plist(format, name, &identifier, &spec.version).into_bytes(),
-                ),
-            });
+            // An Audio Unit's Info.plist names codes only the plugin knows,
+            // and comes from its code once it is built.
+            if format != Format::Au {
+                files.push(PlannedFile {
+                    path: format!("{root}/Contents/Info.plist"),
+                    contents: Contents::Bytes(
+                        info_plist(format, name, &identifier, &spec.version).into_bytes(),
+                    ),
+                });
+            }
         }
         (os, Format::Clap) => {
             // The library itself, renamed.
@@ -301,7 +317,7 @@ pub fn vst3_arch_folder(os: Os, arch: Arch) -> &'static str {
 /// `CFBundleIdentifier`. So an underscore is written as a hyphen, exactly
 /// as in the identifier a package gets when it sets none, and the id itself
 /// can stay as it is.
-fn macos_identifier(identifier: &str) -> Result<String, Error> {
+pub(crate) fn macos_identifier(identifier: &str) -> Result<String, Error> {
     let written = identifier.replace('_', "-");
     if check_identifier(&written).is_ok() {
         return Ok(written);
@@ -326,8 +342,9 @@ pub fn info_plist(format: Format, name: &str, identifier: &str, version: &str) -
     let identifier = xml_escape(identifier);
     let version = xml_escape(version);
     let signature = match format {
-        // An LV2 bundle has no Info.plist; `plan` never writes one for it.
-        Format::Clap | Format::Lv2 => "",
+        // An LV2 bundle has no Info.plist, and an Audio Unit's comes from
+        // the plugin: `plan` never writes one for either.
+        Format::Clap | Format::Lv2 | Format::Au => "",
         Format::Vst3 => "    <key>CFBundleSignature</key><string>????</string>\n",
     };
     format!(
@@ -581,5 +598,35 @@ mod tests {
         );
         assert!(plist.contains("<key>CFBundleName</key><string>Rock &amp; &lt;Roll&gt;</string>"));
         assert!(!plist.contains("<Roll>"));
+    }
+
+    #[test]
+    fn an_audio_unit_is_a_macos_bundle_and_nothing_else() {
+        let spec = |os| BundleSpec {
+            format: Format::Au,
+            os,
+            archs: vec![Arch::Aarch64],
+            name: "Mangue Pluck".into(),
+            identifier: "org.manguebyte.pluck".into(),
+            version: "0.1.0".into(),
+        };
+        let plan = plan(&spec(Os::Macos)).unwrap();
+        assert_eq!(plan.root, "Mangue Pluck.component");
+        let paths: Vec<&str> = plan.files.iter().map(|file| file.path.as_str()).collect();
+        // The Info.plist comes from the plugin once it is built.
+        assert_eq!(
+            paths,
+            [
+                "Mangue Pluck.component/Contents/MacOS/Mangue Pluck",
+                "Mangue Pluck.component/Contents/PkgInfo",
+            ]
+        );
+        assert!(plan.sign);
+        assert_eq!(plan.signed, plan.root);
+        for os in [Os::Windows, Os::Linux] {
+            let error = super::plan(&spec(os)).unwrap_err();
+            assert_eq!(error.exit_code(), 2);
+            assert!(error.message().contains("macOS"), "{error}");
+        }
     }
 }

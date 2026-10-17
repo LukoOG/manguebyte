@@ -169,11 +169,14 @@ pub enum Format {
     /// LV2, the open plugin standard of Linux audio. Bundled only when asked
     /// for: see [`Format::DEFAULT`].
     Lv2,
+    /// An Audio Unit (version 2), Apple's format, on macOS only. Bundled
+    /// only when asked for, like LV2.
+    Au,
 }
 
 impl Format {
     /// Every format, in the order they are bundled.
-    pub const ALL: [Self; 3] = [Self::Clap, Self::Vst3, Self::Lv2];
+    pub const ALL: [Self; 4] = [Self::Clap, Self::Vst3, Self::Lv2, Self::Au];
 
     /// The formats a command works with when none is named: CLAP and VST 3.
     /// An LV2 bundle needs the plugin to export itself as one (with
@@ -187,6 +190,7 @@ impl Format {
             Self::Clap => "clap",
             Self::Vst3 => "vst3",
             Self::Lv2 => "lv2",
+            Self::Au => "component",
         }
     }
 
@@ -196,16 +200,18 @@ impl Format {
             Self::Clap => "CLAP",
             Self::Vst3 => "VST 3",
             Self::Lv2 => "LV2",
+            Self::Au => "AU",
         }
     }
 
-    /// Reads a format as written on the command line: `clap`, `vst3` or
-    /// `lv2`, in any case.
+    /// Reads a format as written on the command line: `clap`, `vst3`, `lv2`
+    /// or `au`, in any case.
     pub fn from_name(name: &str) -> Option<Self> {
         match name.to_ascii_lowercase().as_str() {
             "clap" => Some(Self::Clap),
             "vst3" => Some(Self::Vst3),
             "lv2" => Some(Self::Lv2),
+            "au" => Some(Self::Au),
             _ => None,
         }
     }
@@ -287,6 +293,9 @@ mod tests {
         assert_eq!(Format::from_name("Lv2"), Some(Format::Lv2));
         assert_eq!(Format::Lv2.extension(), "lv2");
         assert!(!Format::DEFAULT.contains(&Format::Lv2));
+        assert_eq!(Format::from_name("AU"), Some(Format::Au));
+        assert_eq!(Format::Au.extension(), "component");
+        assert!(!Format::DEFAULT.contains(&Format::Au));
     }
 
     #[test]

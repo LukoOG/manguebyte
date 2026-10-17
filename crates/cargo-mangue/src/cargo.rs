@@ -727,6 +727,35 @@ impl Cargo {
         features: &[String],
         args: &[OsString],
     ) -> Result<(), Error> {
+        self.run_helper(
+            helper_manifest,
+            target_directory,
+            request,
+            features,
+            args,
+            "The program that writes the LV2 bundle's Turtle files did not build or did not \
+             finish; its messages are above. The plugin must invoke export_lv2! (from \
+             manguebyte::lv2 or manguebyte_lv2) at the root of its crate, and the crate must \
+             have the rlib type as well as cdylib.",
+        )
+    }
+
+    /// Builds and runs a program that depends on the plugin's crate, as
+    /// [`run_lv2_helper`](Self::run_lv2_helper) does, failing with
+    /// `failure` if it does not build or does not finish.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`Failure::Build`](crate::Failure::Build) and `failure`.
+    pub fn run_helper(
+        &self,
+        helper_manifest: &Path,
+        target_directory: &Path,
+        request: &BuildRequest,
+        features: &[String],
+        args: &[OsString],
+        failure: &str,
+    ) -> Result<(), Error> {
         let mut command = Command::new(&self.program);
         command
             .arg("run")
@@ -758,12 +787,7 @@ impl Cargo {
         if status.success() {
             Ok(())
         } else {
-            Err(Error::build(
-                "The program that writes the LV2 bundle's Turtle files did not build or did not \
-                 finish; its messages are above. The plugin must invoke export_lv2! (from \
-                 manguebyte::lv2 or manguebyte_lv2) at the root of its crate, and the crate must \
-                 have the rlib type as well as cdylib.",
-            ))
+            Err(Error::build(failure))
         }
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "mangue-pluck"
-description = "An example CLAP and VST 3 instrument built with Manguebyte: a polyphonic plucked synth."
+description = "An example CLAP, VST 3, LV2 and Audio Unit instrument built with Manguebyte: a polyphonic plucked synth."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -26,6 +26,11 @@ manguebyte = { path = "../../crates/manguebyte", default-features = false, featu
 # editors in one process (ADR 0007, decision 7).
 manguebyte-gui.workspace = true
 manguebyte-ui.workspace = true
+# The Audio Unit wrapper, used directly rather than through the facade,
+# whose feature for it comes with its documentation. It exports a unit
+# only on macOS; elsewhere it adds the function that writes the unit's
+# Info.plist, which `cargo mangue bundle --format au` calls.
+manguebyte-au.workspace = true
 
 [dev-dependencies]
 # The editor's test opens it headless, through the glue's test hook.
