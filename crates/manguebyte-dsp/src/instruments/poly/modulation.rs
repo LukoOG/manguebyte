@@ -318,6 +318,9 @@ mod tests {
 
     const RATE: f64 = 48_000.0;
 
+    /// How far a sine of 1 Hz can move in a sample at [`RATE`].
+    const TAU_STEP: f64 = core::f64::consts::TAU / RATE;
+
     fn run(envelope: &mut Envelope, params: &EnvParams, samples: usize) -> Vec<f64> {
         (0..samples)
             .map(|_| envelope.next(params, RATE, Floor::NONE))
@@ -411,6 +414,30 @@ mod tests {
         let early = values[..2_400].iter().fold(0.0f64, |m, v| m.max(v.abs()));
         let late = values[24_000..].iter().fold(0.0f64, |m, v| m.max(v.abs()));
         assert!(early <= 0.1 && late > 0.999, "{early} {late}");
+        // Struck again, a retriggered LFO starts its cycle again; a free one
+        // runs on, unless the voice is new.
+        for retrigger in [true, false] {
+            let params = LfoParams {
+                retrigger,
+                phase: 0.25,
+                ..LfoParams::new(LfoShape::Sine, 3.0)
+            };
+            let mut lfo = Lfo::new();
+            lfo.strike(&params, true, Noise::for_note(60, 1.0, 1), RATE);
+            assert!((lfo.next(&params, 3.0, RATE) - 1.0).abs() < 1e-12);
+            for _ in 0..1_000 {
+                lfo.next(&params, 3.0, RATE);
+            }
+            let before = lfo.next(&params, 3.0, RATE);
+            lfo.strike(&params, false, Noise::for_note(62, 1.0, 1), RATE);
+            let after = lfo.next(&params, 3.0, RATE);
+            if retrigger {
+                assert!((after - 1.0).abs() < 1e-12, "{after}");
+            } else {
+                let step = TAU_STEP * 3.0;
+                assert!((after - before).abs() < step, "{before} then {after}");
+            }
+        }
         // A sample-and-hold draws a new level every cycle, repeatably.
         let params = LfoParams::new(LfoShape::SampleAndHold, 10.0);
         let draw = || {
