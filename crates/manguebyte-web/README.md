@@ -7,9 +7,11 @@ instrument, or one of `manguebyte-dsp`'s: plucked strings, FM, a tonewheel
 organ through its rotating speaker, an 808-style drum machine, the 808's
 kick bass, an acid bass) through a chain of [effects](#effects), then gain
 and pan, into a [master bus](#the-master-bus) with a shared reverb, a glue
-compressor and a true-peak limiter. Events are 32-byte records that land on
-the exact frame they name, and the output is the same, bit for bit,
-whatever the size of the quanta it is rendered in.
+compressor and a true-peak limiter. Every kind and preset plays at one
+[loudness](#loudness), -24 LUFS on a standard phrase, and a sampler part
+measures each instrument as it loads to play it there. Events are 32-byte
+records that land on the exact frame they name, and the output is the
+same, bit for bit, whatever the size of the quanta it is rendered in.
 
 Built for `wasm32-unknown-unknown`, the crate is a WebAssembly module with
 plain `extern "C"` exports (`src/ffi.rs`) and no imports. `js/worklet.js` is
@@ -537,6 +539,13 @@ The synth now takes its accent as an argument of the note
 (`Synth::note_on_accented`) instead of a flag set on every voice
 beforehand, which sounds the same.
 
+[Loudness](#loudness) keeps it at 2 as well: it changes how loud the
+parts are, not what any record or export means. `sampler.normalize` is a
+new parameter id; the export `mb_sfz_measure` and its status 1
+(`MEASURING`) are new, and `js/worklet.js` looks for the export by name,
+finishing a load in one step without it; `mb_sfz_finish` still finishes a
+load in one call, measuring the instrument there if no step did.
+
 ## Instruments
 
 A part plays one of ten kinds of instrument, named by a code in the
@@ -590,16 +599,14 @@ on, and the parameter JSON and `paramValue` say where they are. So a knob
 set on the same frame after the preset sticks, and one set before it is
 moved. The JSON's defaults are the first preset's positions.
 
-**Levels.** One note at full velocity, accented, stays under the master
-limiter's ceiling on every kind: the dsp presets' levels, set for whole
-phrases, are trimmed by `PLUCKED_LEVEL_DB` (-6 dB), `FM_LEVEL_DB` (-3 dB)
-and `ANALOG_KIT_LEVEL_DB` (+2 dB, the machine's drums as loud as the
-synthesized kit's). Measured at full velocity: a nylon guitar note peaks
-at -8.8 dB (-5.6 accented), the finger bass at -7.4 (-4.3), the electric
-piano at -12.8 (-10.3), the FM bass at -8.7 (-5.6), a five-note jazz organ
-chord at -7.6 (-5.6), the 808 kick at -6.0 (-1.8), the kick bass at -6.9
-(-3.9), the acid at -8.1 (-3.7). Chords of six strings at full velocity
-reach the limiter, which turns them down gently.
+**Levels.** Every kind and every preset plays its standard phrase at the
+same loudness, -24 LUFS ([Loudness](#loudness)), and one note at full
+velocity, accented, stays under the master limiter's ceiling on every
+kind: the loudest, the drum machine's snare, peaks at -0.6 dBTP. The dsp
+presets' levels are trimmed by `PLUCKED_LEVEL_DB` (-6 dB), `FM_LEVEL_DB`
+(-3 dB) and `ANALOG_KIT_LEVEL_DB` (+2 dB), and each preset's make-up gain
+comes on top. Chords of six strings at full velocity reach the limiter,
+which turns them down gently.
 
 ### Accents, velocity and slides
 
@@ -832,6 +839,7 @@ Every preset slides in 0.06 s; a preset leaves the velocity alone.
 | `kit.decay` | x | 0.25 to 4 | 1 | log |
 | `kick.level`, `snare.level`... `guitar_tap.level` | | 0 to 1 | 0.8 | linear |
 | `sampler.interpolation` | | 0 cubic, 1 sinc | 0 | choice |
+| `sampler.normalize` (sampler, sampler kit) | | 0 off: the samples as they are; 1 on: at the make-up measured as the instrument loaded ([Loudness](#loudness)) | 1 | switch, 20 ms |
 
 ### Demo
 
@@ -851,6 +859,7 @@ is silent until it has one:
 await engine.createPart(4, 'sampler');
 const { regions, warnings } = await engine.loadSfz(4, 'samples/piano.grand/voice.sfz');
 engine.noteOn(4, 60, 0.8, context.currentTime + 0.05);
+engine.setParam(4, 'sampler.normalize', 0); // as recorded, off the loudness target
 ```
 
 `loadSfz` resolves once the part plays the instrument: a note scheduled
@@ -866,7 +875,10 @@ installs the result.
   cubic, or a windowed sinc with `sampler.interpolation` set to 1 (cleaner
   far up the spectrum, about 3.6 times the cost; see below).
 - A sample that peaks at full scale peaks at -6 dB (`SAMPLER_LEVEL_DB`) at
-  full velocity, which follows the SFZ square law (`amp_veltrack=100`).
+  full velocity, which follows the SFZ square law (`amp_veltrack=100`),
+  before the make-up gain the part's loudness normalisation measured when
+  the instrument loaded, which brings it to the loudness target
+  ([Sampler instruments](#sampler-instruments)).
   An accented note is 3 dB louder (`SAMPLER_ACCENT_DB`), and only that
   note: an earlier one on the same key, still ringing, is not.
 - Note off releases a note as its region says; one-shots ignore it. Choke
@@ -894,7 +906,9 @@ velocity, with its accent, through the part's chain, gain and pan. Until
 it has an instrument it plays every drum that way, so a kit sounds while
 its samples load. It has the kit's parameters (`kit.tune`, `kit.decay`,
 `guitar_tap.level` and the rest) for those drums, beside
-`sampler.interpolation`. Choke stops both halves; all notes off releases
+`sampler.interpolation` and `sampler.normalize`, whose make-up is the
+sampled half's: the borrowed drums keep the drums' own, as in a `drums`
+part. Choke stops both halves; all notes off releases
 the samples as above and fades the synthesized drums over 50 ms
 (`DAMP_SECONDS`). A closed hat chokes an open hat of its own half: a
 sampled one through the SFZ text's `group` and `off_by`, a synthesized one
@@ -925,11 +939,15 @@ relative to the SFZ file, and transfers each to the worklet as it arrives.
 Decoding is the costly part, so the worklet keeps the files in a queue and,
 after each render quantum, decodes up to 64 KiB of them
 (`LOAD_BYTES_PER_QUANTUM`, always at least one file). When the last is in,
-it makes the instrument and hands it to the part through the sampler's
+it makes the instrument and, if the part normalises, measures it for its
+[loudness](#sampler-instruments): one quantum makes the instrument and the
+measurement, and each one after renders 8 192 frames of the phrase
+(`MEASURE_FRAMES_PER_QUANTUM`, `mb_sfz_measure`), 28 quanta in all, 75 ms
+at 48 kHz. Then it hands the instrument to the part through the sampler's
 lock-free single-producer single-consumer loader, which the sampler reads
 when it next renders; the instrument it replaces goes back the same way
 and is freed by `mb_collect`, which the worklet calls between quanta. The
-render call never allocates, frees or waits.
+render call never allocates, frees, waits or measures.
 
 The alternative was to decode on the main thread, in a second instance of
 the module, and send the finished instrument over. But a worklet's
@@ -952,6 +970,173 @@ millisecond, against 2.7 ms for a quantum at 48 kHz. Making the first
 engine makes the sinc table every instrument shares, about 11 ms, once.
 Eight piano voices took 0.09 ms a quantum with cubic interpolation and
 0.32 ms with the sinc; 32 voices 0.21 ms with cubic.
+
+## Loudness
+
+Every kind of instrument and every preset plays equally loud: its
+standard phrase comes out of a part at **-24 LUFS** integrated loudness
+(ITU-R BS.1770-4, `LOUDNESS_TARGET_LUFS`), within 1 LU
+(`LOUDNESS_TOLERANCE_LU`). A sampler part brings each instrument there as
+it loads.
+
+### The target
+
+-24 LUFS is the loudest target at which every kind's loudest single
+note, accented at full velocity, still stays under the master limiter's
+ceiling (-0.3 dBTP), so that the limiter leaves one note alone, as the
+engine always promised. The drum machine sets it: its velocity and accent
+span 9 dB, so its snare struck that hard is 23.4 dB above the loudness of
+its groove. At -18 LUFS, the first figure considered, that snare would
+peak at +5.4 dBTP and the synthesized kick and snare at +0.8, every
+accented drum hit going into the limiter. -24 sits by the -23 LUFS that
+EBU R 128 asks of a whole programme (and the -24 of ATSC A/85), and where
+most of the engine's melodic parts already were (the synth and the nylon
+guitar at -22.6); a few parts together come to about -18 LUFS, and
+`master.gain` takes a set further, the limiter catching what it must.
+
+### The method
+
+Each kind is measured on a standard phrase suited to it (`Phrase`, two
+bars at 120 bpm, every note at velocity 0.8, none accented, measured for
+4.5 s from the first note):
+
+| Phrase | Notes | Kinds and presets |
+|---|---|---|
+| `melody` | C4 E4 G4 A4 G4, E4 D4 C4 D4 E4 C4, in quarters and eighths held for nine tenths of their length | synth, nylon and steel guitar, tubular bell, sampler |
+| `bass` | the melody two octaves down, around C2 | finger and slap bass, FM bass, kick bass, the three acid presets |
+| `chord` | C4 E4 G4 for a bar, A3 C4 E4 for a bar, held for nine tenths | electric piano, the four organ presets |
+| `groove` | the closed hat on every eighth, the kick on beats 1 and 3, the snare on 2 and 4 | drums, drum machine, sampler kit |
+
+The part has a neutral chain (no effect, gain 0 dB, centred, no send),
+and the master limiter is kept out of it: the master gain is turned down
+20 dB, the readings are put back up by as much, and every measurement
+checks that the limiter did nothing. The meter is `manguebyte-analysis`'s
+`LoudnessMeter`, on the part's two channels. Each kind and preset then
+plays at a make-up gain, the target minus what it measured, on top of
+what its voices put out: a pure gain, so velocity and accents keep their
+dynamics exactly (`tests/voices.rs` still measures them). A preset's
+make-up comes with its settings, on the frame the preset lands on: the
+presets being as loud as each other, a note sounding through a change of
+preset keeps about its level. The synthesized drums carry theirs wherever
+they play, so the drums a sampler kit or the drum machine borrows match a
+`drums` part. The table is `InstrumentKind::calibration` (one
+`Calibration` per preset, in the order of the preset's values, with
+`InstrumentKind::preset_param` naming the parameter); only each kind's
+own knobs at their defaults are calibrated, so a knob that changes the
+loudness (`synth.wave`, the drawbars, `acid.drive`) still does.
+
+### Measured
+
+`cargo test -p manguebyte-web --test loudness -- --nocapture` prints
+this. Before is each kind as it played until now; the peak is the true
+peak, after calibration, of the loudest single note of the phrase's keys
+(and every drum of the map for a kit), accented at full velocity.
+
+| Kind | Preset | Phrase | Before, LUFS | Make-up, dB | After, LUFS | Accented peak, dBTP |
+|---|---|---|---|---|---|---|
+| `synth` | | melody | -22.57 | -1.43 | -24.00 | -6.5 |
+| `drums` | | groove | -19.24 | -4.76 | -24.00 | -5.2 |
+| `plucked` | nylon guitar | melody | -22.58 | -1.42 | -24.00 | -8.3 |
+| `plucked` | steel guitar | melody | -32.96 | +8.96 | -24.00 | -5.4 |
+| `plucked` | finger bass | bass | -21.09 | -2.91 | -24.00 | -6.9 |
+| `plucked` | slap bass | bass | -24.35 | +0.35 | -24.00 | -6.6 |
+| `fm` | electric piano | chord | -25.06 | +1.06 | -24.00 | -10.3 |
+| `fm` | tubular bell | melody | -23.32 | -0.68 | -24.00 | -13.9 |
+| `fm` | FM bass | bass | -17.74 | -6.26 | -24.00 | -11.9 |
+| `organ` | jazz | chord | -22.58 | -1.42 | -24.00 | -16.9 |
+| `organ` | gospel | chord | -21.65 | -2.35 | -24.00 | -16.1 |
+| `organ` | full | chord | -20.33 | -3.67 | -24.00 | -16.8 |
+| `organ` | ballad | chord | -21.93 | -2.07 | -24.00 | -19.0 |
+| `analog_kit` | | groove | -24.26 | +0.26 | -24.00 | -0.6 |
+| `kick_bass` | | bass | -14.09 | -9.91 | -24.00 | -13.8 |
+| `acid` | classic | bass | -20.30 | -3.70 | -24.00 | -7.4 |
+| `acid` | squelch | bass | -22.00 | -2.00 | -24.00 | -6.3 |
+| `acid` | square | bass | -18.34 | -5.66 | -24.00 | -10.5 |
+| `sampler` | a recorded fixture at -6 dBFS | melody | -22.80 | -1.20, measured | -24.00 | -10.6 |
+| `sampler_kit` | a recorded fixture kit | groove | -27.12 | +3.12, measured | -24.00 | -5.3 |
+
+The worst case is the drum machine's snare at -0.6 dBTP: no single note
+of any kind reaches the limiter. The spread before was 18.9 LU, from the
+steel guitar 9 LU under the target to the kick bass 10 over.
+
+### The table test
+
+`tests/loudness.rs` plays every row of the table on its phrase and fails
+for one more than 1 LU from the target, saying what its make-up should
+be; it measures the accented peaks above and fails if one reaches the
+ceiling. A new kind does not compile until `calibration` and
+`preset_param` have their arms; a preset added to a kind's list of names
+does not compile until its row is there (the rows are arrays as long as
+the lists); and a unit test checks each row against the instrument's
+preset parameter, any whose id ends in `.preset`, by count and by name.
+To calibrate a new row, give it a make-up of 0, run the command above,
+and put in the make-up the failure asks for.
+
+### Sampler instruments
+
+Recorded instruments come at any level, so a sampler part measures each
+one when it loads, and plays it at the make-up that brings it to the
+target (`Engine::sampler_make_up_db` says what that was). The instrument
+plays its kind's phrase offline, into a scratch buffer, through
+`SamplerVoice`s of the same sampler code the part plays it with, and the
+same meter reads it:
+
+- a melodic instrument plays the melody, moved by whole octaves to where
+  it has the most of its notes, each note it has no region for played on
+  the nearest key it has;
+- a sampler kit plays the groove on the drums of it that it has (the
+  drums it borrows from the synthesized kit are calibrated already); a
+  kit with none of them, a pandeiro, say, plays its own keys in turn, one
+  on each eighth note of the groove.
+
+Rendering the phrase was chosen over measuring the samples, weighted by
+the keys they cover, because it hears what sets the level of what is
+played and the samples alone do not say: the regions' `volume` and
+`amplitude`, their velocity tracking at velocity 0.8, envelopes, loops,
+layered regions and how the regions share the keyboard; and it costs
+about the same, a pass over the sound. The voices see one note each, so
+choke groups between notes and `polyphony` limits are left out of the
+measurement, which a phrase of single notes or short drums barely
+touches. The make-up is held back where the phrase's loudest frame,
+struck at full velocity and accented (3.9 dB more under the square law,
+and the accent's 3 dB), would pass -1 dBFS (`NORMALIZE_PEAK_DB`), so a
+very spiky instrument plays under the target rather than into the
+limiter, and it stays within 24 dB either way (`NORMALIZE_RANGE_DB`).
+Two fixture instruments recorded 12 dB apart come out at -24.00 LUFS
+both, melodic or a kit (`tests/loudness.rs`).
+
+It is `sampler.normalize`, on by default. Off, the part plays the samples
+as they are, at `SAMPLER_LEVEL_DB`; switched while notes sound, the level
+glides over 20 ms, at once in silence, the same in every quantum. The
+make-up is a part gain on the sampled half, so an instrument loaded while
+the notes of the one it replaces ring on brings those notes to its
+make-up too, over 20 ms. An instrument loaded while normalisation is off
+is not measured, and plays as recorded even if it is switched on later;
+`Engine::load_instrument_unmeasured` loads one as it is whatever the
+switch says, for instruments whose levels are set already.
+
+The measurement renders 4.5 s of sound and allocates, so it is never the
+render call's work (`tests/realtime.rs` proves it): natively
+`Engine::load_instrument` does it at once, and in a browser the worklet
+does it between render quanta, a step at a time (see
+[How an instrument is loaded](#how-an-instrument-is-loaded)). In a debug
+build in Node.js, a step took 8 to 9 ms against 10 to 13 ms for decoding
+a 64 KiB file, which is what the steps were sized to.
+
+### For Aratu
+
+The per-voice gains Aratu keeps on its side can be removed: every kind
+and preset now comes out at the same loudness, and its recorded
+instruments are measured and brought there as they load. Keep a gain
+only where a voice should sit above or below the others in the mix, and
+put it in the part's `gain`. The gains measured until now matched peaks,
+not loudness: an organ, whose tones are close to sines, peaks some 10 dB
+under a plucked string or a drum of the same loudness, which is why it
+seemed to need 3.33 times its level, and by BS.1770 it was already as
+loud as the synth. Parts that were loud before are quieter now (the
+drums by 4.8 dB, the FM bass by 6.3, the kick bass by 9.9), so a set as a
+whole may want `master.gain` raised a few decibels; the limiter keeps it
+under its ceiling.
 
 ## Licence
 

@@ -559,6 +559,35 @@ display, and no editor has been opened inside a real host yet.
   `DelayTaps`, `ReverbDecay`), from the settings the parameters hold; the
   axes are as they were, and the reverb's tail is drawn at 1 kHz with its
   damping.
+- Every kind of instrument and every preset plays at one loudness: its
+  standard phrase (`Phrase`: a two-bar melody, a bass line, two chords or
+  a groove, at velocity 0.8) comes out of a part at -24 LUFS
+  (`LOUDNESS_TARGET_LUFS`, ITU-R BS.1770-4, measured with
+  `manguebyte-analysis`), within 1 LU, by a make-up gain per kind and
+  preset (`InstrumentKind::calibration`, `preset_param`). Before, they
+  spread over 18.9 LU, the steel guitar 9 LU under the target and the
+  kick bass 10 over. The make-ups are pure gains, so velocity and accents
+  keep their dynamics, and -24 is the loudest target at which no single
+  note of any kind, accented at full velocity, reaches the limiter (the
+  drum machine's snare peaks at -0.6 dBTP). Levels change: the drums play
+  4.8 dB lower, the kick bass 9.9, the steel guitar 9 dB higher. A kind or
+  a preset without its row does not compile, and `tests/loudness.rs`
+  fails for a row off the target, saying what its make-up should be.
+- Sampler parts measure each instrument as it loads, playing their kind's
+  phrase offline through the sampler's voices (the melody in the
+  instrument's range; for a sampler kit the groove on its own drums), and
+  play it at the make-up that brings it to the target
+  (`Engine::sampler_make_up_db`), held back where its peaks would pass
+  -1 dBFS at full velocity, accented (`NORMALIZE_PEAK_DB`), within 24 dB
+  (`NORMALIZE_RANGE_DB`): two instruments recorded 12 dB apart land on
+  -24.00 LUFS both. `sampler.normalize` (on by default) switches it, the
+  level gliding over 20 ms while notes sound;
+  `Engine::load_instrument_unmeasured` loads an instrument as it is. The
+  measurement is a control call's: `Engine::load_instrument` makes it at
+  once, and `js/worklet.js` between render quanta through the new export
+  `mb_sfz_measure`, 8 192 frames a quantum (`PROBE_STEP_FRAMES`), 28
+  quanta for a load. `manguebyte-analysis` is now a dependency of
+  `manguebyte-web`. The ABI version stays 2.
 
 ### Hosting
 
