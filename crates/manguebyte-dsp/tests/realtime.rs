@@ -974,7 +974,7 @@ fn shape_notes<V: Voice>(synth: &mut Synth<V>, round: u8) {
 
 #[test]
 fn the_modelled_acoustic_instruments_do_not_use_the_heap() {
-    use manguebyte_dsp::instruments::{MalletParams, MalletVoice};
+    use manguebyte_dsp::instruments::{BowedParams, BowedString, MalletParams, MalletVoice};
 
     let mallets = [
         MalletParams::marimba(),
@@ -991,6 +991,28 @@ fn the_modelled_acoustic_instruments_do_not_use_the_heap() {
         Synth::with_voices(4, || MalletVoice::new(MalletParams::marimba())),
         |synth, round| {
             let params = mallets[usize::from(round) % mallets.len()];
+            synth
+                .voices_mut()
+                .for_each(|voice| voice.set_params(params));
+            shape_notes(synth, round);
+        },
+    );
+
+    let strings = [
+        BowedParams::violin(),
+        BowedParams::viola(),
+        BowedParams::cello(),
+        BowedParams::contrabass(),
+        BowedParams::string_ensemble(),
+        BowedParams::violin_pizzicato(),
+        BowedParams::cello_pizzicato(),
+        BowedParams::contrabass_pizzicato(),
+    ];
+    flood(
+        "BowedString",
+        Synth::with_voices(3, || BowedString::new(BowedParams::violin())),
+        |synth, round| {
+            let params = strings[usize::from(round) % strings.len()];
             synth
                 .voices_mut()
                 .for_each(|voice| voice.set_params(params));
