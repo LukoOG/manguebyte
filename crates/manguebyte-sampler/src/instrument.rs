@@ -236,6 +236,54 @@ impl Zone {
     pub(crate) fn accepts_random(&self, random: f64) -> bool {
         random >= self.lorand && (random < self.hirand || self.hirand >= 1.0)
     }
+
+    /// The sums of the squares of the first `frames` frames a note reads
+    /// from `sample`, its sample, on the left and on the right (the same
+    /// for a mono sample): from the offset, round the loop if it has one,
+    /// to the end. Reads each frame twice at most, however often the loop
+    /// goes round.
+    fn squares(&self, sample: &SampleData, frames: u64) -> (f64, f64) {
+        let sums = |from: u64, count: u64| -> (f64, f64) {
+            let range = |channel: &[f32]| -> f64 {
+                let (Ok(start), Ok(count)) = (usize::try_from(from), usize::try_from(count)) else {
+                    return 0.0;
+                };
+                channel
+                    .get(start..)
+                    .unwrap_or_default()
+                    .iter()
+                    .take(count)
+                    .map(|&sample| f64::from(sample) * f64::from(sample))
+                    .sum()
+            };
+            let left = range(&sample.left);
+            let right = sample.right.as_deref().map_or(left, range);
+            (left, right)
+        };
+        let Some(lp) = &self.lp else {
+            let count = (self.end + 1).saturating_sub(self.offset).min(frames);
+            return sums(self.offset, count);
+        };
+        // Where `Player::start` puts the first frame read: an offset past
+        // the loop goes round it.
+        let first = if self.offset > lp.end {
+            lp.start + (self.offset - lp.start) % lp.len()
+        } else {
+            self.offset
+        };
+        let before = (lp.end + 1 - first).min(frames);
+        let (mut left, mut right) = sums(first, before);
+        let rest = frames - before;
+        let rounds = rest / lp.len();
+        let part = rest % lp.len();
+        if rounds > 0 {
+            let (whole_left, whole_right) = sums(lp.start, lp.len());
+            left += whole_left * rounds as f64;
+            right += whole_right * rounds as f64;
+        }
+        let (part_left, part_right) = sums(lp.start, part);
+        (left + part_left, right + part_right)
+    }
 }
 
 /// An SFZ instrument with every sample decoded and every region resolved,
@@ -252,6 +300,15 @@ impl Zone {
 /// keeps one sequence; the audio thread only ever loads and stores them,
 /// which never waits.
 ///
+/// Cloning is cheap: the clone shares the decoded samples and the resolved
+/// regions, which never change once loaded, and copies only the state kept
+/// between notes, from which it then goes its own way. So one instrument
+/// can play in a [`Sampler`](crate::Sampler) while a clone of it is played
+/// elsewhere, measured say, without either one's notes moving the other's
+/// round robins; the samples are freed with the last of them. Like every
+/// drop of an instrument, dropping a clone may free, so it belongs off the
+/// audio thread.
+///
 /// ```
 /// use manguebyte_sampler::{Instrument, MemorySource};
 ///
@@ -261,22 +318,48 @@ impl Zone {
 /// )?;
 /// assert_eq!(instrument.num_regions(), 1);
 /// assert!(instrument.warnings().is_empty());
+/// let clone = instrument.clone();
+/// assert_eq!(clone.sample_bytes(), instrument.sample_bytes());
 /// # Ok::<(), manguebyte_sampler::InstrumentError>(())
 /// ```
 pub struct Instrument {
-    pub(crate) zones: Vec<Zone>,
-    pub(crate) samples: Vec<SampleData>,
+    pub(crate) zones: Arc<[Zone]>,
+    pub(crate) samples: Arc<[SampleData]>,
     /// Per key, the zones that start on a key going down.
-    pub(crate) attack_by_key: Vec<Vec<u32>>,
+    pub(crate) attack_by_key: Arc<[Vec<u32>]>,
     /// Per key, the zones that start on a key coming up.
-    pub(crate) release_by_key: Vec<Vec<u32>>,
+    pub(crate) release_by_key: Arc<[Vec<u32>]>,
     pub(crate) sequence: Vec<AtomicU32>,
     random: AtomicU64,
     seed: u64,
     pub(crate) note_shift: i32,
     /// Shared by every instrument: see [`prepare_tables`](crate::prepare_tables).
     pub(crate) sinc: Arc<SincTable>,
-    warnings: Vec<Warning>,
+    warnings: Arc<[Warning]>,
+}
+
+impl Clone for Instrument {
+    /// The same instrument, its samples and regions shared, its round
+    /// robins and random numbers where this one's are, and from then on its
+    /// own. Allocates (the round-robin counters).
+    fn clone(&self) -> Self {
+        Self {
+            zones: Arc::clone(&self.zones),
+            samples: Arc::clone(&self.samples),
+            attack_by_key: Arc::clone(&self.attack_by_key),
+            release_by_key: Arc::clone(&self.release_by_key),
+            sequence: self
+                .sequence
+                .iter()
+                .map(|counter| AtomicU32::new(counter.load(Ordering::Relaxed)))
+                .collect(),
+            random: AtomicU64::new(self.random.load(Ordering::Relaxed)),
+            seed: self.seed,
+            note_shift: self.note_shift,
+            sinc: Arc::clone(&self.sinc),
+            warnings: Arc::clone(&self.warnings),
+        }
+    }
 }
 
 impl fmt::Debug for Instrument {
@@ -371,16 +454,16 @@ impl Instrument {
         }
         let sequence = zones.iter().map(|_| AtomicU32::new(0)).collect();
         Self {
-            zones,
-            samples,
-            attack_by_key,
-            release_by_key,
+            zones: zones.into(),
+            samples: samples.into(),
+            attack_by_key: attack_by_key.into(),
+            release_by_key: release_by_key.into(),
             sequence,
             random: AtomicU64::new(DEFAULT_SEED),
             seed: DEFAULT_SEED,
             note_shift: sfz.control.note_shift(),
             sinc: SincTable::shared(),
-            warnings: sfz.warnings.clone(),
+            warnings: sfz.warnings.as_slice().into(),
         }
     }
 
@@ -410,6 +493,107 @@ impl Instrument {
             .ok()
             .and_then(|key| self.attack_by_key.get(key))
             .is_some_and(|zones| !zones.is_empty())
+    }
+
+    /// About how much sound a note plays: the energy of what a note on
+    /// `key` at `velocity` (0 to 1, as [`Sampler::note_on`](crate::Sampler::note_on)
+    /// takes it), its key held, reads from its samples in its first
+    /// `seconds`, at the gains it plays them with, both channels added, in
+    /// full-scale seconds: a sine at full scale in both channels for a second
+    /// is 1, so is 0 dBFS of it on one of them for two.
+    ///
+    /// Every region the note starts on channel 0 counts: layers add up, and
+    /// regions that take turns (`seq_length`) or share the random range
+    /// (`lorand`, `hirand`) count for the share of the notes they play.
+    /// Each is read as the note reads it: from its `offset`, at its pitch
+    /// for the key, round its loop, to its `end`, at its `volume`,
+    /// `amplitude`, velocity tracking and pan. Its envelope and a loop's
+    /// crossfade are left out, as is everything after the first `seconds`,
+    /// so this is an estimate, for a level to start from before the
+    /// instrument is played and measured. It reads each frame of a region
+    /// twice at most, however often a loop goes round, so it costs about a
+    /// pass over what the note plays in `seconds`, and does not allocate.
+    /// A velocity or a length of time that is not a positive number, or an
+    /// infinite length, gives 0.
+    ///
+    /// ```
+    /// use manguebyte_sampler::{Instrument, MemorySource};
+    ///
+    /// let instrument = Instrument::from_sfz("<region> sample=*sine", &mut MemorySource::new())?;
+    /// // A full-scale sine in both channels, middle C, for a second.
+    /// assert!((instrument.note_energy(60, 1.0, 1.0) - 1.0).abs() < 1e-3);
+    /// // At half the velocity, the square law: a quarter of the gain.
+    /// let half = instrument.note_energy(60, 0.5, 1.0);
+    /// assert!((half - (64.0f64 / 127.0).powi(4)).abs() < 1e-3);
+    /// # Ok::<(), manguebyte_sampler::InstrumentError>(())
+    /// ```
+    pub fn note_energy(&self, key: u8, velocity: f32, seconds: f64) -> f64 {
+        if velocity.is_nan() || velocity <= 0.0 || !seconds.is_finite() || seconds <= 0.0 {
+            return 0.0;
+        }
+        let velocity = (f64::from(velocity) * 127.0).round().clamp(1.0, 127.0) as u8;
+        let curve = (f64::from(velocity) / 127.0).powi(2);
+        let Some(key) = u8::try_from(i32::from(key.min(127)) + self.note_shift)
+            .ok()
+            .filter(|&key| key < 128)
+        else {
+            return 0.0;
+        };
+        let Some(zones) = self.attack_by_key.get(usize::from(key)) else {
+            return 0.0;
+        };
+        let mut energy = 0.0;
+        for &index in zones {
+            let Some(zone) = self.zones.get(index as usize) else {
+                continue;
+            };
+            // A legato region waits for another key to be down.
+            if zone.trigger == Trigger::Legato || !zone.accepts(0, key, velocity) {
+                continue;
+            }
+            let Some(sample) = zone.sample.and_then(|index| self.samples.get(index)) else {
+                continue;
+            };
+            let low = zone.lorand.clamp(0.0, 1.0);
+            let high = if zone.hirand >= 1.0 {
+                1.0
+            } else {
+                zone.hirand.clamp(0.0, 1.0)
+            };
+            let share = (high - low).max(0.0) / f64::from(zone.seq_length.max(1));
+            // The gain, velocity tracking and pan law of `Player`.
+            let velocity_gain = if zone.veltrack >= 0.0 {
+                1.0 - zone.veltrack + zone.veltrack * curve
+            } else {
+                1.0 + zone.veltrack * curve
+            };
+            let gain = zone.gain * velocity_gain;
+            let pan = zone.pan.clamp(-1.0, 1.0);
+            let (left_gain, right_gain) = if sample.right.is_some() {
+                ((1.0 - pan).min(1.0), (1.0 + pan).min(1.0))
+            } else {
+                let angle = (pan + 1.0) * core::f64::consts::FRAC_PI_4;
+                (
+                    core::f64::consts::SQRT_2 * angle.cos(),
+                    core::f64::consts::SQRT_2 * angle.sin(),
+                )
+            };
+            let cents = (f64::from(key) - zone.keycenter) * zone.keytrack + zone.detune;
+            let speed = 2f64.powf(cents / 1_200.0).clamp(1.0 / 65_536.0, 256.0);
+            // Frames of the sample a second of the note reads.
+            let rate = sample.rate * speed;
+            let frames = (seconds * rate).round();
+            if !rate.is_finite() || rate <= 0.0 || frames.is_nan() || frames < 1.0 {
+                continue;
+            }
+            let (left, right) = zone.squares(sample, frames as u64);
+            energy += share
+                * gain
+                * gain
+                * (left_gain * left_gain * left + right_gain * right_gain * right)
+                / rate;
+        }
+        energy
     }
 
     /// How many regions it has.
@@ -1031,5 +1215,172 @@ mod tests {
         assert_eq!(instrument.seed(), 7);
         assert_ne!(instrument.next_random(), first[0]);
         assert!(!instrument.take_turn(99));
+    }
+
+    /// A WAV file of `channels` channels, each holding `samples`, at 1 kHz.
+    fn plain_wav(samples: &[f32], channels: usize) -> Vec<u8> {
+        let mut buffer = manguebyte_core::AudioBuffer::<f32>::new(channels, samples.len());
+        for channel in 0..channels {
+            buffer.channel_mut(channel).copy_from_slice(samples);
+        }
+        let mut bytes = Vec::new();
+        manguebyte_formats::wav::write(
+            &mut bytes,
+            &buffer,
+            1_000,
+            manguebyte_formats::wav::WavFormat::Float32,
+        )
+        .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn a_notes_energy_is_what_it_reads_at_its_gains() {
+        // A second of 0.5 at 1 kHz: 0.25 a frame, in both channels of a mono
+        // sample at the centre, 0.5 full-scale seconds in all.
+        let half = vec![0.5f32; 1_000];
+        let mut source = MemorySource::new()
+            .with("mono.wav", plain_wav(&half, 1))
+            .with("stereo.wav", plain_wav(&half, 2));
+        let mut energy = |text: &str, key: u8, velocity: f32, seconds: f64| {
+            Instrument::from_sfz(text, &mut source)
+                .unwrap()
+                .note_energy(key, velocity, seconds)
+        };
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        let mono = "<region> sample=mono.wav pitch_keycenter=60";
+        assert!(close(energy(mono, 60, 1.0, 10.0), 0.5), "to its end");
+        assert!(close(energy(mono, 60, 1.0, 0.25), 0.125), "for a quarter");
+        // An octave up reads the second in half the time.
+        assert!(close(energy(mono, 72, 1.0, 10.0), 0.25));
+        assert!(close(
+            energy(
+                "<control> note_offset=12 <region> sample=mono.wav pitch_keycenter=72",
+                60,
+                1.0,
+                10.0
+            ),
+            0.5
+        ));
+        // Gains: volume, amplitude, velocity tracking, the pan of a stereo
+        // sample, which turns the other side down.
+        let quarter = energy("<region> sample=mono.wav volume=-6.0206", 60, 1.0, 10.0);
+        assert!((quarter - 0.125).abs() < 1e-6, "{quarter}");
+        assert!(close(
+            energy("<region> sample=mono.wav amplitude=50", 60, 1.0, 10.0),
+            0.125
+        ));
+        let soft = (64.0f64 / 127.0).powi(4) * 0.5;
+        assert!(close(energy(mono, 60, 0.5, 10.0), soft));
+        assert!(close(
+            energy("<region> sample=mono.wav amp_veltrack=0", 60, 0.5, 10.0),
+            0.5
+        ));
+        assert!(close(
+            energy("<region> sample=stereo.wav", 60, 1.0, 10.0),
+            0.5
+        ));
+        assert!(close(
+            energy("<region> sample=stereo.wav pan=100", 60, 1.0, 10.0),
+            0.25
+        ));
+        // A mono sample panned keeps its power.
+        assert!(close(
+            energy("<region> sample=mono.wav pan=-60", 60, 1.0, 10.0),
+            0.5
+        ));
+        // Layers add up; turns and random ranges share.
+        let layers = "<region> sample=mono.wav <region> sample=mono.wav";
+        assert!(close(energy(layers, 60, 1.0, 10.0), 1.0));
+        let turns = "<region> sample=mono.wav seq_length=2 seq_position=1
+                     <region> sample=mono.wav seq_length=2 seq_position=2";
+        assert!(close(energy(turns, 60, 1.0, 10.0), 0.5));
+        let chance = "<region> sample=mono.wav hirand=0.25 <region> sample=mono.wav lorand=0.25";
+        assert!(close(energy(chance, 60, 1.0, 10.0), 0.5));
+        // What a note on its own does not start counts for nothing.
+        for silent in [
+            "<region> sample=mono.wav trigger=legato",
+            "<region> sample=mono.wav trigger=release",
+            "<region> sample=mono.wav lovel=127",
+            "<region> sample=mono.wav key=61",
+            "<region> sample=mono.wav end=-1",
+        ] {
+            assert_eq!(energy(silent, 60, 0.5, 10.0), 0.0, "{silent}");
+        }
+        assert_eq!(energy(mono, 60, 0.0, 10.0), 0.0);
+        assert_eq!(energy(mono, 60, f32::NAN, 10.0), 0.0);
+        assert_eq!(energy(mono, 60, 1.0, f64::INFINITY), 0.0);
+        assert_eq!(energy(mono, 60, 1.0, -1.0), 0.0);
+    }
+
+    #[test]
+    fn a_notes_energy_goes_round_its_loop() {
+        // 0.5 for 500 frames, then a loop of 100 frames of 1.
+        let mut frames = vec![0.5f32; 500];
+        frames.extend([1.0f32; 100]);
+        let mut source = MemorySource::new().with("loop.wav", plain_wav(&frames, 1));
+        let looped = Instrument::from_sfz(
+            "<region> sample=loop.wav loop_mode=loop_continuous loop_start=500 loop_end=599",
+            &mut source,
+        )
+        .unwrap();
+        // Half a second before the loop, then the loop for the rest: 2 a
+        // second of it, both channels.
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert!(close(looped.note_energy(60, 1.0, 0.5), 0.25));
+        assert!(close(looped.note_energy(60, 1.0, 10.0), 0.25 + 9.5 * 2.0));
+        assert!(close(looped.note_energy(60, 1.0, 0.55), 0.25 + 0.1));
+        // An offset past the loop starts inside it.
+        let inside = Instrument::from_sfz(
+            "<region> sample=loop.wav offset=650 end=599 loop_mode=loop_sustain loop_start=500 loop_end=599",
+            &mut source,
+        )
+        .unwrap();
+        assert_eq!(
+            inside.note_energy(60, 1.0, 1.0),
+            0.0,
+            "an offset past the end plays nothing"
+        );
+        let wrapped = Instrument::from_sfz(
+            "<region> sample=loop.wav offset=550 loop_mode=loop_sustain loop_start=100 loop_end=199",
+            &mut source,
+        )
+        .unwrap();
+        // An offset past the loop enters it where `Player` does, at 150;
+        // the loop holds 0.5, so a second of it is 0.25 a frame.
+        assert!(close(wrapped.note_energy(60, 1.0, 1.0), 2.0 * 0.25 * 1.0));
+    }
+
+    #[test]
+    fn a_clone_shares_the_samples_and_keeps_its_own_round_robins() {
+        let mut source = MemorySource::new().with("a.wav", wav_with_smpl(100, 60, 0, 0));
+        let mut instrument = Instrument::from_sfz(
+            "<region> sample=a.wav seq_length=2 seq_position=1
+             <region> sample=a.wav seq_length=2 seq_position=2",
+            &mut source,
+        )
+        .unwrap();
+        instrument.set_seed(11);
+        assert!(instrument.take_turn(0));
+        let _ = instrument.next_random();
+        let clone = instrument.clone();
+        // The same memory, not a copy of it.
+        assert!(Arc::ptr_eq(&clone.samples, &instrument.samples));
+        assert!(Arc::ptr_eq(&clone.zones, &instrument.zones));
+        assert!(Arc::ptr_eq(&clone.attack_by_key, &instrument.attack_by_key));
+        assert_eq!(clone.sample_bytes(), instrument.sample_bytes());
+        assert_eq!((clone.num_regions(), clone.seed()), (2, 11));
+        // It starts where the original was, then goes its own way: had the
+        // two shared one counter, the original's call here would have been
+        // its turn.
+        assert_eq!(clone.next_random(), instrument.next_random());
+        assert!(!clone.take_turn(0) && !instrument.take_turn(0));
+        let turns: Vec<bool> = (0..4).map(|_| clone.take_turn(0)).collect();
+        assert_eq!(turns, [true, false, true, false]);
+        assert!(instrument.take_turn(0), "the original's turn is its own");
+        // Dropped, the original lets go of the samples the clone still has.
+        drop(instrument);
+        assert_eq!(Arc::strong_count(&clone.samples), 1);
+        assert_eq!(clone.samples[0].frames(), 100);
     }
 }
