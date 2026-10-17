@@ -92,23 +92,55 @@ impl Table {
     /// its last (1), and `phase` in the cycle, from 0 up to 1.
     #[inline]
     pub(super) fn read(&self, level: usize, position: f64, phase: f64) -> f64 {
+        self.reader(level, position).read(phase)
+    }
+
+    /// The table at `level` and `position`, set up to be read at many
+    /// phases: what every unison voice of an oscillator reads in a sample.
+    #[inline]
+    pub(super) fn reader(&self, level: usize, position: f64) -> Reader<'_> {
         let level = &self.levels[level.min(LEVELS - 1)];
         let place = limit(position, 0.0, 1.0) * (FRAMES - 1) as f64;
         let frame = (place as usize).min(FRAMES - 2);
-        let blend = place - frame as f64;
-        let at = limit(phase, 0.0, 1.0) * level.size as f64;
-        let index = (at as usize).min(level.size - 1);
-        let t = at - index as f64;
         let stride = level.size + GUARD;
-        let first = hermite(&level.data[frame * stride + index..][..4], t);
-        if blend > 0.0 {
-            let second = hermite(&level.data[(frame + 1) * stride + index..][..4], t);
-            first + (second - first) * blend
+        Reader {
+            first: &level.data[frame * stride..][..stride],
+            second: &level.data[(frame + 1) * stride..][..stride],
+            blend: place - frame as f64,
+            size: level.size as f64,
+            last: level.size - 1,
+        }
+    }
+}
+
+/// One level of a table between two frames, ready to be read.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Reader<'a> {
+    first: &'a [f32],
+    second: &'a [f32],
+    blend: f64,
+    size: f64,
+    last: usize,
+}
+
+impl Reader<'_> {
+    /// The waveform at `phase`, from 0 up to 1.
+    #[inline]
+    pub(super) fn read(&self, phase: f64) -> f64 {
+        let at = limit(phase, 0.0, 1.0) * self.size;
+        let index = (at as usize).min(self.last);
+        let t = at - index as f64;
+        let first = hermite(&self.first[index..index + 4], t);
+        if self.blend > 0.0 {
+            let second = hermite(&self.second[index..index + 4], t);
+            first + (second - first) * self.blend
         } else {
             first
         }
     }
+}
 
+impl Table {
     /// Builds a table from the spectra of its frames.
     fn from_spectra(spectra: &[Spectrum]) -> Self {
         let levels = (0..LEVELS)

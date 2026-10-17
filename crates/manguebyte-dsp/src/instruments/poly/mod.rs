@@ -32,6 +32,27 @@
 //! assert!(block.peak() > 0.0);
 //! ```
 //!
+//! # Cost and latency
+//!
+//! A voice runs at twice the sample rate and is [`LATENCY_SAMPLES`] (20.5)
+//! samples late. What one held voice costs at 48 kHz, measured by the
+//! example `poly_synth_presets -- --cost` as the least of sixty runs, on a
+//! 15 W laptop processor (an Intel Core i3-1215U) while other builds ran on
+//! it:
+//!
+//! | Patch | Share of one core |
+//! |---|---|
+//! | the init patch: one saw through the ladder | 4% |
+//! | sixteen unison saws, no filter | 3% |
+//! | sixteen unison wavetable voices, no filter | 7% |
+//! | three oscillators of sixteen unison voices each (saws and a wavetable), two driven filters, saturation and three modulations | 24% |
+//! | the presets | 2% to 12% |
+//!
+//! Unison voices are cheap; what costs is the oversampled filters and
+//! saturation, which run on two channels once the voice is spread across
+//! the stereo field, and table reading. Quieter runs of the same machine
+//! measured two thirds of these figures.
+//!
 //! # Presets
 //!
 //! [`PRESETS`] holds them in this order, so an interface can offer them by

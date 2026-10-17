@@ -714,6 +714,7 @@ impl Tone {
             position: 0.0,
             level: 0,
             bank: cx.bank,
+            reader: None,
         }; OSCILLATORS + 1];
         for index in 0..=OSCILLATORS {
             if !needed[index] {
@@ -731,6 +732,10 @@ impl Tone {
             if index < OSCILLATORS {
                 drawing.width = 0.5 - 0.49 * shape[index];
                 drawing.position = shape[index];
+                if let Shape::Table(table) = cx.plan.shapes[index] {
+                    let reader = cx.bank[table].reader(drawing.level, drawing.position);
+                    drawing.reader = Some((table, reader));
+                }
             }
         }
 

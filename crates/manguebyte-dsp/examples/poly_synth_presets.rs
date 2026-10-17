@@ -6,6 +6,7 @@
 //! ```text
 //! cargo run --release -p manguebyte-dsp --example poly_synth_presets -- <directory>
 //! cargo run --release -p manguebyte-dsp --example poly_synth_presets -- --levels
+//! cargo run --release -p manguebyte-dsp --example poly_synth_presets -- --cost
 //! ```
 //!
 //! Each file is scaled so that its peak is at -3 dBFS, so the presets can
@@ -18,7 +19,8 @@
 //!
 //! With `--levels` nothing is written: for each preset, the example prints
 //! the level that would put the peak of one note at -9 dBFS, which is how
-//! the presets' levels were set.
+//! the presets' levels were set. With `--cost` it only measures what a
+//! held voice costs.
 
 use std::fs;
 use std::io;
@@ -473,24 +475,49 @@ fn print_levels() {
     }
 }
 
+/// Prints what one held voice costs at 48 kHz: the init patch (a saw
+/// through the ladder), a 16-voice saw stack and a 16-voice wavetable stack
+/// with no filter, and the heaviest patch.
+fn print_cost() {
+    let unfiltered = |osc: OscParams| PolySynthParams {
+        oscillators: [osc, OscParams::OFF, OscParams::OFF],
+        filters: [FilterParams::OFF, FilterParams::OFF],
+        ..PolySynthParams::INIT
+    };
+    let saws = unfiltered(OscParams::new(Wave::Saw, 1.0).unison(16, 0.5, 1.0));
+    let tables = unfiltered(OscParams::table(TableShape::Spectral, 0.4, 1.0).unison(16, 0.5, 1.0));
+    for (name, params) in [
+        ("the init patch", PolySynthParams::INIT),
+        ("16 unison saws", saws),
+        ("16 unison wavetables", tables),
+        (
+            "three 16-voice unison oscillators and two driven filters",
+            heaviest(),
+        ),
+    ] {
+        println!(
+            "one voice of {name}: {:.1}% of a core",
+            100.0 * cost(&params)
+        );
+    }
+}
+
 fn main() -> io::Result<()> {
     let argument = std::env::args().nth(1).unwrap_or_else(|| ".".into());
-    if argument == "--levels" {
-        print_levels();
-        return Ok(());
+    match argument.as_str() {
+        "--levels" => {
+            print_levels();
+            return Ok(());
+        }
+        "--cost" => {
+            print_cost();
+            return Ok(());
+        }
+        _ => {}
     }
     let directory = Path::new(&argument);
     fs::create_dir_all(directory)?;
-
-    // What a voice costs, held, at 48 kHz.
-    let init = cost(&PolySynthParams::INIT);
-    let heavy = cost(&heaviest());
-    println!(
-        "one voice: the plain saw {:.2}% of a core, three 16-voice unison oscillators and \
-         two driven filters {:.1}%",
-        100.0 * init,
-        100.0 * heavy
-    );
+    print_cost();
 
     let mut heaviest_preset = (0.0, "");
     for preset in PRESETS.iter() {

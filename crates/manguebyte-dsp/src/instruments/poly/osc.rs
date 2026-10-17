@@ -38,7 +38,7 @@ use core::f64::consts::{FRAC_PI_4, SQRT_2, TAU};
 
 use super::super::common::Noise;
 use super::params::MAX_UNISON;
-use super::tables::Table;
+use super::tables::{Reader, Table};
 
 /// The residual of a band-limited unit step at fraction `d` (0 to 1) of
 /// the way from sample `n - 1` to sample `n`, for samples `n - 2`, `n - 1`,
@@ -147,6 +147,9 @@ pub(super) struct Drawing<'a> {
     /// The mip-map level to read.
     pub(super) level: usize,
     pub(super) bank: &'a [Table],
+    /// The table the shape reads, set up for this sample's level and
+    /// position, by its index in the bank.
+    pub(super) reader: Option<(usize, Reader<'a>)>,
 }
 
 impl Drawing<'_> {
@@ -169,7 +172,10 @@ impl Drawing<'_> {
                 let high = if phase < self.width { 1.0 } else { -1.0 };
                 high - (2.0 * self.width - 1.0)
             }
-            Shape::Table(index) => self.bank[index].read(self.level, self.position, phase),
+            Shape::Table(index) => match self.reader {
+                Some((table, reader)) if table == index => reader.read(phase),
+                _ => self.bank[index].read(self.level, self.position, phase),
+            },
         }
     }
 
@@ -297,6 +303,10 @@ pub(super) struct Osc {
     pub(super) wrapped: [f64; MAX_UNISON],
     /// Each voice's frequency as a multiple of the oscillator's.
     ratio: [f64; MAX_UNISON],
+    /// Each voice's share of the detune, for the number of voices
+    /// `shares_for`.
+    shares: [f64; MAX_UNISON],
+    shares_for: usize,
     /// Each voice's left and right gain, and where they are heading.
     gain: [(f64, f64); MAX_UNISON],
     target: [(f64, f64); MAX_UNISON],
@@ -326,6 +336,8 @@ impl Osc {
             value: [0.0; MAX_UNISON],
             wrapped: [0.0; MAX_UNISON],
             ratio: [1.0; MAX_UNISON],
+            shares: [0.0; MAX_UNISON],
+            shares_for: 0,
             gain: [(0.0, 0.0); MAX_UNISON],
             target: [(0.0, 0.0); MAX_UNISON],
             voices: 1,
@@ -395,14 +407,20 @@ impl Osc {
     pub(super) fn arrange(&mut self, voices: usize, detune: f64, pan: f64, spread: f64) {
         let voices = voices.clamp(1, MAX_UNISON);
         let recount = voices != self.voices;
+        if voices != self.shares_for {
+            for (index, share) in self.shares.iter_mut().enumerate().take(voices) {
+                *share = detune_share(index, voices);
+            }
+            self.shares_for = voices;
+        }
         if recount || detune != self.made_for.0 {
             // A detune of at most 100 cents is a ratio within 6% of 1, whose
             // exponential four terms of its series give to 10⁻⁸: a
             // hundred-thousandth of a cent.
             let cents = super::params::MAX_DETUNE_CENTS * detune * detune;
             let scale = cents * (core::f64::consts::LN_2 / 1_200.0);
-            for (index, ratio) in self.ratio.iter_mut().enumerate().take(voices) {
-                let x = scale * detune_share(index, voices);
+            for (ratio, share) in self.ratio.iter_mut().zip(&self.shares).take(voices) {
+                let x = scale * share;
                 *ratio = 1.0 + x * (1.0 + x * (0.5 + x * (1.0 / 6.0 + x / 24.0)));
             }
         }
@@ -479,13 +497,16 @@ impl Osc {
         // A voice neither modulated, synced nor changing shape takes the
         // short way.
         let plain = pm_depth == 0.0 && master.is_none() && self.blend >= 1.0;
+        // The voices' samples are added up here and put on the line once.
+        let (mut sum_left, mut sum_right) = (0.0, 0.0);
         for index in 0..self.running {
             let (left, right) = self.gain[index];
             let dt = (increment * self.ratio[index]).clamp(0.0, 0.45);
             if plain && self.pm[index] == 0.0 {
                 let value = self.plain(index, dt, drawing, left, right);
                 self.value[index] = value;
-                self.line.add_now(value * left, value * right);
+                sum_left += value * left;
+                sum_right += value * right;
                 continue;
             }
             let pm = if pm_depth != 0.0 {
@@ -499,8 +520,10 @@ impl Osc {
             };
             let value = self.voice(index, dt, pm, reset, &shapes, drawing, left, right);
             self.value[index] = value;
-            self.line.add_now(value * left, value * right);
+            sum_left += value * left;
+            sum_right += value * right;
         }
+        self.line.add_now(sum_left, sum_right);
         self.out = self.line.emit();
         self.out
     }
