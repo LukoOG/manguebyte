@@ -188,12 +188,25 @@ pub const kAudioUnitProperty_BypassEffect: AudioUnitPropertyID = 21;
 pub const kAudioUnitProperty_LastRenderError: AudioUnitPropertyID = 22;
 pub const kAudioUnitProperty_SetRenderCallback: AudioUnitPropertyID = 23;
 pub const kAudioUnitProperty_HostCallbacks: AudioUnitPropertyID = 27;
+/// Deprecated in favour of `kAudioUnitProperty_PresentPreset`; its name is
+/// not retained for the caller.
+pub const kAudioUnitProperty_CurrentPreset: AudioUnitPropertyID = 28;
 pub const kAudioUnitProperty_InPlaceProcessing: AudioUnitPropertyID = 29;
 pub const kAudioUnitProperty_ElementName: AudioUnitPropertyID = 30;
 pub const kAudioUnitProperty_SupportedChannelLayoutTags: AudioUnitPropertyID = 32;
 pub const kAudioUnitProperty_ParameterStringFromValue: AudioUnitPropertyID = 33;
+pub const kAudioUnitProperty_PresentPreset: AudioUnitPropertyID = 36;
 pub const kAudioUnitProperty_ParameterValueFromString: AudioUnitPropertyID = 38;
 pub const kAudioUnitProperty_ShouldAllocateBuffer: AudioUnitPropertyID = 51;
+
+/// `AUPreset`: a preset's number, negative for a user's preset, and its
+/// name.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AUPreset {
+    pub presetNumber: i32,
+    pub presetName: CFStringRef,
+}
 
 /// `AudioStreamBasicDescription`.
 #[repr(C)]
@@ -609,6 +622,7 @@ mod tests {
         assert_eq!(size_of::<AudioUnitParameterValueFromString>(), 24);
         assert_eq!(size_of::<AudioUnitParameterEvent>(), 32);
         assert_eq!(size_of::<HostCallbackInfo>(), 40);
+        assert_eq!(size_of::<AUPreset>(), 16);
         assert_eq!(size_of::<AudioComponentPlugInInterface>(), 32);
         assert_eq!(kAudioFormatLinearPCM, 0x6C70_636D);
     }

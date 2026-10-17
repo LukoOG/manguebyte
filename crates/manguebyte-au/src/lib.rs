@@ -35,7 +35,8 @@
 //! | Parameters | Listed in their own unit and range, with their names and value text both ways; stepped ones with names are indexed, with their names listed; switches are booleans. `SetParameter` reaches the plugin on the first frame of the next render, and `ScheduleParameters` on its frame, a ramp as points 32 frames apart |
 //! | MIDI | For instruments and note effects, `MusicDeviceMIDIEvent`, and `MusicDeviceStartNote` and `StopNote` as MIDI notes, on their frames |
 //! | Transport | From the host's callbacks: tempo and beat, the bar's start and the time signature, playing, recording, the position in frames and the cycle |
-//! | State | `ClassInfo`: a dictionary with the unit's codes and the text of [`save_state`](manguebyte_plugin::save_state); another unit's state is refused and changes nothing |
+//! | State | `ClassInfo`: a dictionary with the unit's codes, the present preset's name and the text of [`save_state`](manguebyte_plugin::save_state); another unit's state is refused and changes nothing |
+//! | Presets | `PresentPreset` (and the deprecated `CurrentPreset`): the number and name the host sets, -1 and "Untitled" until then; restoring a state makes its name the present preset's. No factory presets |
 //! | Latency | Reported from the plugin when initialised and on every render; tail time 0 |
 //! | Other properties | Maximum frames per slice (changeable while initialised, which prepares the plugin again), element count, element names, supported channel layouts and the layout itself, last render error, host callbacks, bypass (for effects), in-place processing and buffer allocation (recorded) |
 //! | Listeners | Property listeners are called for what changes; render notifications before and after each render |

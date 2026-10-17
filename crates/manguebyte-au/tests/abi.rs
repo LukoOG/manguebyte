@@ -1410,3 +1410,156 @@ fn start_note_and_stop_note_play_as_midi_does() {
     assert_same_bits(&output, &harness.render(256), "a note started and stopped");
     assert!(output.channel(0)[150] > 0.0 && output.channel(0)[250] == 0.0);
 }
+
+/// The text of a CoreFoundation string.
+fn text_of(string: CFStringRef) -> String {
+    let mut buffer = [0 as std::ffi::c_char; 256];
+    // SAFETY: a live string, and a buffer of that size.
+    let done =
+        unsafe { CFStringGetCString(string, buffer.as_mut_ptr(), 256, kCFStringEncodingUTF8) };
+    assert_ne!(done, 0, "not a string");
+    // SAFETY: the buffer ends with a NUL.
+    unsafe { CStr::from_ptr(buffer.as_ptr()) }
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// A new CoreFoundation string, which the caller releases.
+fn new_string(text: &str) -> CFStringRef {
+    // SAFETY: the text's own bytes, in UTF-8.
+    unsafe {
+        CFStringCreateWithBytes(
+            ptr::null(),
+            text.as_ptr(),
+            text.len() as CFIndex,
+            kCFStringEncodingUTF8,
+            0,
+        )
+    }
+}
+
+#[test]
+fn the_present_preset_is_kept_and_travels_with_the_state() {
+    let _serial = serial();
+    let global = kAudioUnitScope_Global;
+    let fx = Host::new::<Fx>();
+    for property in [
+        kAudioUnitProperty_PresentPreset,
+        kAudioUnitProperty_CurrentPreset,
+    ] {
+        assert_eq!(fx.info(property, global, 0), Ok((16, true)));
+    }
+
+    // Untitled, a user's preset, until the host says otherwise. The present
+    // preset's name is the caller's to release; the current preset's, the
+    // deprecated property, stays the unit's.
+    let preset = fx
+        .get::<AUPreset>(kAudioUnitProperty_PresentPreset, global, 0)
+        .unwrap();
+    assert_eq!(
+        (preset.presetNumber, text_of(preset.presetName)),
+        (-1, "Untitled".into())
+    );
+    // SAFETY: the reference the unit handed over.
+    unsafe { CFRelease(preset.presetName) };
+    let current = fx
+        .get::<AUPreset>(kAudioUnitProperty_CurrentPreset, global, 0)
+        .unwrap();
+    assert_eq!(text_of(current.presetName), "Untitled");
+
+    // Set, then got back; the host keeps its own string.
+    HEARD.lock().unwrap().clear();
+    let add: AddListener = fx.method(kAudioUnitAddPropertyListenerSelect);
+    let user = 9 as *mut c_void;
+    // SAFETY: the method, with a listener that outlives the unit.
+    let status = unsafe {
+        add(
+            fx.this,
+            kAudioUnitProperty_PresentPreset,
+            Some(listener),
+            user,
+        )
+    };
+    assert_eq!(status, noErr);
+    let bright = new_string("Bright");
+    let given = AUPreset {
+        presetNumber: 5,
+        presetName: bright,
+    };
+    assert_eq!(
+        fx.set(kAudioUnitProperty_PresentPreset, global, 0, &given),
+        noErr
+    );
+    // SAFETY: the test's own reference.
+    unsafe { CFRelease(bright) };
+    let preset = fx
+        .get::<AUPreset>(kAudioUnitProperty_PresentPreset, global, 0)
+        .unwrap();
+    assert_eq!(
+        (preset.presetNumber, text_of(preset.presetName)),
+        (5, "Bright".into())
+    );
+    // SAFETY: as above.
+    unsafe { CFRelease(preset.presetName) };
+    assert_eq!(
+        *HEARD.lock().unwrap(),
+        [(kAudioUnitProperty_PresentPreset, global, 0, 9)]
+    );
+    // A preset with no name is untitled.
+    let nameless = AUPreset {
+        presetNumber: 2,
+        presetName: ptr::null(),
+    };
+    assert_eq!(
+        fx.set(kAudioUnitProperty_CurrentPreset, global, 0, &nameless),
+        noErr
+    );
+    let current = fx
+        .get::<AUPreset>(kAudioUnitProperty_CurrentPreset, global, 0)
+        .unwrap();
+    assert_eq!(
+        (current.presetNumber, text_of(current.presetName)),
+        (2, "Untitled".into())
+    );
+
+    // The state carries the name under "name", and a unit given the state
+    // takes it as its present preset, a user's.
+    let warm = new_string("Warm");
+    let given = AUPreset {
+        presetNumber: 0,
+        presetName: warm,
+    };
+    assert_eq!(
+        fx.set(kAudioUnitProperty_PresentPreset, global, 0, &given),
+        noErr
+    );
+    // SAFETY: the test's own reference.
+    unsafe { CFRelease(warm) };
+    let saved = fx
+        .get::<CFPropertyListRef>(kAudioUnitProperty_ClassInfo, global, 0)
+        .unwrap();
+    // SAFETY: the dictionary the unit made, and CoreFoundation's functions.
+    unsafe {
+        let key = new_string("name");
+        assert_eq!(text_of(CFDictionaryGetValue(saved, key)), "Warm");
+        CFRelease(key);
+    }
+    let other = Host::new::<Fx>();
+    assert_eq!(
+        other.set(kAudioUnitProperty_ClassInfo, global, 0, &saved),
+        noErr
+    );
+    let preset = other
+        .get::<AUPreset>(kAudioUnitProperty_PresentPreset, global, 0)
+        .unwrap();
+    assert_eq!(
+        (preset.presetNumber, text_of(preset.presetName)),
+        (-1, "Warm".into())
+    );
+    // SAFETY: the references the unit handed over.
+    unsafe {
+        CFRelease(preset.presetName);
+        CFRelease(saved);
+    }
+}

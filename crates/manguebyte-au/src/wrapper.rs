@@ -137,6 +137,53 @@ struct Audio<P> {
     watcher: ParamWatcher,
 }
 
+/// The preset a host says is the present one: Apple's base classes start
+/// with number -1, a user's preset, named "Untitled".
+struct Preset {
+    number: i32,
+    /// The name as text, for the state's dictionary.
+    text: String,
+    /// The same as a string of the unit's own, which
+    /// `kAudioUnitProperty_CurrentPreset` hands out without a reference
+    /// for the caller, so it has to live here. `None` only if
+    /// CoreFoundation could not make one.
+    name: Option<Owned>,
+}
+
+/// What a preset is called when nobody named it.
+const UNTITLED: &str = "Untitled";
+
+impl Preset {
+    fn untitled() -> Self {
+        Self::named(-1, UNTITLED)
+    }
+
+    fn named(number: i32, text: &str) -> Self {
+        Self {
+            number,
+            text: text.to_owned(),
+            name: cf::string(text),
+        }
+    }
+
+    /// The preset as `AUPreset`. With `retained`, the name carries a
+    /// reference the caller releases (`kAudioUnitProperty_PresentPreset`);
+    /// without, it is the unit's own, valid until the preset changes
+    /// (`kAudioUnitProperty_CurrentPreset`).
+    fn to_c(&self, retained: bool) -> AUPreset {
+        let name = self.name.as_ref().map_or(ptr::null(), Owned::as_ptr);
+        if retained && !name.is_null() {
+            // SAFETY: a live string this value holds; the reference taken
+            // here is the caller's.
+            unsafe { CFRetain(name) };
+        }
+        AUPreset {
+            presetNumber: self.number,
+            presetName: name,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Listener {
     property: AudioUnitPropertyID,
@@ -190,6 +237,8 @@ pub(crate) struct Instance<P: Plugin> {
     audio: Exclusive<Audio<P>>,
     /// Only ever taken off the audio thread.
     listeners: Mutex<Vec<Listener>>,
+    /// The present preset; only ever taken off the audio thread.
+    preset: Mutex<Preset>,
     notifications: Exclusive<Vec<Notification>>,
 }
 
@@ -247,6 +296,7 @@ pub(crate) fn factory<P: Plugin>() -> *mut c_void {
                 events: EventBuffer::with_capacity(EVENTS_PER_BLOCK),
             }),
             listeners: Mutex::new(Vec::new()),
+            preset: Mutex::new(Preset::untitled()),
             notifications: Exclusive::new(Vec::with_capacity(MAX_RENDER_NOTIFICATIONS)),
             params,
         };
@@ -1530,6 +1580,9 @@ impl<P: Plugin> Instance<P> {
         let pointer = size_of::<*const c_void>();
         match property {
             kAudioUnitProperty_ClassInfo => global(pointer, true),
+            kAudioUnitProperty_PresentPreset | kAudioUnitProperty_CurrentPreset => {
+                global(size_of::<AUPreset>(), true)
+            }
             kAudioUnitProperty_SampleRate => {
                 self.channels(scope, element)?;
                 Ok((size_of::<f64>(), !initialized))
@@ -1694,7 +1747,7 @@ impl<P: Plugin> Instance<P> {
             cf::number(self.codes[0] as i32)?,
             cf::number(self.codes[1] as i32)?,
             cf::number(self.codes[2] as i32)?,
-            cf::string(P::INFO.name)?,
+            cf::string(&lock(&self.preset).text)?,
             cf::data(text.as_bytes())?,
         ];
         for (key, value) in STATE_KEYS.iter().zip(&values) {
@@ -1730,10 +1783,14 @@ impl<P: Plugin> Instance<P> {
             let Ok(text) = std::str::from_utf8(bytes) else {
                 return kAudioUnitErr_InvalidPropertyValue;
             };
-            match load_state::<P>(&self.params, text) {
-                Ok(_) => noErr,
-                Err(_) => kAudioUnitErr_InvalidPropertyValue,
+            if load_state::<P>(&self.params, text).is_err() {
+                return kAudioUnitErr_InvalidPropertyValue;
             }
+            // The state's name is the present preset's, as a user's preset.
+            if let Some(name) = cf::read_string(cf::get(list, "name")) {
+                *lock(&self.preset) = Preset::named(-1, &name);
+            }
+            noErr
         }
     }
 
@@ -1765,6 +1822,16 @@ impl<P: Plugin> Instance<P> {
         unsafe {
             match property {
                 kAudioUnitProperty_ClassInfo => put_object(out, size, self.class_info()),
+                kAudioUnitProperty_PresentPreset | kAudioUnitProperty_CurrentPreset => {
+                    if (*size as usize) < size_of::<AUPreset>() {
+                        return kAudioUnitErr_InvalidPropertyValue;
+                    }
+                    // The present preset's name follows the Get rule: the
+                    // caller releases it. The deprecated property's does
+                    // not, and stays the unit's.
+                    let retained = property == kAudioUnitProperty_PresentPreset;
+                    put(out, size, lock(&self.preset).to_c(retained))
+                }
                 kAudioUnitProperty_SampleRate => put(out, size, config().sample_rate),
                 kAudioUnitProperty_StreamFormat => {
                     let channels = self.channels(scope, element).unwrap_or(0);
@@ -1974,7 +2041,29 @@ impl<P: Plugin> Instance<P> {
                     let Some(list) = take::<CFPropertyListRef>(data, size) else {
                         return kAudioUnitErr_InvalidPropertyValue;
                     };
-                    self.restore(list)
+                    let status = self.restore(list);
+                    if status == noErr {
+                        self.changed(kAudioUnitProperty_PresentPreset, kAudioUnitScope_Global, 0);
+                    }
+                    status
+                }
+                kAudioUnitProperty_PresentPreset | kAudioUnitProperty_CurrentPreset => {
+                    let Some(preset) = take::<AUPreset>(data, size) else {
+                        return kAudioUnitErr_InvalidPropertyValue;
+                    };
+                    // The name is copied into a string of the unit's own, so
+                    // the caller keeps its reference and may change its
+                    // string afterwards. A preset with no name is untitled.
+                    let text = if preset.presetName.is_null() {
+                        Some(UNTITLED.to_owned())
+                    } else {
+                        cf::read_string(preset.presetName)
+                    };
+                    let Some(text) = text else {
+                        return kAudioUnitErr_InvalidPropertyValue;
+                    };
+                    *lock(&self.preset) = Preset::named(preset.presetNumber, &text);
+                    noErr
                 }
                 kAudioUnitProperty_SetRenderCallback => {
                     let source = match take::<AURenderCallbackStruct>(data, size) {
