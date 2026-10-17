@@ -3,7 +3,7 @@
 //! Each block goes through the forward MDCT of section 1.3.2 of the Vorbis
 //! I specification with the window the decoder will put on it, long or
 //! short, the short ones where a transient would smear across a long block
-//! (pre-echo). A masking threshold (the model of [`psy`]) sets the floor of
+//! (pre-echo). A masking threshold (the model of the crate's `psy` module) sets the floor of
 //! each channel: a floor of type 1, fitted at its posts, which the
 //! residue, the spectrum divided by the floor and rounded, is coded
 //! against, so that the quantisation noise lies at the floor, under the
@@ -22,7 +22,6 @@
 //! step, and the bitrate with it: see [`VorbisOptions::with_quality`].
 
 mod books;
-mod psy;
 mod trained;
 
 use std::io::{self, Seek, SeekFrom, Write};
@@ -30,7 +29,6 @@ use std::io::{self, Seek, SeekFrom, Write};
 use manguebyte_core::AudioBuffer;
 
 use self::books::{Book, Lattice};
-use self::psy::{HOP, Model, Transients};
 use super::VorbisError;
 use super::decoder::{inverse_db_table, render_floor1, slope};
 use super::mdct::Mdct;
@@ -38,6 +36,7 @@ use super::reader::channel_order;
 use super::setup::{self, Floor1, Identification};
 use crate::metadata::{Metadata, picture_comment};
 use crate::ogg;
+use crate::psy::{HOP, Model, Transients};
 
 /// The vendor string written into every file, naming the encoder.
 const VENDOR: &str = concat!("manguebyte-formats ", env!("CARGO_PKG_VERSION"));

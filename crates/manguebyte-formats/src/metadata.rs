@@ -27,7 +27,7 @@
 //!
 //! # Where each field lives
 //!
-//! | Field | WAV | AIFF | FLAC and Ogg Vorbis | MP3 (read only) |
+//! | Field | WAV | AIFF | FLAC and Ogg Vorbis | MP3 |
 //! |---|---|---|---|---|
 //! | `title` | `LIST/INFO` `INAM` | `NAME` | `TITLE` | ID3 `TIT2`, ID3v1 |
 //! | `artist` | `IART` | `AUTH` | `ARTIST` | `TPE1`, ID3v1 |
@@ -50,7 +50,9 @@
 //! | `chunks` | chunks not listed here | chunks not listed here | blocks not listed here | |
 //!
 //! A blank is a field the format has no place for: it is not read from such
-//! a file and not written to one. RIFF's `INFO` defines no ISRC: its `ISRC`
+//! a file and not written to one. MP3 is written with an ID3v2.4 tag in
+//! UTF-8, without ID3v1, `TYER` or the dimensions of a picture, which `APIC`
+//! has no place for. RIFF's `INFO` defines no ISRC: its `ISRC`
 //! item is the *source* of a file, and comes back among the `tags` under
 //! that name.
 //!
@@ -90,7 +92,7 @@ mod iff;
 mod riff;
 mod vorbis_comment;
 
-pub(crate) use id3::{read_id3v1, read_id3v2};
+pub(crate) use id3::{read_id3v1, read_id3v2, write_id3v2};
 pub(crate) use iff::{IffMetadata, build_iff};
 pub(crate) use riff::{RiffMetadata, build_riff};
 pub(crate) use vorbis_comment::{

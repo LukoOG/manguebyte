@@ -483,9 +483,162 @@ pub(crate) fn read_id3v1(last: &[u8]) -> Option<Metadata> {
     })
 }
 
+/// The most an ID3v2 size can say: 28 bits.
+const MAX_ID3V2: usize = (1 << 28) - 1;
+
+/// An ID3v2.4 tag of what `metadata` holds that ID3 has frames for, text
+/// in UTF-8: the fields as `TIT2`, `TPE1`, `TALB`, `TDRC`, `TRCK`, `TCON`,
+/// `COMM`, `TCOP`, `TBPM`, `TKEY` and `TSRC`; each tag as the text frame it
+/// names when its name is one (four capitals or digits starting with `T`),
+/// as a comment when it is `COMM` or `COMM:` and a description, and as a
+/// `TXXX` frame described by its name otherwise; each picture as an
+/// `APIC` frame, which keeps its kind, type, description and data. `None`
+/// when there is nothing to write, and `Err` when the tag would pass the
+/// 256 MiB an ID3v2 size can state.
+pub(crate) fn write_id3v2(metadata: &Metadata) -> Result<Option<Vec<u8>>, &'static str> {
+    let mut body = Vec::new();
+    let mut put = |id: &[u8; 4], data: &[u8]| -> Result<(), &'static str> {
+        if data.len() > MAX_ID3V2 {
+            return Err("an ID3 frame larger than 256 MiB");
+        }
+        body.extend_from_slice(id);
+        body.extend_from_slice(&syncsafe_bytes(data.len() as u32));
+        body.extend_from_slice(&[0, 0]);
+        body.extend_from_slice(data);
+        Ok(())
+    };
+    let text = |value: &str| -> Vec<u8> {
+        let mut data = vec![3];
+        data.extend_from_slice(value.as_bytes());
+        data
+    };
+    let comment = |description: &str, value: &str| -> Vec<u8> {
+        let mut data = vec![3];
+        data.extend_from_slice(b"XXX");
+        data.extend_from_slice(description.as_bytes());
+        data.push(0);
+        data.extend_from_slice(value.as_bytes());
+        data
+    };
+    let fields: [(&[u8; 4], Option<&String>); 8] = [
+        (b"TIT2", metadata.title.as_ref()),
+        (b"TPE1", metadata.artist.as_ref()),
+        (b"TALB", metadata.album.as_ref()),
+        (b"TDRC", metadata.date.as_ref()),
+        (b"TCON", metadata.genre.as_ref()),
+        (b"TCOP", metadata.copyright.as_ref()),
+        (b"TKEY", metadata.key.as_ref()),
+        (b"TSRC", metadata.isrc.as_ref()),
+    ];
+    for (id, value) in fields {
+        if let Some(value) = value {
+            put(id, &text(value))?;
+        }
+    }
+    if let Some(track) = metadata.track {
+        let value = match metadata.track_total {
+            Some(total) => format!("{track}/{total}"),
+            None => track.to_string(),
+        };
+        put(b"TRCK", &text(&value))?;
+    }
+    if let Some(bpm) = metadata.bpm {
+        put(b"TBPM", &text(&bpm.to_string()))?;
+    }
+    if let Some(value) = &metadata.comment {
+        put(b"COMM", &comment("", value))?;
+    }
+    for (name, value) in &metadata.tags {
+        let id = name.as_bytes();
+        if name == "COMM" {
+            put(b"COMM", &comment("", value))?;
+        } else if let Some(description) = name.strip_prefix("COMM:") {
+            put(b"COMM", &comment(description, value))?;
+        } else if id.len() == 4
+            && id[0] == b'T'
+            && name != "TXXX"
+            && id
+                .iter()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        {
+            put(&[id[0], id[1], id[2], id[3]], &text(value))?;
+        } else {
+            let mut data = vec![3];
+            data.extend_from_slice(name.as_bytes());
+            data.push(0);
+            data.extend_from_slice(value.as_bytes());
+            put(b"TXXX", &data)?;
+        }
+    }
+    for picture in &metadata.pictures {
+        let mut data = vec![3];
+        data.extend_from_slice(picture.mime.as_bytes());
+        data.push(0);
+        data.push(picture.kind.min(255) as u8);
+        data.extend_from_slice(picture.description.as_bytes());
+        data.push(0);
+        data.extend_from_slice(&picture.data);
+        put(b"APIC", &data)?;
+    }
+    if body.is_empty() {
+        return Ok(None);
+    }
+    if body.len() > MAX_ID3V2 {
+        return Err("an ID3 tag larger than 256 MiB");
+    }
+    let mut tag = b"ID3\x04\x00\x00".to_vec();
+    tag.extend_from_slice(&syncsafe_bytes(body.len() as u32));
+    tag.extend_from_slice(&body);
+    Ok(Some(tag))
+}
+
+/// A number below 2^28 as four bytes of seven bits.
+fn syncsafe_bytes(value: u32) -> [u8; 4] {
+    [
+        (value >> 21) as u8 & 0x7F,
+        (value >> 14) as u8 & 0x7F,
+        (value >> 7) as u8 & 0x7F,
+        value as u8 & 0x7F,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_is_written_is_read_back() {
+        let metadata = Metadata {
+            title: Some("Coco de roda".to_owned()),
+            artist: Some("Selma do Coco".to_owned()),
+            album: Some("Olinda".to_owned()),
+            date: Some("1998".to_owned()),
+            track: Some(4),
+            track_total: Some(11),
+            genre: Some("Coco".to_owned()),
+            comment: Some("ao vivo".to_owned()),
+            copyright: Some("(C) 1998".to_owned()),
+            bpm: Some(126.5),
+            key: Some("G".to_owned()),
+            isrc: Some("BRXYZ9800004".to_owned()),
+            tags: vec![
+                ("TPE2".to_owned(), "Banda".to_owned()),
+                ("MOOD".to_owned(), "festa".to_owned()),
+                ("COMM:faixa".to_owned(), "quatro".to_owned()),
+            ],
+            pictures: vec![Picture {
+                kind: 3,
+                mime: "image/png".to_owned(),
+                description: "capa".to_owned(),
+                data: vec![0x89, b'P', b'N', b'G', 0, 0xFF],
+                ..Picture::default()
+            }],
+            ..Metadata::default()
+        };
+        let tag = write_id3v2(&metadata).unwrap().unwrap();
+        assert_eq!(read(&tag), metadata);
+        assert_eq!(write_id3v2(&Metadata::default()), Ok(None));
+    }
 
     fn frame(version: u8, id: &[u8], data: &[u8]) -> Vec<u8> {
         let mut out = id.to_vec();

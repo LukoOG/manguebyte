@@ -310,6 +310,34 @@ frames between two frames. Intensity stereo and the reordering of short
 blocks are checked by the unit tests of `src/mp3/layer3.rs`, against the
 formulas of the standard.
 
+### What this crate's MP3 encoder wrote
+
+`encoder-signal-2ch-32000-cbr96.mp3`, `encoder-signal-1ch-48000-vbr5.mp3`
+and `encoder-tones-2ch-44100-vbr8.mp3` are what this crate's encoder made
+of the sources of their names, at a constant 96 kbit/s and at variable
+bitrates of qualities 5 and 8, the last with an ID3v2 title, written by
+
+```bash
+MANGUEBYTE_DUMP_DIR=/some/dir cargo test -p manguebyte-formats --test mp3_encoder dump_files_for_other_software -- --ignored
+```
+
+and decoded by FFmpeg 7.1 twice, with its floating-point and its
+fixed-point decoder:
+
+```bash
+ffmpeg -c:a mp3float -i FILE.mp3 -f f32le -c:a pcm_f32le FILE.mp3float.raw
+ffmpeg -c:a mp3 -i FILE.mp3 -f f32le -c:a pcm_f32le FILE.mp3.raw
+```
+
+The `.mp3float.ref` and `.mp3fixed.ref` files keep every 64th frame of
+those decodes, laid out as the `.ref` files of Ogg Opus below. Both
+decoders take the delay and padding of the LAME tag and give every file
+the exact length of its source; FFmpeg reports the tag's encoder as
+`LAMEmbyte` and reads the title. The floating-point decoder comes within
+1.2e-6 of this crate's, the fixed-point one within 3.0e-5, one step of
+its 16 bits. `tests/mp3_encoder.rs` checks both, and that the encoder
+still writes these bytes: when it changes, the files are made again.
+
 ### Layer II
 
 FFmpeg's own encoder (`mp2`), from the same sources, one file for each

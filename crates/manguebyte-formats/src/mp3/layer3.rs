@@ -39,6 +39,26 @@ impl GranuleInfo {
     fn short(&self) -> bool {
         self.window_switching && self.block_type == 2
     }
+
+    /// A granule of the block type given, for the encoder's tests of its
+    /// filter bank against this one.
+    #[cfg(test)]
+    pub(super) fn of_block_type(block_type: u8) -> Self {
+        Self {
+            window_switching: block_type != 0,
+            block_type,
+            ..Self::default()
+        }
+    }
+}
+
+#[cfg(test)]
+impl SideInfo {
+    /// The block type of each granule of channel `channel`, for the
+    /// encoder's tests.
+    pub(super) fn block_types(&self, channel: usize) -> [u8; 2] {
+        [0, 1].map(|granule| self.granules[granule][channel].block_type)
+    }
 }
 
 /// The side information of a frame (2.4.1.7).
@@ -153,7 +173,7 @@ struct ScaleFactors {
 }
 
 /// `|x|^(4/3)` for every value a Huffman code and its extra bits can give.
-fn power_table() -> &'static [f32] {
+pub(super) fn power_table() -> &'static [f32] {
     static TABLE: OnceLock<Vec<f32>> = OnceLock::new();
     TABLE.get_or_init(|| {
         (0..8_207)
@@ -162,22 +182,23 @@ fn power_table() -> &'static [f32] {
     })
 }
 
-/// The tables of the inverse MDCT and its windows.
-struct Transform {
+/// The tables of the inverse MDCT and its windows, which the encoder's
+/// forward transform shares.
+pub(super) struct Transform {
     /// `cos(pi / 72 (2i + 1 + 18)(2k + 1))` for 36 outputs and 18 inputs.
-    long: [[f32; 18]; 36],
+    pub(super) long: [[f32; 18]; 36],
     /// `cos(pi / 24 (2i + 1 + 6)(2k + 1))` for 12 outputs and 6 inputs.
-    short: [[f32; 6]; 12],
+    pub(super) short: [[f32; 6]; 12],
     /// The windows of block types 0, 1 and 3 (2.4.3.4.10.2), and of short
     /// blocks.
-    windows: [[f32; 36]; 4],
-    short_window: [f32; 12],
+    pub(super) windows: [[f32; 36]; 4],
+    pub(super) short_window: [f32; 12],
     /// The butterflies of alias reduction.
-    cs: [f32; 8],
-    ca: [f32; 8],
+    pub(super) cs: [f32; 8],
+    pub(super) ca: [f32; 8],
 }
 
-fn transform() -> &'static Transform {
+pub(super) fn transform() -> &'static Transform {
     static TRANSFORM: OnceLock<Box<Transform>> = OnceLock::new();
     TRANSFORM.get_or_init(|| {
         let mut t = Box::new(Transform {
@@ -813,7 +834,7 @@ fn requantize(
 /// Puts the values of short blocks, coded band by band and window by
 /// window, in the order the inverse transform takes them: subband by
 /// subband, the six lines of each window together (2.4.3.4.8).
-fn reorder(spectrum: &mut [f32; 576], rate: usize, mixed: bool) {
+pub(super) fn reorder(spectrum: &mut [f32; 576], rate: usize, mixed: bool) {
     let short = &SHORT_BANDS[rate];
     let first = if mixed {
         (0..13)
@@ -839,7 +860,7 @@ fn reorder(spectrum: &mut [f32; 576], rate: usize, mixed: bool) {
 /// Alias reduction (2.4.3.4.10.1): butterflies across each boundary between
 /// subbands of long blocks. A short block has none; a mixed block has the
 /// one between its two long subbands.
-fn reduce_aliases(spectrum: &mut [f32; 576], gi: &GranuleInfo) {
+pub(super) fn reduce_aliases(spectrum: &mut [f32; 576], gi: &GranuleInfo) {
     let limit = match (gi.short(), gi.mixed) {
         (false, _) => 32,
         (true, true) => 2,
@@ -860,7 +881,7 @@ fn reduce_aliases(spectrum: &mut [f32; 576], gi: &GranuleInfo) {
 /// The inverse MDCT of each subband, windowed and overlapped with the last
 /// granule (2.4.3.4.10.2), the inversion of every other sample of the odd
 /// subbands that the filter bank expects, and the filter bank: 576 samples.
-fn synthesize(
+pub(super) fn synthesize(
     spectrum: &[f32; 576],
     gi: &GranuleInfo,
     overlap: &mut [[f32; 18]; 32],

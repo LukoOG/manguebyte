@@ -1,5 +1,6 @@
-//! What the encoder may leave out: a masking threshold for each block, and
-//! where the transients are that call for short blocks.
+//! What a lossy encoder may leave out: a masking threshold for each block
+//! of a transform, and where the transients are that call for short
+//! blocks. The Vorbis and MP3 encoders share it.
 //!
 //! The model is a simple one, of the kind textbooks start from (Zwicker and
 //! Fastl, *Psychoacoustics*, 1990; Painter and Spanias, "Perceptual coding
@@ -31,18 +32,18 @@ const SLOPE_UP_DB: f64 = 12.0;
 const FULL_SCALE_SPL: f64 = 96.0;
 
 /// The Bark of a frequency in hertz (Zwicker and Terhardt, 1980).
-pub(super) fn bark(hz: f64) -> f64 {
+pub(crate) fn bark(hz: f64) -> f64 {
     13.0 * (0.000_76 * hz).atan() + 3.5 * (hz / 7_500.0).powi(2).atan()
 }
 
 /// The absolute threshold of hearing in dB SPL (Terhardt, 1979).
-pub(super) fn threshold_in_quiet(hz: f64) -> f64 {
+pub(crate) fn threshold_in_quiet(hz: f64) -> f64 {
     let khz = (hz / 1_000.0).clamp(0.02, 20.0);
     3.64 * khz.powf(-0.8) - 6.5 * (-0.6 * (khz - 3.3).powi(2)).exp() + 1e-3 * khz.powi(4)
 }
 
 /// The tables of the model for one block size.
-pub(super) struct Model {
+pub(crate) struct Model {
     /// The attenuation from each bin to the next, as power factors, up and
     /// down the scale.
     step_up: Vec<f32>,
@@ -62,7 +63,7 @@ impl Model {
     /// The model for blocks of `n` samples at `rate` hertz, whose
     /// transform gives a full-scale sine a power of `full_scale` in its
     /// strongest bin.
-    pub(super) fn new(n: usize, rate: u32, full_scale: f64) -> Self {
+    pub(crate) fn new(n: usize, rate: u32, full_scale: f64) -> Self {
         let half = n / 2;
         let hz = |bin: f64| (bin + 0.5) * f64::from(rate) / n as f64;
         let mut step_up = vec![1.0f32; half];
@@ -113,7 +114,7 @@ impl Model {
 
     /// The masking threshold of the spectrum `x`, as power in each bin,
     /// into `threshold`.
-    pub(super) fn threshold(&mut self, x: &[f32], threshold: &mut [f32]) {
+    pub(crate) fn threshold(&mut self, x: &[f32], threshold: &mut [f32]) {
         let half = x.len();
         // The power, smoothed over neighbouring bins, which the phase of a
         // component spreads its energy across.
@@ -182,7 +183,7 @@ impl Model {
 /// energy summed over hops of [`HOP`] samples; a hop is a transient if it
 /// holds more than eight times the mean of the eight before it, and more
 /// than a floor below which nothing is heard.
-pub(super) struct Transients {
+pub(crate) struct Transients {
     previous: Vec<f32>,
     history: [f32; 8],
     at: usize,
@@ -191,10 +192,10 @@ pub(super) struct Transients {
 }
 
 /// Samples per hop of the transient detector.
-pub(super) const HOP: usize = 64;
+pub(crate) const HOP: usize = 64;
 
 impl Transients {
-    pub(super) fn new(channels: usize) -> Self {
+    pub(crate) fn new(channels: usize) -> Self {
         Self {
             previous: vec![0.0; channels],
             history: [0.0; 8],
@@ -208,14 +209,14 @@ impl Transients {
     /// channel, [`end_hop`](Self::end_hop) says whether the hop was a
     /// transient.
     #[inline]
-    pub(super) fn add(&mut self, channel: usize, sample: f32) {
+    pub(crate) fn add(&mut self, channel: usize, sample: f32) {
         let difference = sample - self.previous[channel];
         self.previous[channel] = sample;
         self.sum += difference * difference;
     }
 
     /// Closes a hop: whether it was a transient.
-    pub(super) fn end_hop(&mut self) -> bool {
+    pub(crate) fn end_hop(&mut self) -> bool {
         let energy = self.sum;
         self.sum = 0.0;
         // The mean of the hops seen, up to eight.
