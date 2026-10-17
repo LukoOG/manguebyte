@@ -243,7 +243,7 @@ impl ChoirParams {
             brightness: 4_000.0,
             velocity_range_db: 18.0,
             accent_db: 3.0,
-            level: 0.25,
+            level: 0.08,
         }
     }
 
@@ -254,7 +254,7 @@ impl ChoirParams {
             breathiness: 0.3,
             open_quotient: 0.7,
             brightness: 2_500.0,
-            level: 0.45,
+            level: 0.1,
             ..Self::aah_choir()
         }
     }
@@ -281,7 +281,7 @@ impl ChoirParams {
             brightness: 6_000.0,
             velocity_range_db: 18.0,
             accent_db: 3.0,
-            level: 0.5,
+            level: 0.12,
         }
     }
 
