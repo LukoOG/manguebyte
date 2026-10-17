@@ -315,3 +315,108 @@ pub(crate) fn inharmonic_db(signal: &[f64], fundamental: f64, tolerance: f64, le
     }
     10.0 * (other / (harmonic + other).max(1e-300)).max(1e-30).log10()
 }
+
+/// `signal` through a Butterworth band-pass from `low` to `high` hertz
+/// built on a prototype of order 4, run forwards and then backwards so
+/// that it delays nothing (as `scipy.signal.sosfiltfilt` does): how the
+/// recordings the acoustic drums are calibrated against were measured.
+pub(crate) fn band_passed(signal: &[f64], low: f64, high: f64) -> Vec<f64> {
+    use crate::iir::{Band, Design};
+    let design = Design::butterworth(
+        Band::Bandpass {
+            low_hz: low,
+            high_hz: high,
+        },
+        4,
+    );
+    let sections = design.sections(RATE);
+    let mut out = signal.to_vec();
+    for _ in 0..2 {
+        for section in sections.as_slice() {
+            let (mut x1, mut x2, mut y1, mut y2) = (0.0, 0.0, 0.0, 0.0);
+            for value in out.iter_mut() {
+                let x = *value;
+                let y = section.b0 * x + section.b1 * x1 + section.b2 * x2
+                    - section.a1 * y1
+                    - section.a2 * y2;
+                (x2, x1, y2, y1) = (x1, x, y1, y);
+                *value = y;
+            }
+        }
+        out.reverse();
+    }
+    out
+}
+
+/// The RMS level in decibels of consecutive frames `seconds` long.
+pub(crate) fn frame_levels(signal: &[f64], seconds: f64) -> Vec<f64> {
+    let len = ((seconds * RATE) as usize).max(1);
+    signal
+        .chunks_exact(len)
+        .map(|frame| decibels(rms(frame)))
+        .collect()
+}
+
+/// How long `levels` (frames `seconds` apart, in decibels) take to fall
+/// 60 dB, from the time they take to fall `drop` dB below their loudest
+/// frame, as T20 is read for a room: `None` if they never fall that far.
+pub(crate) fn decay_from_peak(levels: &[f64], seconds: f64, drop: f64) -> Option<f64> {
+    let (loudest, peak) =
+        levels
+            .iter()
+            .enumerate()
+            .fold((0, f64::NEG_INFINITY), |best, (index, &level)| {
+                if level > best.1 { (index, level) } else { best }
+            });
+    let below = levels[loudest..]
+        .iter()
+        .position(|&level| level < peak - drop)?;
+    Some(below as f64 * seconds * 60.0 / drop)
+}
+
+/// The time of the loudest of `levels`, frames `seconds` apart.
+pub(crate) fn loudest_at(levels: &[f64], seconds: f64) -> f64 {
+    let index = levels
+        .iter()
+        .enumerate()
+        .fold((0, f64::NEG_INFINITY), |best, (index, &level)| {
+            if level > best.1 { (index, level) } else { best }
+        })
+        .0;
+    index as f64 * seconds
+}
+
+/// The spectral centroid of each of `count` consecutive frames `seconds`
+/// long, through a Hann window, weighted by magnitude.
+pub(crate) fn centroid_track(signal: &[f64], seconds: f64, count: usize) -> Vec<f64> {
+    let len = (seconds * RATE) as usize;
+    let mut fft = RealFft::<f64>::new(len);
+    let mut input = vec![0.0; len];
+    let mut spectrum = vec![Complex::<f64>::ZERO; fft.spectrum_len()];
+    signal
+        .chunks_exact(len)
+        .take(count)
+        .map(|frame| {
+            for (n, (slot, &x)) in input.iter_mut().zip(frame).enumerate() {
+                // numpy's hanning: symmetric, zero at both ends.
+                *slot = x * (0.5 - 0.5 * (TAU * n as f64 / (len - 1) as f64).cos());
+            }
+            fft.forward(&input, &mut spectrum);
+            let (mut weighted, mut total) = (0.0, 0.0);
+            for (bin, value) in spectrum.iter().enumerate() {
+                let magnitude = value.norm();
+                weighted += magnitude * bin as f64 * RATE / len as f64;
+                total += magnitude;
+            }
+            weighted / total.max(1e-300)
+        })
+        .collect()
+}
+
+/// The energy of `signal` between `low` and `high` hertz over its first
+/// `seconds`, through [`band_passed`].
+pub(crate) fn band_energy(signal: &[f64], low: f64, high: f64, seconds: f64) -> f64 {
+    let filtered = band_passed(signal, low, high);
+    let end = ((seconds * RATE) as usize).min(filtered.len());
+    filtered[..end].iter().map(|x| x * x).sum()
+}

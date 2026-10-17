@@ -350,7 +350,7 @@ impl Decay {
 
 /// One drum strike.
 #[derive(Debug, Clone)]
-struct DrumTone {
+pub(crate) struct DrumTone {
     sample_rate: f64,
     drum: AnalogDrum,
     /// The rise at the start, and its step.
@@ -391,7 +391,7 @@ struct DrumTone {
 }
 
 impl DrumTone {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let filter = || StateVariableFilter::new(SvfMode::Bandpass, 1_000.0, 1.0);
         Self {
             sample_rate: 48_000.0,
@@ -423,7 +423,7 @@ impl DrumTone {
         }
     }
 
-    fn prepare(&mut self, sample_rate: f64) {
+    pub(crate) fn prepare(&mut self, sample_rate: f64) {
         self.sample_rate = sample_rate;
         let spec = ProcessSpec {
             sample_rate,
@@ -454,7 +454,7 @@ impl DrumTone {
 
     /// Strikes `drum` with its settings, a velocity from 0 to 1 and an
     /// accent. `strikes` is the choke group's count, for the open hi-hat.
-    fn strike(
+    pub(crate) fn strike(
         &mut self,
         drum: AnalogDrum,
         kit: &AnalogKitParams,
@@ -625,7 +625,7 @@ impl DrumTone {
     }
 
     #[inline]
-    fn next(&mut self) -> f64 {
+    pub(crate) fn next(&mut self) -> f64 {
         let rate = self.sample_rate;
         let loudest: f64;
         let out = match self.drum {
