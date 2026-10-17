@@ -35,6 +35,9 @@ osc = ["dep:manguebyte-osc"]
 host = ["dep:manguebyte-host"]
 ## Running a plugin as a standalone application.
 standalone = ["dep:manguebyte-standalone", "devices"]
+## Decoding AAC, ALAC and WMA through the system's codecs: Media
+## Foundation on Windows, AudioToolbox on macOS.
+platform-codecs = ["manguebyte-formats/platform-codecs"]
 
 [dependencies]
 manguebyte-core.workspace = true

@@ -1,6 +1,6 @@
 # manguebyte-formats
 
-Audio files for the Manguebyte Audio Framework: WAV, RF64, AIFF and FLAC reading and writing, Ogg Vorbis and MP3 reading, file playback and recording.
+Audio files for the Manguebyte Audio Framework: WAV, RF64, AIFF and FLAC reading and writing, Ogg Vorbis and MPEG audio (layers I to III) reading, metadata, waveform thumbnails, AAC, ALAC and WMA through the system's codecs, file playback and recording.
 
 Part of the [Manguebyte Audio Framework](https://github.com/alessonqueirozdev-hub/manguebyte). Most projects depend on
 [`manguebyte`](https://crates.io/crates/manguebyte), which gathers every part

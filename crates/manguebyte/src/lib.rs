@@ -11,7 +11,7 @@
 //! | [`graph`] | `manguebyte-graph` | a processing graph that can be rewired while it plays |
 //! | [`plugin`] | `manguebyte-plugin` | the format-independent plugin API and a test harness |
 //! | [`midi`] | `manguebyte-midi` | MIDI messages, stream parsing, MIDI files, sample-accurate event buffers |
-//! | [`formats`] | `manguebyte-formats` | audio file reading and writing |
+//! | [`formats`] | `manguebyte-formats` | audio file reading and writing, metadata, waveform thumbnails; AAC, ALAC and WMA through the system's codecs (feature `platform-codecs`) |
 //! | `clap` | `manguebyte-clap` | builds CLAP plugins (feature `clap`) |
 //! | `vst3` | `manguebyte-vst3` | builds VST 3 plugins (feature `vst3`) |
 //! | `lv2` | `manguebyte-lv2` | builds LV2 plugins and their Turtle files (feature `lv2`) |

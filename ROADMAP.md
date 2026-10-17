@@ -116,7 +116,12 @@ Everything a standalone audio application needs, short of a user interface.
 - ⬜ Opus decoding
 - ✅ FLAC encoding, checked against FFmpeg
 - ⬜ Ogg Vorbis encoding
-- ⬜ Metadata, cue points and loop markers
+- ✅ Metadata, cue points and loop markers: one model for every format,
+  read and written where the format allows, unknown chunks kept
+- ✅ MPEG audio layers I and II
+- ✅ Waveform thumbnails with a cache file
+- ✅ AAC, ALAC and WMA through the system's codecs on Windows and macOS
+  (`platform-codecs`)
 
 **Networking**
 - ✅ Open Sound Control: codec, address patterns, UDP and TCP, and a

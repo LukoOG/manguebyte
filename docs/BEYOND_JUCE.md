@@ -581,7 +581,7 @@ it has, and Manguebyte does not:
 - hosting of AU and LV2 plugins, plugin scanning, and the editors of hosted
   plugins (Manguebyte hosts CLAP and VST 3 plugins, without their editors);
 - SIMD wrappers and lookup tables among its DSP utilities, and more audio
-  formats (Opus, encoders for compressed formats, metadata);
+  formats (Opus, encoders for compressed formats);
 - iOS and Android;
 - documentation, tutorials and a large community.
 

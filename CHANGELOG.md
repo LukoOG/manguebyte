@@ -1095,6 +1095,54 @@ display, and no editor has been opened inside a real host yet.
 
 ### File formats
 
+- `metadata`: one model for what files say beside their audio, the same
+  for every format. Typed fields for title, artist, album, date, track,
+  genre, comment, copyright, tempo, key, ISRC, the Broadcast Wave
+  originator and time reference with the rest of `bext` (EBU Tech 3285,
+  loudness included), `iXML` kept as text, an instrument (root note, fine
+  tune, gain, key and velocity range), loops, cue points with labels and
+  lengths, and pictures; other text as tags, and every chunk not
+  understood kept as it was, so that a file read and written again loses
+  nothing the model does not interpret. WAV reads and writes `LIST/INFO`,
+  `bext`, `iXML`, `cue ` with `LIST/adtl`, `smpl` and `inst`, and reads the
+  tempo of `acid`; AIFF reads and writes `NAME`, `AUTH`, `(c) `, `ANNO`,
+  `MARK` and `INST`; FLAC reads its Vorbis comment and pictures, and
+  `FlacOptions::with_metadata` and `with_picture` write them with any other
+  block; Ogg Vorbis comments fill the same fields, pictures included; MP3
+  reads ID3v2.2, 2.3 and 2.4 (unsynchronisation, extended headers, every
+  text encoding, `APIC`) and ID3v1. `wav::write_with_metadata`,
+  `aiff::write_with_metadata` and `AudioWriter::set_metadata` write it;
+  `AudioReader::metadata` and the `metadata` field of every decoded file
+  read it. Damaged metadata never costs the audio, and no more than the
+  file holds is allocated: 16 MiB a chunk, 64 MiB a file.
+- `mp3` decodes MPEG audio layers I and II too, written from ISO/IEC
+  11172-3 and 13818-3: every allocation table, grouped quantisers, the
+  selection of scale factors, joint stereo and the CRC, with exact seeking
+  like layer III. Files FFmpeg's encoder wrote decode within 3.2e-5 of its
+  own decoder.
+- `thumbnail`: waveform overviews. `Thumbnail` keeps the minimum, maximum
+  and RMS level of every bucket of a few hundred frames and of every
+  coarser level by fours, grows as audio is pushed into it, and answers a
+  range at any zoom from a few dozen cells, exactly for the buckets the
+  range touches; `ThumbnailBuilder` reads a file on a thread of its own
+  and shares the overview as it grows; `write_cache` and `read_cache` keep
+  it in six bytes a bucket and channel, checked by a checksum.
+- `platform`, behind the new `platform-codecs` feature (and the facade's
+  feature of that name): AAC and ALAC in MPEG-4 files, AAC in ADTS, WMA and
+  CAF decoded by the system's codecs, Media Foundation on Windows and
+  AudioToolbox on macOS, through `read_file`, `decode` and `AudioReader`,
+  from a file or from memory. On Windows the priming an MPEG-4 file's edit
+  list states is left out, which Media Foundation does not do itself.
+  Elsewhere, and without the feature, these formats are recognised and
+  refused with `FormatError::Unsupported`. A new CI job builds and tests
+  the feature on Linux, Windows and macOS.
+- Breaking: `AudioFile`, `WavFile`, `AiffFile`, `FlacFile`, `VorbisFile`
+  and `Mp3File` have a `metadata` field; `FileFormat` has the variants
+  `Mp4`, `Aac`, `Wma` and `Caf`, and needs 16 bytes to recognise every
+  format (`FileFormat::DETECT_LEN`); `FormatError` has the variants
+  `Unsupported` and `Platform`. A layer I or II file, refused before, now
+  decodes, and the headers of layers I and II of MPEG-2.5, which does not
+  exist, are no longer taken for frames.
 - `vorbis`: an Ogg Vorbis decoder written from the Vorbis I specification
   and RFC 3533: floors of type 1, residues of types 0, 1 and 2, codebooks
   of every lookup type, channel coupling, both block sizes, 1 to 255
