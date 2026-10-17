@@ -1,6 +1,6 @@
 # manguebyte-midi
 
-MIDI 1.0 and 2.0 messages, packets, files and sample-accurate event buffers for the Manguebyte Audio Framework.
+MIDI 1.0 and 2.0 messages, packets, files, MPE, capability inquiry (MIDI-CI) and sample-accurate event buffers for the Manguebyte Audio Framework.
 
 Part of the [Manguebyte Audio Framework](https://github.com/alessonqueirozdev-hub/manguebyte). Most projects depend on
 [`manguebyte`](https://crates.io/crates/manguebyte), which gathers every part

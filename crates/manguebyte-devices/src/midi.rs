@@ -179,6 +179,17 @@ pub(crate) enum MidiSink {
 impl MidiSink {
     /// Parses `bytes`, which arrived just now, and queues every message.
     pub(crate) fn deliver(&mut self, bytes: &[u8], parser: &mut StreamParser) {
+        self.deliver_with_sysex(bytes, parser, |_| {});
+    }
+
+    /// [`deliver`](Self::deliver), handing each whole system exclusive
+    /// message to `on_sysex` too, without its `0xF0` and `0xF7`.
+    pub(crate) fn deliver_with_sysex(
+        &mut self,
+        bytes: &[u8],
+        parser: &mut StreamParser,
+        mut on_sysex: impl FnMut(&[u8]),
+    ) {
         let at = Instant::now();
         let mut push = |message| {
             let timed = Timed { at, message };
@@ -198,10 +209,15 @@ impl MidiSink {
         parser.feed_slice(bytes, |event| match event {
             StreamEvent::Channel(message) => push(MidiInputMessage::Channel(message)),
             StreamEvent::System(message) => push(MidiInputMessage::System(message)),
-            StreamEvent::SysEx(_) => {}
+            StreamEvent::SysEx(payload) => on_sysex(payload),
         });
     }
 }
+
+/// The largest system exclusive message [`MidiInput::open_with_sysex`]
+/// delivers, in bytes: room for a MIDI-CI property exchange chunk of the
+/// largest size a device may announce in practice.
+pub const SYSEX_CAPACITY: usize = 65_536;
 
 /// One receiver for any number of ports: the sink to share between the
 /// ports, and the audio thread's end.
@@ -269,6 +285,43 @@ impl MidiInput {
     pub fn open(id: &str) -> Result<(Self, MidiReceiver), MidiError> {
         let (sender, receiver) = receiver_pair(QUEUE_CAPACITY);
         let (connection, name) = connect_input(id, MidiSink::Own(sender))?;
+        Ok((
+            Self {
+                name,
+                _connection: connection,
+            },
+            receiver,
+        ))
+    }
+
+    /// Opens the input port with this identifier, as [`open`](Self::open)
+    /// does, and also hands every system exclusive message that arrives on
+    /// it to `on_sysex`, without its `0xF0` and `0xF7`, such as the MIDI-CI
+    /// messages a [`manguebyte_midi::ci::agent::Agent`] reads.
+    ///
+    /// `on_sysex` runs on the thread the system delivers MIDI on, never on
+    /// the audio thread, and may take its time there; a message longer
+    /// than [`SYSEX_CAPACITY`] is dropped. Send replies with
+    /// [`MidiOutput::send_raw`].
+    pub fn open_with_sysex(
+        id: &str,
+        mut on_sysex: impl FnMut(&[u8]) + Send + 'static,
+    ) -> Result<(Self, MidiReceiver), MidiError> {
+        let (sender, receiver) = receiver_pair(QUEUE_CAPACITY);
+        let mut sink = MidiSink::Own(sender);
+        let mut input = midir::MidiInput::new(CLIENT_NAME).map_err(|_| MidiError::Unavailable)?;
+        input.ignore(midir::Ignore::ActiveSense);
+        let (port, name) = find_input(&input, id)?;
+        let connection = input
+            .connect(
+                &port,
+                "manguebyte-in",
+                move |_timestamp, bytes, parser: &mut StreamParser| {
+                    sink.deliver_with_sysex(bytes, parser, &mut on_sysex);
+                },
+                StreamParser::new(SYSEX_CAPACITY),
+            )
+            .map_err(|error| MidiError::Connect(error.to_string()))?;
         Ok((
             Self {
                 name,
@@ -620,6 +673,36 @@ mod tests {
             })
         };
         assert_eq!(seen, [on(64, 100), on(60, 100), on(62, 90)]);
+    }
+
+    #[test]
+    fn system_exclusive_messages_reach_their_handler_and_the_rest_the_queue() {
+        use manguebyte_midi::ci::Muid;
+        use manguebyte_midi::ci::agent::{Agent, AgentConfig, AgentEvent};
+
+        let (sender, mut receiver) = receiver_pair(16);
+        let mut sink = MidiSink::Own(sender);
+        let mut parser = StreamParser::new(SYSEX_CAPACITY);
+        // A MIDI-CI discovery from another device, cut into two
+        // deliveries, then a note.
+        let mut other = Agent::new(Muid::from_seed(7), AgentConfig::default());
+        other.discover();
+        let discovery = other.outgoing().unwrap();
+        let (head, tail) = discovery.split_at(10);
+        let mut payloads = Vec::new();
+        let mut handle = |payload: &[u8]| payloads.push(payload.to_vec());
+        sink.deliver_with_sysex(head, &mut parser, &mut handle);
+        sink.deliver_with_sysex(tail, &mut parser, &mut handle);
+        sink.deliver_with_sysex(&[0x90, 60, 100], &mut parser, &mut handle);
+        let mut seen = Vec::new();
+        receiver.read(FRAMES, RATE, |_, message| seen.push(message));
+        assert_eq!(seen, [note(60)]);
+        assert_eq!(payloads.len(), 1);
+        let mut agent = Agent::new(Muid::from_seed(8), AgentConfig::default());
+        let events = agent.receive(&payloads[0]).unwrap();
+        assert!(
+            matches!(events[..], [AgentEvent::PeerDiscovered(peer)] if peer.muid == other.muid())
+        );
     }
 
     #[cfg(any(windows, target_os = "android"))]

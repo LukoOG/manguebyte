@@ -21,6 +21,9 @@
 //! - [`mod@ump`]: the Universal MIDI Packet and every message it carries.
 //! - [`mod@translate`]: conversion between the two protocols, as the
 //!   specification prescribes it.
+//! - [`mod@ci`]: MIDI Capability Inquiry. Discovery, profiles, property
+//!   exchange and process inquiry, read and written, and a device that
+//!   answers and asks on an application's behalf.
 //!
 //! And for both:
 //!
@@ -30,6 +33,7 @@
 #![forbid(unsafe_code)]
 
 mod buffer;
+pub mod ci;
 pub mod file;
 pub mod keyboard;
 mod list;
