@@ -835,6 +835,31 @@ display, and no editor has been opened inside a real host yet.
   height at the cut-off is set in decibels, the accent's short decay and
   sweep that builds over consecutive accents, and a constant-time slide
   on legato that does not strike the envelopes again.
+- `DrumKitVoice`: a drum kit whose piece on each General MIDI key is
+  chosen and tuned in a `DrumKit` (`Piece`: model, level, tune, decay,
+  three timbre settings, pan, choke group; `LoFi`: a sampler's saturation,
+  rate, word length and filter on every piece). Acoustic pieces by modal
+  synthesis: drum heads in the modes of a circular membrane (the zeros of
+  the Bessel functions, checked against `J_m`), struck by a Hertzian
+  pulse at a radius that weights the modes, each batter mode coupled to
+  the resonant head's through the air into a close pair, the pitch sharp
+  after a hard strike, and snare wires as noise gated by the snare head's
+  motion; cymbals as 280 to 460 resonators with a plate's modal density,
+  a measured decay curve and a cascade that carries energy up the bands
+  after the strike (the shimmer). The snare and the crash are calibrated
+  against recordings of real ones, and tests check the recorded targets:
+  the crash's decay by octave (within 0.6 to 1.5 times), the high bands
+  peaking 0.1 to 0.4 s after the strike, its centroid every 100 ms
+  (within 25 %) and its partial clusters; the snare's body and wire
+  decays, the wires peaking 40 ms after the body, its centroid and its
+  wire-to-body balance. Drum machines as recipes of their circuits' parts:
+  the 909, 606 and CR-78 (with its guiro, maracas, tambourine, cowbell,
+  bongos and conga), and the 808 of `AnalogKitVoice`. Presets: acoustic,
+  808, 909, 606, CR-78, trap, techno, house, drum and bass, lo-fi.
+  Restruck while it rings, an acoustic piece adds the new strike to its
+  ringing. A ringing cymbal costs about 3.5 % of one core at 48 kHz, a
+  snare 1.3 %. `cargo run --release -p manguebyte-dsp --example
+  drum_kit_wavs -- <directory>` renders a tour of every kit and grooves.
 
 ### Parameters
 

@@ -89,6 +89,9 @@ Everything a standalone audio application needs, short of a user interface.
   four-operator FM, a tonewheel organ with a rotary speaker, the drums and
   kick bass of the classic analogue drum machine, and an acid bass; each a
   `Voice` with presets, measured for tuning, decay, velocity and accent
+- ✅ Drum kits: acoustic drums and cymbals by modal synthesis, calibrated
+  against recordings of a real snare and crash; the 909, 606, CR-78 and
+  808; kits for trap, techno, house, drum and bass and lo-fi
 - ✅ Metering: loudness to ITU-R BS.1770 and EBU R 128 (checked against the
   EBU's test signals), true peak, peak, RMS, VU, PPM, stereo correlation
 - ✅ Pitch detection (YIN and the McLeod method) with note naming
