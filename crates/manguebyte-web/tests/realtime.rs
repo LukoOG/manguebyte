@@ -385,6 +385,63 @@ fn pushing_draining_and_rendering_never_allocate() {
     assert!(stats.limited > 0, "{stats:?}");
 }
 
+/// Loudness normalisation measures an instrument in the control call that
+/// loads it, never while the engine renders: the parts have their make-up
+/// before they first render, and rendering, with notes sounding and
+/// normalisation switched off and on under them, touches no heap. The
+/// measurement itself allocates, so the counter would see it there.
+#[test]
+fn loudness_normalisation_is_measured_outside_the_render_call() {
+    let mut engine = Engine::new(EngineConfig::new(48_000.0)).unwrap();
+    engine.create_part(0, InstrumentKind::Sampler).unwrap();
+    engine.create_part(1, InstrumentKind::SamplerKit).unwrap();
+    let (sfz, files) = common::tone_instrument();
+    let (kit_sfz, kit_files) = common::kit_instrument();
+    let loads = heap_calls(|| {
+        common::load_sfz(&mut engine, 0, &sfz, &files);
+        common::load_sfz(&mut engine, 1, &kit_sfz, &kit_files);
+    });
+    assert!(loads > 0, "measuring allocates");
+    assert!(engine.sampler_make_up_db(0).is_some());
+    assert!(engine.sampler_make_up_db(1).is_some());
+    let normalize = ParamId::from_name(ids::SAMPLER_NORMALIZE);
+    let mut records = Vec::new();
+    for step in 0..40u64 {
+        let frame = step * 1_200;
+        records.push(EventRecord::note_on(frame, 0, 57 + (step % 12) as u8, 0.8));
+        records.push(EventRecord::note_off(
+            frame + 1_000,
+            0,
+            57 + (step % 12) as u8,
+        ));
+        records.push(EventRecord::note_on(
+            frame,
+            1,
+            [36, 38, 42, 88][step as usize % 4],
+            0.8,
+        ));
+        for part in [0, 1] {
+            records.push(EventRecord::param(
+                frame + 300,
+                part,
+                normalize,
+                (step % 2) as f64,
+            ));
+        }
+    }
+    let calls = heap_calls(|| {
+        for &record in &records {
+            engine.push(record);
+        }
+        for _ in 0..400 {
+            engine.render(128);
+        }
+    });
+    assert_eq!(calls, 0, "the engine touched the heap {calls} times");
+    assert_eq!(engine.stats().dropped, 0);
+    assert_eq!(engine.stats().unrouted, 0);
+}
+
 /// Every path a full queue takes: waiting events pushed out by earlier
 /// ones, records refused, and drains and staged copies that stop with
 /// records left over. (Silencing a part that produced something that is

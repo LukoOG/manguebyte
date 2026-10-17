@@ -248,6 +248,19 @@
 //! and fails for one that misses the target, saying what its make-up
 //! should be, and a new kind or preset does not compile without its row.
 //!
+//! Recorded instruments come at any level, so a sampler part measures
+//! each one as it loads: the instrument plays its kind's phrase (the
+//! melody, moved into its range, or for a sampler kit the groove on its
+//! own drums) offline, through the same sampler voices, and the part plays
+//! it at the make-up that brings the phrase to the target
+//! ([`Engine::sampler_make_up_db`]), held back where its peaks would
+//! otherwise reach [`NORMALIZE_PEAK_DB`] at full velocity, accented, and
+//! never beyond [`NORMALIZE_RANGE_DB`]. That is `sampler.normalize`, on by
+//! default; off, the part plays the samples as they are. The measurement
+//! is a control call's work, never the render call's:
+//! [`Engine::load_instrument`] makes it at once, `js/worklet.js`
+//! [`PROBE_STEP_FRAMES`] frames between two render quanta at a time.
+//!
 //! # The contract with Aratu
 //!
 //! [Aratu](https://github.com/alessonqueirozdev-hub/aratu) writes records
@@ -328,7 +341,9 @@
 //! gives it to the part, whose sounding notes ring on with the instrument
 //! they started with. Samples play at their own rate, read at the ratio of
 //! that rate to the engine's. A sample peaking at full scale peaks at
-//! [`SAMPLER_LEVEL_DB`] (-6 dB) at full velocity; an accent adds
+//! [`SAMPLER_LEVEL_DB`] (-6 dB) at full velocity, before the make-up of
+//! the part's loudness normalisation (see [Loudness](#loudness)), which
+//! measures the instrument as it loads; an accent adds
 //! [`SAMPLER_ACCENT_DB`] (3 dB); choke stops every voice after one more
 //! frame, and all notes off releases every voice in no less than
 //! [`PANIC_FADE_SECONDS`] (8 ms). A part made as an
@@ -366,6 +381,7 @@ mod level;
 mod load;
 mod master;
 mod params;
+mod probe;
 mod queue;
 pub mod record;
 pub mod ring;
@@ -390,6 +406,7 @@ pub use manguebyte_params::ParamId;
 pub use manguebyte_sampler;
 pub use master::{MASTER_LOOKAHEAD_SECONDS, TRUE_PEAK_DELAY, master_latency_frames};
 pub use params::ids;
+pub use probe::{NORMALIZE_PEAK_DB, NORMALIZE_RANGE_DB, PROBE_STEP_FRAMES};
 pub use record::{Event, EventRecord, RECORD_SIZE, RecordKind};
 pub use ring::{RingConsumer, RingProducer, event_ring, event_ring_starting_at, ring_bytes};
 pub use sampled::{PANIC_FADE_SECONDS, SAMPLER_ACCENT_DB, SAMPLER_LEVEL_DB, SAMPLER_VOICES};

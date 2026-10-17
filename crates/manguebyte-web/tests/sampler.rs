@@ -10,10 +10,12 @@ use manguebyte_web::{
     SAMPLER_LEVEL_DB, SfzLoad, ids,
 };
 
-/// An engine with sampler part 0, through no stage, playing `sfz`.
+/// An engine with sampler part 0, through no stage, playing `sfz` as it
+/// is: not measured for loudness normalisation (`tests/loudness.rs` is
+/// about that), so at [`SAMPLER_LEVEL_DB`].
 fn sampler_engine(sfz: &str, files: &[(String, Vec<u8>)]) -> Engine {
     let mut engine = engine_with(InstrumentKind::Sampler, Chain::NONE);
-    load_sfz(&mut engine, 0, sfz, files);
+    load_sfz_unmeasured(&mut engine, 0, sfz, files);
     engine
 }
 
@@ -290,8 +292,9 @@ fn a_new_instrument_leaves_the_sounding_notes_alone() {
     let (b, _) = render(&mut swapped, 6_000, 128);
     assert_eq!(bits(&a), bits(&b));
     // The kit takes over in the middle of the notes: they ring on as they
-    // were, and the next note plays the kit.
-    load_sfz(&mut swapped, 0, &kit_sfz, &kit_files);
+    // were, and the next note plays the kit. (Measured, the kit would bring
+    // its own make-up gain, which the part would glide to.)
+    load_sfz_unmeasured(&mut swapped, 0, &kit_sfz, &kit_files);
     let (a, _) = render(&mut steady, 12_000, 128);
     let (b, _) = render(&mut swapped, 12_000, 128);
     assert_eq!(bits(&a), bits(&b), "the sounding notes did not change");
@@ -358,12 +361,12 @@ fn loads_say_what_is_wrong() {
     assert!(error.to_string().contains("a5.wav"), "{error}");
 }
 
-/// A sampler kit with the fixture kit, or with no instrument.
+/// A sampler kit with the fixture kit, as it is, or with no instrument.
 fn kit_engine(loaded: bool) -> Engine {
     let mut engine = engine_with(InstrumentKind::SamplerKit, Chain::FULL);
     if loaded {
         let (sfz, files) = kit_instrument();
-        load_sfz(&mut engine, 0, &sfz, &files);
+        load_sfz_unmeasured(&mut engine, 0, &sfz, &files);
     }
     engine
 }
@@ -407,7 +410,7 @@ fn a_sampler_kit_plays_its_samples_for_the_notes_it_has() {
     ];
     let (sfz, files) = kit_instrument();
     let mut plain = engine_with(InstrumentKind::Sampler, Chain::FULL);
-    load_sfz(&mut plain, 0, &sfz, &files);
+    load_sfz_unmeasured(&mut plain, 0, &sfz, &files);
     push_all(&mut plain, &records);
     let mut engine = kit_engine(true);
     push_all(&mut engine, &records);

@@ -3,7 +3,8 @@
 #![allow(dead_code)]
 
 use manguebyte_web::{
-    Chain, Engine, EngineConfig, EventRecord, InstrumentKind, ParamId, Pushed, SfzLoad,
+    Chain, Engine, EngineConfig, EventRecord, InstrumentKind, ParamId, Pushed, SfzInstrument,
+    SfzLoad,
 };
 
 pub const RATE: f64 = 48_000.0;
@@ -97,9 +98,9 @@ pub fn noise(frames: usize, amplitude: f64, seed: u64) -> Vec<f32> {
         .collect()
 }
 
-/// Loads `sfz` with `files` through [`SfzLoad`], file by file, and gives
-/// it to part `part`, which must be a sampler part.
-pub fn load_sfz(engine: &mut Engine, part: u16, sfz: &str, files: &[(String, Vec<u8>)]) {
+/// Makes the instrument of `sfz` with `files` through [`SfzLoad`], file by
+/// file.
+pub fn build_sfz(sfz: &str, files: &[(String, Vec<u8>)]) -> SfzInstrument {
     let mut load = SfzLoad::new(sfz).unwrap_or_else(|error| panic!("{error}"));
     let wanted: Vec<String> = load.paths().map(str::to_owned).collect();
     for path in wanted {
@@ -109,8 +110,22 @@ pub fn load_sfz(engine: &mut Engine, part: u16, sfz: &str, files: &[(String, Vec
             .unwrap_or_else(|| panic!("no fixture {path}"));
         assert!(load.add_file(&path, bytes.clone()).unwrap(), "{path}");
     }
-    let instrument = load.finish().unwrap_or_else(|error| panic!("{error}"));
+    load.finish().unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// Loads `sfz` with `files` through [`SfzLoad`], file by file, and gives
+/// it to part `part`, which must be a sampler part: measured, so that the
+/// part plays it at the loudness target while it normalises.
+pub fn load_sfz(engine: &mut Engine, part: u16, sfz: &str, files: &[(String, Vec<u8>)]) {
+    let instrument = build_sfz(sfz, files);
     engine.load_instrument(part, instrument).unwrap();
+}
+
+/// [`load_sfz`] without the measurement: the part plays the samples at
+/// [`sampler_level`], as they are.
+pub fn load_sfz_unmeasured(engine: &mut Engine, part: u16, sfz: &str, files: &[(String, Vec<u8>)]) {
+    let instrument = build_sfz(sfz, files);
+    engine.load_instrument_unmeasured(part, instrument).unwrap();
 }
 
 /// A melodic instrument like Aratu's: an A4 sampled at 24 kHz for the keys
@@ -158,11 +173,12 @@ pub fn signal_instrument(samples: &[f32]) -> (String, Vec<(String, Vec<u8>)>) {
 }
 
 /// An engine whose part 0, through `chain`, plays `samples` (see
-/// [`signal_instrument`]) when key 60 is struck.
+/// [`signal_instrument`]) when key 60 is struck, as they are: the
+/// instrument is not measured for loudness normalisation.
 pub fn signal_engine(samples: &[f32], chain: Chain) -> Engine {
     let mut engine = engine_with(InstrumentKind::Sampler, chain);
     let (sfz, files) = signal_instrument(samples);
-    load_sfz(&mut engine, 0, &sfz, &files);
+    load_sfz_unmeasured(&mut engine, 0, &sfz, &files);
     engine
 }
 

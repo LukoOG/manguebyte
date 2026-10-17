@@ -41,10 +41,13 @@
 // process() works through it until it has decoded LOAD_BYTES_PER_QUANTUM
 // bytes of files (always at least one step): the audio is never held up by
 // more than about one file's decoding, and mb_render itself never
-// allocates. A message marked `now`, sent while the context is not running
-// and process() is not being called, works through the whole queue at
-// once instead. Each load carries a token; an sfzBegin for the same part
-// makes the steps of an earlier load stale, and they are dropped.
+// allocates. The finish then measures the instrument for the part's
+// loudness normalisation, MEASURE_FRAMES_PER_QUANTUM frames of its phrase
+// a quantum (mb_sfz_measure), before handing it over. A message marked
+// `now`, sent while the context is not running and process() is not being
+// called, works through the whole queue at once instead. Each load carries
+// a token; an sfzBegin for the same part makes the steps of an earlier load
+// stale, and they are dropped.
 
 import { EventRing, RECORD_SIZE } from './ring.js';
 
@@ -56,6 +59,16 @@ const ABI_VERSION = 2;
  * one file is larger. The README gives what that costs.
  */
 export const LOAD_BYTES_PER_QUANTUM = 64 * 1024;
+
+/**
+ * Frames of an instrument's phrase measured after one render quantum, for
+ * the part's loudness normalisation (`PROBE_STEP_FRAMES` in Rust): about
+ * what decoding LOAD_BYTES_PER_QUANTUM bytes costs.
+ */
+export const MEASURE_FRAMES_PER_QUANTUM = 8192;
+
+/** `ffi::status::MEASURING`: a measurement has more to do. */
+const MEASURING = 1;
 
 /** Render quanta between two calls that free the instruments parts are done with. */
 const COLLECT_EVERY = 512;
@@ -176,16 +189,20 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
     return this.loadTokens.get(part) === token;
   }
 
-  /** One step of a load: decodes a file, or finishes. */
+  /**
+   * One step of a load: decodes a file, measures some of the instrument
+   * for the part's loudness normalisation, or finishes. Returns false when
+   * the measurement has more to do: the job stays first in the queue.
+   */
   step(job) {
     const x = this.exports;
     const { part, token } = job;
     if (!this.current(part, token)) {
       if (job.type === 'finish') this.reply(job.id, { status: STALE, error: null });
-      return;
+      return true;
     }
     if (job.type === 'file') {
-      if (this.loadErrors.has(part)) return;
+      if (this.loadErrors.has(part)) return true;
       const path = new Uint8Array(job.path);
       const file = new Uint8Array(job.bytes);
       const both = new Uint8Array(path.length + file.length);
@@ -193,29 +210,50 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
       both.set(file, path.length);
       const status = this.input(both) ? x.mb_sfz_add_file(this.engine, part, path.length, file.length) : BAD_INPUT;
       if (status !== 0) this.loadErrors.set(part, { status, error: this.textBuffer() });
-      return;
+      return true;
     }
-    this.loadTokens.delete(part);
     const failed = this.loadErrors.get(part);
-    this.loadErrors.delete(part);
     if (failed) {
+      this.loadTokens.delete(part);
+      this.loadErrors.delete(part);
       x.mb_sfz_abandon(this.engine, part);
       this.reply(job.id, failed);
-      return;
+      return true;
     }
+    // A module from before loudness normalisation finishes in one step.
+    if (typeof x.mb_sfz_measure === 'function') {
+      const measured = x.mb_sfz_measure(this.engine, part, MEASURE_FRAMES_PER_QUANTUM);
+      if (measured === MEASURING) {
+        this.jobs.unshift(job);
+        return false;
+      }
+      if (measured !== 0) {
+        this.loadTokens.delete(part);
+        this.reply(job.id, { status: measured, error: this.textBuffer() });
+        return true;
+      }
+    }
+    this.loadTokens.delete(part);
     const status = x.mb_sfz_finish(this.engine, part);
     const text = this.textBuffer();
     this.reply(job.id, status === 0 ? { status, summary: text } : { status, error: text });
+    return true;
   }
 
-  /** Works through the queued load steps, until `budget` bytes of files are decoded (always one step). */
+  /**
+   * Works through the queued load steps, until `budget` bytes of files are
+   * decoded (always one step). A step of a measurement counts as the whole
+   * budget, and comes first in its quantum.
+   */
   work(budget) {
     let used = 0;
     let steps = 0;
     while (this.jobs.length > 0 && (steps === 0 || used < budget)) {
-      const job = this.jobs.shift();
+      const job = this.jobs[0];
+      if (job.type === 'finish' && steps > 0 && budget !== Infinity) break;
+      this.jobs.shift();
       if (job.type === 'file') used += job.bytes.byteLength;
-      this.step(job);
+      if (!this.step(job)) used += LOAD_BYTES_PER_QUANTUM;
       steps += 1;
     }
     this.refresh();

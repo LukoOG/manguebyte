@@ -97,13 +97,63 @@ test('loadSfz loads between render quanta and the part plays the instrument', { 
     // A sine starts at 0, so the first sound is one frame later.
     assert.equal(start + firstSound(left), at + 1);
     assert.deepEqual(left, right);
-    assert.ok(peak(left) > 0.3 && peak(left) < 1, `peak ${peak(left)}`);
+    // Two loud sines (0.8 of full scale), which the part's loudness
+    // normalisation turns down by about 11 dB.
+    assert.ok(peak(left) > 0.05 && peak(left) < 0.3, `peak ${peak(left)}`);
     assert.equal(await engine.activeVoices(0), 2);
     engine.allNotesOff(0);
     await context.run(40);
     assert.equal(await engine.activeVoices(0), 0);
     const params = await engine.params(0);
     assert.ok(params.some((param) => param.id === 'sampler.interpolation'));
+    const normalize = params.find((param) => param.id === 'sampler.normalize');
+    assert.equal(normalize && normalize.default, 1, 'normalisation is on by default');
+    await engine.close();
+  } finally {
+    engine.release();
+  }
+});
+
+test('loadSfz measures an instrument between quanta, and two recorded 12 dB apart play alike', { skip: skipWithoutWasm }, async () => {
+  const sfz = '<global> ampeg_release=0.05\n' +
+    '<region> sample=a4.wav pitch_keycenter=69 lokey=0 hikey=127 loop_mode=loop_continuous loop_start=12000 loop_end=17999\n';
+  const files = new Map([
+    ['https://samples.test/loud/voice.sfz', new TextEncoder().encode(sfz)],
+    ['https://samples.test/loud/a4.wav', wav16(sine(440, 24000, 24000, 0.8), 24000)],
+    ['https://samples.test/quiet/voice.sfz', new TextEncoder().encode(sfz)],
+    ['https://samples.test/quiet/a4.wav', wav16(sine(440, 24000, 24000, 0.2), 24000)],
+  ]);
+  const fetch = async (href) => {
+    const bytes = files.get(href);
+    return bytes ? { ok: true, status: 200, arrayBuffer: async () => bytes.slice().buffer } : { ok: false, status: 404 };
+  };
+  const context = new FakeContext(0);
+  context.state = 'running';
+  const engine = await make(context);
+  try {
+    const level = async (part) => {
+      engine.noteOn(part, 69, 0.8, (context.frame + 2 * QUANTUM) / RATE);
+      const { left } = await context.run(30);
+      engine.allNotesOff(part);
+      await context.run(10);
+      return peak(left);
+    };
+    await engine.createPart(0, 'sampler', 'none');
+    await engine.createPart(1, 'sampler', 'none');
+    for (const [part, name] of [[0, 'loud'], [1, 'quiet']]) {
+      const { error, quanta } = await runUntil(context, engine.loadSfz(part, `https://samples.test/${name}/voice.sfz`, { fetch }));
+      assert.equal(error, undefined);
+      // Two files, then 4.5 s of the phrase measured 8 192 frames a quantum.
+      assert.ok(quanta >= 27, `${quanta} quanta`);
+    }
+    const [loud, quiet] = [await level(0), await level(1)];
+    assert.ok(Math.abs(20 * Math.log10(loud / quiet)) < 1, `${loud} against ${quiet}`);
+    // Off, the loud one plays as recorded: 0.8, at the part's -6 dB, at
+    // velocity 102 of 127 squared.
+    engine.setParam(0, 'sampler.normalize', 0);
+    const recorded = await level(0);
+    assert.ok(Math.abs(recorded - 0.8 * 0.5 * (102 / 127) ** 2) < 0.005, `${recorded}`);
+    assert.ok(recorded > 2 * loud);
     await engine.close();
   } finally {
     engine.release();
@@ -120,7 +170,8 @@ test('loadSfz finishes at once while the context is not running', { skip: skipWi
     assert.equal(summary.regions, 2);
     engine.noteOn(3, 60, 1);
     const { left } = await context.run(4);
-    assert.ok(peak(left) > 0.1);
+    // Measured as it loaded, and turned down to the loudness target.
+    assert.ok(peak(left) > 0.05 && peak(left) < 0.2, `peak ${peak(left)}`);
     await engine.close();
   } finally {
     engine.release();

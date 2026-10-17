@@ -534,6 +534,7 @@ fn sfz_instruments_load_through_the_exports() {
         assert!(ffi::mb_sfz_files_json(null, 0).is_null());
         assert_eq!(ffi::mb_sfz_add_file(null, 0, 0, 0), status::NO_ENGINE);
         assert_eq!(ffi::mb_sfz_finish(null, 0), status::NO_ENGINE);
+        assert_eq!(ffi::mb_sfz_measure(null, 0, 64), status::NO_ENGINE);
         assert_eq!(ffi::mb_sfz_abandon(null, 0), status::NO_ENGINE);
         assert_eq!(ffi::mb_collect(null), 0);
         assert!(ffi::mb_input_ptr(engine, ffi::MAX_INPUT_BYTES + 1).is_null());
@@ -566,6 +567,13 @@ fn sfz_instruments_load_through_the_exports() {
         assert_eq!(ffi::mb_sfz_finish(engine, 0), status::NO_LOAD);
         assert_eq!(ffi::mb_sfz_add_file(engine, 0, 0, 0), status::NO_LOAD);
         assert_eq!(ffi::mb_sfz_abandon(engine, 0), status::NO_LOAD);
+        assert_eq!(ffi::mb_sfz_measure(engine, 0, 64), status::NO_LOAD);
+        // So does measuring it.
+        assert_eq!(ffi::mb_sfz_begin(engine, 0, length), status::OK);
+        assert_eq!(ffi::mb_sfz_measure(engine, 0, 64), status::BAD_SAMPLE);
+        let message = text(engine, ffi::mb_text_ptr(engine));
+        assert!(message.contains("a.wav"), "{message}");
+        assert_eq!(ffi::mb_sfz_measure(engine, 0, 64), status::NO_LOAD);
 
         // A file that is not audio ends the load too.
         input(engine, sfz);
@@ -574,6 +582,15 @@ fn sfz_instruments_load_through_the_exports() {
         assert_eq!(ffi::mb_sfz_add_file(engine, 0, 5, 17), status::BAD_INPUT);
         assert_eq!(ffi::mb_sfz_add_file(engine, 0, 5, 16), status::BAD_SAMPLE);
         assert_eq!(ffi::mb_sfz_finish(engine, 0), status::NO_LOAD);
+
+        // Under Miri the part does not normalise, so that the instrument
+        // is not measured: playing its phrase, 4.5 s of sound, would take
+        // far too long there.
+        if cfg!(miri) {
+            let off = ParamId::from_name(ids::SAMPLER_NORMALIZE);
+            assert_eq!(push(engine, &[EventRecord::param(0, 0, off, 0.0)]), 1);
+            assert_eq!(ffi::mb_render(engine, 128), 128);
+        }
 
         // Begun twice, abandoned, begun again and loaded.
         input(engine, sfz);
@@ -591,6 +608,25 @@ fn sfz_instruments_load_through_the_exports() {
         input(engine, b"b.wav");
         assert_eq!(ffi::mb_sfz_add_file(engine, 0, 5, 0), status::OK);
         assert_eq!(text(engine, ffi::mb_sfz_files_json(engine, 0)), "[]");
+        // Measured a step at a time for the part's loudness normalisation,
+        // and the files it no longer needs ignored meanwhile.
+        let mut steps = 0;
+        loop {
+            steps += 1;
+            match ffi::mb_sfz_measure(engine, 0, manguebyte_web::PROBE_STEP_FRAMES as u32) {
+                status::OK => break,
+                measuring => assert_eq!(measuring, status::MEASURING),
+            }
+            assert_eq!(text(engine, ffi::mb_sfz_files_json(engine, 0)), "[]");
+            assert_eq!(ffi::mb_sfz_add_file(engine, 0, 5, 0), status::OK);
+        }
+        if cfg!(miri) {
+            assert_eq!(steps, 1, "nothing to measure");
+        } else {
+            // The instrument and the measurement made, then 4.5 s at
+            // 48 kHz in steps of 8 192 frames.
+            assert_eq!(steps, 1 + 27);
+        }
         assert_eq!(ffi::mb_sfz_finish(engine, 0), status::OK);
         let summary = text(engine, ffi::mb_text_ptr(engine));
         assert!(
@@ -598,8 +634,11 @@ fn sfz_instruments_load_through_the_exports() {
             "{summary}"
         );
         assert!(summary.ends_with("\"warnings\":[]}"), "{summary}");
+        let make_up = (*engine).engine().sampler_make_up_db(0);
+        assert_eq!(make_up.is_some(), !cfg!(miri), "{make_up:?}");
 
-        assert_eq!(push(engine, &[EventRecord::note_on(10, 0, 60, 1.0)]), 1);
+        let at = ffi::mb_frame(engine) as u64 + 10;
+        assert_eq!(push(engine, &[EventRecord::note_on(at, 0, 60, 1.0)]), 1);
         assert_eq!(ffi::mb_render(engine, 128), 128);
         let (left, right) = output(engine, 128);
         assert!(left[..10].iter().all(|&sample| sample == 0.0));

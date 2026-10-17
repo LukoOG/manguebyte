@@ -52,7 +52,7 @@ const KIT: [&str; 13] = [
     ids::GUITAR_TAP_LEVEL,
 ];
 
-const SAMPLER: [&str; 1] = [ids::SAMPLER_INTERPOLATION];
+const SAMPLER: [&str; 2] = [ids::SAMPLER_INTERPOLATION, ids::SAMPLER_NORMALIZE];
 
 const PLUCKED: [&str; 6] = [
     ids::PLUCKED_PRESET,

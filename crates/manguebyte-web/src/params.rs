@@ -279,6 +279,10 @@ pub mod ids {
     /// How a sampler part reads its samples between their frames: 0 cubic,
     /// 1 sinc.
     pub const SAMPLER_INTERPOLATION: &str = "sampler.interpolation";
+    /// Whether a sampler part plays its instrument at the loudness target:
+    /// 1 (the default) at the make-up gain measured when the instrument
+    /// loaded, 0 at the level of its samples.
+    pub const SAMPLER_NORMALIZE: &str = "sampler.normalize";
 
     /// Plucked string preset: 0 nylon guitar, 1 steel guitar, 2 finger
     /// bass, 3 slap bass. Setting it moves the other `plucked.*` knobs to
@@ -399,8 +403,8 @@ pub mod ids {
     /// reverb, the send, the other effects' in the order of their codes
     /// ([`Effect`](crate::Effect)), then the instruments' added after them:
     /// the plucked string's, the FM's, the organ's, the analogue kit's, the
-    /// kick bass's and the acid bass's.
-    pub const ALL: [&str; 145] = [
+    /// kick bass's and the acid bass's, then the sampler's normalisation.
+    pub const ALL: [&str; 146] = [
         LOWPASS_CUTOFF,
         LOWPASS_RESONANCE,
         REVERB_MIX,
@@ -546,6 +550,7 @@ pub mod ids {
         ACID_SLIDE,
         ACID_DRIVE,
         ACID_VELOCITY,
+        SAMPLER_NORMALIZE,
     ];
 
     /// The drawbars' identifiers, from the lowest footage to the highest
@@ -698,6 +703,7 @@ param_ids!(
     KIT_TUNE,
     KIT_DECAY,
     SAMPLER_INTERPOLATION,
+    SAMPLER_NORMALIZE,
     PLUCKED_PRESET,
     FM_PRESET,
     ORGAN_PRESET,
@@ -1313,10 +1319,12 @@ impl AcidKnobs {
     }
 }
 
-/// A sampler part's own parameters: how it reads its samples. A sampled
-/// kit has the kit's too, for the drums its SFZ text leaves out.
+/// A sampler part's own parameters: how it reads its samples, and whether
+/// it plays them at the loudness target. A sampled kit has the kit's too,
+/// for the drums its SFZ text leaves out.
 pub(crate) struct SamplerParams {
     pub(crate) interpolation: ChoiceParam,
+    pub(crate) normalize: BoolParam,
     pub(crate) kit: Option<KitParams>,
 }
 
@@ -1329,12 +1337,16 @@ impl SamplerParams {
                 &INTERPOLATION_NAMES,
                 0,
             ),
+            // Switched while notes sound, the level glides.
+            normalize: BoolParam::new(ids::SAMPLER_NORMALIZE, "Normalize loudness", true)
+                .with_smoothing(LEVEL_SMOOTHING),
             kit: kit.then(KitParams::new),
         }
     }
 
     pub(crate) fn visit<'a>(&'a self, visitor: &mut dyn FnMut(&'a dyn Param)) {
         visitor(&self.interpolation);
+        visitor(&self.normalize);
         if let Some(kit) = &self.kit {
             kit.visit(visitor);
         }

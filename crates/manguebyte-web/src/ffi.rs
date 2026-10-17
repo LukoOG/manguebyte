@@ -25,8 +25,12 @@
 //!    [`mb_sfz_files_json`] lists the sample files it names.
 //! 2. For each file, write its path and then its bytes at [`mb_input_ptr`]
 //!    and call [`mb_sfz_add_file`], which decodes it.
-//! 3. Call [`mb_sfz_finish`], which hands the instrument to the part;
-//!    later, [`mb_collect`] frees the instruments parts are done with.
+//! 3. Call [`mb_sfz_measure`] until it returns [`status::OK`] rather than
+//!    [`status::MEASURING`]: each call renders a few thousand frames of the
+//!    phrase the part's loudness normalisation measures the instrument on.
+//! 4. Call [`mb_sfz_finish`], which hands the instrument to the part (and
+//!    measures what step 3 left, all at once); later, [`mb_collect`] frees
+//!    the instruments parts are done with.
 //!
 //! A load that fails writes why into the text buffer ([`mb_text_ptr`],
 //! [`mb_text_len`]).
@@ -53,6 +57,7 @@ use crate::drums::drum_map_json;
 use crate::effect::Effect;
 use crate::engine::{Chain, Engine, EngineConfig, EngineError, InstrumentKind};
 use crate::load::{SfzLoad, summary_json};
+use crate::probe::LoudnessProbe;
 use crate::record::RECORD_SIZE;
 use manguebyte_params::ParamId;
 
@@ -97,6 +102,13 @@ use manguebyte_params::ParamId;
 /// export [`mb_set_instrument`], which `js/worklet.js` looks for by name.
 /// A note on before the last note's note off was two notes and still is on
 /// every kind that was there; on the two monophonic kinds it is a slide.
+///
+/// Nor did loudness normalisation: [`mb_sfz_measure`] and its status
+/// [`status::MEASURING`] are added, and `js/worklet.js` looks for the export
+/// by name; [`mb_sfz_finish`] still finishes a load in one call, measuring
+/// it there if no step did; and `sampler.normalize` is a parameter id of
+/// its own. Every kind playing at the loudness target changes levels, not
+/// what any export or record means.
 /// The synth takes its accent as an argument of the note now, and sounds
 /// the same.
 pub const ABI_VERSION: u32 = 2;
@@ -145,6 +157,9 @@ pub mod status {
     /// [`Effect::code`](crate::Effect::code), or the part or the master bus
     /// cannot have that effect.
     pub const NO_SUCH_EFFECT: i32 = -14;
+    /// Not an error: [`mb_sfz_measure`](super::mb_sfz_measure) did a step
+    /// and there are more to do.
+    pub const MEASURING: i32 = 1;
 }
 
 /// The largest input area [`mb_input_ptr`] makes, in bytes: 256 MiB.
@@ -158,9 +173,17 @@ pub struct WebEngine {
     /// Bytes JavaScript hands over: SFZ text, sample files.
     input: Vec<u8>,
     /// The SFZ instruments being loaded, by part.
-    loads: Vec<(u16, SfzLoad)>,
+    loads: Vec<(u16, Load)>,
     /// The points of the last curve, `x` and `y` in turn.
     curve: Vec<f32>,
+}
+
+/// An SFZ instrument on its way to a part.
+enum Load {
+    /// Its sample files arriving and being decoded.
+    Decoding(SfzLoad),
+    /// Made, and being measured for the part's loudness normalisation.
+    Measuring(LoudnessProbe),
 }
 
 impl WebEngine {
@@ -731,8 +754,8 @@ pub unsafe extern "C" fn mb_sfz_begin(engine: *mut WebEngine, part: u32, bytes: 
         Err(error) => return web.fail(status::BAD_SFZ, error),
     };
     match web.load_index(part) {
-        Some(index) => web.loads[index].1 = load,
-        None => web.loads.push((number, load)),
+        Some(index) => web.loads[index].1 = Load::Decoding(load),
+        None => web.loads.push((number, Load::Decoding(load))),
     }
     status::OK
 }
@@ -753,7 +776,10 @@ pub unsafe extern "C" fn mb_sfz_files_json(engine: *mut WebEngine, part: u32) ->
     };
     match web.load_index(part) {
         Some(index) => {
-            web.text = web.loads[index].1.missing_json();
+            web.text = match &web.loads[index].1 {
+                Load::Decoding(load) => load.missing_json(),
+                Load::Measuring(_) => "[]".to_owned(),
+            };
             web.text.as_ptr()
         }
         None => {
@@ -766,7 +792,8 @@ pub unsafe extern "C" fn mb_sfz_files_json(engine: *mut WebEngine, part: u32) ->
 /// Decodes one sample file for the load of `part`. The input area holds
 /// the file's path, `path_bytes` bytes of UTF-8 as [`mb_sfz_files_json`]
 /// gave it, then the file's `file_bytes` bytes. A path the text does not
-/// name, or one already given, is ignored. Returns a [`status`]: on
+/// name, or one already given, is ignored, as is every file once
+/// [`mb_sfz_measure`] has begun. Returns a [`status`]: on
 /// [`status::BAD_SAMPLE`] the text buffer says why, and the load is over.
 /// Allocates; the work is bounded by the size of the file.
 ///
@@ -797,7 +824,10 @@ pub unsafe extern "C" fn mb_sfz_add_file(
     }
     let path = String::from_utf8_lossy(&web.input[..path_end]).into_owned();
     let bytes = web.input[path_end..file_end].to_vec();
-    match web.loads[index].1.add_file(&path, bytes) {
+    let Load::Decoding(load) = &mut web.loads[index].1 else {
+        return status::OK;
+    };
+    match load.add_file(&path, bytes) {
         Ok(_) => status::OK,
         Err(error) => {
             web.loads.swap_remove(index);
@@ -806,9 +836,63 @@ pub unsafe extern "C" fn mb_sfz_add_file(
     }
 }
 
+/// Measures the instrument of the load of `part` for the part's loudness
+/// normalisation, up to `frames` frames of the phrase it plays at a time
+/// ([`PROBE_STEP_FRAMES`](crate::PROBE_STEP_FRAMES) is about what decoding
+/// a 64 KiB file costs). The first call makes the instrument, every file
+/// being in, and the measurement, and renders nothing. Returns a
+/// [`status`]: [`status::MEASURING`] while there is
+/// more to measure, [`status::OK`] once it is done (at once, for a part
+/// that does not normalise), and then [`mb_sfz_finish`] gives the
+/// instrument to the part. On an error the text buffer says why, and the
+/// load is over: [`status::BAD_SAMPLE`] if a file is missing, or the
+/// part's own if it is gone or plays something else now. Allocates on the
+/// first call; the work of each is bounded by `frames`.
+///
+/// # Safety
+///
+/// `engine` is null or a live pointer from [`mb_engine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mb_sfz_measure(engine: *mut WebEngine, part: u32, frames: u32) -> i32 {
+    // SAFETY: as the caller promises.
+    let Some(web) = (unsafe { web(engine) }) else {
+        return status::NO_ENGINE;
+    };
+    let Some(index) = web.load_index(part) else {
+        return web.fail(
+            status::NO_LOAD,
+            "no SFZ instrument is being loaded for the part",
+        );
+    };
+    let (number, load) = web.loads.swap_remove(index);
+    let (mut probe, made) = match load {
+        Load::Measuring(probe) => (probe, false),
+        Load::Decoding(load) => {
+            let instrument = match load.finish() {
+                Ok(instrument) => instrument,
+                Err(error) => return web.fail(status::BAD_SAMPLE, error),
+            };
+            match web.engine.probe_instrument(number, instrument) {
+                Ok(probe) => (probe, true),
+                Err(error) => return web.fail(status_of(Err(error)), error),
+            }
+        }
+    };
+    // Making the instrument and the measurement is a step of its own.
+    let done = if made {
+        probe.is_done()
+    } else {
+        probe.step(frames as usize)
+    };
+    web.loads.push((number, Load::Measuring(probe)));
+    if done { status::OK } else { status::MEASURING }
+}
+
 /// Finishes the load of `part` and gives the instrument to the part, which
 /// plays new notes with it from the next frame rendered
-/// ([`Engine::load_instrument`](crate::Engine::load_instrument)). On
+/// ([`Engine::load_instrument`](crate::Engine::load_instrument)), at the
+/// make-up gain [`mb_sfz_measure`] measured, measuring what it left, or
+/// everything if it was never called, all at once. On
 /// success the text buffer holds a JSON summary,
 /// `{"regions":10,"samples":10,"sample_bytes":1234,"warnings":["..."]}`.
 /// Returns a [`status`]: [`status::BAD_SAMPLE`] if a file is still
@@ -831,12 +915,21 @@ pub unsafe extern "C" fn mb_sfz_finish(engine: *mut WebEngine, part: u32) -> i32
         );
     };
     let (number, load) = web.loads.swap_remove(index);
-    let instrument = match load.finish() {
-        Ok(instrument) => instrument,
-        Err(error) => return web.fail(status::BAD_SAMPLE, error),
+    let (summary, loaded) = match load {
+        Load::Decoding(load) => {
+            let instrument = match load.finish() {
+                Ok(instrument) => instrument,
+                Err(error) => return web.fail(status::BAD_SAMPLE, error),
+            };
+            let summary = summary_json(&instrument);
+            (summary, web.engine.load_instrument(number, instrument))
+        }
+        Load::Measuring(probe) => {
+            let summary = summary_json(probe.instrument());
+            (summary, web.engine.load_probed(number, probe))
+        }
     };
-    let summary = summary_json(&instrument);
-    match web.engine.load_instrument(number, instrument) {
+    match loaded {
         Ok(()) => {
             web.text = summary;
             status::OK

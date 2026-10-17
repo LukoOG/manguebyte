@@ -371,6 +371,24 @@ impl Trim {
         }
     }
 
+    /// Multiplies both channels by the gain, frame by frame.
+    pub(crate) fn apply_stereo(&mut self, left: &mut [f32], right: &mut [f32]) {
+        if self.smoother.is_smoothing() {
+            for (left, right) in left.iter_mut().zip(right) {
+                let gain = self.smoother.next_value();
+                *left *= gain;
+                *right *= gain;
+            }
+        } else {
+            let gain = self.smoother.current();
+            if gain != 1.0 {
+                for sample in left.iter_mut().chain(right) {
+                    *sample *= gain;
+                }
+            }
+        }
+    }
+
     /// Multiplies `samples` by the gain, frame by frame.
     pub(crate) fn apply(&mut self, samples: &mut [f32]) {
         if self.smoother.is_smoothing() {
@@ -459,6 +477,21 @@ mod tests {
         let mut ones = [1.0f32; 4];
         trim.apply(&mut ones);
         assert_eq!(ones, [2.0; 4]);
+        // Both channels alike, gliding or not.
+        trim.set(1.0, false);
+        let (mut left, mut right) = ([1.0f32; 24], [-1.0f32; 24]);
+        trim.apply_stereo(&mut left, &mut right);
+        assert!((left[9] - 1.5).abs() < 1e-6, "{}", left[9]);
+        assert!(
+            left.iter()
+                .zip(&right)
+                .all(|(left, right)| *left == -*right)
+        );
+        assert_eq!(left[23], 1.0);
+        trim.set(0.25, true);
+        let (mut left, mut right) = ([1.0f32; 4], [-1.0f32; 4]);
+        trim.apply_stereo(&mut left, &mut right);
+        assert_eq!((left, right), ([0.25; 4], [-0.25; 4]));
     }
 
     #[test]

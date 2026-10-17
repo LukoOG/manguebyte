@@ -17,6 +17,11 @@ homepage.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+# The BS.1770 loudness meter a sampler part measures an instrument with
+# when it loads, to play it at the loudness target; the tests read the
+# other kinds' loudness and the master bus's true peak with it too. It is
+# in the workspace and adds nothing outside it.
+manguebyte-analysis.workspace = true
 manguebyte-core.workspace = true
 manguebyte-dsp.workspace = true
 manguebyte-params.workspace = true
@@ -25,9 +30,6 @@ manguebyte-sampler.workspace = true
 [dev-dependencies]
 # WAV files for the tests that load sampler parts.
 manguebyte-formats.workspace = true
-# A true-peak meter of its own, sixteen times oversampled, to check the
-# master bus's limiter against something it was not built from.
-manguebyte-analysis.workspace = true
 
 [lints]
 workspace = true

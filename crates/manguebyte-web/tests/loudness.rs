@@ -158,10 +158,81 @@ fn accented_peak(kind: InstrumentKind, index: usize, setup: &dyn Fn(&mut Engine)
     meter.readings().max_overall_db() - MASTER_DB
 }
 
-/// What a part of `kind` is made ready with before it plays.
+/// A recorded instrument of a kind: for a sampler, two tones like a
+/// plucked string's, harmonics dying away, at `amplitude`; for a sampler
+/// kit, a kick, a snare and a hat, as recorded, `amplitude` their peak.
+fn recorded(kind: InstrumentKind, amplitude: f64) -> (String, Vec<(String, Vec<u8>)>) {
+    let rate = 44_100.0;
+    let tone = |frequency: f64, frames: usize, decay: f64| -> Vec<f32> {
+        let mut samples = vec![0.0f32; frames];
+        for (n, sample) in samples.iter_mut().enumerate() {
+            let t = n as f64 / rate;
+            let mut sum = 0.0;
+            for harmonic in 1..=4 {
+                let h = f64::from(harmonic);
+                sum +=
+                    (core::f64::consts::TAU * frequency * h * t).sin() / h * (-t * h / decay).exp();
+            }
+            *sample = (amplitude / 1.6 * sum) as f32;
+        }
+        samples
+    };
+    if kind == InstrumentKind::SamplerKit {
+        let mut snare = noise(12_000, amplitude, 11);
+        for (n, sample) in snare.iter_mut().enumerate() {
+            *sample = (f64::from(*sample) * (-(n as f64) / 2_500.0).exp()) as f32;
+        }
+        let files = vec![
+            (
+                "kick.wav".to_owned(),
+                wav16(&tone(55.0, 22_050, 0.25), 44_100),
+            ),
+            ("snare.wav".to_owned(), wav16(&snare, 44_100)),
+            (
+                "hat.wav".to_owned(),
+                wav16(&noise(3_000, amplitude * 0.5, 13), 44_100),
+            ),
+        ];
+        let sfz = "<group> loop_mode=one_shot
+            <region> sample=kick.wav key=36
+            <region> sample=snare.wav key=38
+            <region> sample=hat.wav key=42";
+        return (sfz.to_owned(), files);
+    }
+    let files = vec![
+        (
+            "a3.wav".to_owned(),
+            wav16(&tone(220.0, 66_150, 0.6), 44_100),
+        ),
+        (
+            "a4.wav".to_owned(),
+            wav16(&tone(440.0, 66_150, 0.45), 44_100),
+        ),
+    ];
+    let sfz = "<global> ampeg_release=0.3
+        <region> sample=a3.wav pitch_keycenter=57 lokey=0 hikey=62
+        <region> sample=a4.wav pitch_keycenter=69 lokey=63 hikey=127";
+    (sfz.to_owned(), files)
+}
+
+/// What a part of `kind` is made ready with before it plays: a sampler
+/// kind loads [`recorded`] at -6 dBFS, measured if `measured`.
+fn setup_with(kind: InstrumentKind, measured: bool) -> Box<dyn Fn(&mut Engine)> {
+    if !kind.is_sampler() {
+        return Box::new(|_: &mut Engine| {});
+    }
+    Box::new(move |engine: &mut Engine| {
+        let (sfz, files) = recorded(kind, 0.5);
+        if measured {
+            load_sfz(engine, 0, &sfz, &files);
+        } else {
+            load_sfz_unmeasured(engine, 0, &sfz, &files);
+        }
+    })
+}
+
 fn setup_for(kind: InstrumentKind) -> Box<dyn Fn(&mut Engine)> {
-    let _ = kind;
-    Box::new(|_: &mut Engine| {})
+    setup_with(kind, true)
 }
 
 /// Every row of the calibration table, with its kind and index.
@@ -199,11 +270,13 @@ fn every_kind_and_preset_plays_its_phrase_at_the_target() {
     );
     let mut misses = Vec::new();
     for (kind, index, row) in rows() {
-        let Some(make_up) = row.make_up_db else {
-            // The sampler kinds, measured as their instruments load.
-            continue;
-        };
         let after = phrase_loudness(kind, index, &*setup_for(kind));
+        let make_up = match row.make_up_db {
+            Some(make_up) => make_up,
+            // A sampler kind, its instrument measured as it loads: the
+            // make-up is what that measured, here for a recorded one.
+            None => after - phrase_loudness(kind, index, &*setup_with(kind, false)),
+        };
         println!(
             "{:<28} {:<7} {:>9.2} {:>+9.2} {:>9.2}",
             label(kind, &row),
@@ -214,13 +287,21 @@ fn every_kind_and_preset_plays_its_phrase_at_the_target() {
         );
         let off = after - LOUDNESS_TARGET_LUFS;
         if off.abs() > LOUDNESS_TOLERANCE_LU {
-            misses.push(format!(
-                "{} reads {after:.2} LUFS on its {} phrase, {off:+.2} LU from the target: \
-                 its make-up in src/level.rs should be {:+.2} dB",
-                label(kind, &row),
-                row.phrase.name(),
-                make_up - off
-            ));
+            misses.push(match row.make_up_db {
+                Some(_) => format!(
+                    "{} reads {after:.2} LUFS on its {} phrase, {off:+.2} LU from the \
+                     target: its make-up in src/level.rs should be {:+.2} dB",
+                    label(kind, &row),
+                    row.phrase.name(),
+                    make_up - off
+                ),
+                None => format!(
+                    "{}, normalised, reads {after:.2} LUFS on its {} phrase, {off:+.2} LU \
+                     from the target",
+                    label(kind, &row),
+                    row.phrase.name()
+                ),
+            });
         }
     }
     assert!(misses.is_empty(), "uncalibrated:\n{}", misses.join("\n"));
@@ -285,9 +366,6 @@ fn a_presets_make_up_lands_on_its_frame_in_every_quantum() {
 fn no_accented_note_at_full_velocity_reaches_the_limiter() {
     let mut worst = (f64::NEG_INFINITY, String::new());
     for (kind, index, row) in rows() {
-        if row.make_up_db.is_none() {
-            continue;
-        }
         let peak = accented_peak(kind, index, &*setup_for(kind));
         println!("{:<28} {peak:>7.2} dBTP", label(kind, &row));
         if peak > worst.0 {
@@ -301,4 +379,129 @@ fn no_accented_note_at_full_velocity_reaches_the_limiter() {
         worst.1,
         worst.0
     );
+}
+
+/// The loudness of a part of `kind` playing its phrase, `setup` having
+/// loaded it, and the make-up its normalisation measured.
+fn normalised(kind: InstrumentKind, setup: &dyn Fn(&mut Engine)) -> (f64, Option<f64>) {
+    let mut engine = quiet_engine(kind, setup);
+    let make_up = engine.sampler_make_up_db(0);
+    push_all(
+        &mut engine,
+        &phrase_records(kind.calibration()[0].phrase, LEAD_IN),
+    );
+    let sound = after_lead_in(&mut engine, Phrase::MEASURED_SECONDS);
+    let mut meter = LoudnessMeter::stereo();
+    meter.prepare(&spec(sound.num_frames()));
+    meter.measure(&sound);
+    (meter.readings().integrated() - MASTER_DB, make_up)
+}
+
+/// Two instruments recorded 12 dB apart, the same otherwise, play at the
+/// same loudness once normalised, melodic or a kit, and the make-ups the
+/// parts measured are 12 dB apart.
+#[test]
+fn normalisation_brings_instruments_recorded_12_db_apart_together() {
+    for kind in [InstrumentKind::Sampler, InstrumentKind::SamplerKit] {
+        let at = |amplitude: f64, measured: bool| {
+            let (sfz, files) = recorded(kind, amplitude);
+            normalised(kind, &move |engine: &mut Engine| {
+                if measured {
+                    load_sfz(engine, 0, &sfz, &files);
+                } else {
+                    load_sfz_unmeasured(engine, 0, &sfz, &files);
+                }
+            })
+        };
+        let (loud_before, none) = at(0.8, false);
+        let (quiet_before, _) = at(0.2, false);
+        assert_eq!(none, None, "an instrument loaded unmeasured has no make-up");
+        let (loud, loud_make_up) = at(0.8, true);
+        let (quiet, quiet_make_up) = at(0.2, true);
+        println!(
+            "{kind:?}: {loud_before:.2} and {quiet_before:.2} LUFS as recorded, \
+             {loud:.2} and {quiet:.2} normalised"
+        );
+        assert!(
+            (loud_before - quiet_before - 12.04).abs() < 0.1,
+            "recorded 12 dB apart"
+        );
+        assert!(
+            (loud - quiet).abs() < 1.0,
+            "{kind:?}: {loud:.2} against {quiet:.2}"
+        );
+        for loudness in [loud, quiet] {
+            assert!(
+                (loudness - LOUDNESS_TARGET_LUFS).abs() < LOUDNESS_TOLERANCE_LU,
+                "{kind:?}: {loudness:.2} LUFS"
+            );
+        }
+        let apart = quiet_make_up.unwrap() - loud_make_up.unwrap();
+        assert!((apart - 12.04).abs() < 0.1, "{kind:?}: {apart:.2} dB");
+    }
+}
+
+/// `sampler.normalize` off, the part plays the samples as they are, as if
+/// the instrument had not been measured; switched while a note sounds,
+/// the level glides over 20 ms, the same in every quantum.
+#[test]
+fn normalisation_switches_off_and_on_without_a_jump() {
+    let (sfz, files) = tone_instrument();
+    let off = EventRecord::param(0, 0, id(ids::SAMPLER_NORMALIZE), 0.0);
+    let note = EventRecord::note_on(0, 0, 69, 0.8);
+    let mut measured = engine_with(InstrumentKind::Sampler, Chain::NONE);
+    load_sfz(&mut measured, 0, &sfz, &files);
+    let make_up = measured.sampler_make_up_db(0).unwrap();
+    assert!(
+        make_up < -6.0,
+        "a loud sine is turned down: {make_up:.2} dB"
+    );
+    push_all(&mut measured, &[off, note]);
+    let mut unmeasured = engine_with(InstrumentKind::Sampler, Chain::NONE);
+    load_sfz_unmeasured(&mut unmeasured, 0, &sfz, &files);
+    push_all(&mut unmeasured, &[note]);
+    let (switched_off, _) = render(&mut measured, 9_600, 128);
+    let (as_recorded, _) = render(&mut unmeasured, 9_600, 128);
+    assert!(peak(&as_recorded) > 0.1);
+    assert_eq!(bits(&switched_off), bits(&as_recorded));
+    assert_eq!(measured.param_value(0, ids::SAMPLER_NORMALIZE), Some(0.0));
+
+    // Off and on again while the note sounds.
+    let switch = 12_000u64;
+    let play = |quantum: usize| {
+        let mut engine = engine_with(InstrumentKind::Sampler, Chain::NONE);
+        load_sfz(&mut engine, 0, &sfz, &files);
+        push_all(
+            &mut engine,
+            &[
+                note,
+                EventRecord::param(switch, 0, id(ids::SAMPLER_NORMALIZE), 0.0),
+                EventRecord::param(switch + 4_800, 0, id(ids::SAMPLER_NORMALIZE), 1.0),
+            ],
+        );
+        render(&mut engine, 24_000, quantum).0
+    };
+    let reference = play(512);
+    for quantum in [1, 7, 128, 333] {
+        assert_eq!(
+            bits(&play(quantum)),
+            bits(&reference),
+            "quanta of {quantum}"
+        );
+    }
+    // The sine's crest over a few periods, around the switch.
+    let at = |frame: u64| f64::from(peak(&reference[frame as usize..frame as usize + 240]));
+    let (before, after) = (at(switch - 480), at(switch + 1_440));
+    let expected = 10f64.powf(-make_up / 20.0);
+    assert!(
+        (after / before - expected).abs() < 0.01 * expected,
+        "{} against {expected}",
+        after / before
+    );
+    // Part of the way through the glide, part of the way there; no step at
+    // the switch larger than those of the louder sound after it.
+    let middle = at(switch + 360) / before;
+    assert!(middle > 1.2 && middle < expected - 0.2, "{middle}");
+    let steps = |from: u64| largest_step(&reference[from as usize..from as usize + 960]);
+    assert!(steps(switch) <= steps(switch + 960) * 1.01);
 }
