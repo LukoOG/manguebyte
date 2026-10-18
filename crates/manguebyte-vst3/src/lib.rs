@@ -18,7 +18,8 @@
 //! | VST 3 feature | Behaviour |
 //! |---|---|
 //! | Audio buses | Main input and output from the plugin's layout, plus a sidechain input if it has one. The layout is fixed |
-//! | Event bus | For instruments and note effects |
+//! | Event buses | An input for instruments and note effects. An output for a plugin of any kind that sets [`Plugin::NOTE_OUTPUT`](manguebyte_plugin::Plugin::NOTE_OUTPUT) |
+//! | Notes out | What the plugin sends from [`process_with_output`](manguebyte_plugin::Plugin::process_with_output), on its frame (one past the block on its last): note on and off with the plugin's note ids, a choke as a note-off at velocity zero, pressure as polyphonic pressure, and volume, pan, tuning, vibrato and brightness as note expression values. MIDI 2.0 and MIDI 1.0 from the plugin are read into notes and expressions as the framework's input reads them, and controllers, channel pressure, pitch bend and program change go out as `LegacyMIDICCOutEvent`. A note with no id, or one read from MIDI, gets an id made from its channel and key, from `0x7FFF_F800` up, so that its expressions find it |
 //! | Automation | Every point of a parameter's queue is delivered on its frame, so automation is sample-accurate |
 //! | Notes | Note on and off with their ids, note tuning, polyphonic pressure, and the volume, pan, tuning, vibrato and brightness note expressions. On the channels of an MPE zone ([`Plugin::MPE`](manguebyte_plugin::Plugin::MPE)) notes are read through a [`NoteInput`](manguebyte_dsp::note_input::NoteInput), keeping the host's ids, and their member channel's pitch bend, pressure and controller 74 become per-note expressions; that needs controllers declared per channel |
 //! | MIDI controllers | Controllers, channel pressure and pitch bend, which VST 3 delivers only as parameters, arrive as MIDI events again, on their frames. Only the ones in [`Plugin::MIDI_CONTROLLERS`](manguebyte_plugin::Plugin::MIDI_CONTROLLERS) are exposed: one hidden parameter each, which `IMidiMapping` gives for every channel and whose moves arrive on all 16 channels, or, for a plugin that asked for channels, one per controller and channel, whose moves arrive on their own channel. See [MIDI controllers](#midi-controllers) |
@@ -236,6 +237,7 @@
 
 mod factory;
 mod handler;
+mod output;
 mod run_loop;
 mod text;
 mod view;

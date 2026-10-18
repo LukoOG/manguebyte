@@ -86,6 +86,7 @@ use vst3::Steinberg::{
 use vst3::{Class, ComRef};
 
 use crate::handler::Handler;
+use crate::output::NoteSender;
 use crate::text::{copy_wide, param_id, read_wide};
 use crate::view::Editors;
 
@@ -177,7 +178,7 @@ fn expression_from_vst(type_id: u32, value: f64) -> Option<(Expression, f64)> {
 /// The position in `0..=1` at which a VST 3 note expression has the value
 /// `plain`, in the unit documented on [`Expression`]. The inverse of
 /// [`expression_from_vst`].
-fn expression_to_vst(type_id: u32, plain: f64) -> Option<f64> {
+pub(crate) fn expression_to_vst(type_id: u32, plain: f64) -> Option<f64> {
     use vst::NoteExpressionTypeIDs_ as ids;
     let position = match type_id {
         id if id == ids::kVolumeTypeID as u32 => plain / 4.0,
@@ -248,6 +249,8 @@ struct Audio<P> {
     /// Reads notes on the channels of an MPE zone, and the controller
     /// moves the hidden parameters stand for, as every wrapper does.
     input: NoteInput,
+    /// What the plugin sends out, on its way to the output event bus.
+    notes: NoteSender,
     /// Parameter values as the plugin last saw them.
     watcher: ParamWatcher,
     /// Whether the plugin panicked in the last block, so that the next one
@@ -408,6 +411,7 @@ impl<P: Plugin> Component<P> {
                 held: EventBuffer::new(),
                 raw: EventBuffer::new(),
                 input: NoteInput::new(P::MPE),
+                notes: NoteSender::new(if P::NOTE_OUTPUT { EVENTS_PER_BLOCK } else { 0 }),
                 resend_values: false,
             }),
             params,
@@ -928,7 +932,11 @@ impl<P: Plugin> vst::IComponentTrait for Component<P> {
         if media == MediaTypes_::kAudio as vst::MediaType {
             audio_buses::<P>(is_input).1 as i32
         } else if media == MediaTypes_::kEvent as vst::MediaType {
-            i32::from(is_input && takes_notes::<P>())
+            i32::from(if is_input {
+                takes_notes::<P>()
+            } else {
+                P::NOTE_OUTPUT
+            })
         } else {
             0
         }
@@ -949,13 +957,18 @@ impl<P: Plugin> vst::IComponentTrait for Component<P> {
         let default_active = vst::BusInfo_::BusFlags_::kDefaultActive as u32;
 
         if media == MediaTypes_::kEvent as vst::MediaType {
-            if index != 0 || !is_input || !takes_notes::<P>() {
+            let present = if is_input {
+                takes_notes::<P>()
+            } else {
+                P::NOTE_OUTPUT
+            };
+            if index != 0 || !present {
                 return kInvalidArgument;
             }
             bus.mediaType = media;
             bus.direction = direction;
             bus.channelCount = MIDI_CHANNELS as i32;
-            copy_wide("Notes", &mut bus.name);
+            copy_wide(if is_input { "Notes" } else { "Notes out" }, &mut bus.name);
             bus.busType = BusTypes_::kMain as vst::BusType;
             bus.flags = default_active;
             return kResultOk;
@@ -1042,6 +1055,7 @@ impl<P: Plugin> vst::IComponentTrait for Component<P> {
                     audio.plugin.reset();
                     audio.held.clear();
                     audio.input.reset();
+                    audio.notes.reset();
                 }
             }
             kResultOk
@@ -1253,9 +1267,16 @@ impl<P: Plugin> vst::IAudioProcessorTrait for Component<P> {
             if P::LAYOUT.sidechain > 0 {
                 context = context.with_sidechain(&audio.sidechain);
             }
-            let (plugin, buffer) = (&mut audio.plugin, &mut audio.buffer);
-            let finished =
-                catch_unwind(AssertUnwindSafe(|| plugin.process(buffer, &context))).is_ok();
+            let (plugin, buffer, output) = (
+                &mut audio.plugin,
+                &mut audio.buffer,
+                &mut audio.notes.output,
+            );
+            output.clear();
+            let finished = catch_unwind(AssertUnwindSafe(|| {
+                plugin.process_with_output(buffer, &context, output);
+            }))
+            .is_ok();
             if !finished {
                 // The plugin panicked. The host is told the block failed,
                 // and the next block with audio starts with every
@@ -1272,6 +1293,7 @@ impl<P: Plugin> vst::IAudioProcessorTrait for Component<P> {
                 for (index, bus) in buses(data.outputs, data.numOutputs).iter_mut().enumerate() {
                     write_bus(bus, (index == 0).then_some(&audio.buffer), frames);
                 }
+                audio.notes.send(frames, data.outputEvents);
             }
             kResultOk
         })
