@@ -173,7 +173,6 @@ impl Backend for SystemBackend {
         let host = self.host();
         let (outputs, default_output) = host.summaries(Direction::Output)?;
         let (inputs, default_input) = host.summaries(Direction::Input)?;
-        #[cfg_attr(not(feature = "midi"), allow(unused_mut))]
         let mut snapshot = DeviceSnapshot {
             outputs,
             inputs,
@@ -182,24 +181,7 @@ impl Backend for SystemBackend {
             midi_inputs: Vec::new(),
             midi_outputs: Vec::new(),
         };
-        #[cfg(feature = "midi")]
-        {
-            // No MIDI service is no MIDI ports, not a failure to list audio.
-            let summary = |port: crate::midi::MidiPortInfo| DeviceSummary {
-                id: port.id,
-                name: port.name,
-            };
-            snapshot.midi_inputs = crate::midi::midi_input_ports()
-                .unwrap_or_default()
-                .into_iter()
-                .map(summary)
-                .collect();
-            snapshot.midi_outputs = crate::midi::midi_output_ports()
-                .unwrap_or_default()
-                .into_iter()
-                .map(summary)
-                .collect();
-        }
+        list_system_midi(&mut snapshot);
         Ok(snapshot)
     }
 
@@ -325,12 +307,50 @@ impl Backend for SystemBackend {
 
     #[cfg(feature = "midi")]
     fn connect_midi_input(&self, id: &str, sink: MidiSink) -> Result<Box<dyn Send>, MidiError> {
-        let (connection, _) = crate::midi::connect_input(id, sink)?;
-        Ok(Box::new(connection))
+        connect_system_midi_input(id, sink)
     }
 
     #[cfg(feature = "midi")]
     fn connect_midi_output(&self, id: &str) -> Result<Box<dyn MidiSender>, MidiError> {
-        Ok(Box::new(MidiOutput::open(id)?))
+        connect_system_midi_output(id)
     }
+}
+
+/// Fills in the system's MIDI ports, which every backend but the mock
+/// shares.
+pub(crate) fn list_system_midi(snapshot: &mut DeviceSnapshot) {
+    #[cfg(feature = "midi")]
+    {
+        // No MIDI service is no MIDI ports, not a failure to list audio.
+        let summary = |port: crate::midi::MidiPortInfo| DeviceSummary {
+            id: port.id,
+            name: port.name,
+        };
+        snapshot.midi_inputs = crate::midi::midi_input_ports()
+            .unwrap_or_default()
+            .into_iter()
+            .map(summary)
+            .collect();
+        snapshot.midi_outputs = crate::midi::midi_output_ports()
+            .unwrap_or_default()
+            .into_iter()
+            .map(summary)
+            .collect();
+    }
+    #[cfg(not(feature = "midi"))]
+    let _ = snapshot;
+}
+
+#[cfg(feature = "midi")]
+pub(crate) fn connect_system_midi_input(
+    id: &str,
+    sink: MidiSink,
+) -> Result<Box<dyn Send>, MidiError> {
+    let (connection, _) = crate::midi::connect_input(id, sink)?;
+    Ok(Box::new(connection))
+}
+
+#[cfg(feature = "midi")]
+pub(crate) fn connect_system_midi_output(id: &str) -> Result<Box<dyn MidiSender>, MidiError> {
+    Ok(Box::new(MidiOutput::open(id)?))
 }

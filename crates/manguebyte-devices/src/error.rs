@@ -32,6 +32,9 @@ pub enum DeviceError {
     NoCallback,
     /// The platform audio backend reported an error.
     Backend(cpal::Error),
+    /// A backend outside this crate, plugged in through
+    /// [`AudioBackend`](crate::AudioBackend), reported an error of its own.
+    Other(Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl DeviceError {
@@ -65,6 +68,7 @@ impl fmt::Display for DeviceError {
             }
             Self::NoCallback => f.write_str("the device manager has no callback to run"),
             Self::Backend(error) => write!(f, "audio backend error: {error}"),
+            Self::Other(error) => write!(f, "audio backend error: {error}"),
         }
     }
 }
@@ -73,6 +77,7 @@ impl std::error::Error for DeviceError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Backend(error) => Some(error),
+            Self::Other(error) => Some(error.as_ref()),
             _ => None,
         }
     }

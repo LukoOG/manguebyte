@@ -11,6 +11,8 @@ pub struct HostInfo {
     /// The host's name, such as `"WASAPI"`, `"ASIO"`, `"CoreAudio"`,
     /// `"ALSA"`, `"JACK"` or `"AAudio"`. [`AudioHost::by_name`] takes it
     /// back, in any case.
+    ///
+    /// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
     pub name: String,
     /// Whether this is the host that [`AudioHost::default_host`] picks.
     pub is_default: bool,
@@ -54,7 +56,17 @@ pub struct HostInfo {
 /// ```
 ///
 /// Cargo builds `cpal` once for the whole program, so this crate then sees
-/// the ASIO host too, and everything here works with it.
+/// the ASIO host too, and everything here works with it. This path keeps
+/// the program under licences of its own choosing, closed source included,
+/// as long as it keeps to Steinberg's licence for the SDK.
+///
+/// The other path is the workspace's `manguebyte-pro-io` crate, which
+/// speaks ASIO itself under the SDK's GPLv3 option and plugs into a
+/// [`DeviceManager`](crate::DeviceManager) through
+/// [`AudioBackend`](crate::AudioBackend). It needs no SDK download, LLVM
+/// or `bindgen`, but a program that uses it is under the GPLv3 as a whole.
+///
+/// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 pub fn audio_hosts() -> Vec<HostInfo> {
     let default = cpal::default_host().id();
     cpal::available_hosts()

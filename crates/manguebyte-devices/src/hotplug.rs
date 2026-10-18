@@ -157,6 +157,11 @@ pub enum LossCause {
     ReportedByBackend,
     /// Its callback has not been called for [`STALL_TIMEOUT`].
     Stalled,
+    /// The backend asked for the stream to be opened again, as a driver
+    /// does when its sample rate, buffer size or other settings change
+    /// under it. Nothing is wrong with the device: a restart picks the new
+    /// settings up.
+    RestartRequested,
 }
 
 /// Something that changed among the devices, as a poll found it.
@@ -199,7 +204,10 @@ pub enum DeviceEvent {
         port: DeviceSummary,
     },
     /// The device a running stream plays to or records from has gone, and
-    /// the stream will not produce audio again. Reported once per stream.
+    /// the stream will not produce audio again, or the backend asked for
+    /// the stream to be opened again ([`LossCause::RestartRequested`]).
+    /// Either way [`DeviceManager::follow`](crate::DeviceManager::follow)
+    /// restarts it. Reported once per stream.
     StreamLost {
         /// Which side of the stream.
         direction: Direction,
@@ -335,7 +343,9 @@ impl Poller {
                     .any(|other| other.id == device.id)
             });
             let frames = health.frames();
-            let cause = if health.is_lost() {
+            let cause = if health.is_restart_requested() {
+                Some(LossCause::RestartRequested)
+            } else if health.is_lost() {
                 Some(LossCause::ReportedByBackend)
             } else if !listed {
                 Some(LossCause::Disconnected)

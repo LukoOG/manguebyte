@@ -117,6 +117,7 @@ pub(crate) fn input_timing(info: &cpal::InputCallbackInfo) -> (Duration, Option<
 pub(crate) struct StreamHealth {
     frames: AtomicU64,
     lost: AtomicBool,
+    restart: AtomicBool,
 }
 
 impl StreamHealth {
@@ -139,6 +140,15 @@ impl StreamHealth {
 
     pub(crate) fn is_lost(&self) -> bool {
         self.lost.load(Ordering::Acquire)
+    }
+
+    /// Real-time safe.
+    pub(crate) fn request_restart(&self) {
+        self.restart.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn is_restart_requested(&self) -> bool {
+        self.restart.load(Ordering::Acquire)
     }
 }
 

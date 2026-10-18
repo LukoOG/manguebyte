@@ -20,6 +20,10 @@
 //! - [`midi`] opens MIDI ports, real and virtual, keeps a player's timing
 //!   on the way to the audio thread, and sends packets from it on time
 //!   (feature `midi`, on by default).
+//! - [`AudioBackend`] lets a crate of its own put another driver model
+//!   behind a [`DeviceManager`] ([`DeviceManager::with_audio_backend`]).
+//! - [`midi`] opens MIDI ports, real and virtual, and keeps a player's
+//!   timing on the way to the audio thread (feature `midi`, on by default).
 //!
 //! Every callback can be told when its audio is heard or was captured: the
 //! `start_timed` methods and the device manager hand it a [`CallbackInfo`]
@@ -34,7 +38,9 @@
 //!
 //! ASIO has no feature here, because the backend's build script fetches
 //! Steinberg's SDK by itself; [`audio_hosts`] says how an application turns
-//! it on.
+//! it on, and names the other way, the GPLv3 crate `manguebyte-pro-io`.
+//!
+//! ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 //!
 //! # Platforms
 //!
@@ -79,6 +85,7 @@ mod device;
 mod drift;
 mod duplex;
 mod error;
+mod external;
 mod host;
 mod hotplug;
 mod manager;
@@ -95,6 +102,10 @@ pub use device::{
 };
 pub use duplex::{DuplexSettings, DuplexStream};
 pub use error::DeviceError;
+pub use external::{
+    AudioBackend, BackendCallback, BackendEndpoint, BackendFormat, BackendRequest, BackendStream,
+    StreamStatus,
+};
 pub use host::{AudioHost, HostInfo, audio_hosts};
 pub use hotplug::{
     DEFAULT_POLL_INTERVAL, DeviceEvent, DeviceSnapshot, DeviceSummary, DeviceWatcher, LossCause,

@@ -277,6 +277,52 @@ impl DeviceManager {
         Self::with_backend(Arc::new(mock.clone()))
     }
 
+    /// A manager for the devices of a backend outside this crate (see
+    /// [`AudioBackend`](crate::AudioBackend)). Its host is the only one
+    /// listed, MIDI ports are the system's, and everything else works as
+    /// on the system's devices: setups, fallbacks, events and
+    /// [`follow`](Self::follow), which also restarts a stream whose backend
+    /// asked for it ([`LossCause::RestartRequested`](crate::LossCause::RestartRequested)).
+    ///
+    /// ```
+    /// use manguebyte_devices::{
+    ///     AudioBackend, BackendCallback, BackendFormat, BackendRequest, BackendStream,
+    ///     DeviceError, DeviceInfo, DeviceManager, DeviceSnapshot, Direction, StreamStatus,
+    /// };
+    ///
+    /// /// A backend with no devices at all.
+    /// struct Empty;
+    ///
+    /// impl AudioBackend for Empty {
+    ///     fn host_name(&self) -> String {
+    ///         String::from("Empty")
+    ///     }
+    ///     fn snapshot(&self) -> Result<DeviceSnapshot, DeviceError> {
+    ///         Ok(DeviceSnapshot::default())
+    ///     }
+    ///     fn device_info(&self, _: Direction, id: &str) -> Result<DeviceInfo, DeviceError> {
+    ///         Err(DeviceError::DeviceNotFound(id.to_owned()))
+    ///     }
+    ///     fn start(
+    ///         &self,
+    ///         request: &BackendRequest,
+    ///         _: &mut dyn FnMut(BackendFormat) -> BackendCallback,
+    ///         _: StreamStatus,
+    ///     ) -> Result<BackendStream, DeviceError> {
+    ///         let id = request.output.as_ref().map(|output| output.id.clone());
+    ///         Err(DeviceError::DeviceNotFound(id.unwrap_or_default()))
+    ///     }
+    /// }
+    ///
+    /// let manager = DeviceManager::with_audio_backend(Empty);
+    /// assert_eq!(manager.host_name(), "Empty");
+    /// assert!(manager.devices()?.outputs.is_empty());
+    /// # Ok::<(), DeviceError>(())
+    /// ```
+    pub fn with_audio_backend(backend: impl crate::AudioBackend) -> Self {
+        Self::with_backend(Arc::new(crate::external::External::new(Arc::new(backend))))
+    }
+
     fn with_backend(backend: Arc<dyn Backend>) -> Self {
         let watched: WatchSlot = Arc::new(Mutex::new(None));
         #[cfg(feature = "midi")]
