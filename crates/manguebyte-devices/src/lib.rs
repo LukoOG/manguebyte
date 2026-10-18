@@ -22,8 +22,6 @@
 //!   (feature `midi`, on by default).
 //! - [`AudioBackend`] lets a crate of its own put another driver model
 //!   behind a [`DeviceManager`] ([`DeviceManager::with_audio_backend`]).
-//! - [`midi`] opens MIDI ports, real and virtual, and keeps a player's
-//!   timing on the way to the audio thread (feature `midi`, on by default).
 //!
 //! Every callback can be told when its audio is heard or was captured: the
 //! `start_timed` methods and the device manager hand it a [`CallbackInfo`]
