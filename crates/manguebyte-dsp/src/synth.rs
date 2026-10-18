@@ -229,22 +229,26 @@ pub struct Synth<V, S: Sample = f32> {
     bend_range: f64,
     /// Whether a note struck while another is held slurs from it.
     legato: bool,
+    /// How many of the voices, from the first, new notes may take.
+    voice_limit: usize,
     marker: PhantomData<S>,
 }
 
 impl<S: Sample, V: Voice<S>> Synth<V, S> {
     /// Creates a synth from a set of voices. Its polyphony is their number.
     pub fn new(voices: impl IntoIterator<Item = V>) -> Self {
+        let slots: Vec<Slot<V>> = voices
+            .into_iter()
+            .map(|voice| Slot {
+                voice,
+                note: NoteRef::new(0, 0),
+                stage: Stage::Idle,
+                started: 0,
+            })
+            .collect();
         Self {
-            slots: voices
-                .into_iter()
-                .map(|voice| Slot {
-                    voice,
-                    note: NoteRef::new(0, 0),
-                    stage: Stage::Idle,
-                    started: 0,
-                })
-                .collect(),
+            voice_limit: slots.len(),
+            slots,
             clock: 0,
             sustain: [false; 16],
             bend: [0; 16],
@@ -294,6 +298,23 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
     /// How many notes can sound at once.
     pub fn polyphony(&self) -> usize {
         self.slots.len()
+    }
+
+    /// Lets new notes take only the first `limit` voices, at least one and
+    /// at most [`polyphony`](Self::polyphony): fewer notes sound at once,
+    /// and a note beyond them takes one of them over as usual. Real-time
+    /// safe, so that a synth made with as many voices as it may ever need
+    /// can play fewer where each costs more. Voices beyond a new limit
+    /// that are sounding ring on until they are done; a note struck again
+    /// on one of them still restarts it. Every voice by default.
+    pub fn set_voice_limit(&mut self, limit: usize) {
+        self.voice_limit = limit.clamp(1, self.slots.len().max(1));
+    }
+
+    /// How many voices new notes may take. See
+    /// [`set_voice_limit`](Self::set_voice_limit).
+    pub fn voice_limit(&self) -> usize {
+        self.voice_limit
     }
 
     /// How many voices are sounding right now.
@@ -584,7 +605,7 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
             Stage::Sustained => 2,
             Stage::Held => 3,
         };
-        self.slots
+        self.slots[..self.voice_limit.min(self.slots.len())]
             .iter()
             .enumerate()
             .min_by_key(|(_, slot)| {
@@ -861,6 +882,28 @@ mod tests {
         run(&mut synth, 4, &[(0, on(10)), (1, on(10)), (2, on(10))]);
         assert_eq!(starts(&mut synth), [3, 0, 0, 0]);
         assert_eq!(synth.active_voices(), 1);
+    }
+
+    #[test]
+    fn a_voice_limit_plays_fewer_notes_on_the_first_voices() {
+        let mut synth = synth(4);
+        assert_eq!(synth.voice_limit(), 4);
+        synth.set_voice_limit(2);
+        assert_eq!((synth.voice_limit(), synth.polyphony()), (2, 4));
+        // Three notes on two voices: the third takes the oldest over.
+        let output = run(&mut synth, 1, &[(0, on(10)), (0, on(20)), (0, on(30))]);
+        assert_eq!(output, [50.0]);
+        assert_eq!(starts(&mut synth), [2, 1, 0, 0]);
+        // Raised again, the other voices take notes; a note beyond a
+        // lowered limit rings on.
+        synth.set_voice_limit(9);
+        assert_eq!(synth.voice_limit(), 4);
+        run(&mut synth, 1, &[(0, on(40)), (0, on(50))]);
+        assert_eq!(synth.active_voices(), 4);
+        synth.set_voice_limit(0);
+        assert_eq!(synth.voice_limit(), 1);
+        assert_eq!(run(&mut synth, 1, &[]), [30.0 + 20.0 + 40.0 + 50.0]);
+        assert_eq!(starts(&mut synth), [2, 1, 1, 1]);
     }
 
     #[test]
