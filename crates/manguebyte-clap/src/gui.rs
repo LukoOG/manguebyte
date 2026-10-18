@@ -154,7 +154,7 @@ impl HostRef {
     ///
     /// `T` must be the type CLAP gives extension `id`, and this must be
     /// called on the main thread, after the plugin's `init` has begun.
-    unsafe fn extension<T: Copy>(self, id: &CStr) -> Option<T> {
+    pub(crate) unsafe fn extension<T: Copy>(self, id: &CStr) -> Option<T> {
         // SAFETY: valid or null, per `new`.
         let get = unsafe { self.0.as_ref() }?.get_extension?;
         // SAFETY: the host's own function with its own pointer. A non-null

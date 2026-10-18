@@ -23,7 +23,8 @@
 //! | CLAP feature | Behaviour |
 //! |---|---|
 //! | Audio ports | Main input and output from the plugin's layout, plus a sidechain input if it has one. In-place processing is allowed when input and output match |
-//! | Note port | For instruments and note effects, in the CLAP, MIDI, MPE and MIDI 2.0 dialects; CLAP is the preferred one |
+//! | Note ports | An input for instruments and note effects, in the CLAP, MIDI, MPE and MIDI 2.0 dialects; CLAP is the preferred one. An output for a plugin of any kind that sets [`Plugin::NOTE_OUTPUT`](manguebyte_plugin::Plugin::NOTE_OUTPUT), in the same four |
+//! | Notes out | What the plugin sends from [`process_with_output`](manguebyte_plugin::Plugin::process_with_output), on its frame, in the dialects the host's `note-ports` extension says it takes (CLAP and MIDI 1.0 if it has none). With CLAP's dialect: notes, chokes and note expressions as CLAP's own, with the plugin's note ids; MIDI 2.0 messages as `CLAP_EVENT_MIDI2` where the host takes MIDI 2.0, and otherwise read into notes and expressions, with channel messages as `CLAP_EVENT_MIDI`; MIDI 1.0 as `CLAP_EVENT_MIDI`. Without it: everything as MIDI 2.0 packets, or as MPE, or as MIDI 1.0 by the default translation, through an [`OutputTranslator`](manguebyte_plugin::output::OutputTranslator). An event past the block goes on its last frame; one the host's list refuses is dropped |
 //! | Events in | Note on, off and choke; note expression; parameter value and modulation; MIDI 1.0 and MIDI 2.0 packets, read through a [`NoteInput`](manguebyte_dsp::note_input::NoteInput) as [`Plugin::MPE`](manguebyte_plugin::Plugin::MPE) says, so that the notes of an MPE zone and of MIDI 2.0 arrive with identifiers and per-note expressions, as CLAP's own notes do. All keep their frame |
 //! | MIDI controllers | Arrive as the MIDI messages the host sends, once, on their own channel (in VST 3 a controller shared by every channel arrives on all 16). [`Plugin::MIDI_CONTROLLERS`](manguebyte_plugin::Plugin::MIDI_CONTROLLERS) is not used: CLAP needs no parameters for controllers, and nothing is filtered. A plugin that wants to hear only its declared controllers everywhere checks [`MidiControllers::wants`](manguebyte_plugin::MidiControllers::wants) |
 //! | Parameters | Listing, values, text conversion and flush. Continuous parameters are exposed as positions in `0..=1`, stepped ones as whole steps |
@@ -155,6 +156,7 @@
 //! ```
 
 mod gui;
+mod output;
 mod wrapper;
 
 pub use clap_sys;

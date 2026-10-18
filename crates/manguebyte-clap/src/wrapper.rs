@@ -84,6 +84,7 @@ use manguebyte_plugin::editor::{GestureCounters, GestureReader};
 use manguebyte_plugin::{ParamWatcher, Plugin, PluginKind, load_state, save_state};
 
 use crate::gui::{self, Gui, GuiVtables, HostRef, SharedFlags};
+use crate::output::NoteSender;
 
 /// Most events delivered to the plugin in one block. Extra events are
 /// dropped rather than allocated for.
@@ -350,6 +351,7 @@ unsafe extern "C" fn factory_create<P: Plugin>(
                 sidechain: AudioBuffer::new(P::LAYOUT.sidechain, 0),
                 events: EventBuffer::new(),
                 input: NoteInput::new(P::MPE),
+                notes: NoteSender::new(if P::NOTE_OUTPUT { EVENTS_PER_BLOCK } else { 0 }),
                 resend_values: false,
             }),
             params,
@@ -399,6 +401,8 @@ struct Audio<P> {
     /// events, as every wrapper does. Notes in CLAP's own dialect, and
     /// its note expressions, need no reading and do not go through it.
     input: NoteInput,
+    /// What the plugin sends out, and how it reaches the host.
+    notes: NoteSender,
     /// Parameter values as the plugin last saw them.
     watcher: ParamWatcher,
     /// Parameter values as the host last knew them, in index order.
@@ -477,6 +481,24 @@ unsafe extern "C" fn plugin_init<P: Plugin>(plugin: *const clap_plugin) -> bool 
             return false;
         };
         // The host's extensions may be looked up from here on, not before.
+        if P::NOTE_OUTPUT {
+            // SAFETY: the extension is asked for with its own type, on the
+            // main thread, inside `init`.
+            let ports = unsafe {
+                instance
+                    .host
+                    .extension::<clap_host_note_ports>(CLAP_EXT_NOTE_PORTS)
+            };
+            if let Some(supported) = ports.and_then(|ports| ports.supported_dialects) {
+                // SAFETY: the host's own function with its own pointer, on
+                // the main thread; nothing is processing before `init`
+                // returns, so the audio state is free.
+                unsafe {
+                    let dialects = supported(instance.host.as_ptr());
+                    (*instance.audio.get()).notes.set_dialects(dialects);
+                }
+            }
+        }
         if let Some(gui) = &instance.gui {
             let params: Arc<dyn ParamSet> = instance.params.clone();
             gui.init(
@@ -566,6 +588,7 @@ unsafe extern "C" fn plugin_deactivate<P: Plugin>(plugin: *const clap_plugin) {
         let audio = unsafe { &mut *instance.audio.get() };
         audio.plugin.reset();
         audio.input.reset();
+        audio.notes.reset();
     });
 }
 
@@ -616,6 +639,7 @@ unsafe extern "C" fn plugin_reset<P: Plugin>(plugin: *const clap_plugin) {
         audio.plugin.reset();
         // The voices are gone, so the notes the reader followed are too.
         audio.input.reset();
+        audio.notes.reset();
     });
 }
 
@@ -644,7 +668,7 @@ unsafe extern "C" fn plugin_get_extension<P: Plugin>(
         ptr::from_ref(Vtables::<P>::STATE).cast()
     } else if id == CLAP_EXT_AUDIO_PORTS {
         ptr::from_ref(Vtables::<P>::AUDIO_PORTS).cast()
-    } else if id == CLAP_EXT_NOTE_PORTS && takes_notes::<P>() {
+    } else if id == CLAP_EXT_NOTE_PORTS && (takes_notes::<P>() || P::NOTE_OUTPUT) {
         ptr::from_ref(Vtables::<P>::NOTE_PORTS).cast()
     } else if id == CLAP_EXT_LATENCY {
         ptr::from_ref(Vtables::<P>::LATENCY).cast()
@@ -710,8 +734,16 @@ unsafe extern "C" fn plugin_process<P: Plugin>(
         if P::LAYOUT.sidechain > 0 {
             context = context.with_sidechain(&audio.sidechain);
         }
-        let (plugin, buffer) = (&mut audio.plugin, &mut audio.buffer);
-        let finished = catch_unwind(AssertUnwindSafe(|| plugin.process(buffer, &context))).is_ok();
+        let (plugin, buffer, output) = (
+            &mut audio.plugin,
+            &mut audio.buffer,
+            &mut audio.notes.output,
+        );
+        output.clear();
+        let finished = catch_unwind(AssertUnwindSafe(|| {
+            plugin.process_with_output(buffer, &context, output);
+        }))
+        .is_ok();
         if !finished {
             // The plugin panicked. The host is told the block failed, and
             // the next block starts with every parameter's value, since the
@@ -728,6 +760,9 @@ unsafe extern "C" fn plugin_process<P: Plugin>(
             for (index, port) in outputs.iter().enumerate() {
                 write_port(port, (index == 0).then_some(&audio.buffer), frames);
             }
+            // What the plugin sent goes after the parameter values that
+            // went before the block, all of which are on frame 0.
+            audio.notes.send(process.frames_count, process.out_events);
         }
         CLAP_PROCESS_CONTINUE
     })
@@ -1190,7 +1225,7 @@ unsafe fn for_each_event(
 ///
 /// `list` must be a valid output event list for the duration of the call,
 /// or null, and `T` a CLAP event type whose header's size is that of `T`.
-unsafe fn push_event<T>(list: *const clap_output_events, event: &T) -> bool {
+pub(crate) unsafe fn push_event<T>(list: *const clap_output_events, event: &T) -> bool {
     // SAFETY: guaranteed by this function's contract.
     let Some(push) = (unsafe { list.as_ref() }).and_then(|events| events.try_push) else {
         return false;
@@ -1629,7 +1664,11 @@ unsafe extern "C" fn note_ports_count<P: Plugin>(
     _plugin: *const clap_plugin,
     is_input: bool,
 ) -> u32 {
-    u32::from(is_input && takes_notes::<P>())
+    u32::from(if is_input {
+        takes_notes::<P>()
+    } else {
+        P::NOTE_OUTPUT
+    })
 }
 
 unsafe extern "C" fn note_ports_get<P: Plugin>(
@@ -1643,7 +1682,12 @@ unsafe extern "C" fn note_ports_get<P: Plugin>(
         let Some(info) = (unsafe { info.as_mut() }) else {
             return false;
         };
-        if index != 0 || !is_input || !takes_notes::<P>() {
+        let present = if is_input {
+            takes_notes::<P>()
+        } else {
+            P::NOTE_OUTPUT
+        };
+        if index != 0 || !present {
             return false;
         }
         info.id = 0;
@@ -1653,8 +1697,10 @@ unsafe extern "C" fn note_ports_get<P: Plugin>(
             | CLAP_NOTE_DIALECT_MIDI
             | CLAP_NOTE_DIALECT_MIDI_MPE
             | CLAP_NOTE_DIALECT_MIDI2;
+        // What goes out is written in whichever of these the host takes;
+        // see the `output` module.
         info.preferred_dialect = CLAP_NOTE_DIALECT_CLAP;
-        copy_text("Notes", &mut info.name);
+        copy_text(if is_input { "Notes" } else { "Notes out" }, &mut info.name);
         true
     })
 }
