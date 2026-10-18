@@ -17,8 +17,9 @@
 //!   follows the system as devices come and go ([`DeviceEvent`],
 //!   [`DeviceWatcher`]).
 //! - [`MockBackend`] stands in for the system with no hardware, for tests.
-//! - [`midi`] opens MIDI ports, real and virtual, and keeps a player's
-//!   timing on the way to the audio thread (feature `midi`, on by default).
+//! - [`midi`] opens MIDI ports, real and virtual, keeps a player's timing
+//!   on the way to the audio thread, and sends packets from it on time
+//!   (feature `midi`, on by default).
 //!
 //! Every callback can be told when its audio is heard or was captured: the
 //! `start_timed` methods and the device manager hand it a [`CallbackInfo`]

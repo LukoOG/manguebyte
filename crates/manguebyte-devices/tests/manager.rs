@@ -590,6 +590,13 @@ mod midi {
             mock.take_sent_midi(),
             [("synth".to_owned(), vec![0xB0, 7, 100])]
         );
+        // A MIDI 2.0 packet goes out by the default translation.
+        let note = manguebyte_midi::ump::Packet::from_words(&[0x4091_3C00, 0xC000_0000]).unwrap();
+        manager.send_midi_packet(&note).unwrap();
+        assert_eq!(
+            mock.take_sent_midi(),
+            [("synth".to_owned(), vec![0x91, 60, 0x60])]
+        );
         manager.disable_midi_input("keys");
         assert!(!mock.send_midi("keys", &[0x90, 60, 100]));
         manager.set_midi_output(None).unwrap();

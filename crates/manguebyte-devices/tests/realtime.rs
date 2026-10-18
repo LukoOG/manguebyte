@@ -289,3 +289,31 @@ fn a_source_plays_in_the_device_callback_without_the_heap() {
     });
     assert!((f32::from_bits(peak.load(Ordering::Relaxed)) - 0.5).abs() < 1e-3);
 }
+
+#[cfg(feature = "midi")]
+#[test]
+fn queueing_packets_for_an_output_port_does_not_use_the_heap() {
+    use manguebyte_devices::midi::midi_output_queue;
+    use manguebyte_midi::MidiMessage;
+    use manguebyte_midi::ump::Packet;
+
+    let (mut transmitter, mut queue) = midi_output_queue(1_024);
+    let mut queued = 0;
+    assert_no_heap_use("queueing packets for an output port", || {
+        for block in 0..100_u32 {
+            transmitter.begin_block(256, 48_000.0);
+            for offset in (0..256).step_by(64) {
+                let message = MidiMessage::ControlChange {
+                    channel: 0,
+                    controller: 1,
+                    value: (block % 128) as u8,
+                };
+                queued += usize::from(transmitter.send(offset, Packet::from_midi1(0, message)));
+            }
+        }
+    });
+    assert_eq!(queued, 400);
+    let mut sent = 0;
+    queue.send_all(|_| sent += 1);
+    assert_eq!(sent, 400);
+}

@@ -243,6 +243,9 @@ pub struct DeviceManager {
     midi_inputs: Vec<(DeviceSummary, Box<dyn Send>)>,
     #[cfg(feature = "midi")]
     midi_output: Option<(DeviceSummary, Box<dyn MidiSender>)>,
+    /// Puts packets for the output port together, made when first needed.
+    #[cfg(feature = "midi")]
+    midi_writer: Option<crate::midi::PacketWriter>,
 }
 
 impl std::fmt::Debug for DeviceManager {
@@ -298,6 +301,8 @@ impl DeviceManager {
             midi_inputs: Vec::new(),
             #[cfg(feature = "midi")]
             midi_output: None,
+            #[cfg(feature = "midi")]
+            midi_writer: None,
         }
     }
 
@@ -852,6 +857,33 @@ impl DeviceManager {
                 "no MIDI output is open",
             ))),
         }
+    }
+
+    /// Sends one Universal MIDI Packet to the open MIDI output port, as
+    /// the MIDI 1.0 bytes it stands for; see
+    /// [`PacketWriter`](crate::midi::PacketWriter) for what becomes what.
+    ///
+    /// This talks to the operating system and may block: never call it
+    /// from the audio thread.
+    pub fn send_midi_packet(
+        &mut self,
+        packet: &manguebyte_midi::ump::Packet,
+    ) -> Result<(), MidiError> {
+        let Some((_, sender)) = &mut self.midi_output else {
+            return Err(MidiError::PortNotFound(String::from(
+                "no MIDI output is open",
+            )));
+        };
+        let writer = self
+            .midi_writer
+            .get_or_insert_with(crate::midi::PacketWriter::new);
+        let mut result = Ok(());
+        writer.write(packet, |bytes| {
+            if result.is_ok() {
+                result = sender.send(bytes);
+            }
+        });
+        result
     }
 }
 

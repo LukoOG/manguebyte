@@ -33,6 +33,17 @@
 //! matches how long after the previous block it came. Every note is late by
 //! one block, and by the same amount, so the player's timing is kept.
 //!
+//! # Output
+//!
+//! [`MidiOutput`] sends to a port. From the audio thread, packets go
+//! through a [`midi_output_queue`]: its [`MidiTransmitter`] stamps each
+//! with the moment its frame is heard, one block late as input is, and
+//! [`MidiOutput::spawn`] starts the thread that sends them then. Ports
+//! speak MIDI 1.0 on every system for now ([`MidiProtocol`]), so
+//! Universal MIDI Packets go out as MIDI 1.0 by the specification's
+//! default translation ([`PacketWriter`]); for what shapes single notes,
+//! write MPE first, as `manguebyte_plugin::output::OutputTranslator` does.
+//!
 //! # Virtual ports
 //!
 //! [`MidiInput::create_virtual`] and [`MidiOutput::create_virtual`] make a
@@ -44,6 +55,13 @@
 
 use std::fmt;
 use std::sync::{Arc, Mutex};
+
+mod output;
+
+pub use output::{
+    MidiOutputQueue, MidiOutputThread, MidiProtocol, MidiTransmitter, PacketWriter,
+    SYSEX_OUT_CAPACITY, midi_output_queue,
+};
 use std::time::{Duration, Instant};
 
 use manguebyte_core::spsc::{self, Consumer, Producer};
@@ -468,7 +486,15 @@ impl MidiReceiver {
 /// An open MIDI output port.
 ///
 /// Sending talks to the operating system and may block, so it does not
-/// belong on the audio thread. Send from another thread, fed by a queue.
+/// belong on the audio thread. Send from another thread, fed by a queue:
+/// [`midi_output_queue`] makes one, whose audio end stamps each packet
+/// with its frame, and [`spawn`](Self::spawn) starts the thread that sends
+/// them on time.
+///
+/// Every port speaks MIDI 1.0 for now ([`MidiProtocol`]): Universal MIDI
+/// Packets are written out by the default translation, and MIDI 2.0 that
+/// shapes a single note reaches the port only if it was written as MPE
+/// first.
 pub struct MidiOutput {
     name: String,
     connection: midir::MidiOutputConnection,
