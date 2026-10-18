@@ -110,6 +110,10 @@ use manguebyte_params::ParamId;
 /// export [`mb_set_instrument`], which `js/worklet.js` looks for by name.
 /// A note on before the last note's note off was two notes and still is on
 /// every kind that was there; on the two monophonic kinds it is a slide.
+/// Nor did the newer voices: codes 10 to 15 (the drum kits, the
+/// polyphonic synthesiser, the mallets, the bowed strings, the winds and
+/// the choir) are only added, with parameter ids of their own; a drum kit
+/// answers the drum map as the other kits do.
 ///
 /// Nor did loudness normalisation: [`mb_sfz_measure`] and its status
 /// [`status::MEASURING`] are added, and `js/worklet.js` looks for the export

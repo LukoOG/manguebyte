@@ -816,6 +816,7 @@ dependencies = [
  "manguebyte-core",
  "manguebyte-dsp",
  "manguebyte-formats",
+ "manguebyte-midi",
  "manguebyte-params",
  "manguebyte-sampler",
 ]

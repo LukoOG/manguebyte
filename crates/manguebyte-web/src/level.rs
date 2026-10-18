@@ -10,8 +10,9 @@ use manguebyte_params::ParamSmoother;
 
 use crate::engine::InstrumentKind;
 use crate::params::{
-    ACID_PRESET_NAMES, FM_PRESET_NAMES, LEVEL_SMOOTHING, ORGAN_PRESET_NAMES, PLUCKED_PRESET_NAMES,
-    ids,
+    ACID_PRESET_NAMES, BOWED_PRESET_NAMES, CHOIR_PRESET_NAMES, DRUM_KIT_PRESET_NAMES,
+    FM_PRESET_NAMES, LEVEL_SMOOTHING, MALLET_PRESET_NAMES, ORGAN_PRESET_NAMES,
+    PLUCKED_PRESET_NAMES, POLY_PRESET_NAMES, WIND_PRESET_NAMES, ids,
 };
 
 /// The integrated loudness, in LUFS, that a part of every kind plays its
@@ -277,6 +278,159 @@ const ACID: [Calibration; ACID_PRESET_NAMES.len()] = [
     row(Some(ACID_PRESET_NAMES[2]), Phrase::Bass, -5.66),
 ];
 
+/// Each kit's own pieces; the drums of the drum map a kit has no piece for
+/// are the synthesized kit's, at the drums' make-up.
+const DRUM_KIT: [Calibration; DRUM_KIT_PRESET_NAMES.len()] = [
+    row(Some(DRUM_KIT_PRESET_NAMES[0]), Phrase::Groove, 2.76),
+    row(Some(DRUM_KIT_PRESET_NAMES[1]), Phrase::Groove, 2.26),
+    row(Some(DRUM_KIT_PRESET_NAMES[2]), Phrase::Groove, 3.34),
+    row(Some(DRUM_KIT_PRESET_NAMES[3]), Phrase::Groove, 4.09),
+    row(Some(DRUM_KIT_PRESET_NAMES[4]), Phrase::Groove, 4.54),
+    row(Some(DRUM_KIT_PRESET_NAMES[5]), Phrase::Groove, -0.96),
+    row(Some(DRUM_KIT_PRESET_NAMES[6]), Phrase::Groove, 2.78),
+    row(Some(DRUM_KIT_PRESET_NAMES[7]), Phrase::Groove, 3.58),
+    row(Some(DRUM_KIT_PRESET_NAMES[8]), Phrase::Groove, 1.85),
+    row(Some(DRUM_KIT_PRESET_NAMES[9]), Phrase::Groove, 4.47),
+];
+
+/// The make-up of each preset of the polyphonic synthesiser, in the order
+/// of `poly.preset`.
+const POLY_MAKE_UP: [f64; POLY_PRESET_NAMES.len()] = [
+    -2.69,  // Moog Bass
+    -9.47,  // Reese
+    -6.78,  // Wobble Bass
+    -11.62, // Deep Sub
+    -9.83,  // FM Growl
+    -7.47,  // House Organ Bass
+    -7.92,  // Acid Line
+    -7.21,  // Garage Square
+    -11.36, // Wavetable Growl
+    -8.30,  // Synthpop Bass
+    0.85,   // Funk Bass
+    -11.14, // 808 Glide
+    -2.66,  // Rolling Bass
+    -6.91,  // Rubber Bass
+    -6.78,  // Talking Bass
+    -8.04,  // Trance Supersaw
+    -11.13, // Square Lead
+    -11.94, // Sync Lead
+    -10.95, // Chiptune
+    -6.79,  // Hoover
+    -7.96,  // Mono Saw Lead
+    -11.33, // Whistle Lead
+    -10.70, // Digital Lead
+    -2.83,  // Talking Lead
+    -13.57, // Screamer
+    -9.52,  // Future Lead
+    -13.15, // Warm Analog Pad
+    -10.87, // String Machine
+    -11.49, // Glass Pad
+    -14.12, // Dark Drone
+    -13.14, // Choir Pad
+    -15.58, // Formant Pad
+    -15.68, // PWM Pad
+    -10.32, // Shimmer Pad
+    -11.19, // Evolving Spectra
+    -14.10, // Soft Sine Pad
+    -14.34, // Comb Wash
+    -11.47, // Sweep Pad
+    -1.88,  // House Pluck
+    -11.71, // Bell Pluck
+    -8.15,  // Marimba
+    0.16,   // Plucked String
+    -5.12,  // Future Pluck
+    -7.15,  // Glass Pluck
+    -2.08,  // Trance Pluck
+    2.00,   // Pizzicato
+    -9.67,  // Kalimba
+    -5.83,  // Polysynth Piano
+    -0.40,  // Clavinet
+    -9.20,  // FM Electric Piano
+    -15.42, // Drawbar Organ
+    -10.22, // Juno Keys
+    -10.07, // Wurly
+    -9.25,  // Vibraphone
+    -11.34, // Synth Brass
+    0.01,   // Brass Stab
+    -12.39, // Jump Brass
+    -0.98,  // Rave Chord Stab
+    -13.31, // Soft Horns
+    -11.70, // Fanfare
+    -5.49,  // Riser
+    -8.19,  // Downlifter
+    5.07,   // Noise Sweep
+    -4.01,  // Laser Zap
+    -9.69,  // Random Bleeps
+    -3.25,  // Wind
+    -13.12, // Impact Boom
+    -15.75, // Siren
+];
+
+/// The phrase preset `index` of the polyphonic synthesiser is measured on,
+/// by the category the library files it under
+/// (`modelled::poly_phrase`): presets 0 to 14 are basses, 15 to 25 leads,
+/// 26 to 37 pads, 38 to 46 plucks, 47 to 53 keys, 54 to 59 brass, 60 to 67
+/// effects.
+const fn poly_phrase_of(index: usize) -> Phrase {
+    match index {
+        0..=14 => Phrase::Bass,
+        26..=37 | 47..=59 => Phrase::Chord,
+        _ => Phrase::Melody,
+    }
+}
+
+const fn poly_rows() -> [Calibration; POLY_PRESET_NAMES.len()] {
+    let mut rows = [row(None, Phrase::Melody, 0.0); POLY_PRESET_NAMES.len()];
+    let mut index = 0;
+    while index < rows.len() {
+        rows[index] = row(
+            Some(POLY_PRESET_NAMES[index]),
+            poly_phrase_of(index),
+            POLY_MAKE_UP[index],
+        );
+        index += 1;
+    }
+    rows
+}
+
+const POLY: [Calibration; POLY_PRESET_NAMES.len()] = poly_rows();
+
+const MALLET: [Calibration; MALLET_PRESET_NAMES.len()] = [
+    row(Some(MALLET_PRESET_NAMES[0]), Phrase::Melody, -7.18),
+    row(Some(MALLET_PRESET_NAMES[1]), Phrase::Melody, -2.54),
+    row(Some(MALLET_PRESET_NAMES[2]), Phrase::Melody, -3.68),
+    row(Some(MALLET_PRESET_NAMES[3]), Phrase::Melody, -6.52),
+    row(Some(MALLET_PRESET_NAMES[4]), Phrase::Melody, -3.00),
+    row(Some(MALLET_PRESET_NAMES[5]), Phrase::Melody, -9.39),
+    row(Some(MALLET_PRESET_NAMES[6]), Phrase::Melody, -8.81),
+    row(Some(MALLET_PRESET_NAMES[7]), Phrase::Melody, -10.54),
+];
+
+const BOWED: [Calibration; BOWED_PRESET_NAMES.len()] = [
+    row(Some(BOWED_PRESET_NAMES[0]), Phrase::Melody, 5.28),
+    row(Some(BOWED_PRESET_NAMES[1]), Phrase::Melody, 4.96),
+    row(Some(BOWED_PRESET_NAMES[2]), Phrase::Melody, 5.19),
+    row(Some(BOWED_PRESET_NAMES[3]), Phrase::Bass, 6.54),
+    row(Some(BOWED_PRESET_NAMES[4]), Phrase::Chord, -0.27),
+    row(Some(BOWED_PRESET_NAMES[5]), Phrase::Melody, 11.52),
+    row(Some(BOWED_PRESET_NAMES[6]), Phrase::Melody, 12.33),
+    row(Some(BOWED_PRESET_NAMES[7]), Phrase::Bass, 8.75),
+];
+
+const WIND: [Calibration; WIND_PRESET_NAMES.len()] = [
+    row(Some(WIND_PRESET_NAMES[0]), Phrase::Melody, 3.27),
+    row(Some(WIND_PRESET_NAMES[1]), Phrase::Melody, -2.48),
+    row(Some(WIND_PRESET_NAMES[2]), Phrase::Melody, -3.31),
+    row(Some(WIND_PRESET_NAMES[3]), Phrase::Melody, -0.25),
+    row(Some(WIND_PRESET_NAMES[4]), Phrase::Melody, -1.91),
+];
+
+const CHOIR: [Calibration; CHOIR_PRESET_NAMES.len()] = [
+    row(Some(CHOIR_PRESET_NAMES[0]), Phrase::Chord, -9.56),
+    row(Some(CHOIR_PRESET_NAMES[1]), Phrase::Chord, -7.51),
+    row(Some(CHOIR_PRESET_NAMES[2]), Phrase::Melody, -8.99),
+];
+
 impl InstrumentKind {
     /// How the kind is brought to [`LOUDNESS_TARGET_LUFS`]: one
     /// [`Calibration`] per preset, in the order of the preset's values
@@ -307,6 +461,12 @@ impl InstrumentKind {
             Self::AnalogKit => &ANALOG_KIT,
             Self::KickBass => &KICK_BASS,
             Self::Acid => &ACID,
+            Self::DrumKit => &DRUM_KIT,
+            Self::Poly => &POLY,
+            Self::Mallet => &MALLET,
+            Self::Bowed => &BOWED,
+            Self::Wind => &WIND,
+            Self::Choir => &CHOIR,
         }
     }
 
@@ -320,6 +480,12 @@ impl InstrumentKind {
             Self::Fm => Some(ids::FM_PRESET),
             Self::Organ => Some(ids::ORGAN_PRESET),
             Self::Acid => Some(ids::ACID_PRESET),
+            Self::DrumKit => Some(ids::DRUM_KIT_PRESET),
+            Self::Poly => Some(ids::POLY_PRESET),
+            Self::Mallet => Some(ids::MALLET_PRESET),
+            Self::Bowed => Some(ids::BOWED_PRESET),
+            Self::Wind => Some(ids::WIND_PRESET),
+            Self::Choir => Some(ids::CHOIR_PRESET),
             Self::Synth
             | Self::Drums
             | Self::Sampler
@@ -459,6 +625,22 @@ mod tests {
             make_up_db(InstrumentKind::Synth, 0)
         );
         assert_eq!(make_up_db(InstrumentKind::Sampler, 0), 0.0);
+    }
+
+    /// The polyphonic synthesiser's rows are measured on the phrase of the
+    /// category the library files each preset under.
+    #[test]
+    fn every_poly_preset_is_measured_on_its_categorys_phrase() {
+        use manguebyte_dsp::instruments::poly::PRESETS;
+        for (index, (row, preset)) in POLY.iter().zip(&PRESETS).enumerate() {
+            assert_eq!(
+                row.phrase,
+                crate::modelled::poly_phrase(preset.category),
+                "{index} {}",
+                preset.name
+            );
+            assert_eq!(row.preset, Some(preset.name));
+        }
     }
 
     #[test]

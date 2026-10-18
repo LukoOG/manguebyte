@@ -252,6 +252,40 @@ fn rows() -> Vec<(InstrumentKind, usize, Calibration)> {
         .collect()
 }
 
+/// `measure` of every row, in the order of the rows, on up to four threads:
+/// each row is an engine of its own.
+fn each_row<T: Send>(
+    rows: &[(InstrumentKind, usize, Calibration)],
+    measure: impl Fn(InstrumentKind, usize, &Calibration) -> T + Sync,
+) -> Vec<T> {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let next = AtomicUsize::new(0);
+    let results: Mutex<Vec<Option<T>>> = Mutex::new((0..rows.len()).map(|_| None).collect());
+    // Four at most: the tests run beside each other.
+    let threads = std::thread::available_parallelism().map_or(1, |count| count.get().min(4));
+    std::thread::scope(|scope| {
+        for _ in 0..threads.min(rows.len()) {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some((kind, preset, row)) = rows.get(index) else {
+                        break;
+                    };
+                    let value = measure(*kind, *preset, row);
+                    results.lock().unwrap()[index] = Some(value);
+                }
+            });
+        }
+    });
+    results
+        .into_inner()
+        .unwrap()
+        .into_iter()
+        .map(|value| value.expect("every row measured"))
+        .collect()
+}
+
 fn label(kind: InstrumentKind, row: &Calibration) -> String {
     match row.preset {
         Some(preset) => format!("{} {preset:?}", kind.name()),
@@ -269,7 +303,8 @@ fn every_kind_and_preset_plays_its_phrase_at_the_target() {
         "kind", "phrase", "before", "make-up", "after"
     );
     let mut misses = Vec::new();
-    for (kind, index, row) in rows() {
+    let rows = rows();
+    let measured = each_row(&rows, |kind, index, row| {
         let after = phrase_loudness(kind, index, &*setup_for(kind));
         let make_up = match row.make_up_db {
             Some(make_up) => make_up,
@@ -277,6 +312,9 @@ fn every_kind_and_preset_plays_its_phrase_at_the_target() {
             // make-up is what that measured, here for a recorded one.
             None => after - phrase_loudness(kind, index, &*setup_with(kind, false)),
         };
+        (after, make_up)
+    });
+    for ((kind, _, row), (after, make_up)) in rows.into_iter().zip(measured) {
         println!(
             "{:<28} {:<7} {:>9.2} {:>+9.2} {:>9.2}",
             label(kind, &row),
@@ -318,6 +356,12 @@ fn a_presets_make_up_lands_on_its_frame_in_every_quantum() {
             continue;
         };
         let last = (kind.calibration().len() - 1) as f64;
+        // A note every preset plays: a snare on the drum kits.
+        let key = if kind == InstrumentKind::DrumKit {
+            38
+        } else {
+            52
+        };
         let play = |records: &[EventRecord], quantum: usize| {
             let mut engine = engine_with(kind, Chain::NONE);
             push_all(&mut engine, records);
@@ -326,14 +370,14 @@ fn a_presets_make_up_lands_on_its_frame_in_every_quantum() {
         let early = play(
             &[
                 EventRecord::param(0, 0, id(preset), last),
-                EventRecord::note_on(4_800, 0, 52, 0.8),
+                EventRecord::note_on(4_800, 0, key, 0.8),
             ],
             128,
         );
         let with_the_note = play(
             &[
                 EventRecord::param(4_800, 0, id(preset), last),
-                EventRecord::note_on(4_800, 0, 52, 0.8),
+                EventRecord::note_on(4_800, 0, key, 0.8),
             ],
             128,
         );
@@ -365,8 +409,11 @@ fn a_presets_make_up_lands_on_its_frame_in_every_quantum() {
 #[test]
 fn no_accented_note_at_full_velocity_reaches_the_limiter() {
     let mut worst = (f64::NEG_INFINITY, String::new());
-    for (kind, index, row) in rows() {
-        let peak = accented_peak(kind, index, &*setup_for(kind));
+    let rows = rows();
+    let peaks = each_row(&rows, |kind, index, _| {
+        accented_peak(kind, index, &*setup_for(kind))
+    });
+    for ((kind, _, row), peak) in rows.into_iter().zip(peaks) {
         println!("{:<28} {peak:>7.2} dBTP", label(kind, &row));
         if peak > worst.0 {
             worst = (peak, label(kind, &row));

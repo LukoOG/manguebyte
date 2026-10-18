@@ -1,7 +1,8 @@
 //! Parts that play the instrument voices of `manguebyte-dsp`
 //! ([`manguebyte_dsp::instruments`]): plucked strings, FM, the tonewheel
 //! organ through its rotating speaker, the analogue drum machine, the kick
-//! bass and the acid bass.
+//! bass and the acid bass; and, in stereo, the drum kits, the polyphonic
+//! synthesiser, the mallets, the bowed strings, the winds and the choir.
 //!
 //! Each is a [`Synth`] of the voice, built and prepared when the part's
 //! instrument is set, as the module's documentation recommends: the organ's
@@ -23,21 +24,29 @@ use manguebyte_core::AudioBuffer;
 use manguebyte_dsp::event::NoteRef;
 #[cfg(doc)]
 use manguebyte_dsp::instruments::OrganManual;
+use manguebyte_dsp::instruments::poly::VoiceMode;
 use manguebyte_dsp::instruments::{
     AcidParams, AcidVoice, AcidWave, Algorithm, AnalogDrum, AnalogKitParams, AnalogKitVoice,
-    FM_OPERATORS, FmParams, FmVoice, KickBassParams, KickBassVoice, OrganParams, OrganVoice,
-    Percussion, PercussionDecay, PercussionHarmonic, PluckedString, RotaryParams, RotarySpeaker,
-    RotarySpeed, StringParams,
+    BowedString, ChoirVoice, DrumKit as Pieces, DrumKitVoice, FM_OPERATORS, FmParams, FmVoice,
+    KickBassParams, KickBassVoice, MalletVoice, OrganParams, OrganVoice, Percussion,
+    PercussionDecay, PercussionHarmonic, PluckedString, PolySynthVoice, RotaryParams,
+    RotarySpeaker, RotarySpeed, StringParams, WindVoice,
 };
 use manguebyte_dsp::{ProcessSpec, Processor, Synth, Voice};
+use manguebyte_midi::MidiMessage;
 use manguebyte_params::{Param, ParamId, ParamSmoother};
 
 use crate::drums::{DAMP_SECONDS, Drum, DrumKit};
 use crate::engine::InstrumentKind;
 use crate::level::{Trim, make_up_db};
+use crate::modelled::{
+    bowed_settings, choir_settings, drum_kit_settings, kit_key, mallet_settings, poly_settings,
+    wind_settings,
+};
 use crate::params::{
-    self, AcidKnobs, AnalogKitKnobs, FmKnobs, InstrumentParams, KickBassKnobs, LEVEL_SMOOTHING,
-    OrganKnobs, PluckedKnobs,
+    self, AcidKnobs, AnalogKitKnobs, BowedKnobs, ChoirKnobs, DrumKitKnobs, FmKnobs,
+    InstrumentParams, KickBassKnobs, LEVEL_SMOOTHING, MalletKnobs, OrganKnobs, PluckedKnobs,
+    PolyKnobs, WindKnobs,
 };
 use crate::sampled::PANIC_FADE_SECONDS;
 
@@ -53,6 +62,32 @@ pub const ORGAN_VOICES: usize = 16;
 
 /// How many drums an analogue kit part sounds at once.
 pub const ANALOG_KIT_VOICES: usize = 16;
+
+/// How many pieces a drum kit part sounds at once: a kit's worth, each
+/// piece ringing on while the others are struck. See the crate's README
+/// for what they cost.
+pub const DRUM_KIT_VOICES: usize = 12;
+
+/// How many notes a part of the polyphonic synthesiser plays at once with
+/// a polyphonic preset; a monophonic or legato preset plays one. See the
+/// crate's README for what they cost.
+pub const POLY_VOICES: usize = 8;
+
+/// How many notes a mallet part plays at once.
+pub const MALLET_VOICES: usize = 12;
+
+/// How many notes a bowed part plays at once: the four strings of a
+/// soloist and room for chords to ring into the next, or a section's
+/// divisi. See the crate's README for what they cost.
+pub const BOWED_VOICES: usize = 6;
+
+/// How many notes a wind part plays at once: one while `wind.legato` is
+/// on and the notes overlap; a section's chords with it off.
+pub const WIND_VOICES: usize = 4;
+
+/// How many notes a choir part sings at once. See the crate's README for
+/// what they cost.
+pub const CHOIR_VOICES: usize = 6;
 
 /// How long the rotating speaker of an organ part has to hear silence and
 /// put out next to none (below -120 dB) before it is cleared and skipped
@@ -328,6 +363,9 @@ fn acid_settings(knobs: &AcidKnobs) -> AcidParams {
 pub(crate) struct Generations<V> {
     synths: [Synth<V>; 2],
     current: usize,
+    /// One channel, or two for the voices that place their notes in the
+    /// stereo field.
+    channels: usize,
     /// Frames of the other synth's fade still to go, and the fade's length.
     fade_left: u32,
     fade_length: u32,
@@ -364,23 +402,38 @@ impl<V: Voice<f32>> Generations<V> {
 
     /// Two synths of the voices `make` makes, prepared for one channel
     /// under `spec`, with legato on or off. Allocates.
-    fn new(mut make: impl FnMut() -> Vec<V>, legato: bool, spec: &ProcessSpec) -> Self {
-        let mono = ProcessSpec {
-            num_channels: 1,
+    fn new(make: impl FnMut() -> Vec<V>, legato: bool, spec: &ProcessSpec) -> Self {
+        Self::with_channels(1, make, legato, spec)
+    }
+
+    /// The same for two channels, left and right. Allocates.
+    fn stereo(make: impl FnMut() -> Vec<V>, legato: bool, spec: &ProcessSpec) -> Self {
+        Self::with_channels(2, make, legato, spec)
+    }
+
+    fn with_channels(
+        channels: usize,
+        mut make: impl FnMut() -> Vec<V>,
+        legato: bool,
+        spec: &ProcessSpec,
+    ) -> Self {
+        let prepared = ProcessSpec {
+            num_channels: channels,
             ..*spec
         };
         let mut synth = || {
             let mut synth = Synth::new(make());
             synth.set_legato(legato);
-            synth.prepare(&mono);
+            synth.prepare(&prepared);
             synth
         };
         Self {
             synths: [synth(), synth()],
             current: 0,
+            channels,
             fade_left: 0,
             fade_length: 1,
-            scratch: AudioBuffer::new(1, spec.max_block_size),
+            scratch: AudioBuffer::new(channels, spec.max_block_size),
             sample_rate: spec.sample_rate,
             level_db: 0.0,
             trim: Trim::new(1.0, spec.sample_rate),
@@ -391,6 +444,22 @@ impl<V: Voice<f32>> Generations<V> {
     fn each_voice(&mut self, mut apply: impl FnMut(&mut V)) {
         for synth in &mut self.synths {
             synth.voices_mut().for_each(&mut apply);
+        }
+    }
+
+    /// Turns legato playing on or off for the notes that start from now
+    /// on. Real-time safe.
+    fn set_legato(&mut self, legato: bool) {
+        for synth in &mut self.synths {
+            synth.set_legato(legato);
+        }
+    }
+
+    /// Lets the notes that start from now on take only the first `limit`
+    /// voices of each synth. Real-time safe.
+    fn set_voice_limit(&mut self, limit: usize) {
+        for synth in &mut self.synths {
+            synth.set_voice_limit(limit);
         }
     }
 
@@ -449,27 +518,47 @@ impl<V: Voice<f32>> Generations<V> {
         self.synths[self.current].active_voices() + fading
     }
 
-    /// Writes the notes' sound over `mono`, one channel.
-    fn render(&mut self, mono: &mut AudioBuffer<f32>) {
-        let frames = mono.num_frames();
-        self.synths[self.current].process(mono);
+    /// Writes the notes' sound over `out`, which has the synths' channels:
+    /// one, or two.
+    fn render(&mut self, out: &mut AudioBuffer<f32>) {
+        let frames = out.num_frames();
+        self.synths[self.current].process(out);
         if self.fade_left > 0 {
             let other = 1 - self.current;
             self.scratch.set_num_frames(frames);
             self.synths[other].process(&mut self.scratch);
             let length = self.fade_length as f32;
-            for (out, &fading) in mono.channel_mut(0).iter_mut().zip(self.scratch.channel(0)) {
-                if self.fade_left == 0 {
-                    break;
+            if self.channels == 1 {
+                for (out, &fading) in out.channel_mut(0).iter_mut().zip(self.scratch.channel(0)) {
+                    if self.fade_left == 0 {
+                        break;
+                    }
+                    self.fade_left -= 1;
+                    *out += fading * (self.fade_left as f32 / length);
                 }
-                self.fade_left -= 1;
-                *out += fading * (self.fade_left as f32 / length);
+            } else {
+                // Frame by frame as on one channel, both sides alike.
+                let count = frames.min(self.fade_left as usize);
+                for channel in 0..2 {
+                    let mut left = self.fade_left;
+                    let fading = self.scratch.channel(channel);
+                    for (out, &fading) in out.channel_mut(channel)[..count].iter_mut().zip(fading) {
+                        left -= 1;
+                        *out += fading * (left as f32 / length);
+                    }
+                }
+                self.fade_left -= count as u32;
             }
             if self.fade_left == 0 {
                 Self::clear(&mut self.synths[other]);
             }
         }
-        self.trim.apply(mono.channel_mut(0));
+        if self.channels == 1 {
+            self.trim.apply(out.channel_mut(0));
+        } else {
+            let (left, right) = out.channel_pair_mut(0, 1);
+            self.trim.apply_stereo(left, right);
+        }
     }
 }
 
@@ -603,6 +692,56 @@ pub(crate) struct AnalogKitPart {
     scratch: Vec<f32>,
 }
 
+/// A drum kit part: the kit's pieces, in stereo, and the synthesized kit
+/// for the drums of the drum map it has no piece for.
+pub(crate) struct DrumKitPart {
+    gens: Generations<DrumKitVoice>,
+    /// The settings the voices have: which keys have a piece.
+    pieces: Pieces,
+    fallback: DrumKit,
+    /// The synthesized drums' sound, for one quantum.
+    scratch: Vec<f32>,
+}
+
+/// A part of the polyphonic synthesiser: voices for its polyphonic
+/// presets and one for its monophonic and legato ones, each set to the
+/// preset, the notes going to those its preset's mode plays.
+pub(crate) struct PolyPart {
+    poly: Generations<PolySynthVoice>,
+    mono: Generations<PolySynthVoice>,
+    mode: VoiceMode,
+    /// The tempo the voices' synced LFOs follow, beats per minute.
+    tempo: f64,
+    /// What the voices that are not the mode's put out while they ring on
+    /// after a change of mode, for one quantum.
+    scratch: AudioBuffer<f32>,
+}
+
+impl PolyPart {
+    /// The voices of the preset's mode.
+    fn current(&mut self) -> &mut Generations<PolySynthVoice> {
+        match self.mode {
+            VoiceMode::Poly => &mut self.poly,
+            VoiceMode::Mono | VoiceMode::Legato => &mut self.mono,
+        }
+    }
+
+    fn both(&mut self) -> [&mut Generations<PolySynthVoice>; 2] {
+        [&mut self.poly, &mut self.mono]
+    }
+
+    /// Takes the mode of a new preset: the notes of the voices it leaves
+    /// are released, as their voices release.
+    fn set_mode(&mut self, mode: VoiceMode) {
+        let was_poly = self.mode == VoiceMode::Poly;
+        if was_poly != (mode == VoiceMode::Poly) {
+            self.current().release_all();
+        }
+        self.mode = mode;
+        self.mono.set_legato(mode == VoiceMode::Legato);
+    }
+}
+
 /// A part's instrument made of `manguebyte-dsp`'s voices.
 pub(crate) enum Voiced {
     Plucked(Generations<PluckedString>),
@@ -611,10 +750,16 @@ pub(crate) enum Voiced {
     AnalogKit(Box<AnalogKitPart>),
     KickBass(Generations<KickBassVoice>),
     Acid(Generations<AcidVoice>),
+    DrumKit(Box<DrumKitPart>),
+    Poly(Box<PolyPart>),
+    Mallet(Generations<MalletVoice>),
+    Bowed(Generations<BowedString>),
+    Wind(Generations<WindVoice>),
+    Choir(Generations<ChoirVoice>),
 }
 
 /// `$body` with `$gens` bound to the part's [`Generations`], whatever its
-/// voice.
+/// voice: for the polyphonic synthesiser, those of its preset's mode.
 macro_rules! with_gens {
     ($voiced:expr, $gens:ident => $body:expr) => {
         match $voiced {
@@ -630,6 +775,18 @@ macro_rules! with_gens {
             }
             Voiced::KickBass($gens) => $body,
             Voiced::Acid($gens) => $body,
+            Voiced::DrumKit(kit) => {
+                let $gens = &mut kit.gens;
+                $body
+            }
+            Voiced::Poly(poly) => {
+                let $gens = poly.current();
+                $body
+            }
+            Voiced::Mallet($gens) => $body,
+            Voiced::Bowed($gens) => $body,
+            Voiced::Wind($gens) => $body,
+            Voiced::Choir($gens) => $body,
         }
     };
 }
@@ -712,6 +869,96 @@ impl Voiced {
         )
     }
 
+    pub(crate) fn drum_kit(knobs: &DrumKitKnobs, spec: &ProcessSpec) -> Self {
+        let pieces = drum_kit_settings(knobs);
+        let make_up = make_up_db(InstrumentKind::DrumKit, knobs.preset.index());
+        Self::DrumKit(Box::new(DrumKitPart {
+            // One set of choke groups a generation: the closed hat chokes
+            // the open one.
+            gens: Generations::stereo(
+                || DrumKitVoice::voices(DRUM_KIT_VOICES, pieces),
+                false,
+                spec,
+            )
+            .with_level_db(0.0, make_up),
+            pieces,
+            // At the drums' own make-up, as in a drum part.
+            fallback: DrumKit::new(&knobs.kit, spec.sample_rate),
+            scratch: vec![0.0; spec.max_block_size],
+        }))
+    }
+
+    pub(crate) fn poly(knobs: &PolyKnobs, spec: &ProcessSpec) -> Self {
+        let settings = poly_settings(knobs);
+        let make_up = make_up_db(InstrumentKind::Poly, knobs.preset.index());
+        let voices = |count: usize| {
+            Generations::stereo(|| vec![PolySynthVoice::new(settings); count], false, spec)
+                .with_level_db(0.0, make_up)
+        };
+        let mut part = PolyPart {
+            poly: voices(POLY_VOICES),
+            mono: voices(1),
+            mode: VoiceMode::Poly,
+            tempo: 120.0,
+            scratch: AudioBuffer::new(2, spec.max_block_size),
+        };
+        part.set_mode(settings.mode);
+        part.poly.set_voice_limit(knobs.voices.value() as usize);
+        Self::Poly(Box::new(part))
+    }
+
+    pub(crate) fn mallet(knobs: &MalletKnobs, spec: &ProcessSpec) -> Self {
+        let settings = mallet_settings(knobs);
+        let make_up = make_up_db(InstrumentKind::Mallet, knobs.preset.index());
+        Self::Mallet(
+            Generations::stereo(
+                || vec![MalletVoice::new(settings); MALLET_VOICES],
+                false,
+                spec,
+            )
+            .with_level_db(0.0, make_up),
+        )
+    }
+
+    pub(crate) fn bowed(knobs: &BowedKnobs, spec: &ProcessSpec) -> Self {
+        let settings = bowed_settings(knobs);
+        let make_up = make_up_db(InstrumentKind::Bowed, knobs.preset.index());
+        Self::Bowed(
+            Generations::stereo(
+                || vec![BowedString::new(settings); BOWED_VOICES],
+                knobs.legato.value(),
+                spec,
+            )
+            .with_level_db(0.0, make_up),
+        )
+    }
+
+    pub(crate) fn wind(knobs: &WindKnobs, spec: &ProcessSpec) -> Self {
+        let settings = wind_settings(knobs);
+        let make_up = make_up_db(InstrumentKind::Wind, knobs.preset.index());
+        Self::Wind(
+            Generations::stereo(
+                || vec![WindVoice::new(settings); WIND_VOICES],
+                knobs.legato.value(),
+                spec,
+            )
+            .with_level_db(0.0, make_up),
+        )
+    }
+
+    pub(crate) fn choir(knobs: &ChoirKnobs, spec: &ProcessSpec) -> Self {
+        let settings = choir_settings(knobs);
+        let make_up = make_up_db(InstrumentKind::Choir, knobs.preset.index());
+        Self::Choir(
+            Generations::stereo(
+                || vec![ChoirVoice::new(settings); CHOIR_VOICES],
+                knobs.legato.value(),
+                spec,
+            )
+            .with_level_db(0.0, make_up),
+        )
+    }
+
     pub(crate) fn kind(&self) -> InstrumentKind {
         match self {
             Self::Plucked(_) => InstrumentKind::Plucked,
@@ -720,7 +967,26 @@ impl Voiced {
             Self::AnalogKit(_) => InstrumentKind::AnalogKit,
             Self::KickBass(_) => InstrumentKind::KickBass,
             Self::Acid(_) => InstrumentKind::Acid,
+            Self::DrumKit(_) => InstrumentKind::DrumKit,
+            Self::Poly(_) => InstrumentKind::Poly,
+            Self::Mallet(_) => InstrumentKind::Mallet,
+            Self::Bowed(_) => InstrumentKind::Bowed,
+            Self::Wind(_) => InstrumentKind::Wind,
+            Self::Choir(_) => InstrumentKind::Choir,
         }
+    }
+
+    /// Whether the part's voices place their notes in the stereo field.
+    fn is_stereo(&self) -> bool {
+        matches!(
+            self,
+            Self::DrumKit(_)
+                | Self::Poly(_)
+                | Self::Mallet(_)
+                | Self::Bowed(_)
+                | Self::Wind(_)
+                | Self::Choir(_)
+        )
     }
 
     /// Takes the new value of one of the instrument's knobs, `id`, which
@@ -779,7 +1045,104 @@ impl Voiced {
                     gens.set_make_up_db(make_up_db(kind, knobs.preset.index()));
                 }
             }
+            (Self::DrumKit(kit), InstrumentParams::DrumKit(knobs)) => {
+                // The kit's tune, decay and levels are the synthesized
+                // drums' too.
+                kit.fallback.set_param(id, value);
+                kit.pieces = drum_kit_settings(knobs);
+                let pieces = kit.pieces;
+                kit.gens.each_voice(|voice| voice.set_params(pieces));
+                if preset {
+                    kit.gens
+                        .set_make_up_db(make_up_db(kind, knobs.preset.index()));
+                }
+            }
+            (Self::Poly(poly), InstrumentParams::Poly(knobs)) => {
+                if id == params::POLY_MOD_WHEEL {
+                    // The wheel the presets' matrices read, as the
+                    // controller sends it.
+                    let wheel = MidiMessage::ControlChange {
+                        channel: 0,
+                        controller: 1,
+                        value: (value.clamp(0.0, 1.0) * 127.0).round() as u8,
+                    };
+                    for gens in poly.both() {
+                        gens.each_voice(|voice| Voice::<f32>::midi(voice, wheel));
+                    }
+                    return;
+                }
+                if id == params::POLY_POLYPHONY {
+                    poly.poly.set_voice_limit(knobs.voices.value() as usize);
+                    return;
+                }
+                let settings = poly_settings(knobs);
+                for gens in poly.both() {
+                    gens.each_voice(|voice| voice.set_params(settings));
+                }
+                if preset {
+                    let make_up = make_up_db(kind, knobs.preset.index());
+                    for gens in poly.both() {
+                        gens.set_make_up_db(make_up);
+                    }
+                    poly.set_mode(settings.mode);
+                    poly.poly.set_voice_limit(knobs.voices.value() as usize);
+                }
+            }
+            (Self::Mallet(gens), InstrumentParams::Mallet(knobs)) => {
+                let settings = mallet_settings(knobs);
+                gens.each_voice(|voice| voice.set_params(settings));
+                if preset {
+                    gens.set_make_up_db(make_up_db(kind, knobs.preset.index()));
+                }
+            }
+            (Self::Bowed(gens), InstrumentParams::Bowed(knobs)) => {
+                if id == params::BOWED_LEGATO {
+                    gens.set_legato(knobs.legato.value());
+                    return;
+                }
+                let settings = bowed_settings(knobs);
+                gens.each_voice(|voice| voice.set_params(settings));
+                if preset {
+                    gens.set_make_up_db(make_up_db(kind, knobs.preset.index()));
+                }
+            }
+            (Self::Wind(gens), InstrumentParams::Wind(knobs)) => {
+                if id == params::WIND_LEGATO {
+                    gens.set_legato(knobs.legato.value());
+                    return;
+                }
+                let settings = wind_settings(knobs);
+                gens.each_voice(|voice| voice.set_params(settings));
+                if preset {
+                    gens.set_make_up_db(make_up_db(kind, knobs.preset.index()));
+                }
+            }
+            (Self::Choir(gens), InstrumentParams::Choir(knobs)) => {
+                if id == params::CHOIR_LEGATO {
+                    gens.set_legato(knobs.legato.value());
+                    return;
+                }
+                let settings = choir_settings(knobs);
+                gens.each_voice(|voice| voice.set_params(settings));
+                if preset {
+                    gens.set_make_up_db(make_up_db(kind, knobs.preset.index()));
+                }
+            }
             _ => {}
+        }
+    }
+
+    /// Lets the voices whose LFOs can follow the tempo know it, from the
+    /// frame being rendered on: `beats_per_frame` at the part's rate.
+    fn follow_tempo(&mut self, beats_per_frame: f64) {
+        if let Self::Poly(poly) = self {
+            let tempo = beats_per_frame * poly.poly.sample_rate * 60.0;
+            if tempo != poly.tempo && tempo.is_finite() {
+                poly.tempo = tempo;
+                for gens in poly.both() {
+                    gens.each_voice(|voice| voice.set_tempo(tempo));
+                }
+            }
         }
     }
 
@@ -798,6 +1161,16 @@ impl Voiced {
                     kit.fallback.note_on(key, velocity, accent);
                 }
             }
+            Self::DrumKit(kit) => match kit_key(&kit.pieces, key) {
+                Some(piece) => {
+                    let note = NoteRef::new(channel, piece);
+                    kit.gens.note_on(note, velocity, accent);
+                    kit.gens.note_off(note);
+                }
+                // A drum of the drum map the kit has no piece for; any
+                // other key it has nothing for is silent.
+                None => kit.fallback.note_on(key, velocity, accent),
+            },
             voiced => with_gens!(voiced, gens => gens.note_on(note, velocity, accent)),
         }
     }
@@ -806,29 +1179,46 @@ impl Voiced {
     pub(crate) fn note_off(&mut self, channel: u8, key: u8) {
         let note = NoteRef::new(channel, key);
         match self {
-            Self::AnalogKit(_) => {}
+            Self::AnalogKit(_) | Self::DrumKit(_) => {}
             voiced => with_gens!(voiced, gens => gens.note_off(note)),
         }
     }
 
     /// Every note stops at once.
     pub(crate) fn choke(&mut self) {
-        if let Self::AnalogKit(kit) = self {
-            kit.fallback.choke();
+        match self {
+            Self::AnalogKit(kit) => kit.fallback.choke(),
+            Self::DrumKit(kit) => kit.fallback.choke(),
+            Self::Poly(poly) => {
+                poly.mono.choke();
+                poly.poly.choke();
+                return;
+            }
+            _ => {}
         }
         with_gens!(self, gens => gens.choke());
     }
 
-    /// Every note is let go of without a click: the strings, the FM voices
-    /// and the basses release as they do; the organ, whose contacts open
-    /// with a click, fades out over [`PANIC_FADE_SECONDS`], and the
-    /// analogue kit, whose drums are one-shots, over [`DAMP_SECONDS`].
+    /// Every note is let go of without a click: the strings, the FM voices,
+    /// the basses, the synthesiser, the mallets, the bowed strings, the
+    /// winds and the choir release as they do; the organ, whose contacts
+    /// open with a click, fades out over [`PANIC_FADE_SECONDS`], and the
+    /// drum kits, whose drums are one-shots, over [`DAMP_SECONDS`].
     pub(crate) fn all_notes_off(&mut self) {
         match self {
             Self::Organ(organ) => organ.gens.fade_out(PANIC_FADE_SECONDS),
             Self::AnalogKit(kit) => {
                 kit.gens.fade_out(DAMP_SECONDS);
                 kit.fallback.damp();
+            }
+            Self::DrumKit(kit) => {
+                kit.gens.fade_out(DAMP_SECONDS);
+                kit.fallback.damp();
+            }
+            Self::Poly(poly) => {
+                for gens in poly.both() {
+                    gens.release_all();
+                }
             }
             voiced => with_gens!(voiced, gens => gens.release_all()),
         }
@@ -837,8 +1227,16 @@ impl Voiced {
     /// Every note sounding fades out in a straight line over `seconds`,
     /// while the notes that start from now on play in full: a cancel.
     pub(crate) fn fade_out(&mut self, seconds: f64) {
-        if let Self::AnalogKit(kit) = self {
-            kit.fallback.fade_out_all(seconds);
+        match self {
+            Self::AnalogKit(kit) => kit.fallback.fade_out_all(seconds),
+            Self::DrumKit(kit) => kit.fallback.fade_out_all(seconds),
+            Self::Poly(poly) => {
+                for gens in poly.both() {
+                    gens.fade_out(seconds);
+                }
+                return;
+            }
+            _ => {}
         }
         with_gens!(self, gens => gens.fade_out(seconds));
     }
@@ -851,6 +1249,12 @@ impl Voiced {
             Self::AnalogKit(kit) => kit.gens.active_voices() + kit.fallback.active_voices(),
             Self::KickBass(gens) => gens.active_voices(),
             Self::Acid(gens) => gens.active_voices(),
+            Self::DrumKit(kit) => kit.gens.active_voices() + kit.fallback.active_voices(),
+            Self::Poly(poly) => poly.poly.active_voices() + poly.mono.active_voices(),
+            Self::Mallet(gens) => gens.active_voices(),
+            Self::Bowed(gens) => gens.active_voices(),
+            Self::Wind(gens) => gens.active_voices(),
+            Self::Choir(gens) => gens.active_voices(),
         }
     }
 
@@ -863,9 +1267,54 @@ impl Voiced {
         }
     }
 
-    /// Writes the part's sound over `stereo`, using `mono`, as long.
-    pub(crate) fn render(&mut self, mono: &mut AudioBuffer<f32>, stereo: &mut AudioBuffer<f32>) {
+    /// Writes the part's sound over `stereo`, using `mono`, as long, at
+    /// `beats_per_frame` of the master's tempo.
+    pub(crate) fn render(
+        &mut self,
+        mono: &mut AudioBuffer<f32>,
+        stereo: &mut AudioBuffer<f32>,
+        beats_per_frame: f64,
+    ) {
         let frames = mono.num_frames();
+        if self.is_stereo() {
+            self.follow_tempo(beats_per_frame);
+            match &mut *self {
+                Self::DrumKit(kit) => {
+                    kit.gens.render(stereo);
+                    if kit.fallback.active_voices() > 0 {
+                        let drums = &mut kit.scratch[..frames];
+                        kit.fallback.render(drums);
+                        for channel in stereo.iter_channels_mut() {
+                            for (sample, &drum) in channel.iter_mut().zip(drums.iter()) {
+                                *sample += drum;
+                            }
+                        }
+                    }
+                }
+                Self::Poly(poly) => {
+                    let mode = poly.mode;
+                    poly.current().render(stereo);
+                    // The voices of the mode left behind, ringing on.
+                    let other = match mode {
+                        VoiceMode::Poly => &mut poly.mono,
+                        VoiceMode::Mono | VoiceMode::Legato => &mut poly.poly,
+                    };
+                    if other.active_voices() > 0 {
+                        poly.scratch.set_num_frames(frames);
+                        other.render(&mut poly.scratch);
+                        for (out, rung) in
+                            stereo.iter_channels_mut().zip(poly.scratch.iter_channels())
+                        {
+                            for (sample, &ringing) in out.iter_mut().zip(rung) {
+                                *sample += ringing;
+                            }
+                        }
+                    }
+                }
+                voiced => with_gens!(voiced, gens => gens.render(stereo)),
+            }
+            return;
+        }
         match &mut *self {
             Self::AnalogKit(kit) => {
                 kit.gens.render(mono);

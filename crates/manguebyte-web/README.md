@@ -5,7 +5,10 @@ natively. The engine holds numbered parts; each plays an
 [instrument](#instruments) (the eight-voice synth, the drum kit, an SFZ
 instrument, or one of `manguebyte-dsp`'s: plucked strings, FM, a tonewheel
 organ through its rotating speaker, an 808-style drum machine, the 808's
-kick bass, an acid bass) through a chain of [effects](#effects), then gain
+kick bass, an acid bass, drum kits from an acoustic one to the 808, 909,
+606 and CR-78 and kits for trap, techno, house, drum and bass and lo-fi,
+a polyphonic synthesiser with 68 presets, mallets, bowed strings, winds
+and a choir) through a chain of [effects](#effects), then gain
 and pan, into a [master bus](#the-master-bus) with a shared reverb, a glue
 compressor and a true-peak limiter. Every kind and preset plays at one
 [loudness](#loudness), -24 LUFS on a standard phrase, and a sampler part
@@ -136,7 +139,10 @@ instruments. Their keys are fixed here, so a sampler kit that has them
 (`sampler_kit`) is played the same way whoever made it. Where General MIDI
 or General MIDI 2 already names the instrument, its key is used; the rest
 take free keys after the guitar tap. The engine has no synthesized version
-of these yet, so a kit without a region for one of them stays silent on it.
+of most of these yet, so a kit without a region for one of them stays
+silent on it. A [drum kit](#drum-kits-drum_kit) part plays the clap where
+its kit has one, and the shaker on its kit's maracas (or cabasa), the
+shakers of General MIDI 1 (see there).
 
 | Stroke | Name | Key | Source of the key |
 |--------|------|-----|-------------------|
@@ -546,6 +552,17 @@ new parameter id; the export `mb_sfz_measure` and its status 1
 finishing a load in one step without it; `mb_sfz_finish` still finishes a
 load in one call, measuring the instrument there if no step did.
 
+The newer voices of `manguebyte-dsp` keep it at 2 too: instrument codes
+10 to 15 (`drum_kit`, `poly`, `mallet`, `bowed`, `wind`, `choir`) are new,
+and an older engine refuses them with `BAD_INSTRUMENT` (-3); their
+parameters are new ids. Nothing that was there means anything else: a
+drum kit part answers the drum map as the other kits do, and takes the
+accent bit as every kind does; Aratu's percussion keys mean on it what
+they mean on a sampler kit. A note on before a note off on the same
+channel was already two notes; on the parts that slur (the monophonic
+presets of `poly`, `wind`, and `bowed` and `choir` with legato on) it is
+a slur, which no existing writer sends to them.
+
 Playing an instrument before it is measured keeps it at 2 as well. The
 exports `mb_sfz_install`, `mb_sampler_measure` and `mb_sampler_make_up_db`
 are new, and `js/worklet.js` looks for them by name, loading the older way
@@ -562,7 +579,7 @@ level measured awaits `loading.normalized`. The status -102 is new.
 
 ## Instruments
 
-A part plays one of ten kinds of instrument, named by a code in the
+A part plays one of sixteen kinds of instrument, named by a code in the
 exports and by a name in `js/engine.js` (`INSTRUMENT`,
 `InstrumentKind::name`):
 
@@ -578,16 +595,28 @@ exports and by a name in `js/engine.js` (`INSTRUMENT`,
 | 7 | `analog_kit` | `AnalogKit` | an 808-style drum machine on the drum map, with the synthesized ride and guitar tap | 16 |
 | 8 | `kick_bass` | `KickBass` | the 808's long kick played as a bass, sliding | 1 |
 | 9 | `acid` | `Acid` | the acid bass: a saw or square through a diode ladder, with accent and slide | 1 |
+| 10 | `drum_kit` | `DrumKit` | [drum kits](#drum-kits-drum_kit): acoustic by modal synthesis, the 808, 909, 606 and CR-78, and kits for trap, techno, house, drum and bass and lo-fi, on the drum map | 12 |
+| 11 | `poly` | `Poly` | the [polyphonic synthesiser](#polyphonic-synthesiser-poly) and its 68 presets: basses, leads, pads, plucks, keys, brass, effects | 4 to 8 by preset (`poly.voices`), 1 for a monophonic one |
+| 12 | `mallet` | `Mallet` | [mallets](#mallets-mallet) by modal synthesis: marimba, xylophone, vibraphone, glockenspiel, celesta, kalimba, steel pan, tubular bells | 12 |
+| 13 | `bowed` | `Bowed` | [bowed strings](#bowed-strings-bowed) by digital waveguide: violin, viola, cello, double bass, a section, pizzicatos | 6 |
+| 14 | `wind` | `Wind` | [winds](#winds-wind) by digital waveguide: flute, clarinet, saxophone, trumpet, trombone | 4, one while legato |
+| 15 | `choir` | `Choir` | a [choir](#choir-choir) by formant synthesis: "aah", "ooh", a solo voice | 6 |
 
-Kinds 4 to 9 are the voices of `manguebyte_dsp::instruments`
+Kinds 4 to 15 are the voices of `manguebyte_dsp::instruments`
 (`PluckedString`, `FmVoice`, `OrganVoice` and `RotarySpeaker`,
 `AnalogKitVoice`, `KickBassVoice`, `AcidVoice`) played by a `Synth`, as
 that module recommends: the organ's sixteen voices share one `OrganManual`
 (`OrganVoice::voices`), so its percussion is single-triggered; the drum
 machine's sixteen share one `ChokeGroup` (`AnalogKitVoice::voices`), so the
 closed hat chokes the open one; the two basses are a synth of one voice
-with legato on. Notes reach them through `Synth::note_on_accented`, with
-bit 0 of the record's flags.
+with legato on. The newer voices (`DrumKitVoice`, `PolySynthVoice`,
+`MalletVoice`, `BowedString`, `WindVoice`, `ChoirVoice`) place their notes
+in the stereo field, so those parts' synths render two channels: a kit's
+pieces sit where the kit puts them, a synthesiser's unison voices spread,
+a section's players and a choir's singers stand apart. The drum kit's
+voices share one set of choke groups (`DrumKitVoice::voices`).
+Notes reach them through `Synth::note_on_accented`, with bit 0 of the
+record's flags.
 
 ```js
 await engine.createPart(1, 'acid', ['delay']);   // a part of a kind
@@ -595,6 +624,10 @@ await engine.setInstrument(2, 'organ');          // another kind, the same chain
 engine.setPreset(1, 'acid', 'squelch', nextBar); // PRESETS.acid
 engine.setRotary(2, 'fast', nextBar);            // ROTARY: stop, slow, fast
 engine.noteOn(1, 45, 0.9, t, 0, true);           // accented, as Aratu writes "A"
+await engine.createPart(3, 'drum_kit', 'none');
+engine.setPreset(3, 'drum_kit', '909', nextBar); // PRESETS.drum_kit
+await engine.createPart(4, 'poly');
+engine.setPreset(4, 'poly', 'warm_analog_pad', nextBar); // PRESETS.poly
 ```
 
 **Allocation.** An instrument is made, with all its memory (a plucked
@@ -606,8 +639,9 @@ settings, gain, pan and the send; the new instrument's parameters start at
 their defaults, and the notes of the one it replaces stop. Rendering never
 allocates, whatever the parts play (`tests/realtime.rs`).
 
-**Presets and knobs.** The plucked, FM, organ and acid parts have a
-`<kind>.preset` parameter. A preset is a set of knob positions: setting it
+**Presets and knobs.** The plucked, FM, organ, acid, drum kit,
+synthesiser, mallet, bowed, wind and choir parts have a `<kind>.preset`
+parameter. A preset is a set of knob positions: setting it
 moves every knob it covers to the preset's position, on the frame it lands
 on, and the parameter JSON and `paramValue` say where they are. So a knob
 set on the same frame after the preset sticks, and one set before it is
@@ -620,7 +654,11 @@ kind: the loudest, the drum machine's snare, peaks at -0.6 dBTP. The dsp
 presets' levels are trimmed by `PLUCKED_LEVEL_DB` (-6 dB), `FM_LEVEL_DB`
 (-3 dB) and `ANALOG_KIT_LEVEL_DB` (+2 dB), and each preset's make-up gain
 comes on top. Chords of six strings at full velocity reach the limiter,
-which turns them down gently.
+which turns them down gently. The drum kits, the violin's pizzicato and
+the synthesiser's Plucked String play narrower dynamics than
+`manguebyte-dsp` gives them, so that their loudest note, accented at full
+velocity, stays under the ceiling at the target too (see each); the
+acoustic kit's kick, the loudest of the newer voices, peaks at -0.7 dBTP.
 
 ### Accents, velocity and slides
 
@@ -631,7 +669,14 @@ strings, FM and acid a brighter spectrum (the centroid of the first 85 ms
 4 to 72% higher). The organ and the acid bass have no velocity of their own,
 as on the instruments; `organ.velocity` and `acid.velocity` default to 0.5,
 so that Aratu's dynamics are heard on them (half the velocity is 6 and
-4.5 dB down).
+4.5 dB down). On the newer kinds `tests/models.rs` measures the energy of
+the first 0.3 s of a note of 47 presets (every kit on its kick, snare and
+hat, pads, plucks, every mallet, the strings, the winds, the choirs): half
+the velocity is 5 to 15.5 dB down, an accent adds 1.5 to 5 dB, and the
+spectrum of an accented note is up to 35% brighter (the centroid of its
+first 85 ms, of its tone from 0.1 s for the bowed, blown and sung ones);
+an acoustic drum struck harder rings its low modes harder too, and is at
+most 6% darker there by that measure.
 
 **Slides.** On the two monophonic kinds, a note struck while the last one
 is still held slides from it: its pitch glides there (`acid.slide`,
@@ -642,6 +687,15 @@ either earlier in time or on the same frame and pushed first. A note off
 before the next note on, even on the same frame, strikes the next note
 afresh. Only notes on the same channel slide. The replaced note is
 forgotten, so its late note off changes nothing.
+
+Aratu writes slurs on the newer kinds the same way. The synthesiser's
+monophonic presets glide to the next note and strike their envelopes
+again, its legato ones glide without striking them when the notes
+overlap; a wind part (`wind.legato` on, the default) changes notes as
+keys and valves do, the breath going on; a bowed part with `bowed.legato`
+on stops the string at its new length, the bow going on; a choir with
+`choir.legato` on slurs its vowel to the next pitch. `bowed.portamento`
+and `wind.portamento` make those slurs slide through the pitches between.
 
 ```js
 engine.noteOn(1, 45, 0.9, t);          // A
@@ -658,14 +712,21 @@ hands it over to fade out in a straight line over 8 ms while the other,
 clean, takes the notes that follow, so a note on the cancel's frame after
 it plays in full, as on every other kind. (A second cancel within the 8 ms
 of the first cuts the first one's fade short.) All notes off releases the
-strings, the FM voices and the basses as they release; the organ, whose
-contacts open with a click, and the drum machine, whose drums are
+strings, the FM voices, the basses, the synthesiser, the mallets, the
+bowed strings, the winds and the choir as they release; the organ, whose
+contacts open with a click, and the two drum kits, whose drums are
 one-shots, fade out instead, over 8 ms (`PANIC_FADE_SECONDS`) and 50 ms
 (`DAMP_SECONDS`). Choke stops everything at once. `tests/stage.rs` checks
 every kind: no step after a cancel or an all-notes-off larger than the
 steps before, and silence once the fade is over; the organ's speaker,
 which hears the organ a millisecond late, rings on below -120 dB within
-5 ms, and is cleared when it falls asleep.
+5 ms, and is cleared when it falls asleep. `tests/models.rs` does the same
+for more presets of the newer kinds (the 909, trap and lo-fi kits, pads,
+a supersaw, chord stabs and a riser, the vibraphone and the tubular
+bells, a string section, cellos, a double bass pizzicato, a trumpet,
+saxophones in chords, the "ooh" choir and the solo voice), against the
+largest step of the sound before or of the same sound left to go on, as
+a pad whose filter opens grows brighter as it goes.
 
 ### Plucked strings (`plucked`)
 
@@ -835,6 +896,293 @@ together.
 
 Every preset slides in 0.06 s; a preset leaves the velocity alone.
 
+### Drum kits (`drum_kit`)
+
+`DrumKitVoice`, a kit whose piece on each key is chosen and tuned:
+acoustic drums and cymbals by modal synthesis, and the drums of the 909,
+606, CR-78 and 808. Twelve voices share one set of choke groups, so the
+closed hat (and the pedal hat) chokes the open one; a piece struck again
+while it rings takes its own voice. Pieces are one-shots: a note off
+changes nothing. The kit's pieces sit in the stereo field where the kit
+puts them.
+
+| `drum_kit.preset` | Kit |
+|---|---|
+| 0 `acoustic` | an acoustic kit by modal synthesis: kick, snare and its rimshot, side stick, six toms, hi-hats, two crashes, two rides and the bell, china, splash, congas and bongos; the clap, tambourine, cowbell, maracas, guiro and claves of the CR-78 and the 909 |
+| 1 `808` | the 808's sixteen drums |
+| 2 `909` | the 909's eleven: kick, snare, clap, rimshot, three toms, hats, crash, ride |
+| 3 `606` | the 606's seven: kick, snare, two toms, hats, cymbal |
+| 4 `cr_78` | the CR-78's: kick, snare, rimshot, hats, cymbal, cowbell, guiros, maracas, tambourine, bongos, conga, claves |
+| 5 `trap` | the 808's long kick tuned down, a crisp 909 snare and clap, the 808's tight hats, rimshot and cowbell, the 909's cymbals |
+| 6 `techno` | the 909's kick with a rumble, a punchy clap, its hats, ride, crash, snare, rimshot and toms |
+| 7 `house` | the 909's kick, a long clap, short crisp hats, ride, a shaker and tambourine, the 808's congas and cowbell |
+| 8 `drum_and_bass` | the 808's deep kick cut short under an acoustic kit tight and bright |
+| 9 `lo_fi` | a soft acoustic kit through a twelve-bit sampler at 26 kHz, saturated and dark |
+
+**The drum map.** A note of the drum map plays the kit's piece on its
+key (kick 36, side stick 37, snare 38, closed hat 42, open hat 46, crash
+49, ride 51, toms 50, 47 and 43), every other General MIDI key the kit
+has a piece on plays it too (35 to 81: the clap on 39, the pedal hat on
+44, the rimshot or electric snare on 40, congas, cowbell...), and a drum of
+the map the kit has no piece for is the synthesized drum of `drums`, at the
+note's velocity, with its accent, through the part's chain, as on the
+drum machine: the guitar tap (88) on every kit, the side stick on the 606,
+the three toms on the CR-78. `tests/models.rs` checks every drum of the
+map on every kit: the kit's own where it has one, and where it has not
+the synthesized drum to the bit, in the centre.
+
+**Aratu's percussion keys.** The clap (39) is the kit's clap where it has
+one (every kit but the 606 and the CR-78). The shaker (82, past the last
+key a kit maps) plays the kit's maracas (70), or its cabasa (69): the
+acoustic, 808, CR-78, house and lo-fi kits. The kits have no agogô, cuíca, triangle, surdo,
+pandeiro, zabumba, tamborim, alfaia, gonguê or cajón, and the synthesized
+kit has none either, so those keys are silent on every kit; a
+`sampler_kit` with samples of them plays them.
+
+| Parameter | Unit | Range | Default | Scale |
+|---|---|---|---|---|
+| `drum_kit.preset` | | 0 to 9, as above | 0 | choice |
+| `kit.tune` | st | -12 to 12, added to every piece's tuning and the synthesized drums' | 0 | linear |
+| `kit.decay` | x | 0.25 to 4, on every piece's decay and the synthesized drums' | 1 | log |
+| `kick.level`... `guitar_tap.level` | | 0 to 1, the level of the piece on the drum's key (0.8 is the kit's own) or of the synthesized drum | 0.8 | linear |
+| `drum_kit.tone` | | -1 to 1, added to every piece's tone: the stick, where a drum is struck, a machine's colour | 0 | linear |
+| `drum_kit.snap` | | -1 to 1, added to every piece's snap: the wires, a cymbal's shimmer, a machine's snappy | 0 | linear |
+| `drum_kit.velocity` | dB | 0 to 60, how much quieter the softest strike is | the preset's | linear |
+| `drum_kit.accent` | dB | 0 to 12, how much louder an accented strike is | the preset's | linear |
+
+Velocity and an accent also strike harder: an acoustic piece is brighter,
+a machine's snap stronger. **Dynamics.** The kits of `manguebyte-dsp` span
+30 dB of velocity and accent by 4 dB (the lo-fi kit 24 dB). At the
+loudness target a spiky kit (the acoustic kick's beater, the 606's short
+kick) would then put its loudest drum, accented at full velocity, past
+the master limiter's ceiling: its groove at velocity 0.8 sits that far
+below it. So the presets play narrower (`KIT_DYNAMICS` in
+`src/modelled.rs`): the acoustic kit 11 dB and 2 dB, the 808 24 and 3, the
+909 30 and 3, the 606 10 and 1.5, the CR-78 16 and 2, trap 30 and 4,
+techno and house 30 and 3, drum and bass 24 and 3, lo-fi 24 and 4. A
+preset moves `drum_kit.velocity` and `drum_kit.accent` there; widen them
+and an accented drum at full velocity may reach the limiter. All notes off
+fades every piece out over 50 ms.
+
+### Polyphonic synthesiser (`poly`)
+
+`PolySynthVoice`, three oscillators of classic shapes and wavetables with
+up to sixteen unison voices, sync, FM and ring modulation, a sub and
+noise, two filters of fifteen models, four envelopes, three LFOs and a
+sixteen-slot modulation matrix, twice oversampled (20.5 frames late), and
+its library of 68 presets, `PRESETS.poly` in `js/engine.js` (the names in
+lower case, words joined by underscores):
+
+| Category | `poly.preset` |
+|---|---|
+| basses | 0 `moog_bass`, 1 `reese`, 2 `wobble_bass`, 3 `deep_sub`, 4 `fm_growl`, 5 `house_organ_bass`, 6 `acid_line`, 7 `garage_square`, 8 `wavetable_growl`, 9 `synthpop_bass`, 10 `funk_bass`, 11 `808_glide`, 12 `rolling_bass`, 13 `rubber_bass`, 14 `talking_bass` |
+| leads | 15 `trance_supersaw`, 16 `square_lead`, 17 `sync_lead`, 18 `chiptune`, 19 `hoover`, 20 `mono_saw_lead`, 21 `whistle_lead`, 22 `digital_lead`, 23 `talking_lead`, 24 `screamer`, 25 `future_lead` |
+| pads | 26 `warm_analog_pad`, 27 `string_machine`, 28 `glass_pad`, 29 `dark_drone`, 30 `choir_pad`, 31 `formant_pad`, 32 `pwm_pad`, 33 `shimmer_pad`, 34 `evolving_spectra`, 35 `soft_sine_pad`, 36 `comb_wash`, 37 `sweep_pad` |
+| plucks | 38 `house_pluck`, 39 `bell_pluck`, 40 `marimba`, 41 `plucked_string`, 42 `future_pluck`, 43 `glass_pluck`, 44 `trance_pluck`, 45 `pizzicato`, 46 `kalimba` |
+| keys | 47 `polysynth_piano`, 48 `clavinet`, 49 `fm_electric_piano`, 50 `drawbar_organ`, 51 `juno_keys`, 52 `wurly`, 53 `vibraphone` |
+| brass | 54 `synth_brass`, 55 `brass_stab`, 56 `jump_brass`, 57 `rave_chord_stab`, 58 `soft_horns`, 59 `fanfare` |
+| effects | 60 `riser`, 61 `downlifter`, 62 `noise_sweep`, 63 `laser_zap`, 64 `random_bleeps`, 65 `wind`, 66 `impact_boom`, 67 `siren` |
+
+`manguebyte_dsp::instruments::poly` describes each. **Modes.** A preset is
+polyphonic, monophonic or legato, as its settings say. A part keeps voices
+for both: eight for the polyphonic presets, of which a preset plays as many
+as `poly.voices` says, and one for the others. A monophonic preset (Moog
+Bass, 808 Glide, Acid Line, the mono leads...) glides into the next note
+and strikes its envelopes again from where they are; a legato one glides
+without striking them again when the next note on comes before the last
+note's note off, as Aratu writes a slide. A preset of another mode
+releases the notes of the one before, which ring on as they release.
+
+| Parameter | Unit | Range | Default | Scale |
+|---|---|---|---|---|
+| `poly.preset` | | 0 to 67, as above | 0 | choice |
+| `poly.cutoff` | oct | -4 to 4, moves both filters' cutoffs | 0 | linear |
+| `poly.resonance` | | -1 to 1, added to both filters' resonance | 0 | linear |
+| `poly.attack` | x | 0.1 to 10, on the amplifier envelope's attack | 1 | log |
+| `poly.release` | x | 0.1 to 10, on the amplifier envelope's release | 1 | log |
+| `poly.detune` | x | 0 to 2, on every oscillator's unison detune | 1 | linear |
+| `poly.spread` | x | 0 to 2, on every oscillator's unison spread across the stereo field | 1 | linear |
+| `poly.mod_wheel` | | 0 to 1, the modulation wheel the preset's matrix reads (vibrato on the supersaw, the wobble's depth...) | 0 | linear |
+| `poly.voices` | | 1 to 8, how many notes a polyphonic preset plays at once | the preset's | whole |
+
+A preset puts the macros back to neutral and `poly.voices` to the
+preset's; the wheel stays where it is. Synced LFOs follow `master.tempo`.
+The velocity and an accent are the preset's: louder (24 dB of velocity at
+most, an accent of 3 dB by default), and wherever its matrix reads them,
+brighter. "Plucked String" plays narrower, 0.2 of the velocity range and a
+1.3 dB accent: its comb is excited by a burst of noise seeded by the note,
+which for an accented G4 at full velocity peaks 10 dB above the same note
+at 0.8 and would otherwise reach the limiter at the loudness target.
+
+### Mallets (`mallet`)
+
+`MalletVoice`, struck bars, tines, plates and tubes by modal synthesis:
+mallet hardness, strike position, resonator tubes, the vibraphone's motor
+and damper. Twelve voices.
+
+| `mallet.preset` | |
+|---|---|
+| 0 `marimba` | rosewood bars tuned 1 : 4 : 10, yarn mallets, tubes that bloom; no damper |
+| 1 `xylophone` | harder bars tuned 1 : 3 : 6, hard mallets, short-lived |
+| 2 `vibraphone` | aluminium bars, the motor's tremolo, a damper |
+| 3 `glockenspiel` | steel bars, bright and long |
+| 4 `celesta` | struck plates over resonators, a damper |
+| 5 `kalimba` | plucked tines on a box |
+| 6 `steel_pan` | a note whose octave grows from its fundamental |
+| 7 `tubular_bells` | tubes, the strike tone an octave below the fourth mode, a damper |
+
+| Parameter | Unit | Range | Default | Scale |
+|---|---|---|---|---|
+| `mallet.preset` | | 0 to 7, as above | 0 | choice |
+| `mallet.hardness` | x | 0.25 to 4: harder is a shorter contact, brighter | 1 | log |
+| `mallet.decay` | x | 0.25 to 4, on how long the bars ring | 1 | log |
+| `mallet.release` | s | 0.01 to 60, a released note's fall, the damper; 60 is none | the preset's | skew 0.35 |
+| `mallet.position` | | 0 to 1 of the bar from its end, 0.5 the centre | the preset's | linear |
+| `mallet.motor` | Hz | 0 to 16, the vibraphone motor's speed, 0 stopped | the preset's | linear |
+
+A preset puts the factors back to 1 and the release, the position and the
+motor to its own. Velocity and an accent strike harder: louder and
+brighter.
+
+### Bowed strings (`bowed`)
+
+`BowedString`, a string by digital waveguide bowed with the friction of
+rosin: Helmholtz motion, the bow's bite, a player's ear for intonation,
+drift and swell, vibrato that waits, a body of air and wood resonances,
+sections of several players to a note, pizzicato. Six voices.
+
+| `bowed.preset` | |
+|---|---|
+| 0 `violin`, 1 `viola`, 2 `cello`, 3 `double_bass` | a soloist |
+| 4 `string_section` | several players to a note, tuned and starting a little apart |
+| 5 `violin_pizzicato`, 6 `cello_pizzicato`, 7 `double_bass_pizzicato` | plucked |
+
+| Parameter | Unit | Range | Default | Scale |
+|---|---|---|---|---|
+| `bowed.preset` | | 0 to 7, as above | 0 | choice |
+| `bowed.pressure` | | 0 (airy) to 1 (dense, grainy) | the preset's | linear |
+| `bowed.position` | | 0.02 (at the bridge, bright) to 0.4 (over the fingerboard, veiled) of the string | the preset's | linear |
+| `bowed.vibrato` | ct | 0 to 100, the swing either way | the preset's | linear |
+| `bowed.attack` | s | 0.005 to 2, the bow reaching its speed | the preset's | skew 0.35 |
+| `bowed.release` | s | 0.02 to 10, a released note's fall | the preset's | skew 0.35 |
+| `bowed.tone` | Hz | 500 to 20 000, the final low-pass | the preset's | log |
+| `bowed.portamento` | | 0 a slur is a change of finger, 1 the finger slides | the preset's (0) | switch |
+| `bowed.legato` | | 0 every note bowed on its own, 1 a note struck while another is held slurs to it | 0 | switch |
+
+A preset moves every knob but `bowed.legato` to its own. With legato on,
+Aratu slurs by letting the notes overlap, as on the basses: the bow goes
+on, and the finger stops the string at its new length. Velocity is the
+bow's speed; an accent bites harder. The violin's pizzicato plays
+narrower, 14 dB of velocity and a 2 dB accent instead of 24 and 3: a
+finger plucking harder lets the string go sharper, so its loudest pluck
+would otherwise reach the limiter at the loudness target.
+
+### Winds (`wind`)
+
+`WindVoice`, a reed, the lips or an air jet driving a bore by digital
+waveguide, with breath noise, tonguing, a player's ear, drift and swell,
+vibrato, and legato that changes notes as keys and valves do. Four
+voices.
+
+| `wind.preset` | 0 `flute`, 1 `clarinet`, 2 `saxophone`, 3 `trumpet`, 4 `trombone` |
+|---|---|
+
+| Parameter | Unit | Range | Default | Scale |
+|---|---|---|---|---|
+| `wind.preset` | | 0 to 4, as above | 0 | choice |
+| `wind.noise` | | 0 to 1, how much noise the breath carries | the preset's | linear |
+| `wind.vibrato` | ct | 0 to 100, the swing either way | the preset's | linear |
+| `wind.attack` | s | 0.002 to 1, the breath building | the preset's | skew 0.35 |
+| `wind.release` | s | 0.005 to 2, the breath stopping | the preset's | skew 0.35 |
+| `wind.tone` | Hz | 500 to 20 000, the final low-pass | the preset's | log |
+| `wind.portamento` | | 0 a slur changes the note at once, as keys and valves do; 1 it glides | 0 | switch |
+| `wind.legato` | | 1 one player: a note struck while another is held slurs to it; 0 a section, every note its own | 1 | switch |
+
+A preset moves every knob but `wind.legato` to its own. A wind is one
+player by default: overlapping notes slur on one voice, the breath going
+on, and chords sound only with `wind.legato` at 0. Velocity is the breath:
+louder and brighter; an accent pushes harder.
+
+### Choir (`choir`)
+
+`ChoirVoice`, sung vowels by formant synthesis: a glottal pulse through
+five formants, from basses to sopranos by the key, several detuned
+singers to a note. Six voices.
+
+| `choir.preset` | 0 `aah_choir`, 1 `ooh_choir`, 2 `solo_voice` |
+|---|---|
+
+| Parameter | Unit | Range | Default | Scale |
+|---|---|---|---|---|
+| `choir.preset` | | 0 to 2, as above | 0 | choice |
+| `choir.vowel` | | 0 to 4: a, e, i, o, u, and blends between | the preset's | linear |
+| `choir.vibrato` | ct | 0 to 200, the swing either way | the preset's | linear |
+| `choir.attack` | s | 0.005 to 2 | the preset's | skew 0.35 |
+| `choir.release` | s | 0.01 to 4 | the preset's | skew 0.35 |
+| `choir.breathiness` | | 0 to 1 | the preset's | linear |
+| `choir.brightness` | Hz | 500 to 12 000, the voices' brightness at full velocity | the preset's | log |
+| `choir.legato` | | 0 every note sung on its own, 1 a note struck while another is held slurs to it | 0 | switch |
+
+A preset moves every knob but `choir.legato` to its own. A vowel changes
+while the voices sing, over the preset's time. Velocity sings louder and
+brighter; an accent louder.
+
+### What the voices cost
+
+The newer voices are costly. What one
+sounding voice of each costs in the WebAssembly module, built for
+release, at 48 kHz in quanta of 128 frames as an `AudioWorklet` renders
+them, in Node.js on a 15 W laptop processor (an Intel Core i3-1215U), as a
+share of one core: `examples/voice_cost.mjs`, the least of five runs, over
+four sessions. The machine was busy with other work, and the sessions
+differed by up to half again; the ranges are theirs.
+
+| Voice | Per voice | The part at its voices |
+|---|---|---|
+| drum kit, the acoustic crash ringing | 8 to 11% | |
+| drum kit, the acoustic kit's crash, ride, open hat and toms ringing together | 3.1 to 6.2% | 12 voices: up to 75% |
+| drum kit, the 909's | 1.6 to 2.3% | 20 to 28% |
+| drum kit, the lo-fi kit's (its sampler on every piece) | 7.8 to 10% | 93 to 120% |
+| `poly`, one held note of each preset | 2.9% (Laser Zap) to 16% (Wavetable Growl) | 4 to 8 voices by preset: 40% at most |
+| `poly`, Trance Supersaw, String Machine, Warm Analog Pad, Evolving Spectra in chords of eight | 10 to 14% | at their 4 to 6 voices: 40 to 80% |
+| `poly`, the init patch, one saw through the ladder | 6.0% | |
+| `poly`, sixteen unison saws, no filter | 5.9% | |
+| `poly`, sixteen unison wavetables, no filter | 9.3% | |
+| `poly`, three oscillators of sixteen unison voices, two driven filters | 32% | |
+| mallet, vibraphone, tubular bells | 0.4 to 0.6% | 12 voices: 7% |
+| bowed, violin, cello | 2.8 to 3.8% | 6 voices: 17 to 23% |
+| bowed, string section | 5.9 to 7.4% | 6 voices: 36 to 44% |
+| wind, flute, trumpet | 2.5 to 4.8% | 4 voices: 10 to 19%; legato, one: 3 to 5% |
+| choir, "aah" and "ooh" | 4.8 to 7.1% | 6 voices: 29 to 43% |
+| choir, solo voice | 1.6 to 2.7% | 10 to 16% |
+
+A part costs about 0.15% with nothing sounding. No preset of the library
+goes past seven unison voices an oscillator; the sixteen-voice patches,
+which only code can make, are timed through `examples/unison_cost.rs`.
+Unison voices are cheap; the oversampled filters and saturation, and the
+wavetables, are what cost.
+
+**Polyphony limits.** So that a live set stays in real time, each part is
+capped: the drum kits at 12 voices, the mallets at 12, the bowed strings
+and the choir at 6, the winds at 4 (one while `wind.legato` is on and the
+notes overlap). A polyphonic preset of the synthesiser plays as many
+voices as keep the part within 40% of a core on that laptop, by what one
+held note of it cost (the least of three sessions), four at the least (a
+triad and a note ringing on) and eight at the most: `POLY_PRESET_VOICES`
+in `src/modelled.rs`, which a preset sets `poly.voices` to: 8 for
+Marimba, Plucked String, Laser Zap and Random Bleeps, 7 for Glass Pad,
+Drawbar Organ and Siren, 4 for most pads, keys and brass. `poly.voices` takes it up to 8
+or down to 1. A note past a part's voices takes the one that will be
+missed least over, fading it out.
+
+On such a laptop a set of a 909 groove (four pieces ringing: 8%), a bass
+(two voices: 20%), a pad (four voices: 40 to 50%), a lead (two voices:
+20%) and a string section (four notes: 25%) comes to more than a whole
+core, and a browser's audio thread wants to stay well under half of its
+quantum. Keep the costly presets and the full sections few there: a
+machine three times as fast takes a set of that kind.
+`examples/voice_cost.mjs` measures the machine at hand.
+
 ### The synth, the drums and the samplers
 
 | Parameter | Unit | Range | Default | Scale |
@@ -862,6 +1210,16 @@ eight bars of an Aratu-like song through the whole engine, the drum
 machine, an acid line with accents and slides, organ chords with the
 speaker sped up and slowed down, and a strummed steel guitar, and each part
 alone.
+
+`cargo run --release -p manguebyte-web --example new_voices_songs --
+<directory>` writes a song of eight bars for each family of the newer
+voices, scaled to peak at -3 dBFS: a techno groove on the 909 kit with a
+rolling bass and chord stabs the wheel opens, a trap beat with hat rolls
+over the 808 glide bass sliding, a house groove with the shaker, a garage
+bass and a warm pad, a lo-fi beat with a vibraphone and an electric piano,
+and an orchestral bit of a string section, cellos, a clarinet slurring
+its tune, a flute, a marimba, an "aah" choir and the acoustic kit's toms
+and crash.
 
 ## Sampler parts
 
@@ -1051,10 +1409,10 @@ bars at 120 bpm, every note at velocity 0.8, none accented, measured for
 
 | Phrase | Notes | Kinds and presets |
 |---|---|---|
-| `melody` | C4 E4 G4 A4 G4, E4 D4 C4 D4 E4 C4, in quarters and eighths held for nine tenths of their length | synth, nylon and steel guitar, tubular bell, sampler |
-| `bass` | the melody two octaves down, around C2 | finger and slap bass, FM bass, kick bass, the three acid presets |
-| `chord` | C4 E4 G4 for a bar, A3 C4 E4 for a bar, held for nine tenths | electric piano, the four organ presets |
-| `groove` | the closed hat on every eighth, the kick on beats 1 and 3, the snare on 2 and 4 | drums, drum machine, sampler kit |
+| `melody` | C4 E4 G4 A4 G4, E4 D4 C4 D4 E4 C4, in quarters and eighths held for nine tenths of their length | synth, nylon and steel guitar, tubular bell, sampler; the synthesiser's leads, plucks and effects; every mallet; violin, viola, cello, the pizzicatos of the violin and the cello; every wind; the solo voice |
+| `bass` | the melody two octaves down, around C2 | finger and slap bass, FM bass, kick bass, the three acid presets; the synthesiser's basses; the double bass and its pizzicato |
+| `chord` | C4 E4 G4 for a bar, A3 C4 E4 for a bar, held for nine tenths | electric piano, the four organ presets; the synthesiser's pads, keys and brass; the string section; the "aah" and "ooh" choirs |
+| `groove` | the closed hat on every eighth, the kick on beats 1 and 3, the snare on 2 and 4 | drums, drum machine, sampler kit, every drum kit |
 
 The part has a neutral chain (no effect, gain 0 dB, centred, no send),
 and the master limiter is kept out of it: the master gain is turned down
@@ -1101,12 +1459,119 @@ peak, after calibration, of the loudest single note of the phrase's keys
 | `acid` | classic | bass | -20.30 | -3.70 | -24.00 | -7.4 |
 | `acid` | squelch | bass | -22.00 | -2.00 | -24.00 | -6.3 |
 | `acid` | square | bass | -18.34 | -5.66 | -24.00 | -10.5 |
+| `drum_kit` | Acoustic | groove | -26.76 | +2.76 | -24.00 | -0.7 |
+| `drum_kit` | 808 | groove | -26.26 | +2.26 | -24.00 | -1.6 |
+| `drum_kit` | 909 | groove | -27.34 | +3.34 | -24.00 | -1.3 |
+| `drum_kit` | 606 | groove | -28.09 | +4.09 | -24.00 | -1.2 |
+| `drum_kit` | CR-78 | groove | -28.54 | +4.54 | -24.00 | -1.2 |
+| `drum_kit` | Trap | groove | -23.04 | -0.96 | -24.00 | -4.1 |
+| `drum_kit` | Techno | groove | -26.78 | +2.78 | -24.00 | -1.9 |
+| `drum_kit` | House | groove | -27.58 | +3.58 | -24.00 | -1.1 |
+| `drum_kit` | Drum and bass | groove | -25.85 | +1.85 | -24.00 | -1.9 |
+| `drum_kit` | Lo-fi | groove | -28.47 | +4.47 | -24.00 | -4.3 |
+| `poly` | Moog Bass | bass | -21.31 | -2.69 | -24.00 | -6.4 |
+| `poly` | Reese | bass | -14.53 | -9.47 | -24.00 | -12.8 |
+| `poly` | Wobble Bass | bass | -17.22 | -6.78 | -24.00 | -10.4 |
+| `poly` | Deep Sub | bass | -12.38 | -11.62 | -24.00 | -15.2 |
+| `poly` | FM Growl | bass | -14.17 | -9.83 | -24.00 | -13.1 |
+| `poly` | House Organ Bass | bass | -16.53 | -7.47 | -24.00 | -10.7 |
+| `poly` | Acid Line | bass | -16.08 | -7.92 | -24.00 | -10.3 |
+| `poly` | Garage Square | bass | -16.79 | -7.21 | -24.00 | -10.8 |
+| `poly` | Wavetable Growl | bass | -12.64 | -11.36 | -24.00 | -15.4 |
+| `poly` | Synthpop Bass | bass | -15.70 | -8.30 | -24.00 | -12.0 |
+| `poly` | Funk Bass | bass | -24.85 | +0.85 | -24.00 | -1.8 |
+| `poly` | 808 Glide | bass | -12.86 | -11.14 | -24.00 | -14.7 |
+| `poly` | Rolling Bass | bass | -21.34 | -2.66 | -24.00 | -4.8 |
+| `poly` | Rubber Bass | bass | -17.09 | -6.91 | -24.00 | -10.0 |
+| `poly` | Talking Bass | bass | -17.22 | -6.78 | -24.00 | -10.0 |
+| `poly` | Trance Supersaw | melody | -15.96 | -8.04 | -24.00 | -12.0 |
+| `poly` | Square Lead | melody | -12.87 | -11.13 | -24.00 | -14.7 |
+| `poly` | Sync Lead | melody | -12.06 | -11.94 | -24.00 | -14.9 |
+| `poly` | Chiptune | melody | -13.05 | -10.95 | -24.00 | -17.0 |
+| `poly` | Hoover | melody | -17.21 | -6.79 | -24.00 | -10.1 |
+| `poly` | Mono Saw Lead | melody | -16.04 | -7.96 | -24.00 | -11.4 |
+| `poly` | Whistle Lead | melody | -12.67 | -11.33 | -24.00 | -14.9 |
+| `poly` | Digital Lead | melody | -13.30 | -10.70 | -24.00 | -14.0 |
+| `poly` | Talking Lead | melody | -21.17 | -2.83 | -24.00 | -5.8 |
+| `poly` | Screamer | melody | -10.43 | -13.57 | -24.00 | -17.1 |
+| `poly` | Future Lead | melody | -14.48 | -9.52 | -24.00 | -11.8 |
+| `poly` | Warm Analog Pad | chord | -10.85 | -13.15 | -24.00 | -20.2 |
+| `poly` | String Machine | chord | -13.13 | -10.87 | -24.00 | -13.9 |
+| `poly` | Glass Pad | chord | -12.51 | -11.49 | -24.00 | -22.9 |
+| `poly` | Dark Drone | chord | -9.88 | -14.12 | -24.00 | -29.7 |
+| `poly` | Choir Pad | chord | -10.86 | -13.14 | -24.00 | -20.3 |
+| `poly` | Formant Pad | chord | -8.42 | -15.58 | -24.00 | -18.8 |
+| `poly` | PWM Pad | chord | -8.32 | -15.68 | -24.00 | -19.8 |
+| `poly` | Shimmer Pad | chord | -13.68 | -10.32 | -24.00 | -17.9 |
+| `poly` | Evolving Spectra | chord | -12.81 | -11.19 | -24.00 | -26.8 |
+| `poly` | Soft Sine Pad | chord | -9.90 | -14.10 | -24.00 | -20.5 |
+| `poly` | Comb Wash | chord | -9.66 | -14.34 | -24.00 | -25.5 |
+| `poly` | Sweep Pad | chord | -12.53 | -11.47 | -24.00 | -34.9 |
+| `poly` | House Pluck | melody | -22.12 | -1.88 | -24.00 | -4.8 |
+| `poly` | Bell Pluck | melody | -12.29 | -11.71 | -24.00 | -15.3 |
+| `poly` | Marimba | melody | -15.85 | -8.15 | -24.00 | -10.8 |
+| `poly` | Plucked String | melody | -24.16 | +0.16 | -24.00 | -1.0 |
+| `poly` | Future Pluck | melody | -18.88 | -5.12 | -24.00 | -7.3 |
+| `poly` | Glass Pluck | melody | -16.85 | -7.15 | -24.00 | -10.5 |
+| `poly` | Trance Pluck | melody | -21.92 | -2.08 | -24.00 | -1.7 |
+| `poly` | Pizzicato | melody | -26.00 | +2.00 | -24.00 | -1.5 |
+| `poly` | Kalimba | melody | -14.33 | -9.67 | -24.00 | -13.1 |
+| `poly` | Polysynth Piano | chord | -18.17 | -5.83 | -24.00 | -7.7 |
+| `poly` | Clavinet | chord | -23.60 | -0.40 | -24.00 | -2.9 |
+| `poly` | FM Electric Piano | chord | -14.80 | -9.20 | -24.00 | -11.9 |
+| `poly` | Drawbar Organ | chord | -8.58 | -15.42 | -24.00 | -21.4 |
+| `poly` | Juno Keys | chord | -13.78 | -10.22 | -24.00 | -14.4 |
+| `poly` | Wurly | chord | -13.93 | -10.07 | -24.00 | -12.2 |
+| `poly` | Vibraphone | chord | -14.75 | -9.25 | -24.00 | -13.0 |
+| `poly` | Synth Brass | chord | -12.66 | -11.34 | -24.00 | -15.7 |
+| `poly` | Brass Stab | chord | -24.01 | +0.01 | -24.00 | -3.0 |
+| `poly` | Jump Brass | chord | -11.61 | -12.39 | -24.00 | -16.6 |
+| `poly` | Rave Chord Stab | chord | -23.02 | -0.98 | -24.00 | -4.7 |
+| `poly` | Soft Horns | chord | -10.69 | -13.31 | -24.00 | -16.8 |
+| `poly` | Fanfare | chord | -12.30 | -11.70 | -24.00 | -16.3 |
+| `poly` | Riser | melody | -18.51 | -5.49 | -24.00 | -12.7 |
+| `poly` | Downlifter | melody | -15.81 | -8.19 | -24.00 | -10.4 |
+| `poly` | Noise Sweep | melody | -29.07 | +5.07 | -24.00 | -10.3 |
+| `poly` | Laser Zap | melody | -19.99 | -4.01 | -24.00 | -6.5 |
+| `poly` | Random Bleeps | melody | -14.31 | -9.69 | -24.00 | -13.0 |
+| `poly` | Wind | melody | -20.75 | -3.25 | -24.00 | -15.7 |
+| `poly` | Impact Boom | melody | -10.88 | -13.12 | -24.00 | -16.6 |
+| `poly` | Siren | melody | -8.25 | -15.75 | -24.00 | -19.6 |
+| `mallet` | Marimba | melody | -16.82 | -7.18 | -24.00 | -11.1 |
+| `mallet` | Xylophone | melody | -21.46 | -2.54 | -24.00 | -8.6 |
+| `mallet` | Vibraphone | melody | -20.32 | -3.68 | -24.00 | -10.4 |
+| `mallet` | Glockenspiel | melody | -17.48 | -6.52 | -24.00 | -11.1 |
+| `mallet` | Celesta | melody | -21.00 | -3.00 | -24.00 | -11.0 |
+| `mallet` | Kalimba | melody | -14.61 | -9.39 | -24.00 | -9.2 |
+| `mallet` | Steel pan | melody | -15.19 | -8.81 | -24.00 | -10.1 |
+| `mallet` | Tubular bells | melody | -13.46 | -10.54 | -24.00 | -7.0 |
+| `bowed` | Violin | melody | -29.28 | +5.28 | -24.00 | -3.1 |
+| `bowed` | Viola | melody | -28.96 | +4.96 | -24.00 | -4.2 |
+| `bowed` | Cello | melody | -29.19 | +5.19 | -24.00 | -5.7 |
+| `bowed` | Double bass | bass | -30.54 | +6.54 | -24.00 | -4.0 |
+| `bowed` | String section | chord | -23.73 | -0.27 | -24.00 | -12.1 |
+| `bowed` | Violin pizzicato | melody | -35.59 | +11.52 | -24.07 | -1.0 |
+| `bowed` | Cello pizzicato | melody | -36.33 | +12.33 | -24.00 | -1.3 |
+| `bowed` | Double bass pizzicato | bass | -32.75 | +8.75 | -24.00 | -1.8 |
+| `wind` | Flute | melody | -27.27 | +3.27 | -24.00 | -11.6 |
+| `wind` | Clarinet | melody | -21.52 | -2.48 | -24.00 | -9.3 |
+| `wind` | Saxophone | melody | -20.69 | -3.31 | -24.00 | -12.9 |
+| `wind` | Trumpet | melody | -23.75 | -0.25 | -24.00 | -7.8 |
+| `wind` | Trombone | melody | -22.09 | -1.91 | -24.00 | -8.9 |
+| `choir` | Aah choir | chord | -14.44 | -9.56 | -24.00 | -11.6 |
+| `choir` | Ooh choir | chord | -16.49 | -7.51 | -24.00 | -14.6 |
+| `choir` | Solo voice | melody | -15.01 | -8.99 | -24.00 | -10.3 |
 | `sampler` | a recorded fixture at -6 dBFS | melody | -22.80 | -1.20, measured | -24.00 | -10.6 |
 | `sampler_kit` | a recorded fixture kit | groove | -27.12 | +3.12, measured | -24.00 | -5.3 |
 
-The worst case is the drum machine's snare at -0.6 dBTP: no single note
-of any kind reaches the limiter. The spread before was 18.9 LU, from the
-steel guitar 9 LU under the target to the kick bass 10 over.
+The worst case is the drum machine's snare at -0.6 dBTP, then the
+acoustic drum kit's kick at -0.7: no single note of any kind reaches the
+limiter. The spread before was 18.9 LU, from the steel guitar 9 LU under
+the target to the kick bass 10 over; the newer voices spread over 27 LU,
+from the violin's pizzicato 11.6 LU under it to the PWM pad 15.7 over,
+and every one of their 102 rows lands within 0.07 LU of it. The "before"
+of the drum kits, the violin's pizzicato and Plucked String is at their
+narrowed dynamics ([Drum kits](#drum-kits-drum_kit)).
 
 ### The table test
 

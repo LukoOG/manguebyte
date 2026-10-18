@@ -300,7 +300,7 @@ test('parts are configured by control calls and describe their parameters', { sk
     ],
   );
   assert.equal(x.mb_params_json(engine, 9), 0);
-  assert.equal(x.mb_create_part(engine, 2, 10, 0), -3, "one past the last instrument code");
+  assert.equal(x.mb_create_part(engine, 2, 16, 0), -3, "one past the last instrument code");
   assert.equal(x.mb_create_part(engine, 70000, 0, 0), -2);
   assert.equal(x.mb_remove_part(engine, 0), 0);
   assert.equal(x.mb_active_voices(engine, 0), -1);

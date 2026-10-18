@@ -107,6 +107,62 @@ const ACID: [&str; 10] = [
     ids::ACID_DRIVE,
     ids::ACID_VELOCITY,
 ];
+const DRUM_KIT_TONES: [&str; 4] = [
+    ids::DRUM_KIT_TONE,
+    ids::DRUM_KIT_SNAP,
+    ids::DRUM_KIT_VELOCITY,
+    ids::DRUM_KIT_ACCENT,
+];
+const POLY: [&str; 9] = [
+    ids::POLY_PRESET,
+    ids::POLY_CUTOFF,
+    ids::POLY_RESONANCE,
+    ids::POLY_ATTACK,
+    ids::POLY_RELEASE,
+    ids::POLY_DETUNE,
+    ids::POLY_SPREAD,
+    ids::POLY_MOD_WHEEL,
+    ids::POLY_POLYPHONY,
+];
+const MALLET: [&str; 6] = [
+    ids::MALLET_PRESET,
+    ids::MALLET_HARDNESS,
+    ids::MALLET_DECAY,
+    ids::MALLET_RELEASE,
+    ids::MALLET_POSITION,
+    ids::MALLET_MOTOR,
+];
+const BOWED: [&str; 9] = [
+    ids::BOWED_PRESET,
+    ids::BOWED_PRESSURE,
+    ids::BOWED_POSITION,
+    ids::BOWED_VIBRATO,
+    ids::BOWED_ATTACK,
+    ids::BOWED_RELEASE,
+    ids::BOWED_TONE,
+    ids::BOWED_PORTAMENTO,
+    ids::BOWED_LEGATO,
+];
+const WIND: [&str; 8] = [
+    ids::WIND_PRESET,
+    ids::WIND_NOISE,
+    ids::WIND_VIBRATO,
+    ids::WIND_ATTACK,
+    ids::WIND_RELEASE,
+    ids::WIND_TONE,
+    ids::WIND_PORTAMENTO,
+    ids::WIND_LEGATO,
+];
+const CHOIR: [&str; 8] = [
+    ids::CHOIR_PRESET,
+    ids::CHOIR_VOWEL,
+    ids::CHOIR_VIBRATO,
+    ids::CHOIR_ATTACK,
+    ids::CHOIR_RELEASE,
+    ids::CHOIR_BREATHINESS,
+    ids::CHOIR_BRIGHTNESS,
+    ids::CHOIR_LEGATO,
+];
 
 /// The identifiers of the instrument of `kind`, in the order its part
 /// lists them.
@@ -122,6 +178,17 @@ fn instrument_ids(kind: InstrumentKind) -> Vec<&'static str> {
         InstrumentKind::AnalogKit => KIT.iter().chain(&ANALOG).copied().collect(),
         InstrumentKind::KickBass => KICK_BASS.to_vec(),
         InstrumentKind::Acid => ACID.to_vec(),
+        InstrumentKind::DrumKit => [ids::DRUM_KIT_PRESET]
+            .iter()
+            .chain(&KIT)
+            .chain(&DRUM_KIT_TONES)
+            .copied()
+            .collect(),
+        InstrumentKind::Poly => POLY.to_vec(),
+        InstrumentKind::Mallet => MALLET.to_vec(),
+        InstrumentKind::Bowed => BOWED.to_vec(),
+        InstrumentKind::Wind => WIND.to_vec(),
+        InstrumentKind::Choir => CHOIR.to_vec(),
     }
 }
 
@@ -351,7 +418,7 @@ fn every_part_lists_its_instrument_then_its_stages_then_gain_pan_and_send() {
             part += 1;
         }
     }
-    assert_eq!(engine.params_json(99), None);
+    assert_eq!(engine.params_json(9_999), None);
 }
 
 /// Every identifier a part or the master bus has hashes to its own

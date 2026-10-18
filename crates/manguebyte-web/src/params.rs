@@ -398,13 +398,145 @@ pub mod ids {
     /// on the instrument) to 1.
     pub const ACID_VELOCITY: &str = "acid.velocity";
 
+    /// Drum kit preset: 0 acoustic, 1 808, 2 909, 3 606, 4 CR-78, 5 trap,
+    /// 6 techno, 7 house, 8 drum and bass, 9 lo-fi. A kit's pieces are its
+    /// preset's; the kit's knobs (`kit.tune`, `kit.decay`, the drums'
+    /// levels) and `drum_kit.tone` and `drum_kit.snap` act on them.
+    pub const DRUM_KIT_PRESET: &str = "drum_kit.preset";
+    /// Added to every piece's tone, -1 to 1: the stick or beater, where a
+    /// drum is struck, a machine drum's colour.
+    pub const DRUM_KIT_TONE: &str = "drum_kit.tone";
+    /// Added to every piece's snap, -1 to 1: a snare's wires, a cymbal's
+    /// shimmer, a machine's snappy or sweep.
+    pub const DRUM_KIT_SNAP: &str = "drum_kit.snap";
+    /// How much quieter the softest strike is than the hardest, decibels,
+    /// 0 to 60. Setting the preset moves it to the preset's.
+    pub const DRUM_KIT_VELOCITY: &str = "drum_kit.velocity";
+    /// How much louder an accented strike is, decibels, 0 to 12; it is
+    /// also struck harder. Setting the preset moves it to the preset's.
+    pub const DRUM_KIT_ACCENT: &str = "drum_kit.accent";
+
+    /// Polyphonic synthesiser preset: an index into
+    /// `manguebyte_dsp::instruments::poly::PRESETS`, 0 to 67. Setting it
+    /// puts the other `poly.*` knobs but `poly.mod_wheel` back to neutral.
+    pub const POLY_PRESET: &str = "poly.preset";
+    /// Moves both filters' cutoffs, octaves, -4 to 4.
+    pub const POLY_CUTOFF: &str = "poly.cutoff";
+    /// Added to both filters' resonance, -1 to 1.
+    pub const POLY_RESONANCE: &str = "poly.resonance";
+    /// A factor on the amplifier envelope's attack, 0.1 to 10.
+    pub const POLY_ATTACK: &str = "poly.attack";
+    /// A factor on the amplifier envelope's release, 0.1 to 10.
+    pub const POLY_RELEASE: &str = "poly.release";
+    /// A factor on every oscillator's unison detune, 0 to 2.
+    pub const POLY_DETUNE: &str = "poly.detune";
+    /// A factor on every oscillator's unison spread across the stereo
+    /// field, 0 to 2.
+    pub const POLY_SPREAD: &str = "poly.spread";
+    /// The modulation wheel the preset's matrix reads, 0 to 1.
+    pub const POLY_MOD_WHEEL: &str = "poly.mod_wheel";
+    /// How many notes a polyphonic preset plays at once, 1 to
+    /// [`POLY_VOICES`](crate::POLY_VOICES); setting the preset moves it to
+    /// as many as the preset can play while a part of it stays within its
+    /// share of real time (see the crate's README). A monophonic or legato
+    /// preset plays one.
+    pub const POLY_POLYPHONY: &str = "poly.voices";
+
+    /// Mallet preset: 0 marimba, 1 xylophone, 2 vibraphone, 3
+    /// glockenspiel, 4 celesta, 5 kalimba, 6 steel pan, 7 tubular bells.
+    /// Setting it puts the factors back to 1 and the position and the
+    /// motor to the preset's.
+    pub const MALLET_PRESET: &str = "mallet.preset";
+    /// How hard the mallet is, a factor on how short its contact is, 0.25
+    /// to 4: harder is brighter.
+    pub const MALLET_HARDNESS: &str = "mallet.hardness";
+    /// A factor on how long the bars ring, 0.25 to 4.
+    pub const MALLET_DECAY: &str = "mallet.decay";
+    /// How long a released note takes to fall 60 dB, the damper, seconds,
+    /// 0.01 to 60: 60 is no damper, as on a marimba.
+    pub const MALLET_RELEASE: &str = "mallet.release";
+    /// Where the mallet lands, 0 to 1 of the bar from its end (0.5 the
+    /// centre).
+    pub const MALLET_POSITION: &str = "mallet.position";
+    /// The vibraphone motor's speed, turns a second, 0 (stopped) to 16.
+    pub const MALLET_MOTOR: &str = "mallet.motor";
+
+    /// Bowed string preset: 0 violin, 1 viola, 2 cello, 3 double bass, 4
+    /// string section, 5 violin pizzicato, 6 cello pizzicato, 7 double
+    /// bass pizzicato. Setting it moves every other `bowed.*` knob but
+    /// `bowed.legato` to the preset's positions.
+    pub const BOWED_PRESET: &str = "bowed.preset";
+    /// How hard the bow presses, 0 (airy) to 1 (dense, grainy).
+    pub const BOWED_PRESSURE: &str = "bowed.pressure";
+    /// Where the bow touches the string, 0.02 (at the bridge) to 0.4 of
+    /// its length (over the fingerboard).
+    pub const BOWED_POSITION: &str = "bowed.position";
+    /// The vibrato's depth, the swing either way, cents, 0 to 100.
+    pub const BOWED_VIBRATO: &str = "bowed.vibrato";
+    /// How long the bow takes to reach its speed, seconds.
+    pub const BOWED_ATTACK: &str = "bowed.attack";
+    /// How long a released note takes to fall 60 dB, seconds.
+    pub const BOWED_RELEASE: &str = "bowed.release";
+    /// The cut-off of the final low-pass, hertz.
+    pub const BOWED_TONE: &str = "bowed.tone";
+    /// Whether slurred notes slide into each other: 1 portamento, 0 a
+    /// change of finger.
+    pub const BOWED_PORTAMENTO: &str = "bowed.portamento";
+    /// Whether a note struck while another is held slurs to it (1) or
+    /// starts a note of its own (0, the default).
+    pub const BOWED_LEGATO: &str = "bowed.legato";
+
+    /// Wind preset: 0 flute, 1 clarinet, 2 saxophone, 3 trumpet, 4
+    /// trombone. Setting it moves every other `wind.*` knob but
+    /// `wind.legato` to the preset's positions.
+    pub const WIND_PRESET: &str = "wind.preset";
+    /// How much noise the breath carries, 0 to 1.
+    pub const WIND_NOISE: &str = "wind.noise";
+    /// The vibrato's depth, the swing either way, cents, 0 to 100.
+    pub const WIND_VIBRATO: &str = "wind.vibrato";
+    /// How long the breath takes to build, seconds.
+    pub const WIND_ATTACK: &str = "wind.attack";
+    /// How long it takes to stop once the note is released, seconds.
+    pub const WIND_RELEASE: &str = "wind.release";
+    /// The cut-off of the final low-pass, hertz.
+    pub const WIND_TONE: &str = "wind.tone";
+    /// Whether slurred notes glide into each other (1) or change at once,
+    /// as keys and valves do (0).
+    pub const WIND_PORTAMENTO: &str = "wind.portamento";
+    /// Whether a note struck while another is held slurs to it (1, the
+    /// default: one player, one note at a time) or starts a note of its own
+    /// (0: a section, chords).
+    pub const WIND_LEGATO: &str = "wind.legato";
+
+    /// Choir preset: 0 "aah" choir, 1 "ooh" choir, 2 solo voice. Setting it
+    /// moves every other `choir.*` knob but `choir.legato` to the preset's
+    /// positions.
+    pub const CHOIR_PRESET: &str = "choir.preset";
+    /// The vowel, 0 to 4: a, e, i, o, u, and blends between.
+    pub const CHOIR_VOWEL: &str = "choir.vowel";
+    /// The vibrato's depth, the swing either way, cents, 0 to 200.
+    pub const CHOIR_VIBRATO: &str = "choir.vibrato";
+    /// How long the voices take to sound, seconds.
+    pub const CHOIR_ATTACK: &str = "choir.attack";
+    /// How long they take to fade once released, seconds.
+    pub const CHOIR_RELEASE: &str = "choir.release";
+    /// How much breath the voices carry, 0 to 1.
+    pub const CHOIR_BREATHINESS: &str = "choir.breathiness";
+    /// The voices' brightness at full velocity, hertz.
+    pub const CHOIR_BRIGHTNESS: &str = "choir.brightness";
+    /// Whether a note struck while another is held slurs to it (1) or
+    /// starts a note of its own (0, the default).
+    pub const CHOIR_LEGATO: &str = "choir.legato";
+
     /// Every identifier a part can have: the chain's, the synth's, the
     /// kit's, the sampler's, then the switches of the low-pass and the
     /// reverb, the send, the other effects' in the order of their codes
     /// ([`Effect`](crate::Effect)), then the instruments' added after them:
     /// the plucked string's, the FM's, the organ's, the analogue kit's, the
-    /// kick bass's and the acid bass's, then the sampler's normalisation.
-    pub const ALL: [&str; 146] = [
+    /// kick bass's and the acid bass's, then the sampler's normalisation,
+    /// then the drum kit's, the polyphonic synthesiser's, the mallets', the
+    /// bowed strings', the winds' and the choir's.
+    pub const ALL: [&str; 191] = [
         LOWPASS_CUTOFF,
         LOWPASS_RESONANCE,
         REVERB_MIX,
@@ -551,6 +683,51 @@ pub mod ids {
         ACID_DRIVE,
         ACID_VELOCITY,
         SAMPLER_NORMALIZE,
+        DRUM_KIT_PRESET,
+        DRUM_KIT_TONE,
+        DRUM_KIT_SNAP,
+        DRUM_KIT_VELOCITY,
+        DRUM_KIT_ACCENT,
+        POLY_PRESET,
+        POLY_CUTOFF,
+        POLY_RESONANCE,
+        POLY_ATTACK,
+        POLY_RELEASE,
+        POLY_DETUNE,
+        POLY_SPREAD,
+        POLY_MOD_WHEEL,
+        POLY_POLYPHONY,
+        MALLET_PRESET,
+        MALLET_HARDNESS,
+        MALLET_DECAY,
+        MALLET_RELEASE,
+        MALLET_POSITION,
+        MALLET_MOTOR,
+        BOWED_PRESET,
+        BOWED_PRESSURE,
+        BOWED_POSITION,
+        BOWED_VIBRATO,
+        BOWED_ATTACK,
+        BOWED_RELEASE,
+        BOWED_TONE,
+        BOWED_PORTAMENTO,
+        BOWED_LEGATO,
+        WIND_PRESET,
+        WIND_NOISE,
+        WIND_VIBRATO,
+        WIND_ATTACK,
+        WIND_RELEASE,
+        WIND_TONE,
+        WIND_PORTAMENTO,
+        WIND_LEGATO,
+        CHOIR_PRESET,
+        CHOIR_VOWEL,
+        CHOIR_VIBRATO,
+        CHOIR_ATTACK,
+        CHOIR_RELEASE,
+        CHOIR_BREATHINESS,
+        CHOIR_BRIGHTNESS,
+        CHOIR_LEGATO,
     ];
 
     /// The drawbars' identifiers, from the lowest footage to the highest
@@ -710,6 +887,17 @@ param_ids!(
     ORGAN_ROTARY,
     ORGAN_SPEAKER,
     ACID_PRESET,
+    DRUM_KIT_PRESET,
+    POLY_PRESET,
+    POLY_MOD_WHEEL,
+    POLY_POLYPHONY,
+    MALLET_PRESET,
+    BOWED_PRESET,
+    BOWED_LEGATO,
+    WIND_PRESET,
+    WIND_LEGATO,
+    CHOIR_PRESET,
+    CHOIR_LEGATO,
 );
 
 /// The level parameters of the drums, in [`Drum`](crate::Drum) order.
@@ -944,6 +1132,119 @@ pub(crate) const ROTARY_NAMES: [&str; 3] = ["Stop", "Slow", "Fast"];
 pub(crate) const ACID_PRESET_NAMES: [&str; 3] = ["Classic", "Squelch", "Square"];
 /// Names of the acid oscillator's waves, in the order of their values.
 pub(crate) const ACID_WAVE_NAMES: [&str; 2] = ["Saw", "Square"];
+/// Names of the drum kit presets, in the order of their values.
+pub(crate) const DRUM_KIT_PRESET_NAMES: [&str; 10] = [
+    "Acoustic",
+    "808",
+    "909",
+    "606",
+    "CR-78",
+    "Trap",
+    "Techno",
+    "House",
+    "Drum and bass",
+    "Lo-fi",
+];
+/// Names of the polyphonic synthesiser's presets, in the order of their
+/// values: those of `manguebyte_dsp::instruments::poly::PRESETS`, which a
+/// unit test holds them to.
+pub(crate) const POLY_PRESET_NAMES: [&str; 68] = [
+    "Moog Bass",
+    "Reese",
+    "Wobble Bass",
+    "Deep Sub",
+    "FM Growl",
+    "House Organ Bass",
+    "Acid Line",
+    "Garage Square",
+    "Wavetable Growl",
+    "Synthpop Bass",
+    "Funk Bass",
+    "808 Glide",
+    "Rolling Bass",
+    "Rubber Bass",
+    "Talking Bass",
+    "Trance Supersaw",
+    "Square Lead",
+    "Sync Lead",
+    "Chiptune",
+    "Hoover",
+    "Mono Saw Lead",
+    "Whistle Lead",
+    "Digital Lead",
+    "Talking Lead",
+    "Screamer",
+    "Future Lead",
+    "Warm Analog Pad",
+    "String Machine",
+    "Glass Pad",
+    "Dark Drone",
+    "Choir Pad",
+    "Formant Pad",
+    "PWM Pad",
+    "Shimmer Pad",
+    "Evolving Spectra",
+    "Soft Sine Pad",
+    "Comb Wash",
+    "Sweep Pad",
+    "House Pluck",
+    "Bell Pluck",
+    "Marimba",
+    "Plucked String",
+    "Future Pluck",
+    "Glass Pluck",
+    "Trance Pluck",
+    "Pizzicato",
+    "Kalimba",
+    "Polysynth Piano",
+    "Clavinet",
+    "FM Electric Piano",
+    "Drawbar Organ",
+    "Juno Keys",
+    "Wurly",
+    "Vibraphone",
+    "Synth Brass",
+    "Brass Stab",
+    "Jump Brass",
+    "Rave Chord Stab",
+    "Soft Horns",
+    "Fanfare",
+    "Riser",
+    "Downlifter",
+    "Noise Sweep",
+    "Laser Zap",
+    "Random Bleeps",
+    "Wind",
+    "Impact Boom",
+    "Siren",
+];
+/// Names of the mallet presets, in the order of their values.
+pub(crate) const MALLET_PRESET_NAMES: [&str; 8] = [
+    "Marimba",
+    "Xylophone",
+    "Vibraphone",
+    "Glockenspiel",
+    "Celesta",
+    "Kalimba",
+    "Steel pan",
+    "Tubular bells",
+];
+/// Names of the bowed string presets, in the order of their values.
+pub(crate) const BOWED_PRESET_NAMES: [&str; 8] = [
+    "Violin",
+    "Viola",
+    "Cello",
+    "Double bass",
+    "String section",
+    "Violin pizzicato",
+    "Cello pizzicato",
+    "Double bass pizzicato",
+];
+/// Names of the wind presets, in the order of their values.
+pub(crate) const WIND_PRESET_NAMES: [&str; 5] =
+    ["Flute", "Clarinet", "Saxophone", "Trumpet", "Trombone"];
+/// Names of the choir presets, in the order of their values.
+pub(crate) const CHOIR_PRESET_NAMES: [&str; 3] = ["Aah choir", "Ooh choir", "Solo voice"];
 
 /// A factor from a quarter to four times, 1 in the middle of the knob.
 fn factor(id: &str, name: &str) -> FloatParam {
@@ -1316,6 +1617,437 @@ impl AcidKnobs {
         visitor(&self.slide);
         visitor(&self.drive);
         visitor(&self.velocity);
+    }
+}
+
+/// An offset from -1 to 1, 0 in the middle of the knob.
+fn offset(id: &str, name: &str) -> FloatParam {
+    FloatParam::new(id, name, FloatRange::linear(-1.0, 1.0), 0.0).with_precision(2)
+}
+
+/// A factor from `min` to `max`, 1 by default, that moves evenly in ratios.
+fn ratio(id: &str, name: &str, min: f32, max: f32) -> FloatParam {
+    FloatParam::new(id, name, FloatRange::logarithmic(min, max), 1.0)
+        .with_unit("x")
+        .with_precision(2)
+}
+
+/// A factor from 0 to 2, 1 by default.
+fn scale(id: &str, name: &str) -> FloatParam {
+    FloatParam::new(id, name, FloatRange::linear(0.0, 2.0), 1.0)
+        .with_unit("x")
+        .with_precision(2)
+}
+
+fn cents(id: &str, name: &str, max: f32, default: f64) -> FloatParam {
+    FloatParam::new(id, name, FloatRange::linear(0.0, max), default as f32)
+        .with_unit("ct")
+        .with_precision(1)
+}
+
+fn tone_hertz(id: &str, name: &str, min: f32, max: f32, default: f64) -> FloatParam {
+    FloatParam::new(id, name, FloatRange::logarithmic(min, max), default as f32)
+        .with_unit("Hz")
+        .with_precision(0)
+}
+
+/// The drum kit's knobs: the preset, the kit's own (tune, decay, a level
+/// per drum of the drum map), offsets on every piece's tone and snap, and
+/// the kit's dynamics, which the preset sets.
+pub(crate) struct DrumKitKnobs {
+    pub(crate) preset: ChoiceParam,
+    pub(crate) kit: KitParams,
+    pub(crate) tone: FloatParam,
+    pub(crate) snap: FloatParam,
+    pub(crate) velocity: FloatParam,
+    pub(crate) accent: FloatParam,
+}
+
+impl DrumKitKnobs {
+    pub(crate) fn new() -> Self {
+        let preset = crate::modelled::drum_kit_preset(0);
+        Self {
+            preset: ChoiceParam::new(ids::DRUM_KIT_PRESET, "Preset", &DRUM_KIT_PRESET_NAMES, 0),
+            kit: KitParams::new(),
+            tone: offset(ids::DRUM_KIT_TONE, "Tone"),
+            snap: offset(ids::DRUM_KIT_SNAP, "Snap"),
+            velocity: FloatParam::new(
+                ids::DRUM_KIT_VELOCITY,
+                "Velocity",
+                FloatRange::linear(0.0, 60.0),
+                preset.velocity_range_db as f32,
+            )
+            .with_unit("dB")
+            .with_precision(1),
+            accent: FloatParam::new(
+                ids::DRUM_KIT_ACCENT,
+                "Accent",
+                FloatRange::linear(0.0, 12.0),
+                preset.accent_db as f32,
+            )
+            .with_unit("dB")
+            .with_precision(1),
+        }
+    }
+
+    /// Moves the dynamics to the preset now chosen.
+    pub(crate) fn load_preset(&self) {
+        let preset = crate::modelled::drum_kit_preset(self.preset.index());
+        self.velocity.set_plain(preset.velocity_range_db);
+        self.accent.set_plain(preset.accent_db);
+    }
+
+    pub(crate) fn visit<'a>(&'a self, visitor: &mut dyn FnMut(&'a dyn Param)) {
+        visitor(&self.preset);
+        self.kit.visit(visitor);
+        visitor(&self.tone);
+        visitor(&self.snap);
+        visitor(&self.velocity);
+        visitor(&self.accent);
+    }
+}
+
+/// The polyphonic synthesiser's knobs: the preset, macros on what it
+/// sets, and the modulation wheel, which presets leave alone.
+pub(crate) struct PolyKnobs {
+    pub(crate) preset: ChoiceParam,
+    pub(crate) cutoff: FloatParam,
+    pub(crate) resonance: FloatParam,
+    pub(crate) attack: FloatParam,
+    pub(crate) release: FloatParam,
+    pub(crate) detune: FloatParam,
+    pub(crate) spread: FloatParam,
+    pub(crate) mod_wheel: FloatParam,
+    pub(crate) voices: IntParam,
+}
+
+impl PolyKnobs {
+    pub(crate) fn new() -> Self {
+        Self {
+            preset: ChoiceParam::new(ids::POLY_PRESET, "Preset", &POLY_PRESET_NAMES, 0),
+            cutoff: FloatParam::new(
+                ids::POLY_CUTOFF,
+                "Cutoff",
+                FloatRange::linear(-4.0, 4.0),
+                0.0,
+            )
+            .with_unit("oct")
+            .with_precision(2),
+            resonance: offset(ids::POLY_RESONANCE, "Resonance"),
+            attack: ratio(ids::POLY_ATTACK, "Attack", 0.1, 10.0),
+            release: ratio(ids::POLY_RELEASE, "Release", 0.1, 10.0),
+            detune: scale(ids::POLY_DETUNE, "Detune"),
+            spread: scale(ids::POLY_SPREAD, "Spread"),
+            mod_wheel: unit(ids::POLY_MOD_WHEEL, "Mod wheel", 0.0).with_precision(2),
+            voices: IntParam::new(
+                ids::POLY_POLYPHONY,
+                "Voices",
+                1,
+                crate::POLY_VOICES as i32,
+                crate::modelled::poly_voices(0) as i32,
+            ),
+        }
+    }
+
+    /// Puts the macros back to neutral, the preset as it is, and the
+    /// voices to as many as the preset plays.
+    pub(crate) fn load_preset(&self) {
+        self.voices
+            .set_plain(crate::modelled::poly_voices(self.preset.index()) as f64);
+        self.cutoff.set_plain(0.0);
+        self.resonance.set_plain(0.0);
+        self.attack.set_plain(1.0);
+        self.release.set_plain(1.0);
+        self.detune.set_plain(1.0);
+        self.spread.set_plain(1.0);
+    }
+
+    pub(crate) fn visit<'a>(&'a self, visitor: &mut dyn FnMut(&'a dyn Param)) {
+        visitor(&self.preset);
+        visitor(&self.cutoff);
+        visitor(&self.resonance);
+        visitor(&self.attack);
+        visitor(&self.release);
+        visitor(&self.detune);
+        visitor(&self.spread);
+        visitor(&self.mod_wheel);
+        visitor(&self.voices);
+    }
+}
+
+/// The mallets' knobs: the preset, factors on what it sets, and the
+/// release, the strike position and the motor, which it sets.
+pub(crate) struct MalletKnobs {
+    pub(crate) preset: ChoiceParam,
+    pub(crate) hardness: FloatParam,
+    pub(crate) decay: FloatParam,
+    pub(crate) release: FloatParam,
+    pub(crate) position: FloatParam,
+    pub(crate) motor: FloatParam,
+}
+
+impl MalletKnobs {
+    pub(crate) fn new() -> Self {
+        let preset = crate::modelled::mallet_preset(0);
+        Self {
+            preset: ChoiceParam::new(ids::MALLET_PRESET, "Preset", &MALLET_PRESET_NAMES, 0),
+            hardness: ratio(ids::MALLET_HARDNESS, "Hardness", 0.25, 4.0),
+            decay: ratio(ids::MALLET_DECAY, "Decay", 0.25, 4.0),
+            release: seconds(
+                ids::MALLET_RELEASE,
+                "Release",
+                0.01,
+                60.0,
+                preset.release as f32,
+            ),
+            position: unit(
+                ids::MALLET_POSITION,
+                "Strike position",
+                preset.strike_position as f32,
+            )
+            .with_precision(3),
+            motor: FloatParam::new(
+                ids::MALLET_MOTOR,
+                "Motor",
+                FloatRange::linear(0.0, 16.0),
+                preset.motor_rate as f32,
+            )
+            .with_unit("Hz")
+            .with_precision(2),
+        }
+    }
+
+    /// Puts the factors back to 1 and the release, the position and the
+    /// motor to the preset now chosen.
+    pub(crate) fn load_preset(&self) {
+        let preset = crate::modelled::mallet_preset(self.preset.index());
+        self.hardness.set_plain(1.0);
+        self.decay.set_plain(1.0);
+        self.release.set_plain(preset.release);
+        self.position.set_plain(preset.strike_position);
+        self.motor.set_plain(preset.motor_rate);
+    }
+
+    pub(crate) fn visit<'a>(&'a self, visitor: &mut dyn FnMut(&'a dyn Param)) {
+        visitor(&self.preset);
+        visitor(&self.hardness);
+        visitor(&self.decay);
+        visitor(&self.release);
+        visitor(&self.position);
+        visitor(&self.motor);
+    }
+}
+
+/// The bowed strings' knobs: the preset and what it sets, then legato,
+/// which presets leave alone.
+pub(crate) struct BowedKnobs {
+    pub(crate) preset: ChoiceParam,
+    pub(crate) pressure: FloatParam,
+    pub(crate) position: FloatParam,
+    pub(crate) vibrato: FloatParam,
+    pub(crate) attack: FloatParam,
+    pub(crate) release: FloatParam,
+    pub(crate) tone: FloatParam,
+    pub(crate) portamento: BoolParam,
+    pub(crate) legato: BoolParam,
+}
+
+impl BowedKnobs {
+    pub(crate) fn new() -> Self {
+        let preset = crate::modelled::bowed_preset(0);
+        Self {
+            preset: ChoiceParam::new(ids::BOWED_PRESET, "Preset", &BOWED_PRESET_NAMES, 0),
+            pressure: unit(ids::BOWED_PRESSURE, "Bow pressure", preset.pressure as f32)
+                .with_precision(2),
+            position: FloatParam::new(
+                ids::BOWED_POSITION,
+                "Bow position",
+                FloatRange::linear(0.02, 0.4),
+                preset.bow_position as f32,
+            )
+            .with_precision(3),
+            vibrato: cents(ids::BOWED_VIBRATO, "Vibrato", 100.0, preset.vibrato_depth),
+            attack: seconds(
+                ids::BOWED_ATTACK,
+                "Attack",
+                0.005,
+                2.0,
+                preset.attack as f32,
+            ),
+            release: seconds(
+                ids::BOWED_RELEASE,
+                "Release",
+                0.02,
+                10.0,
+                preset.release as f32,
+            ),
+            tone: tone_hertz(ids::BOWED_TONE, "Tone", 500.0, 20_000.0, preset.tone),
+            portamento: BoolParam::new(ids::BOWED_PORTAMENTO, "Portamento", preset.portamento),
+            legato: BoolParam::new(ids::BOWED_LEGATO, "Legato", false),
+        }
+    }
+
+    /// Moves every knob but legato to the preset now chosen.
+    pub(crate) fn load_preset(&self) {
+        let preset = crate::modelled::bowed_preset(self.preset.index());
+        self.pressure.set_plain(preset.pressure);
+        self.position.set_plain(preset.bow_position);
+        self.vibrato.set_plain(preset.vibrato_depth);
+        self.attack.set_plain(preset.attack);
+        self.release.set_plain(preset.release);
+        self.tone.set_plain(preset.tone);
+        self.portamento
+            .set_plain(f64::from(u8::from(preset.portamento)));
+    }
+
+    pub(crate) fn visit<'a>(&'a self, visitor: &mut dyn FnMut(&'a dyn Param)) {
+        visitor(&self.preset);
+        visitor(&self.pressure);
+        visitor(&self.position);
+        visitor(&self.vibrato);
+        visitor(&self.attack);
+        visitor(&self.release);
+        visitor(&self.tone);
+        visitor(&self.portamento);
+        visitor(&self.legato);
+    }
+}
+
+/// The winds' knobs: the preset and what it sets, then legato, which
+/// presets leave alone.
+pub(crate) struct WindKnobs {
+    pub(crate) preset: ChoiceParam,
+    pub(crate) noise: FloatParam,
+    pub(crate) vibrato: FloatParam,
+    pub(crate) attack: FloatParam,
+    pub(crate) release: FloatParam,
+    pub(crate) tone: FloatParam,
+    pub(crate) portamento: BoolParam,
+    pub(crate) legato: BoolParam,
+}
+
+impl WindKnobs {
+    pub(crate) fn new() -> Self {
+        let preset = crate::modelled::wind_preset(0);
+        Self {
+            preset: ChoiceParam::new(ids::WIND_PRESET, "Preset", &WIND_PRESET_NAMES, 0),
+            noise: unit(ids::WIND_NOISE, "Breath noise", preset.noise as f32).with_precision(2),
+            vibrato: cents(ids::WIND_VIBRATO, "Vibrato", 100.0, preset.vibrato_depth),
+            attack: seconds(ids::WIND_ATTACK, "Attack", 0.002, 1.0, preset.attack as f32),
+            release: seconds(
+                ids::WIND_RELEASE,
+                "Release",
+                0.005,
+                2.0,
+                preset.release as f32,
+            ),
+            tone: tone_hertz(ids::WIND_TONE, "Tone", 500.0, 20_000.0, preset.tone),
+            portamento: BoolParam::new(ids::WIND_PORTAMENTO, "Portamento", preset.portamento),
+            legato: BoolParam::new(ids::WIND_LEGATO, "Legato", true),
+        }
+    }
+
+    /// Moves every knob but legato to the preset now chosen.
+    pub(crate) fn load_preset(&self) {
+        let preset = crate::modelled::wind_preset(self.preset.index());
+        self.noise.set_plain(preset.noise);
+        self.vibrato.set_plain(preset.vibrato_depth);
+        self.attack.set_plain(preset.attack);
+        self.release.set_plain(preset.release);
+        self.tone.set_plain(preset.tone);
+        self.portamento
+            .set_plain(f64::from(u8::from(preset.portamento)));
+    }
+
+    pub(crate) fn visit<'a>(&'a self, visitor: &mut dyn FnMut(&'a dyn Param)) {
+        visitor(&self.preset);
+        visitor(&self.noise);
+        visitor(&self.vibrato);
+        visitor(&self.attack);
+        visitor(&self.release);
+        visitor(&self.tone);
+        visitor(&self.portamento);
+        visitor(&self.legato);
+    }
+}
+
+/// The choir's knobs: the preset and what it sets, then legato, which
+/// presets leave alone.
+pub(crate) struct ChoirKnobs {
+    pub(crate) preset: ChoiceParam,
+    pub(crate) vowel: FloatParam,
+    pub(crate) vibrato: FloatParam,
+    pub(crate) attack: FloatParam,
+    pub(crate) release: FloatParam,
+    pub(crate) breathiness: FloatParam,
+    pub(crate) brightness: FloatParam,
+    pub(crate) legato: BoolParam,
+}
+
+impl ChoirKnobs {
+    pub(crate) fn new() -> Self {
+        let preset = crate::modelled::choir_preset(0);
+        Self {
+            preset: ChoiceParam::new(ids::CHOIR_PRESET, "Preset", &CHOIR_PRESET_NAMES, 0),
+            vowel: FloatParam::new(
+                ids::CHOIR_VOWEL,
+                "Vowel",
+                FloatRange::linear(0.0, 4.0),
+                preset.vowel as f32,
+            )
+            .with_precision(2),
+            vibrato: cents(ids::CHOIR_VIBRATO, "Vibrato", 200.0, preset.vibrato_depth),
+            attack: seconds(
+                ids::CHOIR_ATTACK,
+                "Attack",
+                0.005,
+                2.0,
+                preset.attack as f32,
+            ),
+            release: seconds(
+                ids::CHOIR_RELEASE,
+                "Release",
+                0.01,
+                4.0,
+                preset.release as f32,
+            ),
+            breathiness: unit(
+                ids::CHOIR_BREATHINESS,
+                "Breathiness",
+                preset.breathiness as f32,
+            )
+            .with_precision(2),
+            brightness: tone_hertz(
+                ids::CHOIR_BRIGHTNESS,
+                "Brightness",
+                500.0,
+                12_000.0,
+                preset.brightness,
+            ),
+            legato: BoolParam::new(ids::CHOIR_LEGATO, "Legato", false),
+        }
+    }
+
+    /// Moves every knob but legato to the preset now chosen.
+    pub(crate) fn load_preset(&self) {
+        let preset = crate::modelled::choir_preset(self.preset.index());
+        self.vowel.set_plain(preset.vowel);
+        self.vibrato.set_plain(preset.vibrato_depth);
+        self.attack.set_plain(preset.attack);
+        self.release.set_plain(preset.release);
+        self.breathiness.set_plain(preset.breathiness);
+        self.brightness.set_plain(preset.brightness);
+    }
+
+    pub(crate) fn visit<'a>(&'a self, visitor: &mut dyn FnMut(&'a dyn Param)) {
+        visitor(&self.preset);
+        visitor(&self.vowel);
+        visitor(&self.vibrato);
+        visitor(&self.attack);
+        visitor(&self.release);
+        visitor(&self.breathiness);
+        visitor(&self.brightness);
+        visitor(&self.legato);
     }
 }
 
@@ -1916,6 +2648,12 @@ pub(crate) enum InstrumentParams {
     AnalogKit(Box<AnalogKitKnobs>),
     KickBass(Box<KickBassKnobs>),
     Acid(Box<AcidKnobs>),
+    DrumKit(Box<DrumKitKnobs>),
+    Poly(Box<PolyKnobs>),
+    Mallet(Box<MalletKnobs>),
+    Bowed(Box<BowedKnobs>),
+    Wind(Box<WindKnobs>),
+    Choir(Box<ChoirKnobs>),
 }
 
 impl InstrumentParams {
@@ -1932,6 +2670,12 @@ impl InstrumentParams {
             InstrumentKind::AnalogKit => Self::AnalogKit(Box::new(AnalogKitKnobs::new())),
             InstrumentKind::KickBass => Self::KickBass(Box::new(KickBassKnobs::new())),
             InstrumentKind::Acid => Self::Acid(Box::new(AcidKnobs::new())),
+            InstrumentKind::DrumKit => Self::DrumKit(Box::new(DrumKitKnobs::new())),
+            InstrumentKind::Poly => Self::Poly(Box::new(PolyKnobs::new())),
+            InstrumentKind::Mallet => Self::Mallet(Box::new(MalletKnobs::new())),
+            InstrumentKind::Bowed => Self::Bowed(Box::new(BowedKnobs::new())),
+            InstrumentKind::Wind => Self::Wind(Box::new(WindKnobs::new())),
+            InstrumentKind::Choir => Self::Choir(Box::new(ChoirKnobs::new())),
         }
     }
 
@@ -1946,6 +2690,12 @@ impl InstrumentParams {
             Self::AnalogKit(knobs) => knobs.visit(visitor),
             Self::KickBass(knobs) => knobs.visit(visitor),
             Self::Acid(knobs) => knobs.visit(visitor),
+            Self::DrumKit(knobs) => knobs.visit(visitor),
+            Self::Poly(knobs) => knobs.visit(visitor),
+            Self::Mallet(knobs) => knobs.visit(visitor),
+            Self::Bowed(knobs) => knobs.visit(visitor),
+            Self::Wind(knobs) => knobs.visit(visitor),
+            Self::Choir(knobs) => knobs.visit(visitor),
         }
     }
 
@@ -1957,6 +2707,12 @@ impl InstrumentParams {
             Self::Fm(knobs) if id == FM_PRESET => knobs.load_preset(),
             Self::Organ(knobs) if id == ORGAN_PRESET => knobs.load_preset(),
             Self::Acid(knobs) if id == ACID_PRESET => knobs.load_preset(),
+            Self::DrumKit(knobs) if id == DRUM_KIT_PRESET => knobs.load_preset(),
+            Self::Poly(knobs) if id == POLY_PRESET => knobs.load_preset(),
+            Self::Mallet(knobs) if id == MALLET_PRESET => knobs.load_preset(),
+            Self::Bowed(knobs) if id == BOWED_PRESET => knobs.load_preset(),
+            Self::Wind(knobs) if id == WIND_PRESET => knobs.load_preset(),
+            Self::Choir(knobs) if id == CHOIR_PRESET => knobs.load_preset(),
             _ => {}
         }
     }

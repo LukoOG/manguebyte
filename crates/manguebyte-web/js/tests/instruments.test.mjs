@@ -55,11 +55,11 @@ test('the module plays every instrument code and sets instruments on parts', { s
     assert.equal(x.mb_create_part(engine, code, code, CHAIN.full), 0, name);
   }
   const codes = Object.values(INSTRUMENT);
-  assert.deepEqual(codes, [...codes.keys()], 'codes 0 to 9, in order');
+  assert.deepEqual(codes, [...codes.keys()], 'codes 0 to 15, in order');
   assert.equal(x.mb_create_part(engine, 10, codes.length, CHAIN.full), -3, 'one past the last');
   assert.equal(x.mb_set_instrument(engine, 0, INSTRUMENT.acid), 0);
   assert.equal(x.mb_set_instrument(engine, 0, 99), -3);
-  assert.equal(x.mb_set_instrument(engine, 15, INSTRUMENT.fm), -6, 'no such part');
+  assert.equal(x.mb_set_instrument(engine, 40, INSTRUMENT.fm), -6, 'no such part');
   assert.equal(x.mb_set_instrument(engine, 70000, INSTRUMENT.fm), -2);
   x.mb_engine_free(engine);
 });

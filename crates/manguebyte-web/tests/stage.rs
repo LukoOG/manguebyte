@@ -56,6 +56,16 @@ fn loud(kind: InstrumentKind) -> Vec<EventRecord> {
         // The second slides from the first: one voice.
         InstrumentKind::KickBass => &[33, 45],
         InstrumentKind::Acid => &[36, 48],
+        // The acoustic kit's crash, ride, open hat and floor tom.
+        InstrumentKind::DrumKit => &[49, 51, 46, 43],
+        // The first preset is a monophonic bass: each note takes the last
+        // one's voice over.
+        InstrumentKind::Poly => &[33, 45],
+        InstrumentKind::Mallet => &[48, 55, 60, 64],
+        InstrumentKind::Bowed => &[55, 62, 69, 76],
+        // One player, legato: the second slurs from the first.
+        InstrumentKind::Wind => &[72, 79],
+        InstrumentKind::Choir => &[48, 55, 60, 64],
     };
     notes
         .iter()
@@ -162,10 +172,15 @@ fn notes_after_a_cancel_play_as_on_a_quiet_part() {
         ];
         push_all(&mut engine, &records);
         let (left, _) = render(&mut engine, 19_200, 128);
-        assert!(
-            peak(&left[12_000..]) > 0.05,
-            "{kind:?}: the new note sounds"
-        );
+        // A choir's voices swell slowly, and one voice is quieter than the
+        // chords its level is set by.
+        let sounds = if kind == InstrumentKind::Choir {
+            0.02
+        } else {
+            0.05
+        };
+        let loudest = peak(&left[12_000..]);
+        assert!(loudest > sounds, "{kind:?}: the new note sounds, {loudest}");
         assert!(left.iter().all(|sample| sample.is_finite()));
     }
 }

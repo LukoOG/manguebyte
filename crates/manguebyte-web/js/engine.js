@@ -13,10 +13,13 @@
 //
 // Instruments. A part plays one of INSTRUMENT: the synth, the drums, the
 // samplers, or manguebyte-dsp's plucked strings, FM, organ, 808-style kit,
-// kick bass and acid bass. createPart makes a part of a kind, setInstrument
-// gives a part another one and keeps its effects, setPreset and setRotary
-// move their knobs on the beat. On the two basses a note slides from the
-// last when its noteOn comes before the last note's noteOff.
+// kick bass and acid bass, drum kits (acoustic, 808, 909, 606, CR-78 and
+// genre kits), the polyphonic synthesiser and its library, mallets, bowed
+// strings, winds and choirs. createPart makes a part of a kind,
+// setInstrument gives a part another one and keeps its effects, setPreset
+// and setRotary move their knobs on the beat. On the two basses, the
+// monophonic presets of the synthesiser and a legato part a note slides or
+// slurs from the last when its noteOn comes before the last note's noteOff.
 //
 // Effects. A method chain such as `.delay(0.25, 0.5).chorus()` maps onto
 //
@@ -71,6 +74,12 @@ export const INSTRUMENT = Object.freeze({
   analog_kit: 7,
   kick_bass: 8,
   acid: 9,
+  drum_kit: 10,
+  poly: 11,
+  mallet: 12,
+  bowed: 13,
+  wind: 14,
+  choir: 15,
 });
 
 /**
@@ -78,12 +87,41 @@ export const INSTRUMENT = Object.freeze({
  * values of their `<kind>.preset` parameter: setPreset(part, 'plucked',
  * 'slap_bass') sets `plucked.preset` to 3. A preset moves the knobs it
  * covers to its positions, on the frame it lands on; the README says which.
+ * The polyphonic synthesiser's are its library's names in lower case, words
+ * joined by underscores ('Trance Supersaw' is 'trance_supersaw').
  */
 export const PRESETS = Object.freeze({
   plucked: Object.freeze(['nylon_guitar', 'steel_guitar', 'finger_bass', 'slap_bass']),
   fm: Object.freeze(['electric_piano', 'tubular_bell', 'fm_bass']),
   organ: Object.freeze(['jazz', 'gospel', 'full', 'ballad']),
   acid: Object.freeze(['classic', 'squelch', 'square']),
+  drum_kit: Object.freeze([
+    'acoustic', '808', '909', '606', 'cr_78', 'trap', 'techno', 'house', 'drum_and_bass', 'lo_fi',
+  ]),
+  poly: Object.freeze([
+    'moog_bass', 'reese', 'wobble_bass', 'deep_sub', 'fm_growl', 'house_organ_bass',
+    'acid_line', 'garage_square', 'wavetable_growl', 'synthpop_bass', 'funk_bass', '808_glide',
+    'rolling_bass', 'rubber_bass', 'talking_bass', 'trance_supersaw', 'square_lead',
+    'sync_lead', 'chiptune', 'hoover', 'mono_saw_lead', 'whistle_lead', 'digital_lead',
+    'talking_lead', 'screamer', 'future_lead', 'warm_analog_pad', 'string_machine', 'glass_pad',
+    'dark_drone', 'choir_pad', 'formant_pad', 'pwm_pad', 'shimmer_pad', 'evolving_spectra',
+    'soft_sine_pad', 'comb_wash', 'sweep_pad', 'house_pluck', 'bell_pluck', 'marimba',
+    'plucked_string', 'future_pluck', 'glass_pluck', 'trance_pluck', 'pizzicato', 'kalimba',
+    'polysynth_piano', 'clavinet', 'fm_electric_piano', 'drawbar_organ', 'juno_keys', 'wurly',
+    'vibraphone', 'synth_brass', 'brass_stab', 'jump_brass', 'rave_chord_stab', 'soft_horns',
+    'fanfare', 'riser', 'downlifter', 'noise_sweep', 'laser_zap', 'random_bleeps', 'wind',
+    'impact_boom', 'siren',
+  ]),
+  mallet: Object.freeze([
+    'marimba', 'xylophone', 'vibraphone', 'glockenspiel', 'celesta', 'kalimba', 'steel_pan',
+    'tubular_bells',
+  ]),
+  bowed: Object.freeze([
+    'violin', 'viola', 'cello', 'double_bass', 'string_section', 'violin_pizzicato',
+    'cello_pizzicato', 'double_bass_pizzicato',
+  ]),
+  wind: Object.freeze(['flute', 'clarinet', 'saxophone', 'trumpet', 'trombone']),
+  choir: Object.freeze(['aah_choir', 'ooh_choir', 'solo_voice']),
 });
 
 /** The speeds of an organ part's rotating speaker, in the order of the values of `organ.rotary`. */
@@ -641,9 +679,23 @@ export class ManguebyteEngine {
    *                  and guitar tap are the synthesized kit's
    *   'kick_bass'    the 808's long kick as a bass, one voice, sliding
    *   'acid'         the acid bass, one voice, sliding (PRESETS.acid)
+   *   'drum_kit'     a drum kit on the drum map: acoustic, 808, 909, 606,
+   *                  CR-78, trap, techno, house, drum and bass, lo-fi
+   *                  (PRESETS.drum_kit); the drums of the map a kit has no
+   *                  piece for are the synthesized kit's
+   *   'poly'         the polyphonic synthesiser and its 68 presets
+   *                  (PRESETS.poly); the monophonic ones slide
+   *   'mallet'       marimba, vibraphone, glockenspiel... (PRESETS.mallet)
+   *   'bowed'        violin, viola, cello, double bass, a section,
+   *                  pizzicatos (PRESETS.bowed); slurs with bowed.legato
+   *   'wind'         flute, clarinet, saxophone, trumpet, trombone
+   *                  (PRESETS.wind); slurs unless wind.legato is 0
+   *   'choir'        "aah" and "ooh" choirs, a solo voice (PRESETS.choir);
+   *                  slurs with choir.legato
    *
    * On the two basses a note slides from the one before when it starts
-   * while that one is held: noteOn before the last note's noteOff.
+   * while that one is held: noteOn before the last note's noteOff; so do
+   * the synthesiser's monophonic presets and a legato part.
    */
   createPart(part, kind = 'synth', chain = 'full') {
     // A bad kind or chain throws at once, as it always has.
@@ -668,10 +720,12 @@ export class ManguebyteEngine {
   }
 
   /**
-   * Sets the preset of `part`, which plays `kind` ('plucked', 'fm',
-   * 'organ' or 'acid'), at `time`: `preset` is a name of PRESETS[kind] or
-   * its value. The knobs the preset covers move to its positions on that
-   * frame, so knobs set for the same frame are set after it.
+   * Sets the preset of `part`, which plays `kind` (a kind of PRESETS:
+   * 'plucked', 'fm', 'organ', 'acid', 'drum_kit', 'poly', 'mallet',
+   * 'bowed', 'wind' or 'choir'), at `time`: `preset` is a name of
+   * PRESETS[kind] or its value. The knobs the preset covers move to its
+   * positions on that frame, so knobs set for the same frame are set after
+   * it.
    */
   setPreset(part, kind, preset, time = undefined) {
     return this.setParam(part, `${kind}.preset`, presetValue(kind, preset), time);

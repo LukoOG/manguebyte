@@ -24,12 +24,20 @@ crate-type = ["cdylib", "rlib"]
 manguebyte-analysis.workspace = true
 manguebyte-core.workspace = true
 manguebyte-dsp.workspace = true
+# The modulation wheel a polyphonic synthesiser part sends its voices.
+manguebyte-midi.workspace = true
 manguebyte-params.workspace = true
 manguebyte-sampler.workspace = true
 
 [dev-dependencies]
 # WAV files for the tests that load sampler parts.
 manguebyte-formats.workspace = true
+
+[[example]]
+# Patches of the polyphonic synthesiser beyond its presets (sixteen unison
+# voices), built for `examples/voice_cost.mjs` to time in WebAssembly.
+name = "unison_cost"
+crate-type = ["cdylib"]
 
 [lints]
 workspace = true

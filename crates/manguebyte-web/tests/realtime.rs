@@ -275,7 +275,52 @@ fn events(start: u64) -> Vec<EventRecord> {
     ] {
         records.push(EventRecord::param(frame, part, id(name), value));
     }
-    for part in 10..16u16 {
+    // The newer voices: the drum kit, the polyphonic synthesiser, the
+    // mallets, the bowed strings, the winds and the choir, parts 16 to 21.
+    // Chords, drums and Aratu's shaker with accents, overlapping notes that
+    // slur, every kit, a change from a monophonic preset to a polyphonic one
+    // and back, the wheel, legato switched, then a cancel, a choke and an
+    // all-notes-off on each.
+    for step in 0..24u64 {
+        let frame = start + 13 + step * 250;
+        let accent = step % 3 == 1;
+        let key = 48 + (step * 7 % 24) as u8;
+        let drum = [36u8, 38, 42, 46, 49, 51, 88, 39, 82, 43][step as usize % 10];
+        records.push(EventRecord::note_on(frame, 16, drum, 0.9).with_accent(accent));
+        for part in 17..22u16 {
+            records.push(EventRecord::note_on(frame, part, key, 0.8).with_accent(accent));
+            records.push(EventRecord::note_on(frame, part, key + 7, 0.7));
+            // Held into the next note: a slur where the part slurs.
+            records.push(EventRecord::note_off(frame + 300, part, key));
+            records.push(EventRecord::note_off(frame + 300, part, key + 7));
+        }
+    }
+    for preset in 0..10u64 {
+        records.push(EventRecord::param(
+            start + 100 + preset * 500,
+            16,
+            id(ids::DRUM_KIT_PRESET),
+            preset as f64,
+        ));
+    }
+    for (frame, part, name, value) in [
+        (start + 700, 17, ids::POLY_PRESET, 26.0),
+        (start + 1_700, 17, ids::POLY_PRESET, 11.0),
+        (start + 2_700, 17, ids::POLY_PRESET, 15.0),
+        (start + 800, 17, ids::POLY_MOD_WHEEL, 0.9),
+        (start + 900, 17, ids::POLY_CUTOFF, -1.5),
+        (start + 1_000, 18, ids::MALLET_PRESET, 2.0),
+        (start + 1_100, 18, ids::MALLET_MOTOR, 7.0),
+        (start + 1_200, 19, ids::BOWED_LEGATO, 1.0),
+        (start + 1_300, 19, ids::BOWED_PRESET, 4.0),
+        (start + 1_400, 20, ids::WIND_PRESET, 3.0),
+        (start + 1_500, 20, ids::WIND_LEGATO, 0.0),
+        (start + 1_600, 21, ids::CHOIR_PRESET, 1.0),
+        (start + 1_650, 21, ids::CHOIR_LEGATO, 1.0),
+    ] {
+        records.push(EventRecord::param(frame, part, id(name), value));
+    }
+    for part in 10..22u16 {
         records.push(EventRecord::cancel(start + 3_200 + u64::from(part), part));
         records.push(EventRecord::note_on(start + 3_300, part, 45, 1.0));
         records.push(EventRecord::choke(start + 4_200, part));
@@ -291,11 +336,11 @@ fn events(start: u64) -> Vec<EventRecord> {
 }
 
 /// How many parts `parts` makes.
-const PARTS: u16 = 16;
+const PARTS: u16 = 22;
 
 /// Both instruments through every chain: parts 0 to 5; part 6, a sampler
 /// with an instrument; part 7, a sampler kit with one; parts 8 and 9 with
-/// every effect; parts 10 to 15, the instruments of manguebyte-dsp, some
+/// every effect; parts 10 to 21, the instruments of manguebyte-dsp, some
 /// with every effect.
 fn parts(engine: &mut Engine) {
     let lowpass = Chain {
@@ -325,6 +370,12 @@ fn parts(engine: &mut Engine) {
         (13, InstrumentKind::AnalogKit, Chain::FULL),
         (14, InstrumentKind::KickBass, Chain::NONE),
         (15, InstrumentKind::Acid, Chain::ALL),
+        (16, InstrumentKind::DrumKit, Chain::FULL),
+        (17, InstrumentKind::Poly, Chain::ALL),
+        (18, InstrumentKind::Mallet, Chain::NONE),
+        (19, InstrumentKind::Bowed, Chain::FULL),
+        (20, InstrumentKind::Wind, Chain::NONE),
+        (21, InstrumentKind::Choir, Chain::ALL),
     ] {
         engine.create_part_with(part, kind, chain).unwrap();
     }
@@ -337,12 +388,12 @@ fn parts(engine: &mut Engine) {
 #[test]
 fn pushing_draining_and_rendering_never_allocate() {
     let mut engine = Engine::new(EngineConfig {
-        pending_capacity: 16_384,
+        pending_capacity: 32_768,
         ..EngineConfig::new(48_000.0)
     })
     .unwrap();
     parts(&mut engine);
-    let (mut producer, mut consumer) = event_ring(4_096);
+    let (mut producer, mut consumer) = event_ring(8_192);
     let first = events(0);
     let second = events(20_000);
     let mut bytes = Vec::new();

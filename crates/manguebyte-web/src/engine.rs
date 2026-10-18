@@ -107,11 +107,46 @@ pub enum InstrumentKind {
     /// [`AcidVoice`](manguebyte_dsp::instruments::AcidVoice), one voice,
     /// legato: a note struck while the last is held slides to it.
     Acid,
+    /// Code 10: a drum kit whose pieces are chosen and tuned per key,
+    /// [`DrumKitVoice`](manguebyte_dsp::instruments::DrumKitVoice),
+    /// [`DRUM_KIT_VOICES`](crate::DRUM_KIT_VOICES) voices sharing choke
+    /// groups: the acoustic kit by modal synthesis, the 808, 909, 606 and
+    /// CR-78, and kits for trap, techno, house, drum and bass and lo-fi
+    /// (`drum_kit.preset`). It answers the drum map; a drum of the map its
+    /// kit has no piece for is the synthesized drum of
+    /// [`Drums`](Self::Drums).
+    DrumKit,
+    /// Code 11: the polyphonic synthesiser,
+    /// [`PolySynthVoice`](manguebyte_dsp::instruments::PolySynthVoice), with
+    /// its library of 68 presets (`poly.preset`):
+    /// [`POLY_VOICES`](crate::POLY_VOICES) voices for a polyphonic preset,
+    /// one for a monophonic or legato one.
+    Poly,
+    /// Code 12: struck bars, tines and tubes by modal synthesis,
+    /// [`MalletVoice`](manguebyte_dsp::instruments::MalletVoice): marimba,
+    /// xylophone, vibraphone, glockenspiel, celesta, kalimba, steel pan,
+    /// tubular bells (`mallet.preset`).
+    Mallet,
+    /// Code 13: bowed strings by digital waveguide,
+    /// [`BowedString`](manguebyte_dsp::instruments::BowedString): violin,
+    /// viola, cello, double bass, a string section and three pizzicatos
+    /// (`bowed.preset`), slurring with `bowed.legato`.
+    Bowed,
+    /// Code 14: winds by digital waveguide,
+    /// [`WindVoice`](manguebyte_dsp::instruments::WindVoice): flute,
+    /// clarinet, saxophone, trumpet, trombone (`wind.preset`), slurring a
+    /// note struck while the last is held unless `wind.legato` is off.
+    Wind,
+    /// Code 15: sung vowels by formant synthesis,
+    /// [`ChoirVoice`](manguebyte_dsp::instruments::ChoirVoice): an "aah"
+    /// and an "ooh" choir and a solo voice (`choir.preset`), slurring with
+    /// `choir.legato`.
+    Choir,
 }
 
 impl InstrumentKind {
     /// Every kind, in the order of their codes.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 16] = [
         Self::Synth,
         Self::Drums,
         Self::Sampler,
@@ -122,6 +157,12 @@ impl InstrumentKind {
         Self::AnalogKit,
         Self::KickBass,
         Self::Acid,
+        Self::DrumKit,
+        Self::Poly,
+        Self::Mallet,
+        Self::Bowed,
+        Self::Wind,
+        Self::Choir,
     ];
 
     /// The code the WebAssembly exports use.
@@ -137,12 +178,19 @@ impl InstrumentKind {
             Self::AnalogKit => 7,
             Self::KickBass => 8,
             Self::Acid => 9,
+            Self::DrumKit => 10,
+            Self::Poly => 11,
+            Self::Mallet => 12,
+            Self::Bowed => 13,
+            Self::Wind => 14,
+            Self::Choir => 15,
         }
     }
 
     /// The name `js/engine.js` gives the kind (its `INSTRUMENT`):
     /// `"synth"`, `"drums"`, `"sampler"`, `"sampler_kit"`, `"plucked"`,
-    /// `"fm"`, `"organ"`, `"analog_kit"`, `"kick_bass"` or `"acid"`.
+    /// `"fm"`, `"organ"`, `"analog_kit"`, `"kick_bass"`, `"acid"`,
+    /// `"drum_kit"`, `"poly"`, `"mallet"`, `"bowed"`, `"wind"` or `"choir"`.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Synth => "synth",
@@ -155,6 +203,12 @@ impl InstrumentKind {
             Self::AnalogKit => "analog_kit",
             Self::KickBass => "kick_bass",
             Self::Acid => "acid",
+            Self::DrumKit => "drum_kit",
+            Self::Poly => "poly",
+            Self::Mallet => "mallet",
+            Self::Bowed => "bowed",
+            Self::Wind => "wind",
+            Self::Choir => "choir",
         }
     }
 
@@ -188,6 +242,12 @@ impl InstrumentKind {
             7 => Some(Self::AnalogKit),
             8 => Some(Self::KickBass),
             9 => Some(Self::Acid),
+            10 => Some(Self::DrumKit),
+            11 => Some(Self::Poly),
+            12 => Some(Self::Mallet),
+            13 => Some(Self::Bowed),
+            14 => Some(Self::Wind),
+            15 => Some(Self::Choir),
             _ => None,
         }
     }
@@ -553,6 +613,14 @@ impl Instrument {
                 Self::Voiced(Box::new(Voiced::kick_bass(knobs, spec)))
             }
             InstrumentParams::Acid(knobs) => Self::Voiced(Box::new(Voiced::acid(knobs, spec))),
+            InstrumentParams::DrumKit(knobs) => {
+                Self::Voiced(Box::new(Voiced::drum_kit(knobs, spec)))
+            }
+            InstrumentParams::Poly(knobs) => Self::Voiced(Box::new(Voiced::poly(knobs, spec))),
+            InstrumentParams::Mallet(knobs) => Self::Voiced(Box::new(Voiced::mallet(knobs, spec))),
+            InstrumentParams::Bowed(knobs) => Self::Voiced(Box::new(Voiced::bowed(knobs, spec))),
+            InstrumentParams::Wind(knobs) => Self::Voiced(Box::new(Voiced::wind(knobs, spec))),
+            InstrumentParams::Choir(knobs) => Self::Voiced(Box::new(Voiced::choir(knobs, spec))),
         }
     }
 }
@@ -738,7 +806,7 @@ impl Part {
                 false
             }
             Instrument::Voiced(voiced) => {
-                voiced.render(mono, stereo);
+                voiced.render(mono, stereo, clock.beats_per_frame);
                 false
             }
         };
@@ -1919,6 +1987,12 @@ mod tests {
             InstrumentKind::AnalogKit,
             InstrumentKind::KickBass,
             InstrumentKind::Acid,
+            InstrumentKind::DrumKit,
+            InstrumentKind::Poly,
+            InstrumentKind::Mallet,
+            InstrumentKind::Bowed,
+            InstrumentKind::Wind,
+            InstrumentKind::Choir,
         ];
         for kind in kinds {
             for poison_speaker in [false, true] {

@@ -86,14 +86,31 @@
 //!   synthesized drums of [`InstrumentKind::Drums`];
 //! - [`InstrumentKind::KickBass`] and [`InstrumentKind::Acid`]: one voice
 //!   with legato on, so that a note struck while the last one is held (its
-//!   note on before the last note's note off) slides to its pitch.
+//!   note on before the last note's note off) slides to its pitch;
+//! - [`InstrumentKind::DrumKit`]: the drum kits of `DrumKitVoice`,
+//!   [`DRUM_KIT_VOICES`] voices sharing choke groups, acoustic by modal
+//!   synthesis, the 808, 909, 606 and CR-78, trap, techno, house, drum and
+//!   bass and lo-fi, on the drum map; a drum of the map a kit has no piece
+//!   for is the synthesized drum of [`InstrumentKind::Drums`];
+//! - [`InstrumentKind::Poly`]: the polyphonic synthesiser and its 68
+//!   presets, up to [`POLY_VOICES`] voices (`poly.voices`) for a
+//!   polyphonic preset and one for a monophonic or legato one;
+//! - [`InstrumentKind::Mallet`], [`InstrumentKind::Bowed`],
+//!   [`InstrumentKind::Wind`] and [`InstrumentKind::Choir`]: mallets,
+//!   bowed strings, winds and a choir, [`MALLET_VOICES`],
+//!   [`BOWED_VOICES`], [`WIND_VOICES`] and [`CHOIR_VOICES`] voices; the
+//!   winds slur overlapping notes on one voice, and the strings and the
+//!   choir with `bowed.legato` and `choir.legato`.
 //!
-//! Each has its parameters in its part's JSON: a preset where it has
-//! several (`plucked.preset`, `fm.preset`, `organ.preset`, `acid.preset`),
-//! which moves the knobs it covers on its frame, and the main knobs. Each
-//! part keeps two synths of its voices, so that a cancel fades out the
-//! notes sounding while the notes after it start on clean voices. The
-//! crate's README lists every parameter.
+//! The newer voices place their notes in the stereo field, so their parts
+//! render two channels. Each kind has its parameters in its part's JSON: a
+//! preset where it has several (`plucked.preset`, `fm.preset`,
+//! `organ.preset`, `acid.preset`, `drum_kit.preset`, `poly.preset`,
+//! `mallet.preset`, `bowed.preset`, `wind.preset`, `choir.preset`), which
+//! moves the knobs it covers on its frame, and the main knobs. Each part
+//! keeps two synths of its voices, so that a cancel fades out the notes
+//! sounding while the notes after it start on clean voices. The crate's
+//! README lists every parameter, and what the voices cost in WebAssembly.
 //!
 //! # Parts and parameters
 //!
@@ -384,6 +401,7 @@ mod fx;
 mod level;
 mod load;
 mod master;
+mod modelled;
 mod params;
 mod probe;
 mod queue;
@@ -419,6 +437,7 @@ pub use synth::{
     SYNTH_ACCENT_OCTAVES, SYNTH_VOICES,
 };
 pub use voiced::{
-    ANALOG_KIT_LEVEL_DB, ANALOG_KIT_VOICES, FM_LEVEL_DB, FM_VOICES, ORGAN_VOICES, PLUCKED_LEVEL_DB,
-    PLUCKED_VOICES, SPEAKER_SLEEP_SECONDS,
+    ANALOG_KIT_LEVEL_DB, ANALOG_KIT_VOICES, BOWED_VOICES, CHOIR_VOICES, DRUM_KIT_VOICES,
+    FM_LEVEL_DB, FM_VOICES, MALLET_VOICES, ORGAN_VOICES, PLUCKED_LEVEL_DB, PLUCKED_VOICES,
+    POLY_VOICES, SPEAKER_SLEEP_SECONDS, WIND_VOICES,
 };
