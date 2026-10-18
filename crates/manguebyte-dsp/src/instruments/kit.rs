@@ -9,6 +9,7 @@ use manguebyte_core::{AudioBuffer, Sample};
 
 use super::acoustic::{Cymbal, CymbalKind, HeadKind, Heads, Hit};
 use super::analog_drums::{AnalogDrum, AnalogKitParams, DrumSettings, DrumTone};
+use super::brazilian::{Percussion, Stroke};
 use super::common::{HANDOVER_SECONDS, SoftClip, Tone, db, setting, velocity_gain};
 use super::machines::{Machine, MachineHit, MachineKind};
 use crate::event::NoteRef;
@@ -86,6 +87,93 @@ pub mod gm {
     pub const LONG_GUIRO: u8 = 74;
     /// Claves.
     pub const CLAVES: u8 = 75;
+    /// High agogô.
+    pub const HIGH_AGOGO: u8 = 67;
+    /// Low agogô.
+    pub const LOW_AGOGO: u8 = 68;
+    /// Mute cuíca: the high squeak.
+    pub const MUTE_CUICA: u8 = 78;
+    /// Open cuíca: the low groan.
+    pub const OPEN_CUICA: u8 = 79;
+    /// Mute triangle.
+    pub const MUTE_TRIANGLE: u8 = 80;
+    /// Open triangle.
+    pub const OPEN_TRIANGLE: u8 = 81;
+}
+
+/// The keys of the Brazilian percussion of [`DrumKit::brazilian`]: those
+/// of General MIDI where it names the instrument, of General MIDI 2 for
+/// the shaker and the surdo, and Manguebyte's own for the rest, after the
+/// guitar tap (88), as Aratu writes them.
+pub mod percussion {
+    pub use super::gm::{
+        HAND_CLAP, HIGH_AGOGO, LOW_AGOGO, MUTE_CUICA, MUTE_TRIANGLE, OPEN_CUICA, OPEN_TRIANGLE,
+    };
+    /// The shaker: a ganzá (General MIDI 2).
+    pub const SHAKER: u8 = 82;
+    /// Mute surdo (General MIDI 2).
+    pub const MUTE_SURDO: u8 = 86;
+    /// Open surdo (General MIDI 2).
+    pub const OPEN_SURDO: u8 = 87;
+    /// Pandeiro, the thumb near the rim.
+    pub const PANDEIRO_THUMB: u8 = 89;
+    /// Pandeiro, the fingertips.
+    pub const PANDEIRO_FINGERS: u8 = 90;
+    /// Pandeiro, the palm's slap.
+    pub const PANDEIRO_SLAP: u8 = 91;
+    /// Pandeiro, muted from inside.
+    pub const PANDEIRO_MUTED: u8 = 92;
+    /// Zabumba, the mallet's open stroke.
+    pub const ZABUMBA_OPEN: u8 = 93;
+    /// Zabumba, the mallet pressed into the head.
+    pub const ZABUMBA_MUTED: u8 = 94;
+    /// Zabumba, the thin stick (bacalhau) on the bottom head.
+    pub const ZABUMBA_STICK: u8 = 95;
+    /// Tamborim, open.
+    pub const TAMBORIM_OPEN: u8 = 96;
+    /// Tamborim, muted by a finger.
+    pub const TAMBORIM_MUTED: u8 = 97;
+    /// Alfaia, open.
+    pub const ALFAIA_OPEN: u8 = 98;
+    /// Alfaia, muted.
+    pub const ALFAIA_MUTED: u8 = 99;
+    /// Gonguê, open.
+    pub const GONGUE_OPEN: u8 = 100;
+    /// Gonguê, held by the hand.
+    pub const GONGUE_MUTED: u8 = 101;
+    /// Cajón, the bass stroke.
+    pub const CAJON_BASS: u8 = 102;
+    /// Cajón, the slap.
+    pub const CAJON_SLAP: u8 = 103;
+
+    /// Every key, in increasing order.
+    pub const ALL: [u8; 25] = [
+        HAND_CLAP,
+        HIGH_AGOGO,
+        LOW_AGOGO,
+        MUTE_CUICA,
+        OPEN_CUICA,
+        MUTE_TRIANGLE,
+        OPEN_TRIANGLE,
+        SHAKER,
+        MUTE_SURDO,
+        OPEN_SURDO,
+        PANDEIRO_THUMB,
+        PANDEIRO_FINGERS,
+        PANDEIRO_SLAP,
+        PANDEIRO_MUTED,
+        ZABUMBA_OPEN,
+        ZABUMBA_MUTED,
+        ZABUMBA_STICK,
+        TAMBORIM_OPEN,
+        TAMBORIM_MUTED,
+        ALFAIA_OPEN,
+        ALFAIA_MUTED,
+        GONGUE_OPEN,
+        GONGUE_MUTED,
+        CAJON_BASS,
+        CAJON_SLAP,
+    ];
 }
 
 /// What makes the sound of a piece of a [`DrumKit`].
@@ -106,6 +194,10 @@ pub mod gm {
 /// | `Kick909` | the attack (click) | the depth of the pitch sweep | the rumble |
 /// | other machine drums | the colour, as their knob of that name | the snappy, accent or sweep | the guiro's length |
 /// | `Analog` | as [`DrumSettings::tone`] | as [`DrumSettings::snap`] | - |
+/// | Brazilian percussion | where it is struck or how hard the finger presses (the cuíca's pitch), or the shaker's and the clap's colour | the stick's, slap's or jingles' noise | how freely it rings |
+///
+/// The Brazilian percussion, `HandClap` to `CajonSlap`, is modelled from
+/// the physics of each instrument: see [`DrumKit::brazilian`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DrumModel {
     /// An acoustic bass drum: two heads coupled by the air in the shell,
@@ -196,6 +288,57 @@ pub enum DrumModel {
     CongaCr78,
     /// The CR-78's claves.
     ClavesCr78,
+    /// A hand clap: three clappers, each a burst of the air between the
+    /// palms, and the room's reply.
+    HandClap,
+    /// The agogô's high bell, struck with a stick.
+    AgogoHigh,
+    /// The agogô's low bell.
+    AgogoLow,
+    /// A ganzá: beads shaken in a metal tube.
+    Shaker,
+    /// The cuíca's high squeak, rising into its note.
+    CuicaHigh,
+    /// The cuíca's low groan, falling.
+    CuicaLow,
+    /// The triangle, held in the hand.
+    TriangleMuted,
+    /// The triangle, ringing.
+    TriangleOpen,
+    /// The surdo with the hand on its head.
+    SurdoMuted,
+    /// The surdo, open, falling in pitch.
+    SurdoOpen,
+    /// The pandeiro's thumb near the rim: the open low tone.
+    PandeiroThumb,
+    /// The pandeiro's fingertips: mostly its jingles.
+    PandeiroFingers,
+    /// The pandeiro's slap with the palm.
+    PandeiroSlap,
+    /// The pandeiro muted from inside.
+    PandeiroMuted,
+    /// The zabumba's mallet, open.
+    ZabumbaOpen,
+    /// The zabumba's mallet pressed into the head.
+    ZabumbaMuted,
+    /// The zabumba's thin stick on its bottom head.
+    ZabumbaStick,
+    /// The tamborim, open.
+    TamborimOpen,
+    /// The tamborim, muted by a finger.
+    TamborimMuted,
+    /// The alfaia, open.
+    AlfaiaOpen,
+    /// The alfaia, muted.
+    AlfaiaMuted,
+    /// The gonguê, open.
+    GongueOpen,
+    /// The gonguê, held by the hand.
+    GongueMuted,
+    /// The cajón's bass stroke, in the middle of its front.
+    CajonBass,
+    /// The cajón's slap, at its top edge.
+    CajonSlap,
     /// A drum of the 808, as [`AnalogKitVoice`](super::AnalogKitVoice)
     /// plays it.
     Analog(AnalogDrum),
@@ -208,6 +351,7 @@ enum Engine {
     Cymbal(CymbalKind),
     Machine(MachineKind),
     Analog(AnalogDrum),
+    Percussion(Stroke),
 }
 
 impl DrumModel {
@@ -258,13 +402,41 @@ impl DrumModel {
             M::CongaCr78 => Engine::Machine(MachineKind::CongaCr78),
             M::ClavesCr78 => Engine::Machine(MachineKind::ClavesCr78),
             M::Analog(drum) => Engine::Analog(drum),
+            M::HandClap => Engine::Percussion(Stroke::Clap),
+            M::AgogoHigh => Engine::Percussion(Stroke::AgogoHigh),
+            M::AgogoLow => Engine::Percussion(Stroke::AgogoLow),
+            M::Shaker => Engine::Percussion(Stroke::Shaker),
+            M::CuicaHigh => Engine::Percussion(Stroke::CuicaHigh),
+            M::CuicaLow => Engine::Percussion(Stroke::CuicaLow),
+            M::TriangleMuted => Engine::Percussion(Stroke::TriangleMuted),
+            M::TriangleOpen => Engine::Percussion(Stroke::TriangleOpen),
+            M::SurdoMuted => Engine::Percussion(Stroke::SurdoMuted),
+            M::SurdoOpen => Engine::Percussion(Stroke::SurdoOpen),
+            M::PandeiroThumb => Engine::Percussion(Stroke::PandeiroThumb),
+            M::PandeiroFingers => Engine::Percussion(Stroke::PandeiroFingers),
+            M::PandeiroSlap => Engine::Percussion(Stroke::PandeiroSlap),
+            M::PandeiroMuted => Engine::Percussion(Stroke::PandeiroMuted),
+            M::ZabumbaOpen => Engine::Percussion(Stroke::ZabumbaOpen),
+            M::ZabumbaMuted => Engine::Percussion(Stroke::ZabumbaMuted),
+            M::ZabumbaStick => Engine::Percussion(Stroke::ZabumbaStick),
+            M::TamborimOpen => Engine::Percussion(Stroke::TamborimOpen),
+            M::TamborimMuted => Engine::Percussion(Stroke::TamborimMuted),
+            M::AlfaiaOpen => Engine::Percussion(Stroke::AlfaiaOpen),
+            M::AlfaiaMuted => Engine::Percussion(Stroke::AlfaiaMuted),
+            M::GongueOpen => Engine::Percussion(Stroke::GongueOpen),
+            M::GongueMuted => Engine::Percussion(Stroke::GongueMuted),
+            M::CajonBass => Engine::Percussion(Stroke::CajonBass),
+            M::CajonSlap => Engine::Percussion(Stroke::CajonSlap),
         }
     }
 
     /// Whether the model is an acoustic instrument, which a strike adds to
     /// while it rings instead of starting again.
     pub fn is_acoustic(self) -> bool {
-        matches!(self.engine(), Engine::Heads(_) | Engine::Cymbal(_))
+        matches!(
+            self.engine(),
+            Engine::Heads(_) | Engine::Cymbal(_) | Engine::Percussion(_)
+        )
     }
 }
 
@@ -347,9 +519,10 @@ const CRUSHER_TAIL_SECONDS: f64 = 0.01;
 /// MIDI.
 pub const KIT_FIRST_KEY: u8 = 35;
 
-/// How many keys a [`DrumKit`] maps, from [`KIT_FIRST_KEY`]: up to 81, the
-/// open triangle, the last of General MIDI's percussion.
-pub const KIT_KEYS: usize = 47;
+/// How many keys a [`DrumKit`] maps, from [`KIT_FIRST_KEY`]: up to 103,
+/// the cajón's slap, the last of the Brazilian [`percussion`] (General
+/// MIDI's own end at 81, the open triangle).
+pub const KIT_KEYS: usize = 69;
 
 /// The character of an old sampler or a worn tape, put on every piece of
 /// a kit: a saturator, the sample rate and word length of the sampler,
@@ -525,6 +698,8 @@ struct KitTone {
     cymbal: Cymbal,
     machine: Machine,
     analog: DrumTone,
+    /// Brazilian percussion; its drums ring in `heads`.
+    percussion: Percussion,
     /// The level and the pan of the piece.
     gain: f64,
     left: f64,
@@ -548,6 +723,7 @@ impl KitTone {
             cymbal: Cymbal::new(rate),
             machine: Machine::new(rate),
             analog,
+            percussion: Percussion::new(rate),
             gain: 0.0,
             left: 1.0,
             right: 1.0,
@@ -565,6 +741,7 @@ impl KitTone {
             Some(Engine::Cymbal(_)) => self.cymbal.next(),
             Some(Engine::Machine(_)) => self.machine.next(),
             Some(Engine::Analog(_)) => self.analog.next(),
+            Some(Engine::Percussion(_)) => self.percussion.next(&mut self.heads),
             None => 0.0,
         };
         let mut value = value * self.gain;
@@ -597,6 +774,9 @@ impl Tone for KitTone {
             Some(Engine::Cymbal(_)) => self.cymbal.is_sounding(),
             Some(Engine::Machine(_)) => self.machine.is_sounding(),
             Some(Engine::Analog(_)) => self.analog.is_sounding(),
+            Some(Engine::Percussion(_)) => {
+                self.percussion.is_sounding() || self.heads.is_sounding()
+            }
             None => false,
         }
     }
@@ -607,6 +787,10 @@ impl Tone for KitTone {
             Some(Engine::Cymbal(_)) => self.cymbal.silence(),
             Some(Engine::Machine(_)) => self.machine.silence(),
             Some(Engine::Analog(_)) => self.analog.silence(),
+            Some(Engine::Percussion(_)) => {
+                self.percussion.silence();
+                self.heads.silence();
+            }
             None => {}
         }
         self.engine = None;
@@ -694,6 +878,16 @@ impl Crusher {
 /// acoustic piece struck again while it rings adds the new strike to its
 /// ringing, as the instrument does; the stick lands a little differently
 /// each time.
+///
+/// **Brazilian percussion.** The bells (agogô, gonguê) ring a struck iron
+/// shell's bending modes in doublets, the triangle a steel rod's, the
+/// cuíca a membrane driven at its centre by a cloth's stick-slip with its
+/// pitch gliding, the surdo, zabumba, alfaia, tamborim and pandeiro are
+/// drums with heads as above (the pandeiro's jingles rattling as
+/// stochastic collisions of small plates), the cajón a plate on a box of
+/// air, the ganzá beads colliding in a tube, the hand clap three clappers'
+/// bursts of air: see [`DrumKit::brazilian`]. They are acoustic: struck
+/// again while they ring, they add to it.
 ///
 /// **Drum machines.** The 909's, 606's and CR-78's drums are recipes of
 /// the parts their circuits are made of: swept oscillators and struck
@@ -863,6 +1057,22 @@ impl DrumKitVoice {
                         texture: piece.texture,
                         seed,
                     },
+                );
+            }
+            Engine::Percussion(stroke) => {
+                tone.percussion.strike(
+                    stroke,
+                    &Hit {
+                        amplitude,
+                        hardness,
+                        tune,
+                        decay: piece.decay,
+                        tone: piece.tone,
+                        snap: piece.snap,
+                        texture: piece.texture,
+                        seed,
+                    },
+                    &mut tone.heads,
                 );
             }
             Engine::Machine(kind) => {
@@ -1488,6 +1698,95 @@ impl DrumKit {
             &[TAMBOURINE],
             piece!(M::TambourineCr78, level: 1.5, pan: 0.3),
         )
+    }
+
+    /// Brazilian percussion by physical modelling, on the keys of
+    /// [`percussion`], spread as a percussion section stands: the hand
+    /// clap; the agogô's two bells; the ganzá; the cuíca, squeak and groan;
+    /// the triangle, held and ringing; the surdo, muted and open; the
+    /// pandeiro, by the thumb, the fingertips, the palm's slap and muted;
+    /// the zabumba's mallet, open and muted, and its thin stick; the
+    /// tamborim and the alfaia, open and muted; the gonguê, open and held;
+    /// the cajón's bass and slap. Where a hand damps an instrument (the
+    /// triangle, the surdo, the gonguê, the zabumba, the alfaia, the
+    /// tamborim) its muted stroke stops its open one: choke groups 2 to 7.
+    ///
+    /// How each is modelled, and from which acoustics, is in the source of
+    /// the `brazilian` module; in short:
+    ///
+    /// | Instrument | Model |
+    /// |---|---|
+    /// | agogô, gonguê | an iron shell's ring-like bending modes, 1 : 2.83 : 5.42 : 8.77 : 12.86, in doublets, a second family above, struck with a stick |
+    /// | triangle | a steel rod's free-bar modes, 1 : 2.76 : 5.40 : 8.93..., in two families, radiating its high ones |
+    /// | cuíca | the axisymmetric modes of a membrane, 1 : 2.30 : 3.60 : 4.90, driven at the centre by a cloth's stick-slip, the pitch gliding |
+    /// | surdo, zabumba, alfaia | two coupled heads, the modes of a membrane, starting sharp and settling |
+    /// | tamborim, pandeiro | one head; the pandeiro's jingles small free plates, 1 : 1.73 : 2.33 : 3.91, rattling as stochastic collisions |
+    /// | cajón | a rectangular plate's modes and the box's Helmholtz resonance near 80 Hz, a loose edge rattling |
+    /// | ganzá | stochastic collisions of beads in a metal tube of two resonances |
+    /// | hand clap | three clappers' bursts of air from between their palms |
+    pub fn brazilian() -> Self {
+        use DrumModel as M;
+        use percussion::*;
+        Self::empty()
+            .with(&[HAND_CLAP], piece!(M::HandClap, pan: -0.15))
+            .with(&[HIGH_AGOGO], piece!(M::AgogoHigh, pan: 0.45))
+            .with(&[LOW_AGOGO], piece!(M::AgogoLow, pan: 0.4))
+            .with(&[SHAKER], piece!(M::Shaker, pan: -0.45))
+            .with(&[MUTE_CUICA], piece!(M::CuicaHigh, pan: 0.3))
+            .with(&[OPEN_CUICA], piece!(M::CuicaLow, pan: 0.3))
+            .with(
+                &[MUTE_TRIANGLE],
+                piece!(M::TriangleMuted, pan: 0.55, choke: 2),
+            )
+            .with(
+                &[OPEN_TRIANGLE],
+                piece!(M::TriangleOpen, pan: 0.55, choke: 2),
+            )
+            .with(&[MUTE_SURDO], piece!(M::SurdoMuted, choke: 3))
+            .with(&[OPEN_SURDO], piece!(M::SurdoOpen, choke: 3))
+            .with(&[PANDEIRO_THUMB], piece!(M::PandeiroThumb, pan: -0.3))
+            .with(&[PANDEIRO_FINGERS], piece!(M::PandeiroFingers, pan: -0.3))
+            .with(&[PANDEIRO_SLAP], piece!(M::PandeiroSlap, pan: -0.3))
+            .with(&[PANDEIRO_MUTED], piece!(M::PandeiroMuted, pan: -0.3))
+            .with(&[ZABUMBA_OPEN], piece!(M::ZabumbaOpen, pan: 0.1, choke: 5))
+            .with(
+                &[ZABUMBA_MUTED],
+                piece!(M::ZabumbaMuted, pan: 0.1, choke: 5),
+            )
+            .with(&[ZABUMBA_STICK], piece!(M::ZabumbaStick, pan: 0.1))
+            .with(
+                &[TAMBORIM_OPEN],
+                piece!(M::TamborimOpen, pan: -0.5, choke: 7),
+            )
+            .with(
+                &[TAMBORIM_MUTED],
+                piece!(M::TamborimMuted, pan: -0.5, choke: 7),
+            )
+            .with(&[ALFAIA_OPEN], piece!(M::AlfaiaOpen, pan: -0.2, choke: 6))
+            .with(&[ALFAIA_MUTED], piece!(M::AlfaiaMuted, pan: -0.2, choke: 6))
+            .with(&[GONGUE_OPEN], piece!(M::GongueOpen, pan: -0.4, choke: 4))
+            .with(&[GONGUE_MUTED], piece!(M::GongueMuted, pan: -0.4, choke: 4))
+            .with(&[CAJON_BASS], piece!(M::CajonBass, pan: 0.2))
+            .with(&[CAJON_SLAP], piece!(M::CajonSlap, pan: 0.2))
+    }
+
+    /// This kit with the pieces of [`brazilian`](Self::brazilian) on every
+    /// key of [`percussion`] it has no piece on (a kit's own clap stays),
+    /// each at `gain` times its level there, made independent of this kit's
+    /// [`level`](Self::level) so that they sound alike on every kit.
+    pub fn with_brazilian_percussion(mut self, gain: f64) -> Self {
+        let gain = setting(gain, 0.0, 16.0, 1.0);
+        let level = setting(self.level, 0.0, 4.0, 1.0).max(1e-3);
+        let brazilian = Self::brazilian();
+        for key in percussion::ALL {
+            let piece = match brazilian.piece(key) {
+                Some(&piece) if self.piece(key).is_none() => piece,
+                _ => continue,
+            };
+            let level = (piece.level * gain / level).min(4.0);
+            self.set(key, Some(Piece { level, ..piece }));
+        }
+        self
     }
 }
 

@@ -6,7 +6,7 @@
 //! | [`PluckedString`] | a plucked string by physical modelling | [nylon](StringParams::nylon_guitar) and [steel](StringParams::steel_guitar) guitar, [finger](StringParams::finger_bass) and [slap](StringParams::slap_bass) bass |
 //! | [`FmVoice`] | four-operator frequency modulation | [electric piano](FmParams::electric_piano), [tubular bell](FmParams::tubular_bell), [FM bass](FmParams::fm_bass) |
 //! | [`OrganVoice`] | a tonewheel organ: drawbars, percussion, key click | [jazz](OrganParams::jazz), [gospel](OrganParams::gospel), [full](OrganParams::full), [ballad](OrganParams::ballad), any [registration](OrganParams::registration) |
-//! | [`DrumKitVoice`] | a drum kit whose piece on each key is chosen and tuned: acoustic drums and cymbals by modal synthesis, and the drums of the 909, 606, CR-78 and 808 | [acoustic](DrumKit::acoustic), [808](DrumKit::style_808), [909](DrumKit::style_909), [606](DrumKit::style_606), [CR-78](DrumKit::style_cr78), [trap](DrumKit::trap), [techno](DrumKit::techno), [house](DrumKit::house), [drum and bass](DrumKit::drum_and_bass), [lo-fi](DrumKit::lo_fi) |
+//! | [`DrumKitVoice`] | a drum kit whose piece on each key is chosen and tuned: acoustic drums and cymbals by modal synthesis, Brazilian percussion (agogô, gonguê, triangle, cuíca, surdo, zabumba, alfaia, tamborim, pandeiro, cajón, ganzá, hand clap) by physical modelling, and the drums of the 909, 606, CR-78 and 808 | [acoustic](DrumKit::acoustic), [Brazilian percussion](DrumKit::brazilian), [808](DrumKit::style_808), [909](DrumKit::style_909), [606](DrumKit::style_606), [CR-78](DrumKit::style_cr78), [trap](DrumKit::trap), [techno](DrumKit::techno), [house](DrumKit::house), [drum and bass](DrumKit::drum_and_bass), [lo-fi](DrumKit::lo_fi) |
 //! | [`AnalogKitVoice`] | sixteen drums of a classic analogue drum machine, on the General MIDI keys | one [setting](DrumSettings) per drum |
 //! | [`KickBassVoice`] | that machine's long kick played as a bass, with slides | [the classic](KickBassParams::default) |
 //! | [`AcidVoice`] | the acid bass: an oscillator, a diode ladder and envelopes, with accent and slide | [classic](AcidParams::classic), [squelch](AcidParams::squelch), [square](AcidParams::square) |
@@ -99,6 +99,7 @@ mod acid;
 mod acoustic;
 mod analog_drums;
 mod bowed;
+mod brazilian;
 mod choir;
 mod common;
 mod fm;
@@ -126,7 +127,7 @@ pub use common::HANDOVER_SECONDS;
 pub use fm::{Algorithm, FM_OPERATORS, FM_VELOCITY_RANGE_DB, FmOperator, FmParams, FmVoice};
 pub use kit::{
     CHOKE_GROUPS, CHOKE_SECONDS, ChokeGroups, DrumKit, DrumKitVoice, DrumModel, KIT_FIRST_KEY,
-    KIT_KEYS, LoFi, Piece, gm,
+    KIT_KEYS, LoFi, Piece, gm, percussion,
 };
 pub use mallet::{MALLET_MODES, MalletMode, MalletParams, MalletShape, MalletVoice};
 pub use organ::{

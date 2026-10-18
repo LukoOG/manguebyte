@@ -1065,7 +1065,7 @@ fn the_instruments_do_not_use_the_heap() {
     use manguebyte_dsp::instruments::{
         AcidParams, AcidVoice, AnalogKitParams, AnalogKitVoice, DrumKit, DrumKitVoice, FmParams,
         FmVoice, KickBassParams, KickBassVoice, OrganParams, OrganVoice, PluckedString,
-        RotaryParams, RotarySpeaker, RotarySpeed, StringParams,
+        RotaryParams, RotarySpeaker, RotarySpeed, StringParams, percussion,
     };
 
     let strings = [
@@ -1138,6 +1138,24 @@ fn the_instruments_do_not_use_the_heap() {
         |synth, round| {
             let kit = kits[usize::from(round) % kits.len()];
             synth.voices_mut().for_each(|voice| voice.set_params(kit));
+        },
+    );
+    // The Brazilian percussion, every stroke of it struck again and again
+    // over the rounds, muted strokes choking open ones.
+    let brazilian = [
+        DrumKit::brazilian(),
+        DrumKit::lo_fi().with_brazilian_percussion(1.0),
+    ];
+    flood(
+        "DrumKitVoice, Brazilian percussion",
+        Synth::new(DrumKitVoice::voices(6, DrumKit::brazilian())),
+        |synth, round| {
+            let kit = brazilian[usize::from(round) % brazilian.len()];
+            synth.voices_mut().for_each(|voice| voice.set_params(kit));
+            for step in 0..4 {
+                let key = percussion::ALL[(usize::from(round) * 4 + step) % percussion::ALL.len()];
+                synth.note_on_accented(NoteRef::new(9, key), 0.6, step % 2 == 0);
+            }
         },
     );
     flood(

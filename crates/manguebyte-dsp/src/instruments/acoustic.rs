@@ -47,7 +47,7 @@ const fn partial(hertz: f64, t60: f64, level: f64) -> Partial {
 }
 
 /// A filter for one channel, prepared at `rate`.
-fn filter(mode: SvfMode, hertz: f64, q: f64, rate: f64) -> StateVariableFilter<f64> {
+pub(crate) fn filter(mode: SvfMode, hertz: f64, q: f64, rate: f64) -> StateVariableFilter<f64> {
     let mut filter = StateVariableFilter::new(mode, hertz.min(0.45 * rate), q);
     Processor::<f64>::prepare(
         &mut filter,
@@ -64,18 +64,18 @@ fn filter(mode: SvfMode, hertz: f64, q: f64, rate: f64) -> StateVariableFilter<f
 /// time, added to what is left of the last one: the noise of a stick on a
 /// head, or of snare wires.
 #[derive(Debug, Clone)]
-struct Burst {
+pub(crate) struct Burst {
     slow: f64,
     fast: f64,
     slow_fall: f64,
     fast_fall: f64,
-    band: StateVariableFilter<f64>,
+    pub(crate) band: StateVariableFilter<f64>,
     /// Whether the filter has been fed since it was last cleared.
     fed: bool,
 }
 
 impl Burst {
-    fn new(rate: f64) -> Self {
+    pub(crate) fn new(rate: f64) -> Self {
         Self {
             slow: 0.0,
             fast: 0.0,
@@ -86,14 +86,14 @@ impl Burst {
         }
     }
 
-    fn add(&mut self, level: f64, attack: f64, decay: f64, rate: f64) {
+    pub(crate) fn add(&mut self, level: f64, attack: f64, decay: f64, rate: f64) {
         self.slow += level;
         self.fast += level;
         self.slow_fall = t60_factor(decay, rate);
         self.fast_fall = t60_factor(attack, rate);
     }
 
-    fn level(&self) -> f64 {
+    pub(crate) fn level(&self) -> f64 {
         (self.slow - self.fast).abs() + self.fast.abs()
     }
 
@@ -106,12 +106,12 @@ impl Burst {
     }
 
     /// Whether the burst is over: its envelope has fallen to nothing.
-    fn is_over(&self) -> bool {
+    pub(crate) fn is_over(&self) -> bool {
         self.slow == 0.0 && self.fast == 0.0
     }
 
     #[inline]
-    fn next(&mut self, noise: f64) -> f64 {
+    pub(crate) fn next(&mut self, noise: f64) -> f64 {
         if self.is_over() {
             // Over: the filter is cleared rather than left to ring down
             // into subnormal numbers, which are slow.
@@ -126,7 +126,7 @@ impl Burst {
         self.band.process_sample(0, noise * envelope)
     }
 
-    fn silence(&mut self) {
+    pub(crate) fn silence(&mut self) {
         self.slow = 0.0;
         self.fast = 0.0;
         self.fed = false;
@@ -144,6 +144,16 @@ pub(crate) enum HeadKind {
     Tom,
     Conga,
     Bongo,
+    /// The Brazilian drums of [`super::brazilian`]: the surdo, struck with
+    /// a felt mallet; the zabumba's top head, struck with its mallet, and
+    /// its bottom head, struck with the thin stick; the alfaia, with wooden
+    /// sticks; the tamborim and the pandeiro, frame drums of one head.
+    Surdo,
+    Zabumba,
+    ZabumbaStick,
+    Alfaia,
+    Tamborim,
+    Pandeiro,
 }
 
 /// What makes one drum with heads.
@@ -455,8 +465,170 @@ const fn head_spec(kind: HeadKind) -> HeadSpec {
             level: 0.9,
             ..SNARE
         },
+        // A surdo of 20 to 22 inches: two heads tuned alike on a metal
+        // shell, struck with a felt mallet, ringing long and falling in
+        // pitch as its wide swing settles.
+        HeadKind::Surdo => HeadSpec {
+            hertz: 58.0,
+            modes: 30,
+            far_ratio: 1.03,
+            coupling: (0.12, 0.012),
+            t60: 1.6,
+            t60_slope: 1.0,
+            diameters: 1.1,
+            upper: 0.6,
+            far_decay: 1.0,
+            far_heard: 0.6,
+            listen: (0.25, 0.4),
+            tilt: 0.1,
+            strike: (0.15, 0.45),
+            contact: (0.008, 0.0035),
+            glide: 0.05,
+            swing: (1.0, 0.12),
+            build: 0.02,
+            crack: (0.12, 700.0, 1_600.0, 0.006),
+            wires: NO_WIRES,
+            rim: &[],
+            rim_level: 0.0,
+            shell: &SURDO_SHELL,
+            shell_level: 0.12,
+            head_level: 1.0,
+            level: 1.15,
+        },
+        // A zabumba: a shallow drum whose top head the mallet plays and
+        // whose thinner bottom head, tuned higher, the stick plays.
+        HeadKind::Zabumba => HeadSpec {
+            hertz: 92.0,
+            modes: 30,
+            far_ratio: 1.3,
+            coupling: (0.1, 0.01),
+            t60: 0.8,
+            t60_slope: 1.0,
+            diameters: 1.1,
+            upper: 0.7,
+            far_decay: 1.0,
+            far_heard: 0.5,
+            listen: (0.4, 0.5),
+            tilt: 0.2,
+            strike: (0.2, 0.5),
+            contact: (0.006, 0.0025),
+            glide: 0.035,
+            swing: (1.0, 0.1),
+            build: 0.012,
+            crack: (0.15, 900.0, 2_000.0, 0.005),
+            wires: NO_WIRES,
+            rim: &[],
+            rim_level: 0.0,
+            shell: &ZABUMBA_SHELL,
+            shell_level: 0.2,
+            head_level: 1.0,
+            level: 0.95,
+        },
+        HeadKind::ZabumbaStick => HeadSpec {
+            hertz: 92.0 * 1.3,
+            far_ratio: 1.0 / 1.3,
+            t60: 0.35,
+            strike: (0.75, 0.9),
+            contact: (0.0006, 0.00025),
+            glide: 0.02,
+            swing: (2.0, 0.06),
+            build: 0.004,
+            crack: (0.9, 2_500.0, 5_000.0, 0.006),
+            shell_level: 0.3,
+            level: 0.33,
+            ..head_spec(HeadKind::Zabumba)
+        },
+        // An alfaia of maracatu: two goatskin heads drawn by ropes over a
+        // deep wooden shell, struck with heavy wooden sticks.
+        HeadKind::Alfaia => HeadSpec {
+            hertz: 78.0,
+            modes: 30,
+            far_ratio: 1.04,
+            coupling: (0.12, 0.012),
+            t60: 1.1,
+            t60_slope: 0.9,
+            diameters: 1.2,
+            upper: 0.6,
+            far_decay: 1.0,
+            far_heard: 0.55,
+            listen: (0.45, 0.6),
+            tilt: 0.25,
+            strike: (0.3, 0.65),
+            contact: (0.0018, 0.0006),
+            glide: 0.04,
+            swing: (1.5, 0.1),
+            build: 0.015,
+            crack: (0.45, 1_200.0, 3_000.0, 0.006),
+            wires: NO_WIRES,
+            rim: &[],
+            rim_level: 0.0,
+            shell: &ALFAIA_SHELL,
+            shell_level: 0.35,
+            head_level: 1.0,
+            level: 0.6,
+        },
+        // A tamborim of 6 inches: one tight nylon head on a metal frame,
+        // struck with a thin stick.
+        HeadKind::Tamborim => HeadSpec {
+            hertz: 640.0,
+            modes: 24,
+            far_ratio: 0.0,
+            t60: 0.28,
+            t60_slope: 1.0,
+            diameters: 1.3,
+            listen: (0.5, 0.8),
+            tilt: 0.3,
+            strike: (0.45, 0.85),
+            contact: (0.0005, 0.0002),
+            glide: 0.02,
+            swing: (1.2, 0.04),
+            build: 0.002,
+            crack: (0.6, 2_500.0, 5_500.0, 0.004),
+            wires: NO_WIRES,
+            rim: &[],
+            rim_level: 0.0,
+            shell: &TAMBORIM_FRAME,
+            shell_level: 0.15,
+            level: 0.6,
+            ..SNARE
+        },
+        // A pandeiro of 10 inches: one head on a wooden frame, played with
+        // the thumb, the fingertips and the palm; its jingles are
+        // [`super::brazilian`]'s.
+        HeadKind::Pandeiro => HeadSpec {
+            hertz: 190.0,
+            modes: 30,
+            far_ratio: 0.0,
+            t60: 0.45,
+            t60_slope: 1.0,
+            diameters: 1.3,
+            listen: (0.5, 0.8),
+            tilt: 0.3,
+            strike: (0.2, 0.85),
+            contact: (0.0035, 0.0009),
+            glide: 0.025,
+            swing: (1.0, 0.05),
+            build: 0.004,
+            crack: (0.25, 1_500.0, 3_500.0, 0.004),
+            wires: NO_WIRES,
+            rim: &[],
+            rim_level: 0.0,
+            shell: &PANDEIRO_FRAME,
+            shell_level: 0.1,
+            level: 0.7,
+            ..SNARE
+        },
     }
 }
+
+/// The shells and frames of the Brazilian drums: a surdo's metal shell, a
+/// zabumba's and an alfaia's wooden ones, a tamborim's metal frame and a
+/// pandeiro's wooden one.
+const SURDO_SHELL: [Partial; 2] = [partial(430.0, 0.12, 1.0), partial(1_010.0, 0.08, 0.5)];
+const ZABUMBA_SHELL: [Partial; 1] = [partial(380.0, 0.08, 1.0)];
+const ALFAIA_SHELL: [Partial; 2] = [partial(260.0, 0.1, 1.0), partial(470.0, 0.07, 0.6)];
+const TAMBORIM_FRAME: [Partial; 2] = [partial(2_350.0, 0.06, 1.0), partial(4_100.0, 0.04, 0.5)];
+const PANDEIRO_FRAME: [Partial; 2] = [partial(520.0, 0.06, 1.0), partial(1_150.0, 0.04, 0.5)];
 
 /// How a mode of the heads takes a strike: `projection · J_m(j r)` for a
 /// strike on the batter at radius `r`.
@@ -774,10 +946,8 @@ impl Heads {
         // The stick's noise: louder and brighter the harder it is.
         let (level, low, high, seconds) = spec.crack;
         let crack = match kind {
-            HeadKind::Kick | HeadKind::Tom | HeadKind::Conga | HeadKind::Bongo => {
-                0.3 + 1.4 * hit.snap
-            }
-            _ => 1.0,
+            HeadKind::Snare | HeadKind::Rimshot | HeadKind::SideStick => 1.0,
+            _ => 0.3 + 1.4 * hit.snap,
         };
         let centre = low * (high / low).powf(hard.min(1.2));
         self.crack.band.set_frequency(centre.min(0.45 * rate));
