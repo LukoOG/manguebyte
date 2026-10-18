@@ -29,8 +29,15 @@ unused-allowed-license = "allow"
 # exception names the crate instead. On wasm32, which is not built yet,
 # `wasm-bindgen-shared` would bring it in at run time through the web
 # backends of `cpal` and `midir`; see docs/TECH_DEBT.md.
+#
+# `manguebyte-pro-io` is the one crate of the workspace under the GPLv3
+# alone: it declares the driver interface from Steinberg's ASIO SDK, which
+# it uses under the SDK's GPLv3 option. It is opt-in, and nothing else in
+# the workspace may depend on it (scripts/check-layering.sh checks), so the
+# exception lets it through without letting the GPLv3 reach anything else.
 exceptions = [
     { allow = ["Unicode-3.0"], crate = "unicode-ident" },
+    { allow = ["GPL-3.0-only"], crate = "manguebyte-pro-io" },
 ]
 # The subset of Inter that `manguebyte-gfx` embeds is under the SIL Open
 # Font License. It is a file inside a workspace crate, not a dependency,

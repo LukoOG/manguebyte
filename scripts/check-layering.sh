@@ -60,3 +60,17 @@ if [ "$failed" -ne 0 ]; then
     exit 1
 fi
 echo "No audio crate depends on an interface crate."
+
+# `manguebyte-pro-io` is under the GPLv3 alone (its README says why), and
+# everything else under MIT OR Apache-2.0: no crate of the workspace may
+# depend on it, in any way, for tests and builds included, or the GPLv3
+# would reach it. The inverted tree lists the crate and its dependents.
+dependents="$(cargo tree "$@" --workspace --all-features --target all -e normal,build,dev \
+    --invert manguebyte-pro-io --prefix none --format '{p}' | sort -u \
+    | grep -v '^manguebyte-pro-io v' || true)"
+if [ -n "$dependents" ]; then
+    echo "error: these crates depend on manguebyte-pro-io, which is under the GPLv3:"
+    echo "$dependents"
+    exit 1
+fi
+echo "Nothing depends on manguebyte-pro-io."

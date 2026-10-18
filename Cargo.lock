@@ -791,6 +791,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "manguebyte-pro-io"
+version = "0.1.0"
+dependencies = [
+ "manguebyte-core",
+ "manguebyte-devices",
+]
+
+[[package]]
 name = "manguebyte-sampler"
 version = "0.1.0"
 dependencies = [

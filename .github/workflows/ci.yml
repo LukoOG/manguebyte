@@ -476,9 +476,18 @@ jobs:
           command: check licenses
       # A published crate carries only the files under its own folder, so
       # each one keeps a copy of both licence texts, identical to the root.
-      - name: Every crate carries both licence texts
+      # The exception is manguebyte-pro-io, under the GPLv3 alone, which
+      # carries that text and neither of the others.
+      - name: Every crate carries its licence texts
         run: |
           for crate in crates/*/; do
+            if [ "$crate" = "crates/manguebyte-pro-io/" ]; then
+              grep -q "GNU GENERAL PUBLIC LICENSE" "${crate}LICENSE"
+              grep -q "Version 3, 29 June 2007" "${crate}LICENSE"
+              test ! -e "${crate}LICENSE-MIT"
+              test ! -e "${crate}LICENSE-APACHE"
+              continue
+            fi
             for licence in LICENSE-MIT LICENSE-APACHE; do
               cmp "$licence" "$crate$licence"
             done

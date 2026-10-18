@@ -1,0 +1,24 @@
+[package]
+name = "manguebyte-pro-io"
+description = "ASIO driver support for the Manguebyte Audio Framework, under the GPLv3: a device backend for manguebyte-devices."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# The driver interface is declared from Steinberg's ASIO SDK, which this
+# crate uses under the SDK's GPLv3 option. Unlike every other crate of the
+# workspace it is not under MIT OR Apache-2.0, and no other workspace crate
+# may depend on it (scripts/check-layering.sh checks). The licence text is
+# in LICENSE.
+license = "GPL-3.0-only"
+authors.workspace = true
+keywords = ["audio", "asio", "windows", "realtime", "low-latency"]
+categories.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+manguebyte-core.workspace = true
+manguebyte-devices.workspace = true
+
+[lints]
+workspace = true
