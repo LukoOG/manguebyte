@@ -15,6 +15,9 @@
 //!   messages that stand for it.
 //! - [`UmpTranslator`] and [`packet_to_midi1`] do the same for
 //!   [`Packet`]s.
+//! - [`Midi2ToMpe`] is the alternate translation for what shapes one
+//!   note: it writes MIDI 2.0 out as MPE, with a member channel for each
+//!   note.
 //!
 //! Written from appendix D of "Universal MIDI Packet (UMP) Format and
 //! MIDI 2.0 Protocol", version 1.1.1 (M2-104-UM). Section numbers in
@@ -52,7 +55,7 @@
 //! Only the default translation is implemented. Per-note controllers,
 //! per-note pitch bend, per-note management and relative controllers have
 //! no MIDI 1.0 form and translate to nothing (section D.2.8); mapping them
-//! to MPE is an alternate translation that this module does not attempt.
+//! to MPE is an alternate translation, which [`Midi2ToMpe`] does.
 //! High-resolution velocity (controller 88) is passed through as an
 //! ordinary controller in both directions.
 //!
@@ -65,6 +68,10 @@
 
 use crate::ump::{Bank, ChannelVoice2, Message, NoteAttribute, Packet};
 use crate::{MessageList, MidiMessage, SystemMessage};
+
+mod to_mpe;
+
+pub use to_mpe::Midi2ToMpe;
 
 /// All ones in the low `bits` bits.
 const fn mask(bits: u32) -> u32 {

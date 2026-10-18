@@ -375,3 +375,25 @@ fn the_stream_parser_still_does_not_use_the_heap_alongside_packets() {
     });
     assert!(words > 5_000);
 }
+
+#[test]
+fn writing_mpe_from_midi2_does_not_use_the_heap() {
+    use manguebyte_midi::translate::Midi2ToMpe;
+
+    let messages = performance(if cfg!(miri) { 200 } else { 20_000 });
+    let mut to_midi2 = Midi1ToMidi2::new();
+    let mut mpe = Midi2ToMpe::new(Zone::lower(15).unwrap());
+    let mut produced = 0usize;
+    assert_no_heap_use("writing MPE", || {
+        for (index, message) in messages.iter().enumerate() {
+            for midi2 in to_midi2.translate(*message) {
+                mpe.translate(midi2, |_| produced += 1);
+            }
+            if index % 1_000 == 999 {
+                mpe.end_all(|_| produced += 1);
+                mpe.reset();
+            }
+        }
+    });
+    assert!(produced > messages.len() / 2);
+}
