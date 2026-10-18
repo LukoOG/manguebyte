@@ -132,6 +132,12 @@ impl Meter {
         self.end += frames as u64;
     }
 
+    /// Makes `frame` the frame after the newest one, for a meter made
+    /// before it was known which frame its part starts on. Real-time safe.
+    pub(crate) fn start_at(&mut self, frame: u64) {
+        self.end = frame;
+    }
+
     /// The frame after the newest one.
     pub(crate) fn end(&self) -> u64 {
         self.end

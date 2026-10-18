@@ -435,6 +435,9 @@ pub use drums::{
     DRUM_MAP, Drum, DrumNote, HAT_CHOKE_SECONDS, drum_map_json,
 };
 pub use effect::{Effect, Visual};
+pub use engine::handoff::{
+    DetachedInstrument, DetachedPart, DetachedSfz, DetachedStages, HandoffError,
+};
 pub use engine::{
     CANCEL_FADE_SECONDS, Chain, Engine, EngineConfig, EngineError, EngineStats, InstrumentKind,
     LIMITER_RELEASE_SECONDS, OUTPUT_CEILING, Pushed,

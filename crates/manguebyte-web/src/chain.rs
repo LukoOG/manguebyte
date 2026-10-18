@@ -555,6 +555,58 @@ impl ChainDsp {
         }
     }
 
+    /// A chain that holds only silent stages for `effects`, each made as
+    /// [`set_stages`](Self::set_stages) makes a stage that joins a part's
+    /// chain for the first time, from the parameters' defaults, which is
+    /// what a part's parameters of an effect it has never had hold: the
+    /// stages another chain can [`adopt`](Self::adopt_stages). Allocates.
+    pub(crate) fn stage_donor(effects: Chain, spec: &ProcessSpec) -> Self {
+        let params = ChainParams::new();
+        let mut donor = Self::new(&params, Chain::NONE, spec);
+        let stereo = donor.spec;
+        for effect in Effect::PART_ORDER {
+            if effects.has(effect) {
+                donor.stages.make(effect, &params, &stereo, false);
+            }
+        }
+        donor
+    }
+
+    /// The effects of `effects` whose stage this chain has never made:
+    /// those [`set_stages`](Self::set_stages) would allocate for.
+    pub(crate) fn unmade(&self, effects: Chain) -> Chain {
+        Effect::PART_ORDER
+            .into_iter()
+            .filter(|&effect| effects.has(effect) && self.stages.get(effect).is_none())
+            .fold(Chain::NONE, Chain::with)
+    }
+
+    /// Moves in the stages `donor` holds for the effects of `effects` this
+    /// chain has never made, leaving the others with `donor`. Never
+    /// allocates or frees.
+    pub(crate) fn adopt_stages(&mut self, donor: &mut Self, effects: Chain) {
+        macro_rules! adopt {
+            ($($field:ident: $effect:ident),* $(,)?) => {$(
+                if effects.has(Effect::$effect) && self.stages.$field.is_none() {
+                    self.stages.$field = donor.stages.$field.take();
+                }
+            )*};
+        }
+        adopt!(
+            highpass: Highpass,
+            eq: Eq,
+            drive: Drive,
+            bitcrush: Bitcrush,
+            compressor: Compressor,
+            chorus: Chorus,
+            flanger: Flanger,
+            phaser: Phaser,
+            tremolo: Tremolo,
+            autopan: Autopan,
+            delay: Delay,
+        );
+    }
+
     /// Starts again from `params` after something that is not a number got
     /// in: every memory cleared, every smoother at its parameter's value.
     /// Real-time safe.

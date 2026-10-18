@@ -878,6 +878,40 @@ impl SamplerLoader {
         }
     }
 
+    /// Sends an instrument that is boxed already, as [`load`](Self::load)
+    /// does, without collecting. Never allocates or frees, so a loader kept
+    /// on the audio thread, beside its sampler, can take an instrument made
+    /// and boxed on another thread; see [`take_retired`](Self::take_retired)
+    /// for the other way.
+    ///
+    /// # Errors
+    ///
+    /// Hands the instrument back if too many have been sent and not
+    /// collected or taken back.
+    pub fn load_boxed(&mut self, instrument: Box<Instrument>) -> Result<(), Box<Instrument>> {
+        if self.in_flight >= self.limit {
+            return Err(instrument);
+        }
+        instrument.restart();
+        match self.outgoing.push(instrument) {
+            Ok(()) => {
+                self.in_flight += 1;
+                Ok(())
+            }
+            Err(instrument) => Err(instrument),
+        }
+    }
+
+    /// Takes back one instrument the audio thread has finished with,
+    /// without freeing it, for a caller that frees it on another thread.
+    /// Never allocates or frees. [`collect`](Self::collect) frees them all
+    /// instead.
+    pub fn take_retired(&mut self) -> Option<Box<Instrument>> {
+        let instrument = self.retired.pop()?;
+        self.in_flight = self.in_flight.saturating_sub(1);
+        Some(instrument)
+    }
+
     /// Frees the instruments the audio thread has finished with, and
     /// returns how many there were.
     pub fn collect(&mut self) -> usize {

@@ -87,3 +87,27 @@ fn the_loader_refuses_more_than_it_can_track() {
     assert!(loader.load(instrument(500.0)).is_ok());
     assert!(sampler.instrument().is_some());
 }
+
+#[test]
+fn a_boxed_instrument_comes_and_goes_back_without_being_freed() {
+    let (mut sampler, mut loader) = Sampler::<f32>::with_instrument(instrument(300.0), 8);
+    sampler.prepare(&ProcessSpec {
+        sample_rate: RATE,
+        max_block_size: 512,
+        num_channels: 1,
+    });
+    // Boxed on one thread, sent from another as it is: the same as `load`.
+    loader.load_boxed(Box::new(instrument(500.0))).unwrap();
+    assert_eq!(loader.in_flight(), 2);
+    let output = render_mono(&mut sampler, 4_800, &[(0, on(62, 1.0))]);
+    assert!(amplitude_at(&output[100..], 500.0, RATE) > 0.45);
+    assert!(amplitude_at(&output[100..], 300.0, RATE) < 1e-3);
+    // The one it replaced comes back whole, for its taker to free.
+    let back = loader
+        .take_retired()
+        .expect("the first instrument is retired");
+    assert_eq!(back.num_regions(), 1);
+    assert_eq!(loader.in_flight(), 1);
+    assert!(loader.take_retired().is_none());
+    assert_eq!(loader.collect(), 0);
+}

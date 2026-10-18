@@ -23,6 +23,9 @@ use crate::sampled::SampledInstrument;
 use crate::synth::{SynthInstrument, choke_synth, fade_synth, new_synth, synth_note_on};
 use crate::voiced::Voiced;
 
+// Control calls in two halves, for an engine on a real-time thread.
+pub(crate) mod handoff;
+
 /// The most the output ever reaches: about -0.3 dB below full scale. The
 /// master bus's limiter keeps every sample within
 /// `-OUTPUT_CEILING..=OUTPUT_CEILING`, and the waveform between the

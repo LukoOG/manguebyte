@@ -238,6 +238,37 @@ impl SampledInstrument {
         self.loader.collect()
     }
 
+    /// Hands `instrument`, boxed and measured already, to the sampler as
+    /// [`load`](Self::load) does: the part plays it at `make_up_db` while
+    /// it normalises, and at the level of its samples if it does not (an
+    /// instrument loaded then is not measured). Never allocates or frees:
+    /// `empty` is a two-channel buffer, which is left with no frames, for
+    /// the sampler to take the instrument in; the instruments the sampler
+    /// is done with stay with the loader for
+    /// [`take_finished`](Self::take_finished); and a measurement that was
+    /// under way is handed back for its caller to drop.
+    pub(crate) fn give(
+        &mut self,
+        instrument: Box<Instrument>,
+        make_up_db: Option<f64>,
+        empty: &mut AudioBuffer<f32>,
+    ) -> Result<Option<Box<LoudnessProbe>>, Box<Instrument>> {
+        self.loader.load_boxed(instrument)?;
+        empty.set_num_frames(0);
+        self.sampler.process(empty);
+        let measuring = self.measuring.take();
+        self.provisional_db = None;
+        self.make_up_db = if self.normalize { make_up_db } else { None };
+        self.retrim();
+        Ok(measuring)
+    }
+
+    /// One instrument the sampler is done with, not freed. Never allocates
+    /// or frees.
+    pub(crate) fn take_finished(&mut self) -> Option<Box<Instrument>> {
+        self.loader.take_retired()
+    }
+
     pub(crate) fn note_on(&mut self, channel: u8, key: u8, velocity: f32, accent: bool) {
         if let Some(kit) = &mut self.kit {
             // The instrument the sampler starts notes with now, which is
