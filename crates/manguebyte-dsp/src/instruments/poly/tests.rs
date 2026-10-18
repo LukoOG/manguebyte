@@ -1091,6 +1091,30 @@ fn the_output_does_not_depend_on_the_block_size() {
     }
 }
 
+/// A note that ends ends the same whatever the blocks: the decimator puts
+/// out the last of it after its tones fall silent, then nothing.
+#[test]
+fn the_end_of_a_note_does_not_depend_on_the_block_size() {
+    let script = [
+        (0, on(52, 0.9)),
+        (2_000, off(52)),
+        (3_000, on(64, 0.6)),
+        (3_500, off(64)),
+    ];
+    let run = |block| {
+        let params = PolySynthParams::INIT;
+        let mut synth = synth_of([PolySynthVoice::new(params), PolySynthVoice::new(params)]);
+        let output = play(&mut synth, &script, 16_000, block);
+        (output, synth.active_voices())
+    };
+    let (reference, voices) = run(256);
+    assert_eq!(voices, 0, "both notes are over");
+    assert!(rms(&reference) > 0.01);
+    for block in [1, 7, 64, 1_000] {
+        assert!(run(block).0 == reference, "blocks of {block}");
+    }
+}
+
 #[test]
 fn noise_has_its_colour() {
     let noisy = |color: NoiseColor| PolySynthParams {

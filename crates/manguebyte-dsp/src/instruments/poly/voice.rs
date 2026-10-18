@@ -63,6 +63,10 @@ const DECIMATOR_DB: f64 = 100.0;
 const DECIMATOR_PAIRS: usize = (DECIMATOR_TAPS + 1) / 4;
 const DECIMATOR_HISTORY: usize = 128;
 
+/// How many output samples the decimator takes to put out the last of a
+/// note once its tones are silent: after them it holds nothing but zeros.
+const DECIMATOR_TAIL: u32 = DECIMATOR_TAPS.div_ceil(OVERSAMPLING) as u32;
+
 /// How many samples late, at the output rate, the voice is: two samples
 /// of the oscillators' band-limiting and the decimator's 39, at twice the
 /// rate.
@@ -1113,6 +1117,10 @@ pub struct PolySynthVoice {
     fade: f64,
     fade_step: f64,
     decimator: Decimator,
+    /// Output samples the decimator still has to put out after the tones
+    /// have fallen silent; rendered whatever the blocks, so that the end of
+    /// a note does not depend on where a block starts.
+    tail: u32,
     /// Whether a mono or legato voice was taken over while sounding, so
     /// that its next note carries on from it.
     carried: bool,
@@ -1183,6 +1191,7 @@ impl PolySynthVoice {
             fade: 0.0,
             fade_step: 1.0,
             decimator: Decimator::new(),
+            tail: 0,
             carried: false,
         }
     }
@@ -1242,6 +1251,7 @@ impl PolySynthVoice {
         self.old.silence();
         self.fade = 0.0;
         self.decimator.clear();
+        self.tail = 0;
         self.carried = false;
         self.shared.controls.key_pressure = 0.0;
     }
@@ -1357,7 +1367,7 @@ impl<S: Sample> Voice<S> for PolySynthVoice {
     }
 
     fn is_active(&self) -> bool {
-        self.now.is_sounding() || self.fade > 0.0
+        self.now.is_sounding() || self.fade > 0.0 || self.tail > 0
     }
 
     fn render(&mut self, buffer: &mut AudioBuffer<S>) {
@@ -1375,6 +1385,11 @@ impl<S: Sample> Voice<S> for PolySynthVoice {
                 &mut self.decimator,
                 &cx,
             );
+            if self.now.is_sounding() || self.fade > 0.0 {
+                self.tail = DECIMATOR_TAIL;
+            } else {
+                self.tail = self.tail.saturating_sub(1);
+            }
             match channels {
                 0 => {}
                 1 => buffer.channel_mut(0)[frame] += S::from_f64(0.5 * (left + right)),
