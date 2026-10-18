@@ -304,7 +304,7 @@ evenly in ratios; the parameter JSON gives every scale exactly.
 | `drive`, `transfer_curve` | `amount` | dB | 0 to 36 | 12 | linear |
 | | `output` | dB | -24 to 12 | -6 | linear |
 | | `mix` | | 0 to 1 | 1 | linear |
-| | `shape` | | 0 tanh, 1 soft clip, 2 hard clip, 3 fold | 0 | choice |
+| | `shape` | | 0 tanh, 1 soft clip, 2 hard clip, 3 fold, 4 tube | 0 | choice |
 | `bitcrush`, `bitcrush_steps` | `bits` | bits | 1 to 16 | 8 | linear |
 | | `rate` | Hz | 100 to 48 000 | 48 000 | log |
 | | `mix` | | 0 to 1 | 1 | linear |
@@ -358,8 +358,35 @@ What they do, in short:
   bump) and a peak between, each a cookbook biquad in double precision.
   A shelf is half its gain at its corner frequency.
 - **Drive**: gain into the curve, gain out, mixed with the clean signal; a
-  change of curve cross-fades. The curves are odd, so no offset appears;
-  the drive is not oversampled (its aliasing is that of the curve).
+  change of curve cross-fades. The first four curves are odd, so they add
+  odd harmonics only and no offset appears; the drive is not oversampled
+  (its aliasing is that of the curve). The **tube** (`shape` 4, `'tube'`
+  in `SHAPES`) is asymmetric, in the manner of a triode biased off the
+  middle of its range:
+
+  ```text
+  f(x) = ¾ · (tanh(³⁄₂ · x + ½ ln 2) − ⅓)
+  ```
+
+  The bias, `½ ln 2`, puts the resting point a third of the way up the
+  hyperbolic tangent (its tangent is exactly ⅓), so `f(0) = 0` and the
+  slope there is 1: a quiet signal passes unchanged, and to second order
+  `f(x) ≈ x − x²/2`. The positive half, which runs into the bend sooner,
+  as a triode's grid starts to conduct, flattens towards ½; the negative
+  half, heading for cutoff, eases towards −1. Bent unequally, a wave gains
+  even harmonics: a kilohertz at the drive's defaults comes out with its
+  second and fourth harmonics 18 dB below the fundamental, where the odd
+  curves give none (below -300 dB). That also shifts its middle, so after
+  the curve a first-order high-pass at 5 Hz (`TUBE_DC_HZ`),
+  `y[n] = x[n] − x[n−1] + R·y[n−1]` with `R = exp(−2π·5 Hz/rate)`, takes
+  the offset out: a tenth of the peak and more on a loud tone, less than
+  10⁻⁴ of it after the filter. The drawn curve is `f` itself
+  (`tube_curve`), before the filter. At the drive's defaults a phrase
+  plays within 0.6 LU of the tanh's loudness (`tests/loudness.rs`), so
+  changing the curve changes the colour, not the level. Pakarinen and
+  Yeh, "A review of digital techniques for modeling vacuum-tube guitar
+  amplifiers" (*Computer Music Journal* 33(2), 2009), survey this kind of
+  static model.
 - **Bitcrush**: holds the signal for whole periods of `rate` (a
   sample-and-hold, aliasing on purpose) and rounds it to steps of
   `2^(1-bits)`, half-way away from zero: the staircase is odd, so there is
@@ -414,7 +441,7 @@ apply, so what is drawn is what the effect runs:
 |---|---|
 | high-pass, low-pass | `SvfResponse`, the state-variable filter's own response |
 | EQ | the three bands' `BiquadResponse`s, of the coefficients the equaliser runs, in a row |
-| drive | the `ShaperCurve`, between the drive's gains and its mix |
+| drive | the `ShaperCurve`, or this crate's `tube_curve` before its high-pass, between the drive's gains and its mix |
 | compressor, glue | `CompressorTransfer`, with the make-up and the parallel mix |
 | limiter | `LimiterTransfer`, at the ceiling or `OUTPUT_CEILING`, the lower |
 | chorus, flanger | `ChorusSweep` |
@@ -423,8 +450,8 @@ apply, so what is drawn is what the effect runs:
 | delay | `DelayTaps`, with the ping-pong's spread between the sides: echo `k` of the louder side is the tap's gain times `1 - p/2 + p/2·|1-2p|^(k-1)`, `p` the ping-pong |
 | reverb | `ReverbDecay` at 1 kHz, where reverberation times are quoted (a part's reverb has damping 0.45 and size 0.6; the shared one its parameters) |
 
-The bitcrusher is this crate's own, and so is its staircase.
-`tests/effects.rs` checks every curve against the `manguebyte-dsp`
+The bitcrusher is this crate's own, and so is its staircase; so is the
+tube's curve. `tests/effects.rs` checks every curve against the `manguebyte-dsp`
 function, to the precision of an `f32`, and against what is measured
 through the engine: the equaliser's and the filters' curves within 0.1 dB,
 the compressor's within 0.1 dB, the delay's taps exactly. They live in
@@ -513,8 +540,71 @@ number for the first parameter, `{}` for the effect as it is set, or
 low-pass and the reverb included; that is the shape of a method chain
 once it is evaluated. `removeEffect`, `setSend`, `setMaster`,
 `effectCurve`, `effectRunning`, `masterParams`, `masterParamValue`,
-`partChain` and `limiterReduction` complete it; `EFFECT`, `CHAIN`,
-`EFFECT_ORDER`, `EFFECT_PARAMS`, `VISUAL` and `SHAPES` name everything.
+`partChain`, `limiterReduction`, and `partScope` and `partLevels` (see
+[Scopes and levels](#scopes-and-levels)) complete it; `EFFECT`, `CHAIN`,
+`EFFECT_ORDER`, `EFFECT_PARAMS`, `VISUAL`, `SHAPES` and `SCOPE_FRAMES`
+name everything.
+
+## Scopes and levels
+
+Every part keeps its latest 4 096 frames (`SCOPE_FRAMES`, 85 ms at
+48 kHz) and its peak and RMS levels, for Aratu's editor to draw: what the
+part puts into the master bus, after its effects, gain and pan, in both
+channels (its send to the shared reverb is not in it).
+
+```js
+// Every frame the editor draws:
+const { frame, time, left, right } = await engine.partScope(0, 2048);
+const { peak, rms } = await engine.partLevels(0);   // [left, right], linear
+const every = await engine.partLevels();            // [{ part, frame, peak, rms }, ...]
+```
+
+- **The scope.** `partScope(part, frames)` gives the newest `frames`
+  frames, at most 4 096 and none before frame 0; frames from before the
+  part was made are silence. `frame` is the engine frame of the first
+  sample, the frame it is heard on, and `time` its `AudioContext` time
+  (before the device's own latency). The parts run the master bus's
+  look-ahead (111 frames at 48 kHz) ahead of the output, so the newest 111
+  samples are about to be heard. A part made again over itself keeps its
+  scope and levels, which belong to its number; a removed part has none
+  (`null`).
+- **The levels.** The peak rises at once to every sample above it and falls
+  20 dB in 1.7 s (`PEAK_RETURN_SECONDS`, the return time IEC 60268-18 gives
+  digital peak meters), in a straight line in decibels; the RMS is the
+  square of the signal averaged by a one-pole filter with a time constant of
+  0.3 s (`RMS_SECONDS`), so a steady sine at full scale reads `1/√2`. Both
+  are linear, 1 at full scale; both settle to exactly 0 in silence.
+- **On the audio thread.** The render call feeds each part's meter one
+  frame at a time, writing into a ring that was made with the part: no
+  allocation, no lock, and the same samples and levels whatever the quanta
+  (`tests/scope.rs` reads them after quanta of 1, 7, 128 and 512 frames and
+  compares the bits). Reading copies out of the ring, between render calls,
+  and does not allocate either (`Engine::part_scope_into`,
+  `Engine::part_levels`, and the exports `mb_part_scope`, `mb_scope_ptr`,
+  `mb_part_scope_end`, `mb_part_levels`, `mb_levels_ptr`,
+  `mb_scope_frames`; `tests/realtime.rs` reads every part after every
+  quantum under the counting allocator).
+- **Shared memory.** When the page is cross-origin isolated, `engine.js`
+  gives the worklet a `SharedArrayBuffer` of one slot per part it can hold
+  (`js/scope.js`, 48 bytes and 8 bytes a frame each: 33 KiB a part, 1 MiB
+  for the default 32). After every render quantum the worklet copies the
+  frames each part rendered, and its levels, into its slot: three export
+  calls and two copies of 128 samples a part. A slot is a sequence lock:
+  the worklet makes its counter odd, writes, and makes it even, never
+  waiting; `partScope` and `partLevels` read the slot, without a message,
+  and read again if the counter was odd or moved. Without shared memory,
+  or with `scopes: false` in `ManguebyteEngine.create`, they ask the
+  worklet, which answers from the engine between quanta: a message each
+  way. `engine.scopeMode` says which, `'shared'` or `'message'` (or `null`
+  for a module without the exports, when they reject).
+
+`js/scope.js` lays a slot out as `seq` (u32), `part` (i32, -1 for a free
+slot), `written` (u32, frames ever written, wrapping at 2³²), four bytes
+of padding, `end` (f64, the engine frame after the newest one), the four
+levels (f32: peak left, peak right, RMS left, RMS right), eight bytes of
+padding, then the left and right channels of `capacity` frames each, frame
+`n` of the slot at `n mod capacity`. `js/tests/scope.test.mjs` checks it,
+and `partScope` and `partLevels` against the engine in both modes.
 
 ## What did not change in the contract
 
@@ -576,6 +666,17 @@ instrument rather than once it is measured, with the same summary; code
 that awaited it and then played notes works as it did, the first few tens
 of milliseconds of them at the provisional make-up. Code that wants the
 level measured awaits `loading.normalized`. The status -102 is new.
+
+The [scopes and levels](#scopes-and-levels) and the tube keep it at 2 as
+well. The exports `mb_scope_frames`, `mb_part_scope`, `mb_scope_ptr`,
+`mb_part_scope_end`, `mb_part_levels` and `mb_levels_ptr` are new, and
+`js/worklet.js` looks for them by name: without them its ready message says
+`scopes: null`, and `partScope` and `partLevels` reject with the new status
+-103. The worklet's `scope` option and its ready message's `scopes` field
+are new; nothing the parts play changed. `drive.shape` 4 is a new value of
+a parameter that was there: an older engine, which holds a choice to its
+last value, plays the fold for it, and every value that was there means
+what it did.
 
 ## Instruments
 

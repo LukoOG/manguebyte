@@ -807,3 +807,34 @@ fn a_measurement_under_way_is_the_same_in_every_quantum_and_every_schedule() {
         }
     }
 }
+
+/// Changing the drive's curve to the tube, at the drive's defaults, keeps
+/// a phrase within [`LOUDNESS_TOLERANCE_LU`] of the loudness the tanh
+/// gives it, on the synth's melody and on the drums' groove: choosing a
+/// curve is choosing a colour, not a level.
+#[test]
+fn the_tube_drive_plays_as_loud_as_the_tanh() {
+    let driven = |shape: f64| {
+        move |engine: &mut Engine| {
+            engine
+                .set_chain(0, Chain::NONE.with(manguebyte_web::Effect::Drive))
+                .unwrap();
+            push_all(
+                engine,
+                &[
+                    EventRecord::param(0, 0, id(ids::DRIVE_SHAPE), shape),
+                    EventRecord::param(0, 0, id(ids::DRIVE_ON), 1.0),
+                ],
+            );
+        }
+    };
+    for kind in [InstrumentKind::Synth, InstrumentKind::Drums] {
+        let tanh = phrase_loudness(kind, 0, &driven(0.0));
+        let tube = phrase_loudness(kind, 0, &driven(4.0));
+        eprintln!("{kind:?}: tanh {tanh:.2} LUFS, tube {tube:.2} LUFS");
+        assert!(
+            (tube - tanh).abs() < LOUDNESS_TOLERANCE_LU,
+            "{kind:?}: the tube at {tube:.2} LUFS, the tanh at {tanh:.2}"
+        );
+    }
+}

@@ -13,6 +13,8 @@
 //   maxParts         parts that can exist at once (default 32)
 //   pendingCapacity  events that can wait for their frame (default 4096)
 //   stagingRecords   records copied into the engine per push (default 256)
+//   scope            a SharedArrayBuffer of part scopes (scope.js), or null
+//                    to answer partScope and partLevels by message instead
 //
 // Every render quantum it moves records from the ring (or from the
 // messages received) into the engine, then renders. When the engine's queue
@@ -28,10 +30,20 @@
 // carrying the same id): createPart, removePart, setChain, paramsJson,
 // drumMapJson, paramValue, activeVoices, stats, latency, partChain,
 // masterParamsJson, masterParamValue, effectCurve, effectRunning,
-// limiterReduction; also `records` (an ArrayBuffer of records, for the
-// message fallback) and `close`. Messages are handled between render
-// quanta, so the curves the effectCurve message works out read the
-// parameters as the last quantum left them, never while it renders.
+// limiterReduction, partScope, partLevels; also `records` (an ArrayBuffer
+// of records, for the message fallback) and `close`. Messages are handled
+// between render quanta, so the curves the effectCurve message works out
+// read the parameters as the last quantum left them, never while it
+// renders.
+//
+// Scopes and levels. With a `scope` buffer, every part has a slot in it from
+// the createPart that makes it to the removePart that removes it, and after
+// every render quantum process() copies the frames each part rendered, and
+// its levels, from the engine into its slot (mb_part_scope, mb_part_levels,
+// which never allocate). The page reads them there without a message. The
+// ready message says how the page gets them: `scopes` is 'shared', 'message'
+// (no buffer: partScope and partLevels answer from the engine) or null (a
+// module without the exports).
 //
 // Loading an SFZ instrument (engine.js loadSfz) takes sfzBegin, which
 // parses the text at once and answers with the sample files it names, then
@@ -57,6 +69,7 @@
 // the instrument over measured (mb_sfz_finish), answering both at once.
 
 import { EventRing, RECORD_SIZE } from './ring.js';
+import { PartScopes } from './scope.js';
 
 /** The interface version this file was written for (`ffi::ABI_VERSION`). */
 const ABI_VERSION = 2;
@@ -94,6 +107,8 @@ const ALL_FRAMES = 0xffffffff;
 const NO_EFFECTS = -14;
 /** The module predates setting a part's instrument (`ffi::status::BAD_INSTRUMENT`). */
 const BAD_INSTRUMENT = -3;
+/** The module predates the parts' scopes and levels. */
+const NO_SCOPES = -103;
 
 /** The name the processor is registered under. */
 export const PROCESSOR_NAME = 'manguebyte-engine';
@@ -151,6 +166,12 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
       );
       if (this.engine === 0) throw new Error('the engine settings are out of range');
       this.ring = o.ring ? new EventRing(o.ring) : null;
+      // The parts, by number: the slot each has in `scopes` (-1 without
+      // one) and the frame after the last one copied into it.
+      this.hasScopes = typeof x.mb_part_scope === 'function';
+      this.scopes = this.hasScopes && o.scope ? new PartScopes(o.scope) : null;
+      this.parts = new Map();
+      this.freeSlots = this.scopes ? Array.from({ length: this.scopes.slots }, (_, slot) => this.scopes.slots - 1 - slot) : [];
       this.refresh();
     } catch (error) {
       this.closed = true;
@@ -158,7 +179,55 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
       return;
     }
     this.port.onmessage = (event) => this.receive(event.data);
-    this.port.postMessage({ type: 'ready', mode: this.ring ? 'shared' : 'message' });
+    const scopes = this.hasScopes ? (this.scopes ? 'shared' : 'message') : null;
+    this.port.postMessage({ type: 'ready', mode: this.ring ? 'shared' : 'message', scopes });
+  }
+
+  /** Copies what part `part` rendered since the last copy into its slot; `fresh` gives it the slot first. */
+  copyScope(part, entry, fresh) {
+    const x = this.exports;
+    const end = x.mb_part_scope_end(this.engine, part);
+    const advance = fresh ? this.scopes.capacity : end - entry.end;
+    if (advance <= 0 && !fresh) return;
+    const count = Math.max(0, x.mb_part_scope(this.engine, part, Math.min(advance, this.scopes.capacity)));
+    x.mb_part_levels(this.engine, part);
+    const left = this.scopePtr / 4;
+    if (fresh) {
+      this.scopes.assign(entry.slot, part, this.floats, left, left + count, count, end, this.levelsPtr / 4);
+    } else {
+      this.scopes.append(entry.slot, this.floats, left, left + count, count, advance, end, this.levelsPtr / 4);
+    }
+    entry.end = end;
+  }
+
+  /** Part `part` was made: it gets a slot if it is new. */
+  track(part) {
+    if (!this.hasScopes || this.parts.has(part)) return;
+    const entry = { slot: -1, end: 0 };
+    this.parts.set(part, entry);
+    if (this.scopes && this.freeSlots.length > 0) {
+      entry.slot = this.freeSlots.pop();
+      this.refresh();
+      this.copyScope(part, entry, true);
+    }
+  }
+
+  /** Part `part` was removed: its slot is free. */
+  untrack(part) {
+    const entry = this.parts.get(part);
+    if (!entry) return;
+    this.parts.delete(part);
+    if (entry.slot >= 0) {
+      this.scopes.release(entry.slot);
+      this.freeSlots.push(entry.slot);
+    }
+  }
+
+  /** After a quantum: every part's new frames and levels into its slot. */
+  copyScopes() {
+    for (const [part, entry] of this.parts) {
+      if (entry.slot >= 0) this.copyScope(part, entry, false);
+    }
   }
 
   /** Makes the views of WebAssembly memory again if the memory has grown. */
@@ -167,6 +236,11 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
     if (this.memory === x.memory.buffer) return;
     this.memory = x.memory.buffer;
     this.heap = new Uint8Array(this.memory);
+    this.floats = new Float32Array(this.memory);
+    if (this.hasScopes) {
+      this.scopePtr = x.mb_scope_ptr(this.engine) >>> 0;
+      this.levelsPtr = x.mb_levels_ptr(this.engine) >>> 0;
+    }
     this.staging = x.mb_staging_ptr(this.engine) >>> 0;
     this.stagingCapacity = x.mb_staging_capacity(this.engine);
     this.left = new Float32Array(this.memory, x.mb_output_ptr(this.engine, 0) >>> 0, this.maxQuantum);
@@ -383,7 +457,10 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
       // Each of the next three drops a measurement under way on the part.
       case 'createPart':
         result = x.mb_create_part(engine, message.part, message.kind, message.chain);
-        if (result === 0) this.measuring.delete(message.part);
+        if (result === 0) {
+          this.measuring.delete(message.part);
+          this.track(message.part);
+        }
         break;
       case 'setInstrument':
         // A module from before the export cannot change a part's
@@ -395,7 +472,10 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
         break;
       case 'removePart':
         result = x.mb_remove_part(engine, message.part);
-        if (result === 0) this.measuring.delete(message.part);
+        if (result === 0) {
+          this.measuring.delete(message.part);
+          this.untrack(message.part);
+        }
         break;
       case 'setChain':
         result = x.mb_set_chain(engine, message.part, message.chain);
@@ -459,6 +539,49 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
       case 'limiterReduction':
         result = typeof x.mb_limiter_reduction_db === 'function' ? x.mb_limiter_reduction_db(engine) : 0;
         break;
+      // The scopes and levels, from the engine itself: what the page reads
+      // without shared memory.
+      case 'partScope': {
+        if (!this.hasScopes) {
+          result = { status: NO_SCOPES };
+          break;
+        }
+        const count = x.mb_part_scope(engine, message.part, message.frames);
+        if (count < 0) {
+          result = { status: count };
+          break;
+        }
+        const end = x.mb_part_scope_end(engine, message.part);
+        this.refresh();
+        // Left then right, copied, the buffer transferred with the reply.
+        const start = this.scopePtr;
+        result = { status: 0, frame: end - count, samples: this.heap.slice(start, start + count * 8).buffer };
+        break;
+      }
+      case 'partLevels': {
+        if (!this.hasScopes) {
+          result = { status: NO_SCOPES };
+          break;
+        }
+        const levels = (part) => {
+          const status = x.mb_part_levels(engine, part);
+          if (status !== 0) return { status };
+          const at = this.levelsPtr / 4;
+          const f = this.floats;
+          return {
+            status,
+            part,
+            frame: x.mb_part_scope_end(engine, part),
+            peak: [f[at], f[at + 1]],
+            rms: [f[at + 2], f[at + 3]],
+          };
+        };
+        this.refresh();
+        result = message.part === undefined
+          ? { status: 0, parts: [...this.parts.keys()].sort((a, b) => a - b).map(levels) }
+          : levels(message.part);
+        break;
+      }
       default:
         result = undefined;
     }
@@ -543,6 +666,7 @@ export class ManguebyteProcessor extends AudioWorkletProcessor {
       done += n;
     }
     this.frame += done;
+    if (this.scopes) this.copyScopes();
     // Instruments become playable first; measurements fill the quanta with
     // nothing to load.
     if (this.jobs.length > 0) this.work(LOAD_BYTES_PER_QUANTUM);

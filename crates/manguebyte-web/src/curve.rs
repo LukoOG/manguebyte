@@ -11,7 +11,7 @@
 //! |---|---|
 //! | high-pass, low-pass | [`SvfResponse`], the state-variable filter's own |
 //! | EQ | three [`BiquadResponse`]s of the bands' coefficients, in a row |
-//! | drive | the [`ShaperCurve`]'s, between the drive's gains and its mix |
+//! | drive | the [`ShaperCurve`](manguebyte_dsp::ShaperCurve)'s, or the [`tube_curve`](crate::tube_curve), between the drive's gains and its mix |
 //! | compressor, glue | [`CompressorTransfer`], with the make-up and the mix |
 //! | limiter | [`LimiterTransfer`] |
 //! | chorus, flanger | [`ChorusSweep`] |
@@ -23,17 +23,17 @@
 //! The bitcrusher is this crate's own, and so is its staircase. The axes
 //! are those of [`Visual`], which the crate's README lists.
 
+use manguebyte_dsp::SvfMode;
 use manguebyte_dsp::curve::{
     BiquadResponse, ChorusSweep, CompressorTransfer, Curve as _, DelayTaps, FrequencyResponse,
     LfoCycle, LimiterTransfer, PhaserSweep, ReverbDecay, SvfResponse, linear_spaced, log_spaced,
 };
-use manguebyte_dsp::{ShaperCurve, SvfMode};
 use manguebyte_params::Param;
 
 use crate::effect::{Effect, Visual};
 use crate::fx::{
-    Equaliser, crush, crush_step, drive_curve, gain_from_db, lfo_shape, resonance_to_q,
-    wobble_target,
+    DriveCurve, Equaliser, crush, crush_step, drive_curve, gain_from_db, lfo_shape, resonance_to_q,
+    tube_curve, wobble_target,
 };
 use crate::params::{ChainParams, MasterParams};
 
@@ -178,16 +178,22 @@ pub(crate) fn part_curve(
         }
         Effect::Drive => {
             let p = &params.drive;
-            let curve: ShaperCurve = drive_curve(p.shape.plain());
+            let curve = drive_curve(p.shape.plain());
             let (drive, output, mix) = (
                 f64::from(gain_from_db(p.amount.plain())),
                 f64::from(gain_from_db(p.output.plain())),
                 p.mix.plain(),
             );
+            // The tube's curve as it bends; the offset its drive takes out
+            // after it is not drawn.
+            let bend = |x: f64| match curve {
+                DriveCurve::Shaper(curve) => curve.value_at(x),
+                DriveCurve::Tube => tube_curve(x),
+            };
             linear(-1.0, 1.0, points)
                 .into_iter()
                 .map(|x| {
-                    let y = x + (curve.value_at(x * drive) * output - x) * mix;
+                    let y = x + (bend(x * drive) * output - x) * mix;
                     [x as f32, y as f32]
                 })
                 .collect()

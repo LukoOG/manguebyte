@@ -53,7 +53,15 @@
 //! [`mb_master_param_value`] reads them, and [`mb_limiter_reduction_db`]
 //! feeds a meter.
 //!
-//! The staging area and the output buffers never move, but any call that
+//! Scopes and levels, for an editor to draw each part: after a render,
+//! [`mb_part_scope`] copies a part's latest frames to [`mb_scope_ptr`] and
+//! [`mb_part_scope_end`] says which frame follows them; [`mb_part_levels`]
+//! writes its peak and RMS levels to [`mb_levels_ptr`]. None of them
+//! allocates, so `js/worklet.js` calls them on the audio thread after
+//! every quantum, to copy what changed into shared memory.
+//!
+//! The staging area, the output buffers, the scope area and the levels
+//! never move, but any call that
 //! allocates (making parts, describing parameters) may grow the memory, and
 //! a grown memory has a new `ArrayBuffer`: views made on the old one must
 //! be made again. [`mb_render`] and [`mb_push_staged`] never allocate.
@@ -65,6 +73,7 @@ use crate::drums::drum_map_json;
 use crate::effect::Effect;
 use crate::engine::{Chain, Engine, EngineConfig, EngineError, InstrumentKind};
 use crate::load::{SfzInstrument, SfzLoad, summary_json};
+use crate::meter::SCOPE_FRAMES;
 use crate::probe::LoudnessProbe;
 use crate::record::RECORD_SIZE;
 use manguebyte_params::ParamId;
@@ -133,6 +142,13 @@ use manguebyte_params::ParamId;
 /// part now plays the instrument from where it was loaded, and a clone of
 /// it is measured, where before the part went on from where the
 /// measurement had left them.
+///
+/// Nor did the scopes and levels of the parts: [`mb_scope_frames`],
+/// [`mb_part_scope`], [`mb_scope_ptr`], [`mb_part_scope_end`],
+/// [`mb_part_levels`] and [`mb_levels_ptr`] are only added, and
+/// `js/worklet.js` looks for them by name, answering that the module has
+/// no scopes without them. What the parts sound like, and every other
+/// export, is unchanged.
 pub const ABI_VERSION: u32 = 2;
 
 /// The part number [`mb_effect_curve`] and [`mb_effect_running`] take for
@@ -198,6 +214,11 @@ pub struct WebEngine {
     loads: Vec<(u16, Load)>,
     /// The points of the last curve, `x` and `y` in turn.
     curve: Vec<f32>,
+    /// The frames of the last [`mb_part_scope`], left then right: room for
+    /// [`SCOPE_FRAMES`] of each, made with the engine.
+    scope: Vec<f32>,
+    /// The levels of the last [`mb_part_levels`].
+    levels: [f32; 4],
 }
 
 /// An SFZ instrument on its way to a part.
@@ -299,6 +320,8 @@ pub extern "C" fn mb_engine_new(
             input: Vec::new(),
             loads: Vec::new(),
             curve: Vec::new(),
+            scope: vec![0.0; 2 * SCOPE_FRAMES],
+            levels: [0.0; 4],
         })),
         Err(_) => core::ptr::null_mut(),
     }
@@ -1263,4 +1286,129 @@ pub unsafe extern "C" fn mb_effect_running(engine: *mut WebEngine, part: u32, ef
 pub unsafe extern "C" fn mb_limiter_reduction_db(engine: *mut WebEngine) -> f64 {
     // SAFETY: as the caller promises.
     unsafe { web(engine) }.map_or(f64::NAN, |web| web.engine.limiter_reduction_db())
+}
+
+/// How many frames of each channel a part's scope holds:
+/// [`SCOPE_FRAMES`], 4 096.
+#[unsafe(no_mangle)]
+pub extern "C" fn mb_scope_frames() -> u32 {
+    SCOPE_FRAMES as u32
+}
+
+/// Copies the latest `frames` frames of part `part`, at most
+/// [`mb_scope_frames`] and at most the frames since frame 0, to the scope
+/// area ([`mb_scope_ptr`]): the left channel, then the right right after
+/// it, as many `f32`s each ([`Engine::part_scope`](crate::Engine::part_scope)).
+/// Returns how many frames, or a [`status`]: [`status::NO_SUCH_PART`],
+/// [`status::BAD_PART`]. The first is frame [`mb_part_scope_end`] less that
+/// many. Never allocates.
+///
+/// # Safety
+///
+/// `engine` is null or a live pointer from [`mb_engine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mb_part_scope(engine: *mut WebEngine, part: u32, frames: u32) -> i32 {
+    // SAFETY: as the caller promises.
+    let Some(web) = (unsafe { web(engine) }) else {
+        return status::NO_ENGINE;
+    };
+    let number = match part_number(part) {
+        Ok(number) => number,
+        Err(status) => return status,
+    };
+    let Some(end) = web.engine.part_scope_end(number) else {
+        return status::NO_SUCH_PART;
+    };
+    // Laid end to end: the right channel starts where the left one ends.
+    let count = (frames as usize)
+        .min(SCOPE_FRAMES)
+        .min(usize::try_from(end).unwrap_or(usize::MAX));
+    let (left, right) = web.scope.split_at_mut(count);
+    match web
+        .engine
+        .part_scope_into(number, left, &mut right[..count])
+    {
+        Some((copied, _)) => copied as i32,
+        None => status::NO_SUCH_PART,
+    }
+}
+
+/// Where the scope area starts: the frames of the last [`mb_part_scope`],
+/// left then right. It never moves.
+///
+/// # Safety
+///
+/// `engine` is null or a live pointer from [`mb_engine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mb_scope_ptr(engine: *mut WebEngine) -> *const f32 {
+    // SAFETY: as the caller promises.
+    match unsafe { web(engine) } {
+        Some(web) => web.scope.as_ptr(),
+        None => core::ptr::null(),
+    }
+}
+
+/// The frame after the newest one of part `part`'s scope: the next frame
+/// the part renders ([`Engine::part_scope_end`](crate::Engine::part_scope_end)),
+/// counted as events count them. Exact up to 2⁵³; NaN if there is no such
+/// part.
+///
+/// # Safety
+///
+/// `engine` is null or a live pointer from [`mb_engine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mb_part_scope_end(engine: *mut WebEngine, part: u32) -> f64 {
+    // SAFETY: as the caller promises.
+    let Some(web) = (unsafe { web(engine) }) else {
+        return f64::NAN;
+    };
+    part_number(part)
+        .ok()
+        .and_then(|part| web.engine.part_scope_end(part))
+        .map_or(f64::NAN, |end| end as f64)
+}
+
+/// Writes the levels of part `part` on the newest frame of its scope
+/// ([`Engine::part_levels`](crate::Engine::part_levels)) to [`mb_levels_ptr`]:
+/// four `f32`s, the peak of the left and of the right channel, then their
+/// RMS, linear. Returns a [`status`]: [`status::OK`],
+/// [`status::NO_SUCH_PART`], [`status::BAD_PART`]. Never allocates.
+///
+/// # Safety
+///
+/// `engine` is null or a live pointer from [`mb_engine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mb_part_levels(engine: *mut WebEngine, part: u32) -> i32 {
+    // SAFETY: as the caller promises.
+    let Some(web) = (unsafe { web(engine) }) else {
+        return status::NO_ENGINE;
+    };
+    let number = match part_number(part) {
+        Ok(number) => number,
+        Err(status) => return status,
+    };
+    match web.engine.part_levels(number) {
+        Some(levels) => {
+            let [peak_left, peak_right] = levels.peak;
+            let [rms_left, rms_right] = levels.rms;
+            web.levels = [peak_left, peak_right, rms_left, rms_right];
+            status::OK
+        }
+        None => status::NO_SUCH_PART,
+    }
+}
+
+/// Where the levels of the last [`mb_part_levels`] are: four `f32`s. They
+/// never move.
+///
+/// # Safety
+///
+/// `engine` is null or a live pointer from [`mb_engine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mb_levels_ptr(engine: *mut WebEngine) -> *const f32 {
+    // SAFETY: as the caller promises.
+    match unsafe { web(engine) } {
+        Some(web) => web.levels.as_ptr(),
+        None => core::ptr::null(),
+    }
 }

@@ -217,8 +217,11 @@
 //! tails ring on), every setting glides, and nothing clicks. Each effect
 //! names in its parameters' JSON what an editor draws for it, a
 //! [`Visual`], and [`Engine::effect_curve`] gives the points, worked out
-//! from the parameters outside the render call. The crate's README lists
-//! every parameter with its unit, range and default.
+//! from the parameters outside the render call. The drive's curves are
+//! `manguebyte-dsp`'s, and the tube, [`tube_curve`], an asymmetric curve
+//! that gives even harmonics, with a high-pass at [`TUBE_DC_HZ`] after it.
+//! The crate's README lists every parameter with its unit, range and
+//! default.
 //!
 //! # The master bus
 //!
@@ -242,6 +245,20 @@
 //! by, so events stay on their frames. `master.tempo` and `master.beat` are
 //! what synced effects follow. A master parameter's record may name any
 //! part; it belongs to none ([`Engine::master_params_json`]).
+//!
+//! # Scopes and levels
+//!
+//! Every part keeps its latest [`SCOPE_FRAMES`] frames, what it puts into
+//! the master bus after its effects, gain and pan, and its peak and RMS
+//! levels, for an editor to draw: [`Engine::part_scope`] and
+//! [`Engine::part_levels`]. The render call writes them into a ring per
+//! part, a frame at a time, never allocating; reading them copies out of
+//! it, between render calls. The peak rises at once and falls 20 dB in
+//! [`PEAK_RETURN_SECONDS`], the RMS is averaged over [`RMS_SECONDS`], and
+//! both are the same whatever the quanta. In a browser `js/worklet.js`
+//! copies them after every quantum into a `SharedArrayBuffer` the page
+//! reads without a message (`js/scope.js`), or answers a message when
+//! there is no shared memory.
 //!
 //! # Output level
 //!
@@ -401,6 +418,7 @@ mod fx;
 mod level;
 mod load;
 mod master;
+mod meter;
 mod modelled;
 mod params;
 mod probe;
@@ -421,12 +439,16 @@ pub use engine::{
     CANCEL_FADE_SECONDS, Chain, Engine, EngineConfig, EngineError, EngineStats, InstrumentKind,
     LIMITER_RELEASE_SECONDS, OUTPUT_CEILING, Pushed,
 };
-pub use fx::{DELAY_GLIDE_SECONDS, DELAY_MAX_SECONDS, EFFECT_FADE_SECONDS, WAVE_SMOOTHING_SECONDS};
+pub use fx::{
+    DELAY_GLIDE_SECONDS, DELAY_MAX_SECONDS, EFFECT_FADE_SECONDS, TUBE_DC_HZ,
+    WAVE_SMOOTHING_SECONDS, tube_curve,
+};
 pub use level::{Calibration, LOUDNESS_TARGET_LUFS, LOUDNESS_TOLERANCE_LU, Phrase, PhraseNote};
 pub use load::{SfzInstrument, SfzLoad};
 pub use manguebyte_params::ParamId;
 pub use manguebyte_sampler;
 pub use master::{MASTER_LOOKAHEAD_SECONDS, TRUE_PEAK_DELAY, master_latency_frames};
+pub use meter::{PEAK_RETURN_SECONDS, PartLevels, PartScope, RMS_SECONDS, SCOPE_FRAMES};
 pub use params::ids;
 pub use probe::{NORMALIZE_PEAK_DB, NORMALIZE_RANGE_DB, PROBE_STEP_FRAMES};
 pub use record::{Event, EventRecord, RECORD_SIZE, RecordKind};

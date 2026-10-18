@@ -45,6 +45,13 @@
 // port instead; timing stays exact as long as the records arrive before
 // their frame.
 //
+// Scopes and levels. partScope(part, frames) gives the latest frames of a
+// part, what it puts into the master bus after its effects, gain and pan,
+// and partLevels(part) its peak and RMS levels, for an editor to draw every
+// frame. With shared memory the worklet copies them after every quantum
+// into a SharedArrayBuffer (scope.js) that these read without a message;
+// without it they ask the worklet, a message each way.
+//
 // Sample rate. The engine runs at the context's sample rate, from 3000 to
 // 768000 Hz (`EngineConfig::MIN_SAMPLE_RATE` and `MAX_SAMPLE_RATE`, the range
 // browsers allow for an AudioContext). create() rejects with a message that
@@ -59,8 +66,10 @@
 // played at the start of the next render quantum.
 
 import { EventRing, KIND, RECORD_SIZE, encodeRecord, paramId } from './ring.js';
+import { PartScopes } from './scope.js';
 
 export { FLAG, KIND, RECORD_SIZE, paramId } from './ring.js';
+export { SCOPE_FRAMES } from './scope.js';
 
 /** Instrument codes, as `InstrumentKind::code` gives them, by `InstrumentKind::name`. */
 export const INSTRUMENT = Object.freeze({
@@ -232,7 +241,7 @@ export const VISUAL = Object.freeze({
 
 /** The names a `shape` setting can be given as text, in the order of their values. */
 export const SHAPES = Object.freeze({
-  drive: Object.freeze(['tanh', 'soft', 'hard', 'fold']),
+  drive: Object.freeze(['tanh', 'soft', 'hard', 'fold', 'tube']),
   tremolo: Object.freeze(['sine', 'triangle', 'square', 'saw_up', 'saw_down']),
   autopan: Object.freeze(['sine', 'triangle', 'square', 'saw_up', 'saw_down']),
 });
@@ -281,6 +290,7 @@ export const STATUS = Object.freeze({
   [-100]: 'a later load of the same part took over',
   [-101]: 'the module has no sampler parts',
   [-102]: 'the part was made again, given another kind or removed before its instrument was measured',
+  [-103]: 'the module has no part scopes',
 });
 
 const PROCESSOR_NAME = 'manguebyte-engine';
@@ -413,6 +423,9 @@ export class ManguebyteEngine {
    *   shared           use a SharedArrayBuffer ring (default: when the page
    *                    is cross-origin isolated)
    *   ringCapacity     records the ring holds (default 4096)
+   *   scopes           copy the parts' scopes and levels into shared memory
+   *                    after every quantum (default: when `shared`); false
+   *                    to have partScope and partLevels ask by message
    *   maxQuantum, maxParts, pendingCapacity, stagingRecords
    *                    engine limits (defaults 512, 32, 4096, 256)
    *   AudioWorkletNode the node class (default: the global one)
@@ -425,6 +438,9 @@ export class ManguebyteEngine {
     if (options.wasm === undefined) throw new TypeError('options.wasm is required');
     const [wasm] = await Promise.all([wasmBytes(options.wasm), context.audioWorklet.addModule(workletUrl)]);
     const ring = shared ? EventRing.create(options.ringCapacity ?? 4096) : null;
+    const maxParts = options.maxParts ?? 32;
+    // One slot per part the engine can hold, 33 KiB each.
+    const scopes = shared && options.scopes !== false ? PartScopes.create(maxParts) : null;
     const Node = options.AudioWorkletNode ?? globalThis.AudioWorkletNode;
     const node = new Node(context, PROCESSOR_NAME, {
       numberOfInputs: 0,
@@ -433,13 +449,14 @@ export class ManguebyteEngine {
       processorOptions: {
         wasm,
         ring: ring ? ring.buffer : null,
+        scope: scopes ? scopes.buffer : null,
         maxQuantum: options.maxQuantum ?? 512,
-        maxParts: options.maxParts ?? 32,
+        maxParts,
         pendingCapacity: options.pendingCapacity ?? 4096,
         stagingRecords: options.stagingRecords ?? 256,
       },
     });
-    const engine = new ManguebyteEngine(context, node, ring);
+    const engine = new ManguebyteEngine(context, node, ring, scopes);
     try {
       await engine.ready;
     } catch (error) {
@@ -450,10 +467,15 @@ export class ManguebyteEngine {
   }
 
   /** Use create(). */
-  constructor(context, node, ring) {
+  constructor(context, node, ring, scopes = null) {
     this.context = context;
     this.node = node;
     this.ring = ring;
+    /** The parts' scopes in shared memory, once the worklet says it fills them. */
+    this.scopes = null;
+    this.offeredScopes = scopes;
+    /** How partScope and partLevels get what they give: 'shared', 'message', or null for a module without them. */
+    this.scopeMode = null;
     this.sampleRate = context.sampleRate;
     this.origin = Math.round(context.currentTime * context.sampleRate);
     this.originReported = false;
@@ -480,6 +502,8 @@ export class ManguebyteEngine {
   receive(message) {
     switch (message && message.type) {
       case 'ready':
+        this.scopeMode = message.scopes ?? null;
+        this.scopes = this.scopeMode === 'shared' ? this.offeredScopes : null;
         this.readyCallbacks.resolve();
         break;
       case 'error':
@@ -1053,6 +1077,66 @@ export class ManguebyteEngine {
   /** How far the master limiter is turning the level down, dB, for a meter. */
   limiterReduction() {
     return this.request('limiterReduction');
+  }
+
+  /**
+   * The latest `frames` frames of `part` (at most SCOPE_FRAMES, 4096), for a
+   * scope: what the part puts into the master bus, after its effects, gain
+   * and pan, both channels (its send to the shared reverb is not in it):
+   *
+   *   { frame, time, left: Float32Array, right: Float32Array }
+   *
+   * `frame` is the engine frame of the first sample, the frame it is heard
+   * on, and `time` the AudioContext time of that frame, before the
+   * device's own latency. The engine renders its parts the master bus's
+   * look-ahead (111 frames at 48 kHz) ahead of its output, so the newest
+   * samples are that far ahead of what has been heard. Frames from before
+   * the part was made are silence. Null if there is no such part.
+   *
+   * With shared memory this reads what the worklet copied after the last
+   * quantum, without a message, and is cheap enough for every frame drawn;
+   * without it, the worklet answers a message.
+   */
+  async partScope(part, frames = 1024) {
+    let scope;
+    if (this.scopes) {
+      scope = this.scopes.read(part, frames);
+    } else {
+      const result = await this.request('partScope', { part, frames });
+      if (result.status === -6) return null;
+      if (result.status < 0) throw new Error(`partScope: ${STATUS[result.status] ?? `status ${result.status}`}`);
+      const samples = new Float32Array(result.samples);
+      const count = samples.length / 2;
+      scope = { frame: result.frame, left: samples.slice(0, count), right: samples.slice(count) };
+    }
+    return scope && { ...scope, time: this.timeAt(scope.frame) };
+  }
+
+  /**
+   * The levels of `part` on the newest frame of its scope:
+   *
+   *   { part, frame, peak: [left, right], rms: [left, right] }
+   *
+   * linear, 1 at full scale (20·log10 for dB). The peak rises at once and
+   * falls 20 dB in 1.7 s (`PEAK_RETURN_SECONDS`); the RMS is averaged over
+   * 0.3 s (`RMS_SECONDS`). `frame` is the frame after the newest one. Null if
+   * there is no such part. Without `part`, the levels of every part, in
+   * increasing order of their numbers. Read as partScope is.
+   */
+  async partLevels(part = undefined) {
+    if (this.scopes) {
+      const one = (number) => {
+        const levels = this.scopes.levels(number);
+        return levels && { part: number, ...levels };
+      };
+      if (part !== undefined) return one(part);
+      return this.scopes.parts().map(one).filter((levels) => levels !== null);
+    }
+    const result = await this.request('partLevels', part === undefined ? {} : { part });
+    if (result.status === -6) return null;
+    if (result.status < 0) throw new Error(`partLevels: ${STATUS[result.status] ?? `status ${result.status}`}`);
+    const strip = ({ status, ...levels }) => levels;
+    return part === undefined ? result.parts.filter((levels) => levels.status === 0).map(strip) : strip(result);
   }
 
   async textRequest(type, fields) {

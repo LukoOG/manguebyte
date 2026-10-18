@@ -76,7 +76,8 @@ pub mod ids {
     pub const DRIVE_OUTPUT: &str = "drive.output";
     /// Balance of the clean (0) and the driven (1) signal.
     pub const DRIVE_MIX: &str = "drive.mix";
-    /// The curve: 0 tanh, 1 soft clip, 2 hard clip, 3 fold.
+    /// The curve: 0 tanh, 1 soft clip, 2 hard clip, 3 fold, 4 tube
+    /// ([`tube_curve`](crate::tube_curve)).
     pub const DRIVE_SHAPE: &str = "drive.shape";
 
     /// Bitcrusher switch.
@@ -922,7 +923,7 @@ pub(crate) const INTERPOLATION_NAMES: [&str; 2] = ["Cubic", "Sinc"];
 pub(crate) const WAVE_NAMES: [&str; 4] = ["Saw", "Square", "Triangle", "Sine"];
 
 /// Names of the drive's curves, in the order of their values.
-pub(crate) const DRIVE_SHAPE_NAMES: [&str; 4] = ["Tanh", "Soft clip", "Hard clip", "Fold"];
+pub(crate) const DRIVE_SHAPE_NAMES: [&str; 5] = ["Tanh", "Soft clip", "Hard clip", "Fold", "Tube"];
 
 /// Names of the waves of the tremolo and the auto-pan, in the order of
 /// their values.

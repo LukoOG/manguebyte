@@ -638,30 +638,138 @@ impl Insert for Equaliser {
     }
 }
 
+/// How much the tube curve ([`tube_curve`]) scales its input by before the
+/// bend, so that its small-signal gain is 1 with [`TUBE_BIAS`].
+const TUBE_STEEPNESS: f64 = 1.5;
+
+/// Where the tube curve sits on the hyperbolic tangent at rest, its bias:
+/// `½ ln 2`, whose tangent is exactly `⅓`.
+const TUBE_BIAS: f64 = core::f64::consts::LN_2 / 2.0;
+
+/// The corner of the high-pass that takes out the offset the tube curve
+/// makes, in hertz: a first-order filter, far below anything audible.
+pub const TUBE_DC_HZ: f64 = 5.0;
+
+/// The drive's tube curve, an asymmetric bend in the manner of a triode
+/// biased off the middle of its range:
+///
+/// ```text
+/// f(x) = ¾ · (tanh(³⁄₂ · x + ½ ln 2) − ⅓)
+/// ```
+///
+/// The bias puts the resting point a third of the way up a hyperbolic
+/// tangent, so that the two halves of a wave bend differently: the
+/// positive one, which runs into the bend sooner, as a triode's grid starts
+/// to conduct, flattens towards `½`; the negative one, with more room, as
+/// the valve heads for cutoff, eases towards `−1`. Bent unequally, a wave
+/// gains even harmonics, which the odd curves never give it. `f(0)` is
+/// exactly 0 and the slope there 1, so a quiet signal passes unchanged; to
+/// second order `f(x) ≈ x − x²/2`. Pakarinen and Yeh, "A review of digital
+/// techniques for modeling vacuum-tube guitar amplifiers", *Computer Music
+/// Journal* 33(2), 2009, survey this kind of static, memoryless model.
+///
+/// Bending a wave unequally shifts its middle: the drive takes that offset
+/// out after the curve with a first-order high-pass at [`TUBE_DC_HZ`],
+/// `y[n] = x[n] − x[n−1] + R · y[n−1]`, `R = exp(−2π · 5 Hz / rate)`. The
+/// curve an editor draws is `f` itself, before that filter.
+///
+/// ```
+/// use manguebyte_web::tube_curve;
+///
+/// assert_eq!(tube_curve(0.0), 0.0);
+/// assert!((tube_curve(1e-6) - 1e-6).abs() < 1e-12);
+/// // Asymmetric: the positive half flattens sooner.
+/// assert!(tube_curve(0.5) < -tube_curve(-0.5));
+/// assert!(tube_curve(10.0) < 0.5 && tube_curve(-10.0) > -1.0);
+/// ```
+pub fn tube_curve(x: f64) -> f64 {
+    let rest = TUBE_BIAS.tanh();
+    0.75 * ((TUBE_STEEPNESS * x + TUBE_BIAS).tanh() - rest)
+}
+
+/// One of the drive's curves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DriveCurve {
+    /// One of `manguebyte-dsp`'s: tanh, soft clip, hard clip, fold.
+    Shaper(ShaperCurve),
+    /// [`tube_curve`], with its offset taken out after it.
+    Tube,
+}
+
+impl DriveCurve {
+    /// The curve at `x`, before the tube's offset is taken out.
+    #[inline]
+    pub(crate) fn apply(self, x: f64) -> f64 {
+        match self {
+            Self::Shaper(curve) => curve.apply(x),
+            Self::Tube => tube_curve(x),
+        }
+    }
+}
+
 /// The drive's curves, in the order of their values.
-const DRIVE_CURVES: [ShaperCurve; 4] = [
-    ShaperCurve::Tanh,
-    ShaperCurve::SoftClip,
-    ShaperCurve::HardClip,
-    ShaperCurve::Fold,
+const DRIVE_CURVES: [DriveCurve; 5] = [
+    DriveCurve::Shaper(ShaperCurve::Tanh),
+    DriveCurve::Shaper(ShaperCurve::SoftClip),
+    DriveCurve::Shaper(ShaperCurve::HardClip),
+    DriveCurve::Shaper(ShaperCurve::Fold),
+    DriveCurve::Tube,
 ];
 
-pub(crate) fn drive_curve(index: f64) -> ShaperCurve {
+pub(crate) fn drive_curve(index: f64) -> DriveCurve {
     DRIVE_CURVES[(index.max(0.0) as usize).min(DRIVE_CURVES.len() - 1)]
 }
 
-/// Drive: gain into one of `manguebyte-dsp`'s [`ShaperCurve`]s, gain out,
-/// mixed with the clean signal. A change of curve cross-faded over
-/// [`EFFECT_FADE_SECONDS`].
+/// Below this the tube's high-pass is at rest: -240 dB.
+const DC_FLOOR: f64 = 1e-12;
+
+/// The first-order high-pass after the tube curve, one per channel.
+#[derive(Debug, Clone, Copy)]
+struct DcBlock {
+    pole: f64,
+    /// The last input and output of each channel.
+    state: [[f64; 2]; 2],
+}
+
+impl DcBlock {
+    fn new(sample_rate: f64) -> Self {
+        Self {
+            pole: (-core::f64::consts::TAU * TUBE_DC_HZ / sample_rate).exp(),
+            state: [[0.0; 2]; 2],
+        }
+    }
+
+    #[inline]
+    fn filter(&mut self, side: usize, x: f64) -> f64 {
+        let [last_in, last_out] = self.state[side];
+        let mut y = x - last_in + self.pole * last_out;
+        if y.abs() < DC_FLOOR {
+            y = 0.0;
+        }
+        self.state[side] = [x, y];
+        y
+    }
+
+    fn reset(&mut self) {
+        self.state = [[0.0; 2]; 2];
+    }
+}
+
+/// Drive: gain into one of `manguebyte-dsp`'s [`ShaperCurve`]s or the
+/// [`tube_curve`], gain out, mixed with the clean signal. A change of curve
+/// cross-faded over [`EFFECT_FADE_SECONDS`].
 pub(crate) struct Drive {
     drive: ParamSmoother,
     output: ParamSmoother,
     mix: ParamSmoother,
-    curve: ShaperCurve,
-    previous: ShaperCurve,
+    curve: DriveCurve,
+    previous: DriveCurve,
     /// Frames of the cross-fade from the previous curve still to go.
     fade: u32,
     fade_length: u32,
+    /// What follows the tube curve, while it is the curve or the one being
+    /// faded out; cleared when it becomes the curve again.
+    dc: DcBlock,
 }
 
 impl Drive {
@@ -685,6 +793,18 @@ impl Drive {
             previous: curve,
             fade: 0,
             fade_length: ((EFFECT_FADE_SECONDS * rate).round() as u32).max(1),
+            dc: DcBlock::new(rate),
+        }
+    }
+
+    /// `curve` at `x`, through the high-pass if it is the tube.
+    #[inline]
+    fn bend(&mut self, curve: DriveCurve, side: usize, x: f64) -> f64 {
+        let bent = curve.apply(x);
+        if curve == DriveCurve::Tube {
+            self.dc.filter(side, bent)
+        } else {
+            bent
         }
     }
 }
@@ -702,11 +822,11 @@ impl Insert for Drive {
             } else {
                 0.0
             };
-            for sample in [left, right] {
+            for (side, sample) in [left, right].into_iter().enumerate() {
                 let input = f64::from(*sample);
-                let mut shaped = self.curve.apply(input * drive);
+                let mut shaped = self.bend(self.curve, side, input * drive);
                 if old > 0.0 {
-                    shaped += (self.previous.apply(input * drive) - shaped) * old;
+                    shaped += (self.bend(self.previous, side, input * drive) - shaped) * old;
                 }
                 *sample = if mix >= 1.0 {
                     (shaped * output) as f32
@@ -725,6 +845,12 @@ impl Insert for Drive {
             params::DRIVE_SHAPE => {
                 let curve = drive_curve(value);
                 if curve != self.curve {
+                    let tube_running = self.curve == DriveCurve::Tube
+                        || (self.previous == DriveCurve::Tube && self.fade > 0);
+                    if curve == DriveCurve::Tube && !tube_running {
+                        // It starts afresh, as if from silence.
+                        self.dc.reset();
+                    }
                     self.previous = self.curve;
                     self.curve = curve;
                     self.fade = if idle { 0 } else { self.fade_length };
@@ -742,6 +868,7 @@ impl Insert for Drive {
         self.curve = drive_curve(p.shape.plain());
         self.previous = self.curve;
         self.fade = 0;
+        self.dc.reset();
     }
 }
 

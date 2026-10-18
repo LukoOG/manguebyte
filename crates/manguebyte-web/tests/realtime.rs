@@ -12,8 +12,8 @@ use std::cell::Cell;
 
 use manguebyte_web::ffi;
 use manguebyte_web::{
-    Chain, Drum, Effect, Engine, EngineConfig, EventRecord, InstrumentKind, ParamId, event_ring,
-    ids,
+    Chain, Drum, Effect, Engine, EngineConfig, EventRecord, InstrumentKind, ParamId, SCOPE_FRAMES,
+    event_ring, ids,
 };
 
 thread_local! {
@@ -165,6 +165,13 @@ fn events(start: u64) -> Vec<EventRecord> {
             part,
             id(ids::DRIVE_SHAPE),
             3.0,
+        ));
+        // The tube and its high-pass, from the fold.
+        records.push(EventRecord::param(
+            start + 2_150,
+            part,
+            id(ids::DRIVE_SHAPE),
+            4.0,
         ));
         records.push(EventRecord::param(
             start + 2_200,
@@ -402,6 +409,9 @@ fn pushing_draining_and_rendering_never_allocate() {
     }
     let mut left = vec![0.0f32; 1_000];
     let mut right = vec![0.0f32; 1_000];
+    let mut scope_left = vec![0.0f32; SCOPE_FRAMES];
+    let mut scope_right = vec![0.0f32; SCOPE_FRAMES];
+    let mut heard = 0.0f32;
 
     let calls = heap_calls(|| {
         for &record in &first {
@@ -413,10 +423,16 @@ fn pushing_draining_and_rendering_never_allocate() {
         engine.drain(&mut consumer);
         engine.push_bytes(&bytes);
         // Every quantum size, and a long stretch of silence for the reverb
-        // to fall asleep in, then sound to wake it.
+        // to fall asleep in, then sound to wake it. Every part's scope and
+        // levels are read after each quantum, as an editor would.
         for quantum in [1, 7, 128, 512, 333] {
             for _ in 0..40 {
                 engine.render(quantum);
+                for part in 0..22 {
+                    engine.part_scope_into(part, &mut scope_left, &mut scope_right);
+                    engine.part_scope_end(part);
+                    heard = heard.max(engine.part_levels(part).unwrap().peak[0]);
+                }
             }
         }
         while engine.frame() < 120_000 {
@@ -427,6 +443,7 @@ fn pushing_draining_and_rendering_never_allocate() {
         engine.clear_pending();
     });
     assert_eq!(calls, 0, "the engine touched the heap {calls} times");
+    assert!(heard > 0.0, "the levels moved");
     let stats = engine.stats();
     assert_eq!(stats.dropped, 0);
     assert!(stats.applied > 1_000, "{stats:?}");
@@ -647,6 +664,15 @@ fn the_webassembly_exports_never_allocate_while_rendering() {
                 ffi::mb_frame(engine);
                 ffi::mb_stat(engine, 4);
                 ffi::mb_latency_frames(engine);
+                // What the worklet does after each quantum for every part.
+                for part in [0, 1, 12, 15] {
+                    ffi::mb_part_scope_end(engine, part);
+                    ffi::mb_part_scope(engine, part, 128);
+                    ffi::mb_part_levels(engine, part);
+                }
+                ffi::mb_part_scope(engine, 0, ffi::mb_scope_frames());
+                ffi::mb_scope_ptr(engine);
+                ffi::mb_levels_ptr(engine);
             }
         });
         assert_eq!(calls, 0, "the exports touched the heap {calls} times");

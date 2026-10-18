@@ -90,6 +90,85 @@ fn a_null_engine_is_refused_by_every_export() {
         assert!(ffi::mb_param_value(null, 0, 0).is_nan());
         assert_eq!(ffi::mb_active_voices(null, 0), status::NO_ENGINE);
         assert!(ffi::mb_stat(null, 0).is_nan());
+        assert_eq!(ffi::mb_part_scope(null, 0, 64), status::NO_ENGINE);
+        assert!(ffi::mb_scope_ptr(null).is_null());
+        assert!(ffi::mb_part_scope_end(null, 0).is_nan());
+        assert_eq!(ffi::mb_part_levels(null, 0), status::NO_ENGINE);
+        assert!(ffi::mb_levels_ptr(null).is_null());
+    }
+}
+
+/// A part's scope and levels through the exports are the engine's: the
+/// frames laid end to end, left then right, and four levels.
+#[test]
+fn part_scopes_and_levels_come_through_the_exports() {
+    let records = [
+        EventRecord::param(0, 0, ParamId::from_name(ids::PAN), -0.7),
+        EventRecord::note_on(10, 0, 38, 1.0),
+        EventRecord::note_on(10, 1, 45, 0.8),
+    ];
+    let mut native = Engine::new(EngineConfig {
+        max_quantum: 128,
+        max_parts: 4,
+        ..EngineConfig::new(48_000.0)
+    })
+    .unwrap();
+    native.create_part(0, InstrumentKind::Drums).unwrap();
+    native.create_part(1, InstrumentKind::Synth).unwrap();
+    for record in records {
+        native.push(record);
+    }
+    let engine = ffi::mb_engine_new(48_000.0, 128, 4, 64, 8);
+    assert_eq!(
+        ffi::mb_scope_frames() as usize,
+        manguebyte_web::SCOPE_FRAMES
+    );
+    // SAFETY: `engine` is live until it is freed at the end, the staging
+    // area holds 8 records, and the scope area and the levels hold what
+    // the calls before reading them wrote.
+    unsafe {
+        assert_eq!(ffi::mb_create_part(engine, 0, 1, 3), status::OK);
+        assert_eq!(ffi::mb_create_part(engine, 1, 0, 3), status::OK);
+        assert_eq!(push(engine, &records), 3);
+        // Before the first render there is nothing.
+        assert_eq!(ffi::mb_part_scope_end(engine, 0), 0.0);
+        assert_eq!(ffi::mb_part_scope(engine, 0, 64), 0);
+        for _ in 0..20 {
+            ffi::mb_render(engine, 128);
+            native.render(128);
+        }
+        for part in [0u16, 1] {
+            let end = ffi::mb_part_scope_end(engine, u32::from(part));
+            assert_eq!(Some(end as u64), native.part_scope_end(part));
+            for frames in [1, 500, 4_096, 100_000] {
+                let count = ffi::mb_part_scope(engine, u32::from(part), frames);
+                let want = native.part_scope(part, frames as usize).unwrap();
+                assert_eq!(count as usize, want.left.len());
+                let start = ffi::mb_scope_ptr(engine);
+                let laid = std::slice::from_raw_parts(start, 2 * count as usize);
+                assert_eq!(laid[..count as usize], want.left[..]);
+                assert_eq!(laid[count as usize..], want.right[..]);
+                assert_eq!(want.frame, end as u64 - count as u64);
+            }
+            assert_eq!(ffi::mb_part_levels(engine, u32::from(part)), status::OK);
+            let levels = std::slice::from_raw_parts(ffi::mb_levels_ptr(engine), 4);
+            let want = native.part_levels(part).unwrap();
+            assert_eq!(
+                levels,
+                [want.peak[0], want.peak[1], want.rms[0], want.rms[1]]
+            );
+            assert!(levels[0] > 0.0);
+        }
+        // Panned left, the drums are louder on the left.
+        assert_eq!(ffi::mb_part_levels(engine, 0), status::OK);
+        let levels = std::slice::from_raw_parts(ffi::mb_levels_ptr(engine), 4);
+        assert!(levels[0] > levels[1] && levels[2] > levels[3], "{levels:?}");
+        assert_eq!(ffi::mb_part_scope(engine, 3, 64), status::NO_SUCH_PART);
+        assert_eq!(ffi::mb_part_scope(engine, 70_000, 64), status::BAD_PART);
+        assert!(ffi::mb_part_scope_end(engine, 3).is_nan());
+        assert_eq!(ffi::mb_part_levels(engine, 3), status::NO_SUCH_PART);
+        assert_eq!(ffi::mb_part_levels(engine, 70_000), status::BAD_PART);
+        ffi::mb_engine_free(engine);
     }
 }
 
@@ -413,6 +492,21 @@ fn hostile_calls_in_random_orders_never_break_the_engine() {
                         let (left, right) = output(engine, rendered as usize);
                         for sample in left.iter().chain(&right) {
                             assert!(sample.is_finite() && sample.abs() <= OUTPUT_CEILING);
+                        }
+                        // A part's scope, as many frames as were asked
+                        // for or as there are, every one finite.
+                        let asked = (roll >> 44) as u32 % 5_000;
+                        let count = ffi::mb_part_scope(engine, part, asked);
+                        if parts.contains(&part) {
+                            assert!(count >= 0 && count as u32 <= asked.min(4_096));
+                            let laid = std::slice::from_raw_parts(
+                                ffi::mb_scope_ptr(engine),
+                                2 * count as usize,
+                            );
+                            assert!(laid.iter().all(|sample| sample.is_finite()));
+                            assert_eq!(ffi::mb_part_levels(engine, part), status::OK);
+                        } else {
+                            assert_eq!(count, status::NO_SUCH_PART);
                         }
                     }
                 }

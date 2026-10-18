@@ -13,6 +13,7 @@ use crate::effect::Effect;
 use crate::fx::Clock;
 use crate::load::SfzInstrument;
 use crate::master::Master;
+use crate::meter::{Meter, PartLevels, PartScope};
 use crate::params::{self, InstrumentParams, PartParams};
 use crate::probe::LoudnessProbe;
 use crate::queue::{Admitted, Pending};
@@ -630,10 +631,13 @@ struct Part {
     params: PartParams,
     instrument: Instrument,
     chain: ChainDsp,
+    /// What the part puts into the master bus, for an editor to draw.
+    meter: Meter,
 }
 
 impl Part {
-    fn new(id: u16, kind: InstrumentKind, stages: Chain, spec: &ProcessSpec) -> Self {
+    /// A part whose meter starts on `frame`. Allocates.
+    fn new(id: u16, kind: InstrumentKind, stages: Chain, spec: &ProcessSpec, frame: u64) -> Self {
         let params = PartParams::new(kind, stages);
         let instrument = Instrument::new(&params.instrument, spec);
         let chain = ChainDsp::new(&params.chain, stages, spec);
@@ -642,6 +646,7 @@ impl Part {
             params,
             instrument,
             chain,
+            meter: Meter::new(spec.sample_rate, frame),
         }
     }
 
@@ -1007,7 +1012,9 @@ impl Engine {
     }
 
     /// Makes part `part` play `kind` through `chain`, replacing any part
-    /// already there. Its parameters start at their defaults. Allocates.
+    /// already there. Its parameters start at their defaults. A part made
+    /// over another keeps its [scope and levels](Self::part_scope), which
+    /// belong to the part's number. Allocates.
     ///
     /// # Errors
     ///
@@ -1027,12 +1034,26 @@ impl Engine {
                 max: self.config.max_parts,
             });
         }
-        let new = Part::new(part, kind, chain, &self.spec);
+        let new = Part::new(part, kind, chain, &self.spec, self.parts_frame());
         match slot {
-            Ok(index) => self.parts[index] = new,
+            Ok(index) => {
+                let old = core::mem::replace(&mut self.parts[index], new);
+                self.parts[index].meter = old.meter;
+            }
             Err(index) => self.parts.insert(index, new),
         }
         Ok(())
+    }
+
+    /// The frame the parts render next: they run
+    /// [`master_latency_frames`](Self::master_latency_frames) ahead of the
+    /// output once the first render has rendered those frames.
+    fn parts_frame(&self) -> u64 {
+        if self.primed {
+            self.frame.saturating_add(self.lookahead as u64)
+        } else {
+            self.frame
+        }
     }
 
     /// Removes a part. Its sound stops at once.
@@ -1507,6 +1528,75 @@ impl Engine {
         self.master.reduction_db()
     }
 
+    /// The latest `frames` frames of part `part`, at most
+    /// [`SCOPE_FRAMES`](crate::SCOPE_FRAMES), for an editor's scope: what
+    /// the part puts into the master bus, after its effects, gain and pan,
+    /// both channels (its send to the shared reverb is not in it). Frames
+    /// before the part was made are silence, and there are none before
+    /// frame 0. `None` if there is no such part. Allocates;
+    /// [`part_scope_into`](Self::part_scope_into) does not.
+    ///
+    /// The parts are rendered [`master_latency_frames`](Self::master_latency_frames)
+    /// ahead of the output, so the newest frame is that far ahead of the
+    /// last one [`render`](Self::render) put out. [`PartScope::frame`]
+    /// counts as events do: a sample of frame `f` is heard on the output's
+    /// frame `f`.
+    ///
+    /// ```
+    /// use manguebyte_web::{Engine, EngineConfig, EventRecord, InstrumentKind};
+    ///
+    /// let mut engine = Engine::new(EngineConfig::new(48_000.0)).unwrap();
+    /// engine.create_part(0, InstrumentKind::Drums).unwrap();
+    /// engine.push(EventRecord::note_on(0, 0, 36, 1.0));
+    /// engine.render(128);
+    /// let scope = engine.part_scope(0, 1_024).unwrap();
+    /// // 128 frames and the 111 the parts run ahead by.
+    /// assert_eq!((scope.frame, scope.left.len()), (0, 239));
+    /// assert!(scope.left.iter().any(|&sample| sample != 0.0));
+    /// let levels = engine.part_levels(0).unwrap();
+    /// assert!(levels.peak[0] > levels.rms[0] && levels.rms[0] > 0.0);
+    /// ```
+    pub fn part_scope(&self, part: u16, frames: usize) -> Option<PartScope> {
+        let meter = &self.part(part)?.meter;
+        let frames = frames.min(crate::SCOPE_FRAMES);
+        let (mut left, mut right) = (vec![0.0; frames], vec![0.0; frames]);
+        let (count, frame) = meter.copy_into(&mut left, &mut right);
+        left.truncate(count);
+        right.truncate(count);
+        Some(PartScope { frame, left, right })
+    }
+
+    /// Copies the latest frames of part `part`, as many as the shorter of
+    /// `left` and `right` holds (at most [`SCOPE_FRAMES`](crate::SCOPE_FRAMES)
+    /// and at most the frames since frame 0), into their starts, as
+    /// [`part_scope`](Self::part_scope) gives them. Returns how many, and
+    /// the frame of the first. `None` if there is no such part. Never
+    /// allocates.
+    pub fn part_scope_into(
+        &self,
+        part: u16,
+        left: &mut [f32],
+        right: &mut [f32],
+    ) -> Option<(usize, u64)> {
+        Some(self.part(part)?.meter.copy_into(left, right))
+    }
+
+    /// The frame after the newest one of part `part`'s scope: the next
+    /// frame the part renders. `None` if there is no such part.
+    pub fn part_scope_end(&self, part: u16) -> Option<u64> {
+        self.part(part).map(|part| part.meter.end())
+    }
+
+    /// The peak and RMS levels of part `part` on the newest frame of its
+    /// [scope](Self::part_scope), each channel: the peak rises at once and
+    /// falls 20 dB in [`PEAK_RETURN_SECONDS`](crate::PEAK_RETURN_SECONDS),
+    /// the RMS is averaged over [`RMS_SECONDS`](crate::RMS_SECONDS). Every
+    /// frame counts, however the frames are cut into quanta. `None` if
+    /// there is no such part. Never allocates.
+    pub fn part_levels(&self, part: u16) -> Option<PartLevels> {
+        self.part(part).map(|part| part.meter.levels())
+    }
+
     /// The text of the value `plain` for a parameter of a part, with its
     /// unit, as [`ParamSet::value_to_text`] gives it. Allocates.
     pub fn value_to_text(&self, part: u16, id: &str, plain: f64) -> Option<String> {
@@ -1767,7 +1857,9 @@ impl Engine {
         self.stereo.set_num_frames(frames);
         let clock = self.master.clock();
         for part in &mut self.parts {
-            if !part.render(&mut self.mono, &mut self.stereo, clock) {
+            let finite = part.render(&mut self.mono, &mut self.stereo, clock);
+            part.meter.feed(&self.stereo);
+            if !finite {
                 self.stats.recovered += 1;
                 continue;
             }

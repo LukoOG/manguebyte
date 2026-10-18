@@ -681,6 +681,31 @@ display, and no editor has been opened inside a real host yet.
   names the kinds and their presets (`INSTRUMENT`, `PRESETS`);
   `examples/new_voices_songs.rs` renders a song for each family. The ABI
   version stays 2.
+- `manguebyte-web` keeps a scope and levels for every part, for Aratu's
+  editor to draw: its latest 4 096 frames (`SCOPE_FRAMES`) of what it puts
+  into the master bus, after its effects, gain and pan, and its peak (rising
+  at once, falling 20 dB in 1.7 s, `PEAK_RETURN_SECONDS`) and RMS (0.3 s,
+  `RMS_SECONDS`) levels per channel. The render call writes them into a
+  ring per part, a frame at a time, never allocating, and they are the same
+  bits whatever the quanta. `Engine::part_scope`, `part_scope_into`,
+  `part_scope_end` and `part_levels` read them (`PartScope`, `PartLevels`),
+  as do the new exports `mb_scope_frames`, `mb_part_scope`,
+  `mb_scope_ptr`, `mb_part_scope_end`, `mb_part_levels` and
+  `mb_levels_ptr`, which never allocate. In a cross-origin isolated page
+  the worklet copies them after every quantum into a `SharedArrayBuffer`
+  of one sequence-locked slot per part (`js/scope.js`, 33 KiB a part),
+  which `engine.partScope(part, frames)` and `engine.partLevels(part)` read
+  without a message; without shared memory, or with `scopes: false`, they
+  ask the worklet. A part made again keeps its scope. Status -103 says a
+  module has no scopes. The ABI version stays 2.
+- `manguebyte-web`'s drive has a fifth curve, `drive.shape` 4, the tube
+  (`'tube'` in `SHAPES`, `tube_curve`): `¾·(tanh(1.5x + ½ ln 2) − ⅓)`, a
+  hyperbolic tangent biased a third of the way up, in the manner of a
+  triode, so that the positive half flattens sooner than the negative and
+  a wave gains even harmonics (18 dB below a kilohertz at the defaults,
+  where the odd curves give none); a first-order 5 Hz high-pass
+  (`TUBE_DC_HZ`) after it takes out the offset that leaves. Its slope at
+  rest is 1, and a phrase plays within 0.6 LU of the tanh's loudness.
 
 ### Hosting
 

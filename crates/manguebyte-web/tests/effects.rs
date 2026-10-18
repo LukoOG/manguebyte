@@ -453,6 +453,105 @@ fn the_drive_bends_the_signal_as_its_curve_says() {
     }
 }
 
+/// The amplitude of harmonic `harmonic` of `frequency` in `samples`, a
+/// whole number of its periods long: one bin of a discrete Fourier
+/// transform.
+fn harmonic(samples: &[f32], frequency: f64, harmonic: usize) -> f64 {
+    let step = core::f64::consts::TAU * frequency * harmonic as f64 / RATE;
+    let (mut re, mut im) = (0.0, 0.0);
+    for (n, &sample) in samples.iter().enumerate() {
+        let (sin, cos) = (step * n as f64).sin_cos();
+        re += f64::from(sample) * cos;
+        im -= f64::from(sample) * sin;
+    }
+    2.0 * re.hypot(im) / samples.len() as f64
+}
+
+fn mean(samples: &[f32]) -> f64 {
+    samples.iter().map(|&s| f64::from(s)).sum::<f64>() / samples.len() as f64
+}
+
+/// The tube bends the two halves of a wave unequally, so it gives the
+/// even harmonics the odd curves never do, and takes out the offset that
+/// leaves.
+#[test]
+fn the_tube_gives_even_harmonics_and_no_offset() {
+    // A kilohertz, 48 frames a period; measured over a second, once the
+    // tube's high-pass has long settled.
+    let frequency = 1_000.0;
+    let tone = sine(frequency, RATE, 72_000, 0.9);
+    let window = 24_000..72_000;
+    let mut evens = Vec::new();
+    for shape in 0..5 {
+        // The drive's defaults: 12 dB in, 6 dB down out.
+        let settings = [(ids::DRIVE_SHAPE, f64::from(shape))];
+        let (left, right) = through(Some(Effect::Drive), &settings, &tone, 72_000);
+        assert_eq!(bits(&left), bits(&right));
+        let sound = &left[window.clone()];
+        let fundamental = harmonic(sound, frequency, 1);
+        let even = harmonic(sound, frequency, 2).hypot(harmonic(sound, frequency, 4));
+        let even_db = db(even / fundamental);
+        let offset = mean(sound) / f64::from(peak(sound));
+        eprintln!("shape {shape}: even harmonics {even_db:.1} dB, offset {offset:.2e}");
+        assert!(offset.abs() < 1e-4, "shape {shape}: an offset of {offset}");
+        evens.push(even_db);
+    }
+    for (shape, &even) in evens[..4].iter().enumerate() {
+        assert!(
+            even < -80.0,
+            "shape {shape} is odd: {even} dB of even harmonics"
+        );
+    }
+    assert!(
+        evens[4] > -20.0,
+        "the tube: {} dB of even harmonics",
+        evens[4]
+    );
+
+    // Without the high-pass the curve would leave an offset of a tenth of
+    // its peak and more.
+    let drive = 10f64.powf(12.0 / 20.0);
+    let level = f64::from(sampler_level());
+    let bent: Vec<f32> = tone[window]
+        .iter()
+        .map(|&x| manguebyte_web::tube_curve(f64::from(x) * level * drive) as f32)
+        .collect();
+    assert!(
+        mean(&bent) / f64::from(peak(&bent)) < -0.1,
+        "{}",
+        mean(&bent)
+    );
+}
+
+/// What comes out of the tube is its curve, through the high-pass the
+/// docs give: `y[n] = x[n] - x[n-1] + R y[n-1]`, `R = exp(-2π 5 Hz / rate)`.
+#[test]
+fn the_tube_bends_the_signal_as_its_curve_and_high_pass_say() {
+    let ramp: Vec<f32> = (0..48_000).map(|n| n as f32 / 24_000.0 - 1.0).collect();
+    let settings = [
+        (ids::DRIVE_AMOUNT, 18.0),
+        (ids::DRIVE_OUTPUT, -3.0),
+        (ids::DRIVE_SHAPE, 4.0),
+    ];
+    let (left, _) = through(Some(Effect::Drive), &settings, &ramp, 48_000);
+    let gain = |db: f64| f64::from(10f64.powf(db / 20.0) as f32);
+    let (drive, output) = (gain(18.0), gain(-3.0));
+    let pole = (-core::f64::consts::TAU * manguebyte_web::TUBE_DC_HZ / RATE).exp();
+    let level = sampler_level();
+    let (mut last_in, mut last_out) = (0.0, 0.0);
+    for (n, &x) in ramp.iter().enumerate() {
+        let bent = manguebyte_web::tube_curve(f64::from(x * level) * drive);
+        let out = bent - last_in + pole * last_out;
+        (last_in, last_out) = (bent, out);
+        let want = out * output;
+        assert!(
+            (f64::from(left[n]) - want).abs() < 1e-5,
+            "at {n}: {} measured, {want} wanted",
+            left[n]
+        );
+    }
+}
+
 #[test]
 fn the_tremolo_and_the_auto_pan_follow_their_waves() {
     let steady = vec![1.0f32; 3 * 48_000];
@@ -516,7 +615,7 @@ fn switching_and_changing_effects_never_clicks() {
     let fade = (EFFECT_FADE_SECONDS * RATE) as usize;
     let tone = hum();
     let level = sampler_level() * 0.8;
-    let cases: [(Effect, &[(&str, f64)]); 13] = [
+    let cases: [(Effect, &[(&str, f64)]); 14] = [
         (
             Effect::Highpass,
             &[
@@ -539,6 +638,11 @@ fn switching_and_changing_effects_never_clicks() {
         (
             Effect::Drive,
             &[(ids::DRIVE_AMOUNT, 30.0), (ids::DRIVE_SHAPE, 3.0)],
+        ),
+        // Into the tube, whose offset its high-pass takes out from there.
+        (
+            Effect::Drive,
+            &[(ids::DRIVE_AMOUNT, 24.0), (ids::DRIVE_SHAPE, 4.0)],
         ),
         (
             Effect::Bitcrush,
@@ -743,7 +847,10 @@ fn every_effect_is_the_same_in_every_quantum() {
         (7_001, ids::EQ_LOW_GAIN, -9.0),
         (9_999, ids::DELAY_TIME, 0.2),
         (10_000, ids::MASTER_TEMPO, 133.0),
+        (5_003, ids::DRIVE_SHAPE, 4.0),
         (12_345, ids::DRIVE_SHAPE, 2.0),
+        (12_350, ids::DRIVE_SHAPE, 4.0),
+        (25_000, ids::DRIVE_SHAPE, 0.0),
         (20_000, ids::CHORUS_ON, 0.0),
         (30_003, ids::PHASER_STAGES, 9.0),
         (40_000, ids::DELAY_ON, 0.0),
@@ -992,6 +1099,18 @@ fn the_curves_are_those_of_manguebyte_dsp() {
     let curve = curve_of(Effect::Drive, &drive, points);
     assert_curve("drive", &curve, &samples, |x| {
         ShaperCurve::SoftClip.value_at(x)
+    });
+    // The tube is this crate's own curve, drawn before its high-pass.
+    let tube = [
+        (ids::DRIVE_AMOUNT, 6.0),
+        (ids::DRIVE_OUTPUT, -2.0),
+        (ids::DRIVE_MIX, 0.75),
+        (ids::DRIVE_SHAPE, 4.0),
+    ];
+    let curve = curve_of(Effect::Drive, &tube, points);
+    let (drive, output) = (10f64.powf(6.0 / 20.0), 10f64.powf(-2.0 / 20.0));
+    assert_curve("tube", &curve, &samples, |x| {
+        x + (manguebyte_web::tube_curve(f32_of(drive) * x) * f32_of(output) - x) * 0.75
     });
 
     let chorus = [
