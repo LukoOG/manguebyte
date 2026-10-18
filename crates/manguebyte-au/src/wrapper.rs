@@ -111,6 +111,14 @@ struct Config {
     bypass: bool,
 }
 
+/// What a render reads of the [`Config`], copied so that the configuration
+/// is not held while the host's callbacks run.
+struct Rendering {
+    sources: [Source; 2],
+    host: Option<HostCallbackInfo>,
+    bypass: bool,
+}
+
 /// One input element's memory, which its source renders into.
 struct Pull {
     storage: AudioBuffer<f32>,
@@ -1241,11 +1249,25 @@ impl<P: Plugin> Instance<P> {
                 list,
             )
         };
-        let (Some(mut audio), Some(config)) = (self.audio.try_take(), self.config.try_take())
-        else {
+        let Some(mut audio) = self.audio.try_take() else {
             // SAFETY: the host's list and flags.
             unsafe { silence(list, flags) };
             return noErr;
+        };
+        // The configuration is copied out and let go at once: an input's
+        // callback is the host's, and may ask the unit for a property on
+        // this thread, which would otherwise wait for itself.
+        let config = {
+            let Some(config) = self.config.try_take() else {
+                // SAFETY: the host's list and flags.
+                unsafe { silence(list, flags) };
+                return noErr;
+            };
+            Rendering {
+                sources: config.sources,
+                host: config.host,
+                bypass: config.bypass,
+            }
         };
         let Audio {
             plugin,
@@ -1350,7 +1372,6 @@ impl<P: Plugin> Instance<P> {
             }
             buffer.mDataByteSize = (room * 4) as u32;
         }
-        drop(config);
         drop(audio);
         // SAFETY: the host's arguments.
         unsafe {

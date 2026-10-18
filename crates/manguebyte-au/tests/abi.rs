@@ -1090,6 +1090,90 @@ fn the_effect_sounds_as_it_does_with_no_host() {
     }
 }
 
+/// An input callback that asks the unit for two properties, as a host may
+/// while the unit pulls its input, before it hands the audio over.
+struct Asking {
+    feed: Feed,
+    host: *const Host,
+    answers: Vec<(Result<u32, OSStatus>, Result<u32, OSStatus>)>,
+}
+
+unsafe extern "C" fn asking(
+    refcon: *mut c_void,
+    flags: *mut AudioUnitRenderActionFlags,
+    timestamp: *const AudioTimeStamp,
+    bus: u32,
+    frames: u32,
+    list: *mut AudioBufferList,
+) -> OSStatus {
+    // SAFETY: the refcon is the `Asking` the test set up.
+    let asking = unsafe { &mut *refcon.cast::<Asking>() };
+    // SAFETY: the host the test made, which outlives the render.
+    let host = unsafe { &*asking.host };
+    asking.answers.push((
+        host.get::<u32>(
+            kAudioUnitProperty_MaximumFramesPerSlice,
+            kAudioUnitScope_Global,
+            0,
+        ),
+        host.get::<u32>(kAudioUnitProperty_BypassEffect, kAudioUnitScope_Global, 0),
+    ));
+    // SAFETY: the unit's own arguments, passed on.
+    unsafe {
+        feed(
+            (&raw mut asking.feed).cast(),
+            flags,
+            timestamp,
+            bus,
+            frames,
+            list,
+        )
+    }
+}
+
+#[test]
+fn an_input_callback_may_ask_the_unit_for_its_properties() {
+    let _serial = serial();
+    let (done, finished) = std::sync::mpsc::channel();
+    // On a thread of its own: a unit that waits for itself never returns.
+    std::thread::spawn(move || {
+        let fx = Host::new::<Fx>();
+        let mut asking = Asking {
+            feed: Feed {
+                audio: signal(2, 256, 0.05),
+                position: 0,
+            },
+            host: &raw const fx,
+            // Room made ahead: the render is watched for the heap.
+            answers: Vec::with_capacity(4),
+        };
+        let callback = AURenderCallbackStruct {
+            inputProc: Some(self::asking),
+            inputProcRefCon: (&raw mut asking).cast(),
+        };
+        assert_eq!(
+            fx.set(
+                kAudioUnitProperty_SetRenderCallback,
+                kAudioUnitScope_Input,
+                0,
+                &callback
+            ),
+            noErr
+        );
+        assert_eq!(fx.simple(kAudioUnitInitializeSelect), noErr);
+        let mut output = AudioBuffer::<f32>::new(2, 256);
+        let status = fx.render(256, &mut output, 0, false);
+        done.send((status, asking.answers)).unwrap();
+    });
+    let (status, answers) = finished
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the render waited for itself");
+    assert_eq!(status, noErr);
+    assert_eq!(answers.len(), 1);
+    assert!(answers[0].0.is_ok(), "{answers:?}");
+    assert_eq!(answers[0].1, Ok(0), "{answers:?}");
+}
+
 #[test]
 fn a_render_that_cannot_be_done_says_why() {
     let _serial = serial();

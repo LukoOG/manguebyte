@@ -374,6 +374,7 @@ jobs:
   au:
     name: Audio Unit validation (macOS)
     runs-on: macos-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -404,8 +405,9 @@ jobs:
               codes+=("$(/usr/libexec/PlistBuddy -c "Print :AudioComponents:0:$key" "$plist")")
             done
             echo "auval -v ${codes[*]}"
-            auval -v "${codes[@]}" > auval.txt 2>&1 || true
-            cat auval.txt
+            # Shown as it runs, and stopped after ten minutes, so that a unit
+            # that hangs shows where.
+            perl -e 'alarm shift; exec @ARGV' 600 auval -v "${codes[@]}" 2>&1 | tee auval.txt || true
             grep -q "AU VALIDATION SUCCEEDED" auval.txt
           done
       # The same check through the command-line tool, which reads the codes
