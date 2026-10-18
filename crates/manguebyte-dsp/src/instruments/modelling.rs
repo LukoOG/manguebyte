@@ -175,6 +175,28 @@ impl DcBlock {
         numerator / denominator.max(1e-12)
     }
 
+    /// What [`step`](Self::step) gives scaled by `(1 + R) / 2`, so that its
+    /// gain, which rises to `2 / (1 + R)` at half the sample rate, is never
+    /// above 1: a passive high-pass, for a loop. A loss inside a waveguide
+    /// must not amplify, or the loop can ring by itself once nothing drives
+    /// it; with the corner at a fixed fraction of the note, the unscaled
+    /// filter's gain above it grows as the sample rate falls (by 10% with
+    /// its corner at 94 Hz and a rate of 3 kHz).
+    #[inline]
+    pub(crate) fn step_passive(&mut self, x: f64) -> f64 {
+        self.passive_scale() * self.step(x)
+    }
+
+    /// The gain of [`step_passive`](Self::step_passive) at `w` radians per
+    /// sample.
+    pub(crate) fn passive_gain(&self, w: f64) -> f64 {
+        self.passive_scale() * self.gain(w)
+    }
+
+    fn passive_scale(&self) -> f64 {
+        0.5 * (1.0 + self.pole)
+    }
+
     /// The phase delay at `w`, in samples: negative, a high-pass leads.
     pub(crate) fn delay(&self, w: f64) -> f64 {
         let w = w.max(1e-9);
@@ -911,6 +933,28 @@ mod tests {
             assert!(loss.gain(w0) < 1.0 && loss.gain(wh) < 1.0);
         }
         assert!((trip_gain(1.0, 480.0, 48_000.0).powi(100) - 1e-3).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_passive_high_pass_never_amplifies() {
+        use core::f64::consts::PI;
+        // A corner a quarter of a note near the top of a bore's range, at
+        // the lowest rate a browser runs at and at a usual one.
+        for (corner, rate) in [(94.0, 3_000.0), (500.0, 8_000.0), (65.0, 48_000.0)] {
+            let mut plain = DcBlock::new(corner, rate);
+            let mut passive = plain;
+            assert!(plain.gain(PI) > 1.0, "{corner} Hz at {rate}");
+            for step in 0..=1_000 {
+                let w = PI * f64::from(step) / 1_000.0;
+                assert!(passive.passive_gain(w) <= 1.0 + 1e-12, "{w}");
+            }
+            assert!((passive.passive_gain(PI) - 1.0).abs() < 1e-12);
+            // It is the plain filter scaled, with the same phase.
+            for x in [1.0, -0.5, 0.25, 0.0, 0.75] {
+                let scaled = 0.5 * (1.0 + (-TAU * corner / rate).exp()) * plain.step(x);
+                assert!((passive.step_passive(x) - scaled).abs() < 1e-15);
+            }
+        }
     }
 
     #[test]

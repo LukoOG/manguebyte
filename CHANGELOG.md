@@ -1581,6 +1581,16 @@ display, and no editor has been opened inside a real host yet.
 
 ### Fixed
 
+- A released `WindVoice` could go on sounding by itself at low sample
+  rates: the flute's G4 at 3 kHz held at about -25 dBFS, its B5 at 6 kHz
+  too. The bore's loop high-pass, a DC blocker whose gain rises to
+  `2 / (1 + R)` above its corner, gained up to 10 % there once its corner
+  (a quarter of the note) was a large share of the sample rate, more than
+  the bell lost, and the vortices' loss at the embouchure held the swing
+  at a level. The loop now uses the high-pass scaled by `(1 + R) / 2`,
+  passive at every frequency, so the loop's gain stays below the bore's
+  at every rate; a test releases every preset across its range at 3 to
+  22 kHz and `manguebyte-web` checks the winds at every rate again.
 - After a panic in the plugin, the CLAP and VST 3 wrappers did not give it
   the parameter values the host had sent in that block, so a plugin that
   follows events alone kept the old ones. The next block now starts with

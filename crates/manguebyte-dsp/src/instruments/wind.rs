@@ -967,7 +967,7 @@ impl WindTone {
             // at the note, over the jet's gain there for small deflections
             // (its profile's slope, taken where it is aimed as it plays, and
             // its filter).
-            let trip = self.bell.gain(w0) * self.dc.gain(w0);
+            let trip = self.bell.gain(w0) * self.dc.passive_gain(w0);
             let loss = (1.0 - trip).max(1e-3);
             let slope = JET_GAIN * self.jet_filter.gain(w0).powi(2);
             self.jet_strength = loss / slope.max(1e-3);
@@ -1199,7 +1199,7 @@ impl WindTone {
                 let incoming = if self.kind == WindKind::Clarinet {
                     -reflected
                 } else {
-                    self.dc.step(reflected)
+                    self.dc.step_passive(reflected)
                 };
                 let x = self.valve.position();
                 let (least, range) = if self.kind == WindKind::Clarinet {
@@ -1219,7 +1219,7 @@ impl WindTone {
             WindKind::Brass => {
                 self.turbulence += (self.noise.next() - self.turbulence) * 0.3;
                 let turbulence = air * self.turbulence;
-                let incoming = self.dc.step(reflected);
+                let incoming = self.dc.step_passive(reflected);
                 let x = self.valve.position();
                 let gamma = (LIPS_LEAST + self.lift + LIPS_RANGE * level) * envelope
                     + TURBULENCE * turbulence;
@@ -1249,7 +1249,7 @@ impl WindTone {
                 );
                 let turbulence = air * (self.noise_high - self.noise_low);
 
-                let incoming = self.dc.step(reflected);
+                let incoming = self.dc.step_passive(reflected);
                 // The jet is deflected by the flow in and out of the hole,
                 // which the wave coming back sets, and by its own
                 // turbulence, and reaches the edge a quarter of a period
@@ -2574,6 +2574,37 @@ mod tests {
                     "{kind:?}: {}",
                     measure::peak(&signal)
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn a_released_note_dies_away_at_every_sample_rate() {
+        // At 3 kHz the flute's G4, released, went on sounding by itself at
+        // -25 dBFS: the bore's high-pass gained up to 10% above its corner,
+        // more than the bell lost, and the vortices' loss held the swing.
+        for rate in [3_000.0, 4_000.0, 6_000.0, 8_000.0, 11_025.0, 22_050.0] {
+            for (name, params, low, high) in presets() {
+                for key in [low, (low + high) / 2, 67, 79, high] {
+                    let mut synth = crate::Synth::new(voice(params));
+                    synth.prepare(&ProcessSpec {
+                        sample_rate: rate,
+                        max_block_size: 512,
+                        num_channels: 1,
+                    });
+                    let released = (0.3 * rate) as usize;
+                    let signal = play(
+                        &mut synth,
+                        &[(0, accented(key, 1.0)), (released, off(key))],
+                        (2.0 * rate) as usize,
+                        256,
+                    );
+                    let label = format!("{name} {key} at {rate} Hz");
+                    assert!(measure::peak(&signal[..released]) > 1e-3, "{label}");
+                    assert_eq!(synth.active_voices(), 0, "{label}: still sounding");
+                    let tail = &signal[(1.5 * rate) as usize..];
+                    assert_eq!(measure::peak(tail), 0.0, "{label}");
+                }
             }
         }
     }

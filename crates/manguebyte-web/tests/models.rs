@@ -1244,12 +1244,7 @@ fn every_new_kind_works_at_every_sample_rate() {
             );
             assert_eq!(engine.stats().recovered, 0, "{label}");
             // A crash rings longer than 4 s (the lo-fi kit's for 9, 10 at 3 kHz);
-            // it must still ring out. A wind does not, below 8 kHz: at 3 kHz
-            // the flute's bore, released, goes on sounding by itself, at
-            // -20 dBFS (manguebyte-dsp's to fix).
-            if kind == InstrumentKind::Wind && rate < 8_000.0 {
-                continue;
-            }
+            // it must still ring out, as a wind must at every rate.
             let mut seconds = 4;
             while engine.active_voices(0) != Some(0) && seconds < 30 {
                 let mut more = vec![0.0; rate as usize];
