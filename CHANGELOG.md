@@ -11,6 +11,27 @@ Nothing has been published to crates.io yet. Everything below is on `main`.
 
 ### Plugins
 
+- Plugins send notes, expressions and MIDI out. A plugin that sets
+  `Plugin::NOTE_OUTPUT` writes, from the new `process_with_output`
+  (whose default calls `process`), into an `output::OutputBuffer` with
+  room set aside: notes, chokes and per-note expressions as the framework
+  has them, any MIDI 2.0 channel voice message (per-note controllers,
+  attributes, per-note management, 16- and 32-bit values) and MIDI 1.0.
+  `output::OutputTranslator` writes it as MIDI 2.0 packets, as MIDI 1.0
+  by the default translation, or as MPE, the inverse of how `NoteInput`
+  reads them, and a note number an expression shaped is detached and
+  reset before its next note; `output::NoteIds` finds notes named by id
+  alone. `Harness::take_output` keeps what a plugin sent on the
+  timeline. `manguebyte-clap` offers an output note port and sends
+  CLAP's own notes and note expressions, `CLAP_EVENT_MIDI2` where the
+  host takes MIDI 2.0 and `CLAP_EVENT_MIDI` otherwise, or MIDI 2.0, MPE
+  or MIDI 1.0 to a host without CLAP's dialect. `manguebyte-vst3` offers
+  an output event bus with note on and off, polyphonic pressure, note
+  expression values and `LegacyMIDICCOutEvent` for channel messages.
+  `manguebyte-standalone` sends to a MIDI output port
+  (`Standalone::start_with_midi_output`, `Engine::with_midi_output`), as
+  MIDI 1.0 or MPE. All of it is tested for heap use, and against the
+  framework's own input; LV2 has no output yet.
 - MPE and MIDI 2.0 reach plugins as per-note events in every format,
   through the plugin's `NoteInput`. `manguebyte-clap` offers the MPE and
   MIDI 2.0 note dialects beside CLAP and MIDI and reads
@@ -1254,6 +1275,16 @@ display, and no editor has been opened inside a real host yet.
 
 ### MIDI
 
+- `translate::Midi2ToMpe`: MIDI 2.0 per-note messages written out as MPE,
+  the alternate translation for what the default one drops (M2-104-UM,
+  D.2.8). Each note gets a member channel from the MPE allocator, its
+  per-note pitch bend, pitch attribute and per-note controller 3, its
+  polyphonic pressure and its per-note controller 74 become the
+  channel's pitch bend, pressure and controller 74, sent before the
+  note-on (RP-053, 3.2 and 3.3), and channel messages go to the master
+  channel. The configuration message goes first, per-note management
+  detaches and resets, and a wider per-note bend range is scaled to the
+  members' 48 semitones.
 - `ci`: MIDI Capability Inquiry, written from MIDI-CI 1.2 (M2-101-UM) and
   the profile and property exchange common rules. `parse` and `encode`
   read and write every message: discovery and its reply, endpoint
@@ -1453,6 +1484,15 @@ display, and no editor has been opened inside a real host yet.
 
 ### Devices
 
+- MIDI output from the audio thread: `midi::midi_output_queue` makes a
+  `MidiTransmitter`, which stamps each Universal MIDI Packet with the
+  moment its frame is heard, one block late as input is, and
+  `MidiOutput::spawn` the thread that sends it then. `PacketWriter`
+  writes packets as MIDI 1.0 bytes: MIDI 2.0 by the default translation,
+  7-bit system exclusive put back together. `MidiOutput::send_packet` and
+  `DeviceManager::send_midi_packet` send one from other threads. Every
+  port speaks MIDI 1.0 for now (`MidiProtocol`): the systems' own UMP
+  APIs are not used yet.
 - `MidiReceiver::read_events` and `DeviceIo::read_midi_events` hand MIDI
   to the audio thread as events, read through a `NoteInput`, so that MPE
   arrives as per-note events; the standalone runner uses them.
