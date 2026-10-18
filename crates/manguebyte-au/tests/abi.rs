@@ -1163,7 +1163,11 @@ fn an_input_callback_may_ask_the_unit_for_its_properties() {
         assert_eq!(fx.simple(kAudioUnitInitializeSelect), noErr);
         let mut output = AudioBuffer::<f32>::new(2, 256);
         let status = fx.render(256, &mut output, 0, false);
-        done.send((status, asking.answers)).unwrap();
+        let answers = std::mem::take(&mut asking.answers);
+        // Closed before the answer goes back, so that the leak check the
+        // test makes on its way out sees the unit gone.
+        drop(fx);
+        done.send((status, answers)).unwrap();
     });
     let (status, answers) = finished
         .recv_timeout(std::time::Duration::from_secs(20))
