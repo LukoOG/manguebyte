@@ -9,6 +9,7 @@ use manguebyte_midi::ump::Packet;
 use manguebyte_params::{LoadReport, ParamSet};
 
 use crate::editor::EditorSpec;
+use crate::output::{OutputBuffer, OutputKind};
 use crate::{ParamWatcher, Plugin, StateError, apply_param_events, load_state, save_state};
 
 /// Most events the harness will deliver in a single block.
@@ -47,6 +48,11 @@ pub struct Harness<P: Plugin> {
     watcher: ParamWatcher,
     transport: Transport,
     position: u64,
+    /// What the plugin sends during a block, with room for a block's worth
+    /// if it says it sends anything.
+    output: OutputBuffer,
+    /// What it has sent since the last `take_output`, on the timeline.
+    sent: Vec<(u64, OutputKind)>,
 }
 
 impl<P: Plugin> Harness<P> {
@@ -94,6 +100,12 @@ impl<P: Plugin> Harness<P> {
             editor,
             transport: Transport::playing_at(120.0),
             position: 0,
+            output: if P::NOTE_OUTPUT {
+                OutputBuffer::with_capacity(EVENTS_PER_BLOCK)
+            } else {
+                OutputBuffer::new()
+            },
+            sent: Vec::new(),
         }
     }
 
@@ -150,6 +162,19 @@ impl<P: Plugin> Harness<P> {
     /// How many frames have been rendered so far.
     pub fn position(&self) -> u64 {
         self.position
+    }
+
+    /// Everything the plugin has sent out since this was last called, from
+    /// [`Plugin::process_with_output`], each on its frame of the timeline
+    /// as [`position`](Self::position) counts them. An event sent past the
+    /// end of its block is on the block's last frame, as a host would have
+    /// it. Empty for a plugin that does not set [`Plugin::NOTE_OUTPUT`].
+    ///
+    /// The frames do not depend on the block sizes the plugin was given,
+    /// so comparing what two [block patterns](Self::with_block_pattern)
+    /// send checks that a plugin's output does not either.
+    pub fn take_output(&mut self) -> Vec<(u64, OutputKind)> {
+        std::mem::take(&mut self.sent)
     }
 
     /// Schedules an event at `frame` on the timeline.
@@ -316,7 +341,16 @@ impl<P: Plugin> Harness<P> {
                 context = context.with_sidechain(&self.sidechain);
             }
             let plugin = &mut self.plugin;
-            buffer.windowed(done..done + length, |block| plugin.process(block, &context));
+            let output = &mut self.output;
+            output.clear();
+            buffer.windowed(done..done + length, |block| {
+                plugin.process_with_output(block, &context, output);
+            });
+            let last = length.saturating_sub(1) as u64;
+            for event in &self.output {
+                let frame = self.position + u64::from(event.offset).min(last);
+                self.sent.push((frame, event.kind));
+            }
 
             self.transport.advance(length, self.sample_rate);
             self.position += length as u64;

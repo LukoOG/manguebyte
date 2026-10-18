@@ -64,12 +64,21 @@
 //! controllers through and gives the plugin one hidden parameter for each
 //! one declared; formats that carry MIDI as it is ignore it. See
 //! [`Plugin::MIDI_CONTROLLERS`] for the details.
+//!
+//! # Sending notes out
+//!
+//! A plugin that plays notes, such as an arpeggiator or a sequencer, sets
+//! [`Plugin::NOTE_OUTPUT`] and writes its notes, per-note expressions and
+//! MIDI 1.0 and 2.0 messages from [`Plugin::process_with_output`]. The
+//! [`output`] module has the types, and the translation to MIDI 2.0
+//! packets, MIDI 1.0 and MPE that ports and hosts need.
 
 #![forbid(unsafe_code)]
 
 mod controllers;
 pub mod editor;
 mod harness;
+pub mod output;
 mod state;
 
 use std::sync::Arc;
@@ -83,6 +92,7 @@ use manguebyte_params::ParamSet;
 pub use controllers::{MidiController, MidiControllers};
 use editor::EditorSpec;
 pub use harness::Harness;
+use output::OutputBuffer;
 pub use state::{StateError, load_state, save_state};
 
 /// What sort of plugin this is, so a host can list it in the right place.
@@ -209,6 +219,92 @@ pub trait Plugin: Send + 'static {
     ///   and never needs to poll.
     fn process(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>);
 
+    /// Processes one block in place, as [`process`](Self::process) does,
+    /// and sends notes and MIDI out through `output`. Every wrapper, the
+    /// standalone runner and the [`Harness`] call this; unless overridden
+    /// it calls `process` and sends nothing.
+    ///
+    /// Events go into `output` with their frame in the block, as those of
+    /// `context.events` have, and must not allocate: `output` has room set
+    /// aside, and refuses what does not fit. A plugin that sends notes
+    /// sets [`NOTE_OUTPUT`](Self::NOTE_OUTPUT), does its work here, and
+    /// lets `process` call this with a buffer that has no room, for the
+    /// formats that have no output:
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use manguebyte_core::AudioBuffer;
+    /// use manguebyte_dsp::event::{EventKind, NoteRef};
+    /// use manguebyte_dsp::{ProcessContext, ProcessSpec};
+    /// use manguebyte_params::param_set;
+    /// use manguebyte_plugin::output::{OutputBuffer, OutputKind};
+    /// use manguebyte_plugin::{AudioLayout, Harness, Plugin, PluginInfo, PluginKind};
+    ///
+    /// struct NoParams {}
+    /// param_set!(NoParams {});
+    ///
+    /// /// Plays every note a fifth higher as well.
+    /// struct Fifths(Arc<NoParams>);
+    ///
+    /// impl Plugin for Fifths {
+    ///     const INFO: PluginInfo = PluginInfo {
+    ///         id: "org.example.fifths",
+    ///         name: "Fifths",
+    ///         vendor: "Example",
+    ///         version: "1.0.0",
+    ///         description: "Adds a fifth to every note",
+    ///         kind: PluginKind::NoteEffect,
+    ///     };
+    ///     const LAYOUT: AudioLayout = AudioLayout::STEREO_EFFECT;
+    ///     const NOTE_OUTPUT: bool = true;
+    ///     type Params = NoParams;
+    ///
+    ///     fn new() -> Self { Self(Arc::new(NoParams {})) }
+    ///     fn params(&self) -> Arc<NoParams> { Arc::clone(&self.0) }
+    ///     fn prepare(&mut self, _: &ProcessSpec) {}
+    ///     fn process(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+    ///         self.process_with_output(buffer, context, &mut OutputBuffer::new());
+    ///     }
+    ///     fn process_with_output(
+    ///         &mut self,
+    ///         _: &mut AudioBuffer<f32>,
+    ///         context: &ProcessContext<'_, f32>,
+    ///         output: &mut OutputBuffer,
+    ///     ) {
+    ///         for event in context.events {
+    ///             let fifth = |note: NoteRef| NoteRef::new(note.channel, note.key.saturating_add(7));
+    ///             match event.kind {
+    ///                 EventKind::NoteOn { note, velocity } => {
+    ///                     output.note_on(event.offset, note, velocity);
+    ///                     output.note_on(event.offset, fifth(note), velocity);
+    ///                 }
+    ///                 EventKind::NoteOff { note, velocity } => {
+    ///                     output.note_off(event.offset, note, velocity);
+    ///                     output.note_off(event.offset, fifth(note), velocity);
+    ///                 }
+    ///                 _ => {}
+    ///             }
+    ///         }
+    ///     }
+    /// }
+    ///
+    /// let mut harness = Harness::<Fifths>::new(48_000.0, 64);
+    /// harness.note(10, 20, 60, 1.0);
+    /// harness.render(100);
+    /// let sent = harness.take_output();
+    /// assert_eq!(sent.len(), 4);
+    /// assert_eq!(sent[1], (10, OutputKind::NoteOn { note: NoteRef::new(0, 67), velocity: 1.0 }));
+    /// ```
+    fn process_with_output(
+        &mut self,
+        buffer: &mut AudioBuffer<f32>,
+        context: &ProcessContext<'_, f32>,
+        output: &mut OutputBuffer,
+    ) {
+        let _ = output;
+        self.process(buffer, context);
+    }
+
     /// Clears internal state such as filter memory and tails, without
     /// touching parameters.
     fn reset(&mut self) {}
@@ -320,6 +416,17 @@ pub trait Plugin: Send + 'static {
     /// many hosts never pass the configuration message on; one that reads
     /// MPE from raw MIDI itself says [`Mpe::Off`].
     const MPE: Mpe = Mpe::Follow;
+
+    /// Whether the plugin sends notes and MIDI out, from
+    /// [`process_with_output`](Self::process_with_output). `false` unless
+    /// overridden.
+    ///
+    /// With it set, a plugin of any kind gets an output: a CLAP note port,
+    /// a VST 3 event bus, the MIDI output port of the standalone runner,
+    /// and in the [`Harness`], [`take_output`](Harness::take_output).
+    /// Without it, the buffer `process_with_output` is given has no room,
+    /// and whatever the plugin writes there is dropped.
+    const NOTE_OUTPUT: bool = false;
 
     /// How many frames late the output is compared with the input.
     fn latency_samples(&self) -> usize {

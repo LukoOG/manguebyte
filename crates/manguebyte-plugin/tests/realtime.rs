@@ -222,3 +222,62 @@ fn announcing_and_storing_parameter_values_does_not_use_the_heap() {
     assert_eq!(params.automated.value(), 0.5);
     assert_eq!(params.edited.value(), 1.0);
 }
+
+/// What a plugin and its wrapper do with notes sent out: fill the output
+/// buffer, and write it as MIDI 2.0, as MIDI 1.0 and as MPE, block after
+/// block.
+#[test]
+fn sending_notes_out_does_not_use_the_heap() {
+    use manguebyte_dsp::event::{Expression, NoteRef};
+    use manguebyte_midi::MidiMessage;
+    use manguebyte_midi::mpe::Zone;
+    use manguebyte_midi::ump::{ChannelVoice2, NoteAttribute};
+    use manguebyte_plugin::output::{OutputBuffer, OutputProtocol, OutputTranslator};
+
+    let mut translators = [
+        OutputTranslator::new(OutputProtocol::Midi2),
+        OutputTranslator::new(OutputProtocol::Midi1),
+        OutputTranslator::new(OutputProtocol::Mpe(Zone::lower(7).unwrap())),
+    ];
+    let mut output = OutputBuffer::with_capacity(64);
+    let blocks = if cfg!(miri) { 4 } else { 500 };
+    let mut packets = 0_usize;
+    assert_no_heap_use("sending notes out", || {
+        for block in 0..blocks {
+            output.clear();
+            for step in 0..8_u32 {
+                let key = ((block * 8 + step) % 100) as u8;
+                let note = NoteRef::with_id(step as u8 % 3, key, block * 8 + step);
+                output.note_on(step * 4, note, 0.5);
+                output.expression(step * 4, note, Expression::Tuning, f64::from(step) - 4.0);
+                output.expression(step * 4 + 1, note, Expression::Pressure, 0.5);
+                output.expression(step * 4 + 1, note, Expression::Volume, 0.7);
+                output.midi2(
+                    step * 4 + 2,
+                    ChannelVoice2::NoteOn {
+                        channel: 9,
+                        note: key,
+                        velocity: 0x1234,
+                        attribute: NoteAttribute::pitch(f32::from(key) + 0.25),
+                    },
+                );
+                output.midi1(
+                    step * 4 + 2,
+                    MidiMessage::ControlChange {
+                        channel: 0,
+                        controller: 1,
+                        value: key,
+                    },
+                );
+                output.note_off(step * 4 + 3, note, 0.0);
+            }
+            for translator in &mut translators {
+                translator.translate_buffer(&output, |_, _| packets += 1);
+                if block % 50 == 49 {
+                    translator.end_all(|_| packets += 1);
+                }
+            }
+        }
+    });
+    assert!(packets > blocks as usize * 8 * 3);
+}
