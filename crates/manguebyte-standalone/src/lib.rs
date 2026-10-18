@@ -3,7 +3,9 @@
 //! The same plugin that is exported to a host can be played directly: its
 //! audio goes to the sound card, its notes come from every connected MIDI
 //! keyboard, and an effect takes its input from the default microphone or
-//! line input.
+//! line input. A plugin that sends notes ([`Plugin::NOTE_OUTPUT`]) can
+//! send them to a MIDI output port, as MIDI 1.0 or MPE, with
+//! [`Standalone::start_with_midi_output`].
 //!
 //! ```no_run
 //! # use std::sync::Arc;
@@ -44,14 +46,23 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use manguebyte_core::spsc::{self, Producer};
-use manguebyte_devices::midi::{MidiError, MidiInput, midi_input_ports};
+use manguebyte_devices::midi::{
+    MidiError, MidiInput, MidiOutput, MidiOutputThread, MidiProtocol, midi_input_ports,
+    midi_output_queue,
+};
 use manguebyte_devices::{
     DeviceError, DuplexSettings, DuplexStream, InputDevice, OutputDevice, OutputStream,
     StreamSettings,
 };
 use manguebyte_midi::MidiMessage;
+use manguebyte_midi::mpe::Zone;
 use manguebyte_params::LoadReport;
+use manguebyte_plugin::output::OutputProtocol;
 use manguebyte_plugin::{Plugin, StateError, load_state, save_state};
+
+/// How many packets can wait for the MIDI output thread: a dense part
+/// with expressions sends a few thousand a second.
+const MIDI_OUTPUT_QUEUE: usize = 8_192;
 
 pub use engine::Engine;
 
@@ -131,6 +142,42 @@ pub struct Standalone<P: Plugin> {
     midi_inputs: Vec<MidiInput>,
     midi_problems: Vec<MidiError>,
     _stream: Stream,
+    /// The thread that sends the plugin's notes to the MIDI output port,
+    /// and the port's name. After the stream, which feeds it, so that it
+    /// is dropped after it, sending what the last blocks left.
+    midi_output: Option<(MidiOutputThread, String)>,
+}
+
+/// Where a plugin that sends notes sends them when it runs standalone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MidiOutputOptions {
+    /// The output port, as [`MidiPortInfo::id`] names it.
+    ///
+    /// [`MidiPortInfo::id`]: manguebyte_devices::midi::MidiPortInfo::id
+    pub port_id: String,
+    /// For a port that speaks MIDI 1.0, as every port does for now
+    /// ([`MidiProtocol`]): `Some` writes the plugin's notes as MPE in this
+    /// zone, so that each keeps its own tuning, pressure and brightness,
+    /// and `None` as plain MIDI 1.0 by the default translation, which
+    /// keeps polyphonic pressure alone of them.
+    pub mpe: Option<Zone>,
+}
+
+impl MidiOutputOptions {
+    /// Plain MIDI 1.0 to the port `port_id`.
+    pub fn new(port_id: impl Into<String>) -> Self {
+        Self {
+            port_id: port_id.into(),
+            mpe: None,
+        }
+    }
+
+    /// MPE in a lower zone of all fifteen member channels instead.
+    #[must_use]
+    pub fn mpe(mut self) -> Self {
+        self.mpe = Zone::lower(15);
+        self
+    }
 }
 
 impl<P: Plugin> Standalone<P> {
@@ -144,6 +191,27 @@ impl<P: Plugin> Standalone<P> {
     /// [`midi_problems`](Self::midi_problems), because a missing keyboard
     /// should not stop the sound.
     pub fn start(options: StandaloneOptions) -> Result<Self, StandaloneError> {
+        Self::launch(options, None)
+    }
+
+    /// [`start`](Self::start), and sends what the plugin sends out, from
+    /// [`Plugin::process_with_output`], to a MIDI output port, each packet
+    /// on time (see [`MidiTransmitter`](manguebyte_devices::midi::MidiTransmitter)).
+    ///
+    /// For a plugin that does not set [`Plugin::NOTE_OUTPUT`] the port is
+    /// not opened. A port that cannot be opened is listed in
+    /// [`midi_problems`](Self::midi_problems), and the plugin plays on.
+    pub fn start_with_midi_output(
+        options: StandaloneOptions,
+        midi_output: MidiOutputOptions,
+    ) -> Result<Self, StandaloneError> {
+        Self::launch(options, Some(midi_output))
+    }
+
+    fn launch(
+        options: StandaloneOptions,
+        midi_output: Option<MidiOutputOptions>,
+    ) -> Result<Self, StandaloneError> {
         let output = OutputDevice::open_default()?.with_settings(options.output)?;
         let sample_rate = output.sample_rate();
 
@@ -177,6 +245,25 @@ impl<P: Plugin> Standalone<P> {
         )
         .map_err(StandaloneError::InvalidPlugin)?;
         let params = engine.params();
+
+        let mut sender = None;
+        if let Some(choice) = midi_output.filter(|_| P::NOTE_OUTPUT) {
+            match MidiOutput::open(&choice.port_id) {
+                Ok(port) => {
+                    let protocol = match (port.protocol(), choice.mpe) {
+                        (MidiProtocol::Midi1, Some(zone)) => OutputProtocol::Mpe(zone),
+                        (MidiProtocol::Midi1, None) => OutputProtocol::Midi1,
+                        // A port that speaks MIDI 2.0, when there are any.
+                        _ => OutputProtocol::Midi2,
+                    };
+                    let (transmitter, queue) = midi_output_queue(MIDI_OUTPUT_QUEUE);
+                    engine = engine.with_midi_output(transmitter, protocol);
+                    let name = port.name().to_owned();
+                    sender = Some((port.spawn(queue), name));
+                }
+                Err(error) => midi_problems.push(error),
+            }
+        }
 
         // An effect is given an input if one can run alongside the output.
         let input = (P::LAYOUT.inputs > 0)
@@ -219,6 +306,7 @@ impl<P: Plugin> Standalone<P> {
             sample_rate,
             midi_inputs,
             midi_problems,
+            midi_output: sender,
             _stream: stream,
         })
     }
@@ -263,6 +351,17 @@ impl<P: Plugin> Standalone<P> {
     /// MIDI ports that could not be opened.
     pub fn midi_problems(&self) -> &[MidiError] {
         &self.midi_problems
+    }
+
+    /// Name of the MIDI output port the plugin's notes are sent to, if one
+    /// is open.
+    pub fn midi_output_name(&self) -> Option<&str> {
+        self.midi_output.as_ref().map(|(_, name)| name.as_str())
+    }
+
+    /// How many messages the MIDI output port refused, if one is open.
+    pub fn midi_output_errors(&self) -> Option<u64> {
+        self.midi_output.as_ref().map(|(thread, _)| thread.errors())
     }
 
     /// Captures the plugin's state as text.

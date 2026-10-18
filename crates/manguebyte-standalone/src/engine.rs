@@ -2,12 +2,13 @@ use std::sync::Arc;
 
 use manguebyte_core::spsc::Consumer;
 use manguebyte_core::{AudioBuffer, NoDenormals};
-use manguebyte_devices::midi::MidiReceiver;
+use manguebyte_devices::midi::{MidiReceiver, MidiTransmitter};
 use manguebyte_dsp::event::EventBuffer;
 use manguebyte_dsp::note_input::NoteInput;
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Transport};
 use manguebyte_midi::MidiMessage;
 use manguebyte_params::ParamSet;
+use manguebyte_plugin::output::{OutputBuffer, OutputProtocol, OutputTranslator};
 use manguebyte_plugin::{ParamWatcher, Plugin};
 
 /// Most events delivered to the plugin in one block.
@@ -35,6 +36,11 @@ pub struct Engine<P: Plugin> {
     input: NoteInput,
     /// The block in the plugin's own channel layout.
     work: AudioBuffer<f32>,
+    /// What the plugin sends out during a block, with room if it says it
+    /// sends anything.
+    output: OutputBuffer,
+    /// Where what it sends goes, written for the port, if anywhere.
+    midi_out: Option<(OutputTranslator, MidiTransmitter)>,
 }
 
 impl<P: Plugin> Engine<P> {
@@ -69,7 +75,33 @@ impl<P: Plugin> Engine<P> {
             notes,
             input: NoteInput::new(P::MPE),
             work: AudioBuffer::new(P::LAYOUT.outputs, max_block_size),
+            output: if P::NOTE_OUTPUT {
+                OutputBuffer::with_capacity(EVENTS_PER_BLOCK)
+            } else {
+                OutputBuffer::new()
+            },
+            midi_out: None,
         })
+    }
+
+    /// Sends what the plugin sends out, from
+    /// [`Plugin::process_with_output`], to a MIDI output through
+    /// `transmitter`, written in `protocol` by an [`OutputTranslator`].
+    /// For a plugin that does not set [`Plugin::NOTE_OUTPUT`] nothing is
+    /// ever sent. Allocates.
+    ///
+    /// Each packet goes on the frame of the event it came from, one past
+    /// the block on its last, and the transmitter is told when each block
+    /// begins, at the start of [`render`](Self::render), so that packets
+    /// leave as far apart as their frames are.
+    #[must_use]
+    pub fn with_midi_output(
+        mut self,
+        transmitter: MidiTransmitter,
+        protocol: OutputProtocol,
+    ) -> Self {
+        self.midi_out = Some((OutputTranslator::new(protocol), transmitter));
+        self
     }
 
     /// The plugin's parameters.
@@ -85,6 +117,9 @@ impl<P: Plugin> Engine<P> {
     pub fn render(&mut self, input: Option<&AudioBuffer<f32>>, output: &mut AudioBuffer<f32>) {
         let _quiet = NoDenormals::new();
         let frames = output.num_frames().min(self.work.capacity());
+        if let Some((_, transmitter)) = &mut self.midi_out {
+            transmitter.begin_block(frames, self.sample_rate);
+        }
         let params: &dyn ParamSet = &*self.params;
 
         // Parameter changes first, then notes from the program, then MIDI
@@ -131,8 +166,18 @@ impl<P: Plugin> Engine<P> {
         }
 
         let context = ProcessContext::new(&self.events, &self.transport);
-        self.plugin.process(&mut self.work, &context);
+        self.output.clear();
+        self.plugin
+            .process_with_output(&mut self.work, &context, &mut self.output);
         self.transport.advance(frames, self.sample_rate);
+        if let Some((translator, transmitter)) = &mut self.midi_out {
+            let last = frames.saturating_sub(1) as u32;
+            // What does not fit in the queue is dropped, and counted by
+            // the transmitter.
+            translator.translate_buffer(&self.output, |offset, packet| {
+                transmitter.send(offset.min(last), packet);
+            });
+        }
 
         // A mono plugin is heard on both speakers; otherwise channels map
         // one to one and any extra device channels stay silent.
@@ -325,6 +370,138 @@ mod tests {
         // Nothing undoes it later either.
         engine.render(None, &mut device);
         assert_eq!(params.level.value(), 1.5);
+    }
+
+    /// Sends every note it is given back out a fifth higher, three frames
+    /// later, bent up a semitone.
+    struct Fifths(Arc<LevelParams>);
+    impl Plugin for Fifths {
+        const INFO: PluginInfo = PluginInfo {
+            id: "org.manguebyte.test.standalone-fifths",
+            name: "Fifths",
+            vendor: "Manguebyte tests",
+            version: "0.1.0",
+            description: "Sends notes out a fifth up",
+            kind: PluginKind::NoteEffect,
+        };
+        const LAYOUT: AudioLayout = AudioLayout::MONO_EFFECT;
+        const NOTE_OUTPUT: bool = true;
+        type Params = LevelParams;
+
+        fn new() -> Self {
+            Self(Arc::new(LevelParams {
+                level: FloatParam::new("level", "Level", FloatRange::linear(0.0, 2.0), 0.5),
+            }))
+        }
+        fn params(&self) -> Arc<LevelParams> {
+            Arc::clone(&self.0)
+        }
+        fn prepare(&mut self, _: &ProcessSpec) {}
+        fn process(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+            self.process_with_output(buffer, context, &mut OutputBuffer::new());
+        }
+        fn process_with_output(
+            &mut self,
+            _: &mut AudioBuffer<f32>,
+            context: &ProcessContext<'_, f32>,
+            output: &mut OutputBuffer,
+        ) {
+            use manguebyte_dsp::event::Expression;
+            let up = |note: NoteRef| NoteRef::new(note.channel, note.key + 7);
+            for event in context.events {
+                match event.kind {
+                    EventKind::NoteOn { note, velocity } => {
+                        output.note_on(event.offset + 3, up(note), velocity);
+                        output.expression(event.offset + 3, up(note), Expression::Tuning, 1.0);
+                    }
+                    EventKind::NoteOff { note, velocity } => {
+                        output.note_off(event.offset, up(note), velocity);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn notes_the_plugin_sends_reach_the_midi_output() {
+        use manguebyte_devices::midi::midi_output_queue;
+        use manguebyte_midi::mpe::Zone;
+        use manguebyte_midi::ump::Packet;
+
+        let cc = |channel, controller, value| MidiMessage::ControlChange {
+            channel,
+            controller,
+            value,
+        };
+        let note_on = |channel| MidiMessage::NoteOn {
+            channel,
+            note: 67,
+            velocity: 100,
+        };
+        let note_off = |channel| MidiMessage::NoteOff {
+            channel,
+            note: 67,
+            velocity: 0,
+        };
+        let plain = vec![note_on(0), note_off(0)];
+        let mpe = vec![
+            cc(0, 100, 6),
+            cc(0, 101, 0),
+            cc(0, 6, 15),
+            MidiMessage::PitchBend {
+                channel: 1,
+                value: 0,
+            },
+            MidiMessage::ChannelPressure {
+                channel: 1,
+                pressure: 0,
+            },
+            cc(1, 74, 64),
+            note_on(1),
+            // A semitone of the member channels' 48, in 14 bits.
+            MidiMessage::PitchBend {
+                channel: 1,
+                value: 170,
+            },
+            note_off(1),
+        ];
+        for (protocol, expected) in [
+            (OutputProtocol::Midi1, plain),
+            (OutputProtocol::Mpe(Zone::lower(15).unwrap()), mpe),
+        ] {
+            let (transmitter, mut queue) = midi_output_queue(64);
+            let (engine, mut notes) = engine::<Fifths>();
+            let mut engine = engine.with_midi_output(transmitter, protocol);
+            let mut device = AudioBuffer::<f32>::new(1, 8);
+            notes.push(on(60)).unwrap();
+            engine.render(None, &mut device);
+            notes
+                .push(MidiMessage::NoteOff {
+                    channel: 0,
+                    note: 60,
+                    velocity: 0,
+                })
+                .unwrap();
+            engine.render(None, &mut device);
+            let mut sent: Vec<Packet> = Vec::new();
+            queue.send_all(|packet| sent.push(*packet));
+            let messages: Vec<MidiMessage> = sent
+                .iter()
+                .map(|packet| packet.to_midi1().unwrap())
+                .collect();
+            assert_eq!(messages, expected, "{protocol:?}");
+        }
+
+        // A plugin that sends nothing sends nothing, output or not.
+        let (transmitter, mut queue) = midi_output_queue(64);
+        let (engine, mut notes) = engine::<Keys>();
+        let mut engine = engine.with_midi_output(transmitter, OutputProtocol::Midi2);
+        notes.push(on(60)).unwrap();
+        engine.render(None, &mut AudioBuffer::<f32>::new(2, 8));
+        let mut count = 0;
+        queue.send_all(|_| count += 1);
+        assert_eq!(count, 0);
     }
 
     fn engine<P: Plugin>() -> (Engine<P>, Producer<MidiMessage>) {
