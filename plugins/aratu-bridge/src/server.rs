@@ -181,9 +181,6 @@ struct Server {
     done: Receiver<Done>,
     worker: Option<JoinHandle<()>>,
     next_token: u64,
-    /// Requests for SFZ instruments handed to the audio thread: their
-    /// summaries.
-    loads: HashMap<u32, String>,
     generation: u64,
     block_seen: (u64, Instant),
     overridden: u64,
@@ -219,7 +216,6 @@ impl Server {
             done,
             worker,
             next_token: 1,
-            loads: HashMap::new(),
             generation,
             block_seen: (u64::MAX, Instant::now()),
             overridden: 0,
@@ -871,20 +867,18 @@ impl Server {
         while let Some(back) = self.from_audio.pop() {
             match back {
                 FromAudio::Done(command, code) => {
-                    if let Command::Sfz(_, slot, request) = *command {
-                        let summary = self.loads.remove(&request).unwrap_or_default();
-                        let make_up = slot.make_up_db();
-                        if code == ffi::status::OK {
-                            let json = format!(
-                                "{},\"make_up\":{}}}",
-                                summary.trim_end_matches('}'),
-                                make_up.map_or("null".to_owned(), |db| format!("{db}"))
+                    // Only an SFZ instrument can be refused by the audio
+                    // thread after its reply: say so.
+                    if let Command::Sfz(part, _, _) = *command {
+                        if code != ffi::status::OK {
+                            let mut body = protocol::notice::LOAD_REFUSED.to_le_bytes().to_vec();
+                            body.extend_from_slice(
+                                format!("part {part} could not take its instrument: status {code}")
+                                    .as_bytes(),
                             );
-                            self.reply(request, code, json.as_bytes());
-                        } else {
-                            self.reply(request, code, b"the part could not take the instrument");
+                            let message = protocol::message(plugin::NOTICE, 0, &body);
+                            self.send(&message);
                         }
-                        drop(slot);
                     }
                 }
                 FromAudio::Finished(instrument) => drop(instrument),
@@ -917,10 +911,18 @@ impl Server {
                     {
                         entry.load = None;
                     }
-                    self.loads.insert(request, summary);
+                    let json = format!(
+                        "{},\"make_up\":{}}}",
+                        summary.trim_end_matches('}'),
+                        sfz.make_up_db()
+                            .map_or("null".to_owned(), |db| format!("{db}"))
+                    );
+                    // Queued in order: what the page sends after the reply
+                    // reaches the part after the instrument.
                     self.queue(ToAudio::Command(Box::new(Command::Sfz(
                         part, *sfz, request,
                     ))));
+                    self.reply(request, ffi::status::OK, json.as_bytes());
                 }
             }
         }

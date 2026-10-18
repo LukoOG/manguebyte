@@ -62,7 +62,8 @@ pub mod page {
     /// `u16` part, `u16` length of the path, the path in UTF-8, then the
     /// file's bytes.
     pub const SFZ_FILE: u8 = 0x21;
-    /// `u16` part. Answered once the part plays the instrument, with a
+    /// `u16` part. Answered once the instrument is decoded, measured and
+    /// queued for the part, ahead of whatever the page sends next, with a
     /// JSON summary.
     pub const SFZ_FINISH: u8 = 0x22;
     /// `u16` part: drops a load under way.
@@ -118,6 +119,9 @@ pub mod notice {
     pub const ENGINE_RESET: u32 = 1;
     /// The audio thread's queue was full and messages were dropped.
     pub const OVERFLOW: u32 = 2;
+    /// A sampler part could not take the instrument a load gave it (the
+    /// part changed, or it had too many instruments still sounding).
+    pub const LOAD_REFUSED: u32 = 3;
 }
 
 /// Statuses of replies beyond those of `manguebyte_web::ffi::status`.
