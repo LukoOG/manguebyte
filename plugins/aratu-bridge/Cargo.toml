@@ -1,0 +1,34 @@
+[package]
+name = "aratu-bridge"
+description = "Aratu Bridge: a CLAP, VST 3 and Audio Unit instrument that plays an Aratu page's music in the DAW, in time with its transport, from the control calls and events the page sends over a local WebSocket."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+manguebyte = { path = "../../crates/manguebyte", default-features = false, features = ["clap", "vst3"] }
+# The engine Aratu plays in the browser, here native.
+manguebyte-web.workspace = true
+# The Audio Unit wrapper, used directly rather than through the facade, as
+# the example plugins do. It exports a unit only on macOS; elsewhere it
+# adds the function that writes the unit's Info.plist, which
+# `cargo mangue bundle --format au` calls.
+manguebyte-au.workspace = true
+
+[dev-dependencies]
+# WAV files for the tests that load sampler parts over the bridge.
+manguebyte-formats.workspace = true
+
+[package.metadata.manguebyte]
+name = "Aratu Bridge"
+id = "org.manguebyte.aratu-bridge"
+
+[lints]
+workspace = true

@@ -40,6 +40,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aratu-bridge"
+version = "0.1.0"
+dependencies = [
+ "manguebyte",
+ "manguebyte-au",
+ "manguebyte-formats",
+ "manguebyte-web",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
