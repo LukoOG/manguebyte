@@ -406,12 +406,15 @@ impl Host {
             ctx: (&raw mut got).cast(),
             try_push: Some(events_push),
         };
+        // One pointer for both, in place, so that the input's does not
+        // outlive the output's taking.
+        let ports = outputs.as_mut_ptr();
         let process = clap_process {
             steady_time: -1,
             frames_count: frames,
             transport: ptr::null(),
-            audio_inputs: outputs.as_ptr(),
-            audio_outputs: outputs.as_mut_ptr(),
+            audio_inputs: ports.cast_const(),
+            audio_outputs: ports,
             audio_inputs_count: 1,
             audio_outputs_count: 1,
             in_events: &raw const input,
