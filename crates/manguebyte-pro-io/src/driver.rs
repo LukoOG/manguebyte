@@ -580,7 +580,9 @@ impl Driver {
     /// input of the configuration (it may change it: the buffer is the
     /// stream's own), a silent output buffer to fill, one channel per
     /// output, and the block's [`BlockInfo`]. Blocks are always the
-    /// stream's buffer size. It must not allocate, lock or block.
+    /// stream's buffer size. It must not allocate, lock or block. A callback
+    /// that panics is not called again, and the stream plays silence
+    /// ([`Stream::callback_panicked`]).
     ///
     /// A driver runs one stream at a time; a second start fails with
     /// [`Error::Busy`]. The stream stops when the returned [`Stream`] is

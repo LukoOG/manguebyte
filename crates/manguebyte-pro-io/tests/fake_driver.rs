@@ -485,3 +485,29 @@ fn a_running_clock_drives_the_stream_by_itself() {
     drop(stream);
     assert!(!device.is_running());
 }
+
+#[test]
+fn a_callback_that_panics_leaves_the_stream_silent() {
+    let _turn = one_at_a_time();
+    let device = FakeDevice::new("Panicky");
+    let driver = device.load().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&calls);
+    let stream = driver
+        .start(&duplex(), move |_, output, _| {
+            counted.fetch_add(1, Ordering::Relaxed);
+            output.channel_mut(0).fill(0.5);
+            if counted.load(Ordering::Relaxed) == 2 {
+                panic!("the callback's own mistake");
+            }
+        })
+        .unwrap();
+    assert!(device.switch());
+    assert_ne!(device.read_output(0).unwrap(), vec![0u8; 256 * 4]);
+    assert!(device.switch());
+    assert!(stream.callback_panicked());
+    assert!(device.switch());
+    assert_eq!(calls.load(Ordering::Relaxed), 2, "not called again");
+    assert_eq!(device.read_output(0).unwrap(), vec![0u8; 256 * 4]);
+    assert_eq!(stream.callbacks(), 3);
+}

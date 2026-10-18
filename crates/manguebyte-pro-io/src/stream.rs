@@ -2,6 +2,7 @@
 //! `f32` blocks for a callback.
 
 use std::cell::UnsafeCell;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -181,6 +182,7 @@ struct Shared {
     frames: AtomicU64,
     time_info: AtomicBool,
     skipped: AtomicU64,
+    panicked: AtomicBool,
     input_latency: AtomicU32,
     output_latency: AtomicU32,
 }
@@ -268,7 +270,21 @@ impl Engine {
             direct_process: direct,
             time_info,
         };
-        (audio.callback)(&mut audio.input, &mut audio.output, &info);
+        if !self.shared.panicked.load(Ordering::Relaxed) {
+            // A panic must not unwind into the driver, which is C++ and
+            // cannot take it: the callback is not called again, and the
+            // stream plays silence. Catching costs nothing until it panics.
+            let callback = &mut audio.callback;
+            let (input, output) = (&mut audio.input, &mut audio.output);
+            let ran = catch_unwind(AssertUnwindSafe(|| callback(input, output, &info)));
+            if ran.is_err() {
+                self.shared.panicked.store(true, Ordering::Relaxed);
+            }
+        }
+        if self.shared.panicked.load(Ordering::Relaxed) {
+            audio.output.set_num_frames(frames);
+            audio.output.clear();
+        }
         audio.output.set_num_frames(frames);
         for (channel, target) in audio.outputs.iter().enumerate() {
             // SAFETY: as for the inputs; the host owns the output half the
@@ -709,6 +725,12 @@ impl Stream {
     /// being processed, which the stream skips.
     pub fn skipped(&self) -> u64 {
         self.shared.skipped.load(Ordering::Relaxed)
+    }
+
+    /// Whether the callback panicked. It is not called again, and the
+    /// stream plays silence.
+    pub fn callback_panicked(&self) -> bool {
+        self.shared.panicked.load(Ordering::Relaxed)
     }
 
     /// What the driver reported since the stream started.
