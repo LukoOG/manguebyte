@@ -34,6 +34,9 @@ libloading = { version = "0.8", optional = true }
 # them makes cargo build their shared libraries next to the test executable.
 mangue-pluck = { path = "../../plugins/pluck" }
 mangue-duck = { path = "../../plugins/duck" }
+# The Aratu bridge, hosted as a host loads it, played into over a socket.
+aratu-bridge = { path = "../../plugins/aratu-bridge" }
+manguebyte-web.workspace = true
 manguebyte-plugin.workspace = true
 manguebyte-params.workspace = true
 manguebyte-graph.workspace = true

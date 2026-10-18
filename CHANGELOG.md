@@ -11,6 +11,25 @@ Nothing has been published to crates.io yet. Everything below is on `main`.
 
 ### Plugins
 
+- Aratu Bridge (`plugins/aratu-bridge`), an example CLAP, VST 3 and Audio
+  Unit instrument: share the music, not the audio. An Aratu page sends it
+  over a WebSocket on 127.0.0.1 what it sends its own engine (control
+  calls, event records with a beat for a frame, SFZ files as bytes), and
+  the plugin renders them with `manguebyte-web`'s engine in the DAW, on
+  the DAW's device and in time with its transport: tempo changes, loops
+  going round inside a block (with the next lap sent ahead), jumps and
+  stops, sorted out by epochs. The handshake checks the Origin against an
+  allow-list, the Host and a subprotocol; messages are limited in size;
+  WebSocket, SHA-1 and base 64 are written from RFC 6455, 3174 and 4648.
+  The protocol is `docs/ARATU_BRIDGE.md`. A session sent over a real
+  socket renders bit for bit as the engine renders it alone, through
+  `Harness` in several block patterns and hosted as a CLAP
+  (`manguebyte-host/tests/clap_aratu_bridge.rs`); `process` never touches
+  the heap while a page sends everything it can. Limits: TECH_DEBT 84.
+- `SamplerLoader::load_boxed` and `take_retired` hand instruments made
+  on another thread to a sampler, and back, without allocating or
+  freeing on the thread the loader is on.
+
 - Plugins send notes, expressions and MIDI out. A plugin that sets
   `Plugin::NOTE_OUTPUT` writes, from the new `process_with_output`
   (whose default calls `process`), into an `output::OutputBuffer` with
@@ -465,6 +484,21 @@ display, and no editor has been opened inside a real host yet.
   milliseconds each); `prepare_tables` makes it ahead of time.
 
 ### Web
+
+- Control calls in two halves, for an engine on a real-time thread:
+  `DetachedPart`, `DetachedInstrument`, `DetachedStages` and `DetachedSfz`
+  are made off the audio thread from the engine's configuration, and
+  `Engine::attach_part`, `detach_part`, `swap_instrument`,
+  `set_chain_from` and `give_sfz` hand them over without touching the
+  heap, leaving what the engine lets go of in the slot;
+  `take_finished_instrument` hands back the SFZ instruments sampler parts
+  are done with. The output is bit for bit that of the plain control calls
+  (`tests/handoff.rs`, with a counting allocator).
+- `js/bridge.js`: `AratuBridge`, a `ManguebyteEngine` that plays through
+  the Aratu Bridge plugin in a DAW, with the same methods, times in
+  seconds mapped onto the DAW's position or in beats, its state, the
+  DAW's transport and the plugin's counters (`js/tests/bridge.test.mjs`,
+  against a stand-in socket and golden bytes shared with the Rust side).
 
 - `manguebyte-web`, a new crate: an engine for the browser that builds,
   runs and is tested natively too. Numbered parts play an eight-voice synth

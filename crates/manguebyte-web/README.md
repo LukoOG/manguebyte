@@ -23,6 +23,17 @@ main-thread helper, and `js/ring.js` the shared event ring both use.
 `examples/web/` is a demo page with a small server; its README says how to
 run it.
 
+`js/bridge.js` plays the same music in a DAW instead: `AratuBridge`, a
+`ManguebyteEngine` with the same methods, sends the control calls and the
+records (with a beat for a frame) over a WebSocket on 127.0.0.1 to the
+Aratu Bridge plugin (`plugins/aratu-bridge`), which renders them with this
+engine natively, in time with the DAW's transport. For that, every control
+call that allocates has a counterpart that is made off the audio thread
+and handed over without touching the heap (`DetachedPart`,
+`DetachedInstrument`, `DetachedStages`, `DetachedSfz` and
+`Engine::attach_part` and the others). `docs/ARATU_BRIDGE.md` has the
+protocol.
+
 ```sh
 cargo build -p manguebyte-web --target wasm32-unknown-unknown
 node --test "crates/manguebyte-web/js/tests/*.test.mjs"   # Node.js 21 or later

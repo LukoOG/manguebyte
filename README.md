@@ -268,6 +268,13 @@ with a main input, a sidechain input, a bypass switch that does not click
 and an editor with a gain-reduction meter. Both examples go through the CLAP
 project's validator and Steinberg's on every commit.
 
+[`plugins/aratu-bridge`](plugins/aratu-bridge) runs the engine of
+[Aratu](https://aratu.live), the browser's live-coding language, inside a
+DAW: the page sends it the music (control calls and events, in beats) over
+a local WebSocket rather than the audio, and the plugin plays it on the
+DAW's device in time with its transport, the same bit for bit as the
+browser's engine renders it ([docs/ARATU_BRIDGE.md](docs/ARATU_BRIDGE.md)).
+
 Or play the instrument with no host, straight on the sound card, with any
 connected MIDI keyboard (the argument is the level in decibels):
 

@@ -735,6 +735,7 @@ dependencies = [
 name = "manguebyte-host"
 version = "0.1.0"
 dependencies = [
+ "aratu-bridge",
  "clap-sys",
  "libloading 0.8.9",
  "mangue-duck",
@@ -745,6 +746,7 @@ dependencies = [
  "manguebyte-midi",
  "manguebyte-params",
  "manguebyte-plugin",
+ "manguebyte-web",
  "vst3",
 ]
 

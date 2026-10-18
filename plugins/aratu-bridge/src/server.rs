@@ -185,6 +185,8 @@ struct Server {
     block_seen: (u64, Instant),
     overridden: u64,
     dropped: u64,
+    /// How many dropped messages the page has been told of.
+    dropped_told: u64,
 }
 
 impl Server {
@@ -220,6 +222,7 @@ impl Server {
             block_seen: (u64::MAX, Instant::now()),
             overridden: 0,
             dropped: 0,
+            dropped_told: 0,
         }
     }
 
@@ -988,6 +991,17 @@ impl Server {
         };
         if session.last_status.elapsed() >= STATUS_EVERY {
             session.last_status = now;
+            if self.dropped > self.dropped_told {
+                let text = format!(
+                    "{} events were dropped: the audio thread's queue was full",
+                    self.dropped - self.dropped_told
+                );
+                self.dropped_told = self.dropped;
+                let mut body = protocol::notice::OVERFLOW.to_le_bytes().to_vec();
+                body.extend_from_slice(text.as_bytes());
+                let message = protocol::message(plugin::NOTICE, 0, &body);
+                self.send(&message);
+            }
             let message = protocol::message(plugin::STATUS, 0, &self.status().to_bytes());
             self.send(&message);
         }
