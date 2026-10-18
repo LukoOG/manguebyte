@@ -6,6 +6,8 @@ use crate::SampleType;
 use crate::sys;
 
 /// What went wrong while talking to a driver.
+///
+/// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Error {

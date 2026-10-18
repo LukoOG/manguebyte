@@ -11,6 +11,8 @@
 //! the time structures, which hold doubles, change layout because of it,
 //! and they are declared `packed(4)`. The sizes and offsets are checked at
 //! compile time.
+//!
+//! ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 
 #![allow(missing_docs)]
 
@@ -18,15 +20,29 @@ use std::ffi::{c_char, c_void};
 use std::mem::{offset_of, size_of};
 
 /// `ASIOBool`: zero is false.
+///
+/// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 pub type AsioBool = i32;
 /// `ASIOError`: one of the `ASE_` codes.
+///
+/// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 pub type AsioError = i32;
 /// `ASIOSampleRate`: an IEEE 754 double on every platform the SDK lists.
+///
+/// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 pub type AsioSampleRate = f64;
 /// `ASIOSampleType`: one of the `ASIOST` codes.
+///
+/// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 pub type AsioSampleType = i32;
 
+/// `ASIOFalse`.
+///
+/// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 pub const ASIO_FALSE: AsioBool = 0;
+/// `ASIOTrue`.
+///
+/// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 pub const ASIO_TRUE: AsioBool = 1;
 
 pub const ASE_OK: AsioError = 0;
@@ -137,6 +153,8 @@ pub const TC_STILL: u32 = 1 << 4;
 pub const TC_SPEED_VALID: u32 = 1 << 8;
 
 /// `ASIOSamples`: a 64-bit sample count as two 32-bit halves.
+///
+/// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AsioSamples {
@@ -158,6 +176,8 @@ impl AsioSamples {
 }
 
 /// `ASIOTimeStamp`: nanoseconds as two 32-bit halves.
+///
+/// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AsioTimeStamp {
@@ -179,6 +199,8 @@ impl AsioTimeStamp {
 }
 
 /// `ASIOTimeCode`.
+///
+/// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 #[repr(C, packed(4))]
 #[derive(Clone, Copy)]
 pub struct AsioTimeCode {
@@ -201,6 +223,8 @@ pub struct AsioTimeInfo {
 }
 
 /// `ASIOTime`, which the driver hands to `bufferSwitchTimeInfo`.
+///
+/// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 #[repr(C, packed(4))]
 #[derive(Clone, Copy)]
 pub struct AsioTime {
@@ -233,6 +257,8 @@ impl AsioTime {
 }
 
 /// `ASIOClockSource`.
+///
+/// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct AsioClockSource {
@@ -244,6 +270,8 @@ pub struct AsioClockSource {
 }
 
 /// `ASIOChannelInfo`.
+///
+/// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct AsioChannelInfo {
@@ -257,6 +285,8 @@ pub struct AsioChannelInfo {
 
 /// `ASIOBufferInfo`: the host fills in the first two fields, the driver
 /// the two halves of the channel's double buffer.
+///
+/// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct AsioBufferInfo {
@@ -266,6 +296,8 @@ pub struct AsioBufferInfo {
 }
 
 /// `ASIOInternalBufferInfo`, for `FUTURE_GET_INTERNAL_BUFFER_SAMPLES`.
+///
+/// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AsioInternalBufferInfo {
@@ -278,6 +310,8 @@ pub struct AsioInternalBufferInfo {
 /// These are plain C function pointers in a C structure, with no context
 /// pointer: the C calling convention, which on x86-64 and AArch64 is the
 /// system's own.
+///
+/// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct AsioCallbacks {
@@ -339,6 +373,8 @@ pub(crate) use define_method;
 
 /// The `IASIO` vtable: `IUnknown`'s three methods, then the driver's, in
 /// the order `iasiodrv.h` declares them.
+///
+/// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 #[repr(C)]
 pub struct IAsioVtbl {
     pub query_interface: unsafe extern "system" fn(
@@ -376,6 +412,8 @@ pub struct IAsioVtbl {
 
 /// An `IASIO` object: a pointer to its vtable, then whatever the driver
 /// keeps.
+///
+/// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 #[repr(C)]
 pub struct IAsio {
     pub vtbl: *const IAsioVtbl,

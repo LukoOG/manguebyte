@@ -33,7 +33,11 @@ Everything a standalone audio application needs, short of a user interface.
 - ⬜ Hot-plug and default-device change notifications
 - ⬜ Clock-drift compensation between duplex devices by adaptive resampling
   (the resampler it needs now exists)
-- ⬜ Choosing the audio host (ASIO, JACK, PipeWire)
+- ⬜ Choosing the audio host (JACK, PipeWire)
+- ✅ ASIO drivers, in the opt-in crate `manguebyte-pro-io`, which is under
+  the GPLv3 because it declares Steinberg's interface under the SDK's GPLv3
+  option; closed-source programs use `cpal`'s own `asio` feature instead.
+  ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 - ✅ MIDI input and output ports, with jitter-free timing into the audio
   thread
 

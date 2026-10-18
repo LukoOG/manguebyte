@@ -19,6 +19,8 @@ use crate::{
 
 /// The host name the backend gives itself, which a
 /// [`DeviceSetup`](manguebyte_devices::DeviceSetup) names.
+///
+/// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 pub const HOST_NAME: &str = "ASIO";
 
 /// What every device identifier of the backend starts with, so that a

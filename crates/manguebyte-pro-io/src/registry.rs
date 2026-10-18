@@ -8,6 +8,8 @@ use crate::Error;
 use crate::sys::Guid;
 
 /// An installed driver, as listed under `HKEY_LOCAL_MACHINE\SOFTWARE\ASIO`.
+///
+/// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DriverEntry {
     /// The name of the driver's registry key, which identifies it.

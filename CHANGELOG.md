@@ -1565,6 +1565,36 @@ display, and no editor has been opened inside a real host yet.
   `DeviceManager::send_midi_packet` send one from other threads. Every
   port speaks MIDI 1.0 for now (`MidiProtocol`): the systems' own UMP
   APIs are not used yet.
+- `manguebyte-pro-io`, a new crate, opt-in and under the GPLv3 alone,
+  speaks to ASIO drivers itself. Its driver interface is declared by hand
+  from the Steinberg ASIO SDK 2.3.4 interface definitions, used under the
+  SDK's GPLv3 option; no SDK file is in the repository. It lists the
+  installed drivers from the registry, loads one through COM on a thread of
+  its own (a single-threaded apartment, one driver per process), asks it its
+  channels, sample types, latencies, buffer sizes, rates and clocks, and
+  runs a duplex callback on planar `f32` blocks, with every PCM sample type
+  converted and the DSD ones refused. The host callbacks reach the stream
+  through a static, without allocating or locking (tested with a counting
+  allocator); `asioMessage` answers the selectors the SDK documents,
+  `bufferSwitchTimeInfo` is taken when offered and `outputReady` called when
+  asked for. A reset request, a new buffer size or sample rate and a loss
+  of sync are only counted in the callback; `ProIoBackend` turns them into
+  a restart that a `DeviceManager` carries out off the audio thread.
+  `FakeDevice`, a COM-shaped driver written in Rust, runs it all in CI. Run
+  here on a Behringer UMC404HD (its own driver), FlexASIO and ASIO4ALL,
+  whose reset request at start is now followed by a restart instead of a
+  stream that stops after half a second. A program that uses the crate is
+  under the GPLv3; closed-source programs keep `cpal`'s own `asio`
+  feature. No other crate depends on it, which CI checks.
+  ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
+- An audio backend from outside the crate can run behind the device
+  manager: `AudioBackend`, given to `DeviceManager::with_audio_backend`,
+  with `BackendCallback` (block splitting without copies, silent output,
+  frame counting), `StreamStatus` (a lost device or a restart request, both
+  real-time safe), `BackendRequest`, `BackendFormat` and `BackendStream`. A
+  restart request reaches the manager as `StreamLost` with the new
+  `LossCause::RestartRequested`, and `follow` restarts the stream.
+  `DeviceError::Other` carries such a backend's own errors.
 - `MidiReceiver::read_events` and `DeviceIo::read_midi_events` hand MIDI
   to the audio thread as events, read through a `NoteInput`, so that MPE
   arrives as per-note events; the standalone runner uses them.

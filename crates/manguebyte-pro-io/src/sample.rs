@@ -14,6 +14,8 @@ use crate::sys;
 /// "MSB" types store the most significant byte first (big endian), "LSB"
 /// types the least significant first (little endian). The DSD types are
 /// one-bit streams, which this crate does not convert.
+///
+/// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SampleType {

@@ -111,6 +111,7 @@ small part of the road ahead and the API will change before 1.0. See
 | [`manguebyte-formats`](crates/manguebyte-formats) | WAV (with RF64), AIFF, FLAC, Ogg Vorbis and MP3, read and written, and Ogg Opus and MPEG layers I and II read, whole or block by block with exact seeking; codecs written from their specifications: FLAC checked against FFmpeg, the Vorbis, Opus and MPEG decoders tested on files libvorbis, libopus, LAME and FFmpeg wrote, and the Vorbis and MP3 encoders' files decoded by FFmpeg and libvorbis to the same audio and length; tags, cue points, loops, Broadcast Wave fields and pictures in one metadata model, kept on a round trip; waveform thumbnails with a cache; AAC, ALAC and WMA through the system's codecs on Windows and macOS; wait-free bridges to play and record from an audio callback, and a transport source: play, pause, stop, seek and loop a streamed file from any thread, sample-exact |
 | [`manguebyte-osc`](crates/manguebyte-osc) | Open Sound Control over UDP and TCP, with a real-time bridge that puts time-tagged bundles on their exact frame |
 | [`manguebyte-devices`](crates/manguebyte-devices) | Audio hosts (WASAPI, ASIO, CoreAudio, ALSA, JACK, AAudio), device listing and selection, playback, recording and full-duplex streams that follow the drift between two devices' clocks, in any hardware sample format, with timing and latency in every callback; a device manager that saves its setup and restores it with fallbacks, and follows devices as they are plugged in and out; MIDI input and output ports, virtual ones too, with arrival times mapped to frames so a player's timing survives the audio buffer, read into per-note events for MPE, and system exclusive input for MIDI-CI; a headless backend for tests |
+| [`manguebyte-pro-io`](crates/manguebyte-pro-io) | **GPLv3, opt-in.** ASIO drivers spoken to directly: listing from the registry, loading through COM on a single-threaded apartment of their own, channels, sample types, latencies, buffer sizes and rates, duplex streams on planar `f32` with every PCM sample type converted, driver resets followed by a restart off the audio thread, and a backend for the device manager. A fake driver in Rust tests it all without hardware. Not part of the facade, and no other crate depends on it: a program that uses it is under the GPLv3 (see [its README](crates/manguebyte-pro-io/README.md)) |
 | [`manguebyte-gfx`](crates/manguebyte-gfx) | 2D drawing on the CPU: paths, gradients, images, clips and layers recorded as a scene with an exact text dump; repaint limited to what changed, identical to a full repaint; text shaped and laid out with an embedded Inter subset |
 | [`manguebyte-ui`](crates/manguebyte-ui) | Widgets for plugin editors: a retained tree, row and column layout, theme tokens, label, knob, slider, toggle, meter and canvas, parameter edits as gestures, an accessibility description required of every widget, and a harness that drives it all in a unit test |
 | [`manguebyte-window`](crates/manguebyte-window) | Windows for plugin editors: a child of the host's window on Win32, presenting only what changed, and a headless backend that lets a test drive a window on any system |
@@ -335,6 +336,14 @@ Licensed under either of
 
 at your option.
 
+The one exception is
+[`manguebyte-pro-io`](crates/manguebyte-pro-io), which is opt-in and under
+the GNU General Public License, version 3 only, because its driver
+interface is declared from Steinberg's ASIO SDK under the SDK's GPLv3
+option. No other crate depends on it; a program that uses it is under the
+GPLv3, and closed-source programs reach ASIO through `cpal`'s own `asio`
+feature instead, as the `manguebyte-devices` documentation explains.
+
 `manguebyte-gfx` embeds a subset of the [Inter](https://rsms.me/inter/)
 typeface, which is under the SIL Open Font License 1.1
 ([crates/manguebyte-gfx/fonts/OFL.txt](crates/manguebyte-gfx/fonts/OFL.txt)).
@@ -353,3 +362,5 @@ Manguebyte is an independent project. It is not affiliated with, sponsored by
 or endorsed by the makers of JUCE. JUCE is a trademark of its respective owner
 and is mentioned here only to describe the kind of framework this project
 aims to be.
+
+ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.

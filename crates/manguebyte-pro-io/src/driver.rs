@@ -104,6 +104,8 @@ pub(crate) struct Inner {
 /// single-threaded COM apartment, as drivers expect; `Driver` itself can be
 /// used from any thread.
 ///
+/// ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
+///
 /// ```no_run
 /// use manguebyte_pro_io::{Driver, StreamConfig, drivers};
 ///

@@ -5,6 +5,8 @@ commit. This page records tests done by hand inside real hosts, which CI
 cannot do: what was tried, how it was measured, and what was found, good and
 bad. Each entry names the commit it tested.
 
+ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
+
 ## REAPER 7.82, Windows 11, 14 October 2026
 
 **Setup.** REAPER 7.82 (evaluation licence) on Windows 11, audio through
