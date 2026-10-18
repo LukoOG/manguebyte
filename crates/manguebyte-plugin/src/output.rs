@@ -250,6 +250,97 @@ impl<'a> IntoIterator for &'a OutputBuffer {
     }
 }
 
+/// Which note each identifier names, for events that name a note by its
+/// identifier alone.
+///
+/// CLAP and VST 3 hosts address expressions and note-offs by identifier,
+/// with the key left out, and a plugin that answers in kind does the same.
+/// MIDI and some hosts need the channel and key, so whatever sends the
+/// plugin's notes on keeps one of these: [`start`](Self::start) on each
+/// note-on, [`resolve`](Self::resolve) for each event about a note, and
+/// [`end`](Self::end) on its note-off or choke.
+///
+/// It follows a fixed number of notes, chosen up front; past that, a new
+/// note is not followed, and events that name it find it by the channel
+/// and key they carry. After [`with_capacity`](Self::with_capacity), which
+/// allocates, every method is real-time safe.
+///
+/// ```
+/// use manguebyte_dsp::event::NoteRef;
+/// use manguebyte_plugin::output::NoteIds;
+///
+/// let mut ids = NoteIds::with_capacity(8);
+/// ids.start(NoteRef::with_id(2, 64, 9));
+/// assert_eq!(ids.resolve(NoteRef::with_id(0, 0, 9)), NoteRef::with_id(2, 64, 9));
+/// assert_eq!(ids.end(NoteRef::with_id(0, 0, 9)), NoteRef::with_id(2, 64, 9));
+/// // Once ended, the identifier names nothing.
+/// assert_eq!(ids.resolve(NoteRef::with_id(0, 0, 9)), NoteRef::with_id(0, 0, 9));
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct NoteIds {
+    /// Identifier, channel and key of each identified note that sounds.
+    notes: Vec<(u32, u8, u8)>,
+    capacity: usize,
+}
+
+impl NoteIds {
+    /// Room to follow `capacity` notes at once. Allocates.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            notes: Vec::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    /// Records a note that starts. A note without an identifier needs
+    /// nothing recorded.
+    pub fn start(&mut self, note: NoteRef) {
+        let Some(id) = note.id else {
+            return;
+        };
+        self.forget(id);
+        if self.notes.len() < self.capacity {
+            self.notes.push((id, note.channel & 0x0F, note.key & 0x7F));
+        }
+    }
+
+    /// `note` with the channel and key of the sounding note its
+    /// identifier names, or as it is if it names none.
+    pub fn resolve(&self, note: NoteRef) -> NoteRef {
+        let found = note
+            .id
+            .and_then(|id| self.notes.iter().find(|(known, ..)| *known == id));
+        match found {
+            Some(&(id, channel, key)) => NoteRef::with_id(channel, key, id),
+            None => NoteRef {
+                channel: note.channel & 0x0F,
+                key: note.key & 0x7F,
+                id: note.id,
+            },
+        }
+    }
+
+    /// [`resolve`](Self::resolve), then forgets the note, which ends.
+    pub fn end(&mut self, note: NoteRef) -> NoteRef {
+        let resolved = self.resolve(note);
+        if let Some(id) = note.id {
+            self.forget(id);
+        }
+        resolved
+    }
+
+    /// Forgets every note.
+    pub fn clear(&mut self) {
+        self.notes.clear();
+    }
+
+    fn forget(&mut self, id: u32) {
+        if let Some(index) = self.notes.iter().position(|(known, ..)| *known == id) {
+            self.notes.swap_remove(index);
+        }
+    }
+}
+
 /// What a MIDI port or host on the other end speaks, and so what an
 /// [`OutputTranslator`] writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -325,8 +416,7 @@ const IDENTIFIED_NOTES: usize = 256;
 pub struct OutputTranslator {
     protocol: OutputProtocol,
     group: u8,
-    /// Identifier, channel and key of each identified note that sounds.
-    identified: Vec<(u32, u8, u8)>,
+    identified: NoteIds,
     /// Per channel, one bit per note number shaped since its last reset.
     shaped: [u128; 16],
     /// Per channel, one bit per note number on which a note sounds.
@@ -344,7 +434,7 @@ impl OutputTranslator {
         Self {
             protocol,
             group: 0,
-            identified: Vec::with_capacity(IDENTIFIED_NOTES),
+            identified: NoteIds::with_capacity(IDENTIFIED_NOTES),
             shaped: [0; 16],
             sounding: [0; 16],
             announced: 0,
@@ -408,12 +498,7 @@ impl OutputTranslator {
             }
             OutputKind::NoteOn { note, velocity } => {
                 let (channel, key) = (note.channel & 0x0F, note.key & 0x7F);
-                if let Some(id) = note.id {
-                    self.forget_id(id);
-                    if self.identified.len() < IDENTIFIED_NOTES {
-                        self.identified.push((id, channel, key));
-                    }
-                }
+                self.identified.start(note);
                 let bit = 1u128 << key;
                 if self.shaped[usize::from(channel)] & bit != 0 {
                     self.shaped[usize::from(channel)] &= !bit;
@@ -434,10 +519,7 @@ impl OutputTranslator {
                 self.write(group, on, &mut emit);
             }
             OutputKind::NoteOff { note, velocity } => {
-                let (channel, key) = self.resolve(note);
-                if let Some(id) = note.id {
-                    self.forget_id(id);
-                }
+                let NoteRef { channel, key, .. } = self.identified.end(note);
                 let off = ChannelVoice2::NoteOff {
                     channel,
                     note: key,
@@ -447,10 +529,7 @@ impl OutputTranslator {
                 self.write(group, off, &mut emit);
             }
             OutputKind::NoteChoke { note } => {
-                let (channel, key) = self.resolve(note);
-                if let Some(id) = note.id {
-                    self.forget_id(id);
-                }
+                let NoteRef { channel, key, .. } = self.identified.end(note);
                 let off = ChannelVoice2::NoteOff {
                     channel,
                     note: key,
@@ -464,7 +543,7 @@ impl OutputTranslator {
                 expression,
                 value,
             } => {
-                let (channel, key) = self.resolve(note);
+                let NoteRef { channel, key, .. } = self.identified.resolve(note);
                 self.shaped[usize::from(channel)] |= 1u128 << key;
                 let controller = |controller, value| ChannelVoice2::RegisteredPerNoteController {
                     channel,
@@ -569,23 +648,6 @@ impl OutputTranslator {
         };
         let group = self.group;
         self.write(group, range, emit);
-    }
-
-    /// The channel and key of the note `note` names: those of the note
-    /// with its identifier, if one sounds, and its own otherwise.
-    fn resolve(&self, note: NoteRef) -> (u8, u8) {
-        note.id
-            .and_then(|id| self.identified.iter().find(|(known, ..)| *known == id))
-            .map_or(
-                (note.channel & 0x0F, note.key & 0x7F),
-                |&(_, channel, key)| (channel, key),
-            )
-    }
-
-    fn forget_id(&mut self, id: u32) {
-        if let Some(index) = self.identified.iter().position(|(known, ..)| *known == id) {
-            self.identified.swap_remove(index);
-        }
     }
 }
 
