@@ -138,11 +138,11 @@ Aratu also writes lines for Brazilian percussion and a few other hand
 instruments. Their keys are fixed here, so a sampler kit that has them
 (`sampler_kit`) is played the same way whoever made it. Where General MIDI
 or General MIDI 2 already names the instrument, its key is used; the rest
-take free keys after the guitar tap. The engine has no synthesized version
-of most of these yet, so a kit without a region for one of them stays
-silent on it. A [drum kit](#drum-kits-drum_kit) part plays the clap where
-its kit has one, and the shaker on its kit's maracas (or cabasa), the
-shakers of General MIDI 1 (see there).
+take free keys after the guitar tap. A [drum kit](#drum-kits-drum_kit)
+part plays every one of them on every kit, synthesized by
+`manguebyte-dsp` (`DrumKit::brazilian`, see there); a `sampler_kit`
+plays the ones it has regions for and stays silent on the rest, and a
+`drums` part ignores them.
 
 | Stroke | Name | Key | Source of the key |
 |--------|------|-----|-------------------|
@@ -1032,13 +1032,29 @@ the three toms on the CR-78. `tests/models.rs` checks every drum of the
 map on every kit: the kit's own where it has one, and where it has not
 the synthesized drum to the bit, in the centre.
 
-**Aratu's percussion keys.** The clap (39) is the kit's clap where it has
-one (every kit but the 606 and the CR-78). The shaker (82, past the last
-key a kit maps) plays the kit's maracas (70), or its cabasa (69): the
-acoustic, 808, CR-78, house and lo-fi kits. The kits have no agogô, cuíca, triangle, surdo,
-pandeiro, zabumba, tamborim, alfaia, gonguê or cajón, and the synthesized
-kit has none either, so those keys are silent on every kit; a
-`sampler_kit` with samples of them plays them.
+**Aratu's percussion keys.** Every kit plays [Aratu's Brazilian
+percussion](#percussion-keys), the instruments of `manguebyte-dsp`'s
+`DrumKit::brazilian`, by physical modelling: the agogô's two bells and
+the gonguê (iron shells' bending modes, in doublets), the ganzá (beads
+colliding in a metal tube), the cuíca (a membrane driven at its centre
+by a cloth's stick-slip, its pitch gliding), the triangle (a rod's
+free-bar modes), the surdo, zabumba (its mallet and, on 95, the thin
+stick), alfaia, tamborim and pandeiro (drums with heads, the pandeiro's
+jingles rattling) and the cajón (a plate and the box's air). The clap
+(39) is the kit's own where it has one (every kit but the 606 and the
+CR-78, which take the modelled hand clap). A muted stroke stops the open
+one of its instrument (the triangle, surdo, zabumba, alfaia, tamborim
+and gonguê). They are the same instruments at the same level on every
+kit: the kit's make-up is taken off them, and their velocity made that
+of a 24 dB range at 0.8 (`modelled.rs`, `percussion_gain`), so that a
+line of eighth notes of any of them at velocity 0.8 sits 6 to 17 LU
+under the target, the same on every kit within 0.3 LU (the lo-fi kit's
+sampler takes up to 4.2 LU off the brightest, the ganzá and the
+triangle), and no stroke accented at full velocity reaches the limiter;
+`tests/percussion.rs` measures every key on every kit. `kit.tune`,
+`kit.decay`, `drum_kit.tone` and `drum_kit.snap` move them as they move
+the kit's pieces. The shaker key falls back on a kit's maracas (70) or
+cabasa (69) only on a kit with no shaker of its own, which no preset is.
 
 | Parameter | Unit | Range | Default | Scale |
 |---|---|---|---|---|

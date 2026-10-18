@@ -727,6 +727,16 @@ display, and no editor has been opened inside a real host yet.
   where the odd curves give none); a first-order 5 Hz high-pass
   (`TUBE_DC_HZ`) after it takes out the offset that leaves. Its slope at
   rest is 1, and a phrase plays within 0.6 LU of the tanh's loudness.
+- Aratu's Brazilian percussion keys sound on every `drum_kit` preset:
+  the agogô, ganzá, cuíca, triangle, surdo, pandeiro, zabumba, tamborim,
+  alfaia, gonguê and cajón of `DrumKit::brazilian`, and its hand clap on
+  the kits without one (the 606 and the CR-78), on the keys of the
+  crate's README. They are the same instruments at the same level on
+  every kit: each kit's make-up is taken off them and their velocity
+  made that of a 24 dB range at 0.8, so that a line of eighth notes of
+  each sits 6 to 17 LU under the target (`tests/percussion.rs`, every
+  key on every kit), and none, accented at full velocity, reaches the
+  master limiter (`tests/loudness.rs` now strikes them too).
 
 ### Hosting
 
@@ -1243,6 +1253,34 @@ display, and no editor has been opened inside a real host yet.
 - `cargo run --release -p manguebyte-dsp --example physical_model_wavs --
   <directory>` renders every preset of the four in a phrase of its own
   idiom, normalised to -3 dBFS, and prints what a voice of each costs.
+- Brazilian percussion in `DrumKitVoice`, by physical modelling:
+  `DrumKit::brazilian()` puts 25 strokes on Aratu's keys
+  (`instruments::percussion`, 39 and 67 to 103; `KIT_KEYS` now reaches
+  103), and `DrumKit::with_brazilian_percussion` adds them to any kit on
+  the keys it leaves free. The agogô's two bells and the gonguê ring the
+  ring-like bending modes of an iron shell (1 : 2.83 : 5.42 : 8.77, after
+  Fletcher and Rossing, section 2.20) in doublets split by the seam, with
+  a second family above; the triangle a steel rod's free-bar modes (1 :
+  2.76 : 5.40 : 8.93, section 2.17) in two families, radiating its high
+  ones; the cuíca the axisymmetric modes of a membrane (1 : 2.30 : 3.60 :
+  4.90) driven at the centre by a damp cloth's stick-slip, its pitch
+  rising into the squeak and falling through the groan; the surdo, the
+  zabumba (mallet and the thin stick on its bottom head), the alfaia, the
+  tamborim and the pandeiro are drums with heads, their muted strokes a
+  hand or the mallet on the head, the surdo's open stroke falling in
+  pitch as it settles; the pandeiro's jingles are small free plates (1 :
+  1.73 : 2.33 : 3.91) rattling as stochastic collisions, and the ganzá's
+  beads collide in a tube of two resonances (after P. R. Cook's PhISM,
+  1997); the cajón is a rectangular plate and the box's Helmholtz
+  resonance near 80 Hz, its slap rattling the loose top edge; the hand
+  clap is three clappers' bursts of the air between their palms (after
+  B. H. Repp, 1987). Muted strokes choke open ones (choke groups 2 to
+  7). Tests measure each piece's fundamental and mode structure in its
+  spectrum, its level, that it falls silent at 3 to 96 kHz, that the
+  output does not depend on the block size, and that it does not touch
+  the heap. `cargo run --release -p manguebyte-dsp --example
+  brazilian_percussion_wavs -- <directory>` renders a tour of every
+  stroke and grooves of maracatu, samba, baião and coco.
 
 ### Parameters
 

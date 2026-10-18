@@ -66,10 +66,30 @@ pub(crate) fn drum_kit_preset(index: usize) -> Pieces {
         accent_db,
         ..kit
     }
+    .with_brazilian_percussion(percussion_gain(index, velocity_range_db))
 }
 
-/// Aratu's shaker, which General MIDI 2 puts on 82, past the last key a
-/// kit maps.
+/// The level of `manguebyte-dsp`'s Brazilian percussion on every kit, in
+/// decibels, calibrated by `tests/percussion.rs`.
+const PERCUSSION_DB: f64 = -3.0;
+
+/// The velocity range the percussion is calibrated at, in decibels.
+const PERCUSSION_VELOCITY_DB: f64 = 24.0;
+
+/// The gain that puts the Brazilian percussion of `DrumKit::brazilian` on
+/// kit preset `index` (whose velocity range is `velocity_range_db`) at the
+/// same level on every kit: its part's make-up, which brings the kit's own
+/// groove to the target, taken off again, and its level at velocity 0.8
+/// made that of [`PERCUSSION_VELOCITY_DB`].
+fn percussion_gain(index: usize, velocity_range_db: f64) -> f64 {
+    let make_up = crate::level::make_up_db(crate::engine::InstrumentKind::DrumKit, index);
+    let velocity = 0.2 * (velocity_range_db - PERCUSSION_VELOCITY_DB);
+    10f64.powf((PERCUSSION_DB - make_up + velocity) / 20.0)
+}
+
+/// Aratu's shaker, which General MIDI 2 puts on 82, past General MIDI 1's
+/// keys: every preset has the ganzá of `DrumKit::brazilian` there, and a
+/// kit without one plays its maracas.
 pub(crate) const ARATU_SHAKER: u8 = 82;
 
 /// The key of `pieces` that plays `key`: the key itself if the kit has a
@@ -482,5 +502,34 @@ mod tests {
         assert_eq!(kit_key(&Pieces::style_909(), ARATU_SHAKER), None);
         assert_eq!(kit_key(&Pieces::style_909(), gm::SNARE), Some(gm::SNARE));
         assert_eq!(kit_key(&Pieces::style_606(), gm::SIDE_STICK), None);
+    }
+
+    #[test]
+    fn every_preset_has_the_brazilian_percussion_at_one_level() {
+        use manguebyte_dsp::instruments::percussion;
+        let brazilian = Pieces::brazilian();
+        for index in 0..DRUM_KIT_PRESET_NAMES.len() {
+            let kit = drum_kit_preset(index);
+            let make_up = crate::level::make_up_db(crate::engine::InstrumentKind::DrumKit, index);
+            for key in percussion::ALL {
+                let piece = kit.piece(key).unwrap();
+                if key == percussion::HAND_CLAP
+                    && piece.model != brazilian.piece(key).unwrap().model
+                {
+                    continue;
+                }
+                // What reaches the output at velocity 0.8: the piece, the
+                // kit's level and velocity, the part's make-up.
+                let heard = piece.level
+                    * kit.level
+                    * 10f64.powf((make_up - 0.2 * kit.velocity_range_db) / 20.0);
+                let wanted = brazilian.piece(key).unwrap().level
+                    * 10f64.powf((PERCUSSION_DB - 0.2 * PERCUSSION_VELOCITY_DB) / 20.0);
+                assert!(
+                    close(heard, wanted),
+                    "kit {index}, key {key}: {heard} {wanted}"
+                );
+            }
+        }
     }
 }

@@ -126,12 +126,17 @@ const PEAK_SPACING: f64 = 0.5;
 
 /// The true peak, dBTP, of the loudest single note of `kind` (preset
 /// `index`) accented at full velocity, over the keys of its phrase (and
-/// every drum of the map for a kit), each struck alone.
+/// every drum of the map for a kit, and Aratu's Brazilian percussion for a
+/// drum kit part), each struck alone.
 fn accented_peak(kind: InstrumentKind, index: usize, setup: &dyn Fn(&mut Engine)) -> f64 {
     let phrase = kind.calibration()[index].phrase;
     let mut keys: Vec<u8> = phrase.notes().iter().map(|note| note.key).collect();
     if phrase == Phrase::Groove {
         keys.extend(DRUM_MAP.iter().map(|entry| entry.note));
+    }
+    if kind == InstrumentKind::DrumKit {
+        // Aratu's Brazilian percussion, on every kit.
+        keys.extend(manguebyte_dsp::instruments::percussion::ALL);
     }
     keys.sort_unstable();
     keys.dedup();

@@ -524,12 +524,14 @@ fn the_drum_kits_answer_the_drum_map_and_borrow_what_they_lack() {
                 borrowed.push(format!("{preset} {}", entry.name));
             }
         }
-        // Aratu's percussion keys: the clap and the shaker where the kit has
-        // them, silence where it has nothing.
+        // Aratu's percussion keys sound on every kit (`tests/percussion.rs`
+        // measures all of them); a key past them is silent.
         for (key, has) in [
-            (39u8, pieces.piece(39).is_some()),
-            (82, pieces.piece(70).is_some() || pieces.piece(69).is_some()),
-            (100, false),
+            (39u8, true),
+            (67, true),
+            (82, true),
+            (100, true),
+            (104, false),
         ] {
             let (left, right) = played(
                 InstrumentKind::DrumKit,
@@ -562,7 +564,7 @@ fn the_drum_kits_answer_the_drum_map_and_borrow_what_they_lack() {
         ["3 side_stick", "4 high_tom", "4 mid_tom", "4 floor_tom"]
     );
     println!("borrowed from the synthesized kit: {}", borrowed.join(", "));
-    // Shaker 82 on the house kit is its maracas, on 70: the same strike.
+    // Shaker 82 on the house kit is the ganzá, not its maracas on 70.
     let shaker = played(
         InstrumentKind::DrumKit,
         &[(ids::DRUM_KIT_PRESET, 7.0)],
@@ -573,7 +575,7 @@ fn the_drum_kits_answer_the_drum_map_and_borrow_what_they_lack() {
         &[(ids::DRUM_KIT_PRESET, 7.0)],
         &[EventRecord::note_on(0, 0, 70, 0.9)],
     );
-    assert_eq!(bits(&shaker.0), bits(&maracas.0));
+    assert_ne!(bits(&shaker.0), bits(&maracas.0));
 }
 
 #[test]
