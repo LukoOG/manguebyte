@@ -1,0 +1,5 @@
+# An events message of the Aratu bridge (docs/ARATU_BRIDGE.md): request 9,
+# epoch 7, a note on at beat 1.5 (part 3, note 60, channel 2, velocity
+# 0.75, accented) and lowpass.cutoff = 1234.5 for now (beat NaN). Pinned by
+# js/tests/bridge.test.mjs and plugins/aratu-bridge/tests/golden.rs.
+02000000090000000700000000000000000000000000f83f010103003c0200000000403f000000000000000000000000000000000000f87f03000000000000000000000093c60bce00000000004a9340
