@@ -619,6 +619,35 @@ display, and no editor has been opened inside a real host yet.
   sharing the decoded samples and regions and keeping round robins and
   random numbers of their own; `Instrument::note_energy` estimates the
   energy of what a note plays, without rendering it.
+- `manguebyte-web` plays the newer voices of `manguebyte-dsp`, as six new
+  instrument kinds, codes 10 to 15: `drum_kit` (`DrumKitVoice`: the
+  acoustic kit by modal synthesis, the 808, 909, 606 and CR-78, and kits
+  for trap, techno, house, drum and bass and lo-fi, `drum_kit.preset`),
+  `poly` (the polyphonic synthesiser and its 68 presets, `poly.preset`,
+  with macros on the cutoff, resonance, attack, release, unison detune and
+  spread, the modulation wheel and `poly.voices`), `mallet`, `bowed`,
+  `wind` and `choir`, each with its presets and main knobs. A drum kit
+  answers the drum map, and a drum of the map its kit has no piece for
+  (the guitar tap on every kit, the 606's side stick, the CR-78's toms) is
+  the synthesized drum, to the bit; Aratu's clap and shaker keys play the
+  kit's clap and maracas where it has them. The newer voices render in
+  stereo. The synthesiser's monophonic and legato presets slide, and so
+  do the winds (`wind.legato`, on by default) and the strings and the
+  choir with `bowed.legato` and `choir.legato`. Every kind and every
+  preset, 102 rows more, plays its phrase at -24 LUFS (all within 0.07
+  LU); the drum kits, the violin's pizzicato and Plucked String play
+  narrower dynamics, so that no accented note at full velocity reaches the
+  master limiter (the acoustic kit's kick peaks at -0.7 dBTP;
+  `drum_kit.velocity` and `drum_kit.accent` widen a kit's again). Voices
+  are capped per part from what they cost in WebAssembly, measured by the
+  new `examples/voice_cost.mjs` on a 15 W laptop: 12 for the kits and the
+  mallets, 6 for the strings and the choir, 4 for the winds, and for the
+  synthesiser's polyphonic presets 4 to 8 by preset, as many as keep a
+  part within 40% of a core there (a voice costs 3 to 16%). Rendering
+  stays allocation free and the same in every quantum. `js/engine.js`
+  names the kinds and their presets (`INSTRUMENT`, `PRESETS`);
+  `examples/new_voices_songs.rs` renders a song for each family. The ABI
+  version stays 2.
 
 ### Hosting
 
@@ -880,6 +909,12 @@ display, and no editor has been opened inside a real host yet.
 
 ### Instruments
 
+- `Synth::set_voice_limit` lets new notes take only the
+  first voices of a synth, real-time safe, so that a synth made with as
+  many voices as it may need can play fewer where each costs more. A
+  `PolySynthVoice` renders the last of a note out of its decimator before
+  it is done, so the end of a note no longer depends on where a block
+  starts.
 - `manguebyte_dsp::instruments`: voices for `Synth` that sound like the
   instruments they are named after, built from the crate's own delay
   lines, filters and oscillators. Each has a settings struct with presets
