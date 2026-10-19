@@ -38,6 +38,7 @@ says where. Nothing here contains JUCE code: see
 | [Keyboard state](#15-a-keyboard-an-interface-can-read-without-listening) | Listeners that may run on the audio thread | Atomics an interface polls; no listener, no lock | [`realtime.rs`](../crates/manguebyte-midi/tests/realtime.rs) |
 | [Slow-downs in silence](#10-a-fading-sound-cannot-slow-the-audio-thread-down) | A guard each plugin places in its own callback | Set by the framework around every plugin and every device callback | [`denormal.rs`](../crates/manguebyte-core/src/denormal.rs), both `abi.rs` |
 | [Instruments ready to play](#16-instruments-ready-to-play-measured-in-tests) | Classes to build an instrument from; none ready to play | Synthesised and modelled instruments and drum kits, their tuning and spectra measured in tests | [`instruments`](../crates/manguebyte-dsp/src/instruments) |
+| [Changing the device mid-song](#17-changing-the-audio-device-in-the-middle-of-a-song) | `audioDeviceStopped`, then `audioDeviceAboutToStart` and preparing again | The engine runs on, prepared once: a crossfade, or a short faded gap where devices cannot overlap | [`hotswap.rs`](../crates/manguebyte-devices/tests/hotswap.rs) |
 
 ## 1. Automation on the exact sample
 
@@ -594,6 +595,73 @@ saxophone's bore is cylindrical, the choir sings speech vowels and no
 consonants, and the instruments' levels are matched only in the browser
 engine, not in `manguebyte-dsp` itself; [TECH_DEBT.md](TECH_DEBT.md) items
 66 to 71 list the rest.
+
+## 17. Changing the audio device in the middle of a song
+
+**The problem.** Plugging in headphones, moving from the laptop's speakers
+to an interface, or a driver that asks to be reset should not stop the
+music. In most applications it does: the audio stops, everything is
+prepared again for the new device, and some programs ask to be restarted.
+
+**In JUCE.** An [`AudioIODeviceCallback`](https://docs.juce.com/master/classAudioIODeviceCallback.html)
+is told `audioDeviceStopped` when its device stops, and
+`audioDeviceAboutToStart`, with the new device, before it starts again,
+which the documentation says also happens "after the device has been
+restarted because of a sample-rate or block-size change". Changing the
+device through [`AudioDeviceManager::setAudioDeviceSetup`](https://docs.juce.com/master/classAudioDeviceManager.html)
+goes through that pair, and `audioDeviceAboutToStart` is where a callback
+that plays a processor, such as
+[`AudioProcessorPlayer`](https://docs.juce.com/master/classAudioProcessorPlayer.html),
+has to prepare it again for the new rate and block size. Nothing in the
+documented classes keeps one device playing while the next one starts, or
+runs the processing at a rate of its own while the device's rate changes.
+
+**In Manguebyte.** `DeviceManager::start_engine` fixes the engine's rate,
+largest block and channels once, as an `EngineFormat`, and prepares the
+callback once. Only the edge between the engine and the device adapts:
+a device at the engine's rate gets its output directly, with nothing
+copied or delayed; one at another rate gets it through a resampler whose
+output does not depend on the device's blocks (0.7 ms more); other channel
+counts are repeated or folded. When the backend can run two streams and
+the output device changes, the new device fades in while the old one fades
+out, the old device copying what the engine renders into a wait-free ring
+until it hands the engine itself over; no audio thread allocates, locks or
+waits. When it cannot (one ASIO driver per process, the same device opened
+again, a driver's reset request), the old device fades out, closes, and the
+new one opens and fades in, the engine waiting so that no frame is lost. A
+lost device is replaced the same way, without the fade-out. The
+[`hotswap`](../crates/manguebyte-devices/src/hotswap.rs) module documents it.
+
+**Check it.** `the_song_goes_on_while_the_device_changes_under_it` in
+[`hotswap.rs`](../crates/manguebyte-devices/tests/hotswap.rs) plays a song
+through the manager on four simulated sound cards, each called on its own
+clock in real time, and changes the output under it four times: to another
+device at the same rate with a smaller block, to one at 44.1 kHz, through
+that driver's reset request, and to one with four channels and blocks of
+64 frames. The callback is prepared once and never released; what it
+renders is the song rendered with no device, bit for bit; each device at
+the engine's rate plays one unbroken stretch of the engine's frames,
+exactly, scaled only inside its fades; a reference tone never breaks on
+any device, the level never dips while two devices play, and the reset
+leaves 9 ms of silence; the devices' thread never touches the heap.
+`devices_that_cannot_overlap_hand_over_after_a_short_faded_gap` shows the
+second device starting on the very frame after the last one the first
+played, `a_device_at_another_rate_plays_the_same_whatever_its_blocks` the
+resampled edge's independence from the device's blocks, and
+`a_lost_device_is_replaced_without_preparing_again` a device unplugged.
+On real drivers, `the_engine_runs_on_while_the_driver_changes` in
+`manguebyte-pro-io`'s `hardware.rs` moves a running engine from FlexASIO
+to ASIO4ALL and back, playing silence.
+
+**Limit.** Two devices crossfade only when the backend can run both and
+they are different devices; otherwise the gap is as long as the backend
+takes to close one stream and open the next: 90 ms for the WASAPI device
+of the machine it was tried on, and 0.37 to 2.6 s between two ASIO
+drivers, which load slowly. During a gap the engine waits, so the song
+resumes late by it. The crossfade has been run on the headless backend
+only, the machine having one output, and its level can rise by up to
+3 dB while the fades are a block apart. [TECH_DEBT.md](TECH_DEBT.md) item
+85 lists the rest.
 
 ## Where JUCE is ahead
 

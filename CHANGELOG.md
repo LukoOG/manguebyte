@@ -1556,6 +1556,32 @@ display, and no editor has been opened inside a real host yet.
 
 ### Devices
 
+- Devices change under a running engine without stopping it.
+  `DeviceManager::start_engine` runs the callback at a fixed
+  `EngineFormat` (rate, largest block, channels), prepared once; from then
+  on `apply`, `restart` and `follow` change the devices under it in the
+  middle of a song, and it is never stopped or prepared again: its
+  `CallbackInfo::frame` counts on. Where the backend runs two streams at
+  once and the output device changes, the new device fades in while the
+  old one fades out, both playing, the old device copying what the engine
+  renders into a wait-free ring until it hands the engine itself over
+  through a wait-free queue. Where they cannot (an ASIO driver per
+  process, the same device opened again, a driver's reset request) the
+  old device fades out, closes, and the new one opens and fades in, the
+  engine waiting so that no frame is lost; a lost device is replaced
+  without a fade-out. A device at another rate gets the engine through a
+  resampler (0.7 ms more), whose output does not depend on its blocks;
+  one at the engine's rate with its channels gets the engine's output
+  directly, with nothing copied or delayed. Channel counts are mapped by
+  repeating or folding. `set_crossfade` (30 ms by default) and
+  `last_swap` (`SwapReport`: how, the silence, the time to reopen,
+  underruns). `AudioBackend::supports_concurrent_streams` says whether a
+  backend can crossfade. `MockBackend` runs several streams when told to
+  (`set_concurrent_streams`, `render_on`, `capture_on`,
+  `stream_count`), and asks for restarts (`request_restart`). Proven by
+  `the_song_goes_on_while_the_device_changes_under_it` in
+  `tests/hotswap.rs`; measured on FlexASIO and ASIO4ALL. Limits:
+  TECH_DEBT 85.
 - MIDI output from the audio thread: `midi::midi_output_queue` makes a
   `MidiTransmitter`, which stamps each Universal MIDI Packet with the
   moment its frame is heard, one block late as input is, and
