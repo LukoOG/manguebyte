@@ -52,7 +52,8 @@ commit), the LV2 format, and a hardware MIDI keyboard.
 
 **Setup.** REAPER 7.82 on Windows, with the CLAP builds of `plugins/pluck`
 and `plugins/aratu-bridge`, and for the bridge a page in Chromium served
-from `http://127.0.0.1`. The commit tested was not recorded.
+from `http://127.0.0.1`. The bridge was built from `f7197a6` and the
+pluck from `90ac28c`, both as release builds.
 
 **What worked.**
 

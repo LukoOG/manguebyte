@@ -3,7 +3,7 @@
 An audit of what the code owes, so that shortcuts are chosen on purpose and
 paid back in order. Update it when an item is fixed or a new one is taken on.
 
-Last audit: 2026-10-15, covering every crate in the workspace.
+Last audit: 2026-10-19, covering every crate in the workspace.
 
 ## Scoring
 
