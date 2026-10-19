@@ -10,7 +10,9 @@ break the API.
 ## [0.1.0] - 2026-10-19
 
 The first release on crates.io: 25 crates, `manguebyte-pro-io` under the
-GPLv3 and every other one under MIT or Apache-2.0.
+GPLv3 and every other one under MIT or Apache-2.0. `cargo mangue new` writes
+a crate that depends on this release from crates.io; `--manguebyte-git`
+follows the repository instead, and `--manguebyte-path` a checkout.
 
 ### Plugins
 

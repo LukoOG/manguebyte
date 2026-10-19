@@ -37,9 +37,13 @@ const ID_LITERAL: &str = "\"com.example.plugin-template\"";
 const VENDOR_LITERAL: &str = "\"Template Vendor\"";
 const DESCRIPTION_LITERAL: &str = "\"Template description\"";
 
-/// Where the Manguebyte source lives. A new plugin depends on it from here
-/// unless it is pointed at a checkout.
+/// Where the Manguebyte source lives, for a new plugin that follows its
+/// development (`--manguebyte-git`).
 pub const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
+
+/// The version of Manguebyte a new plugin depends on from crates.io unless
+/// told otherwise: this tool's own, since the two are released together.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The vendor a new plugin gets when none is given.
 pub const DEFAULT_VENDOR: &str = "Example Audio";
@@ -97,6 +101,8 @@ impl Kind {
 /// Where a new plugin gets Manguebyte from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dependency {
+    /// A release on crates.io, by version.
+    Version(String),
     /// A git repository, by URL.
     Git(String),
     /// A folder holding the `manguebyte` crate, as written in `Cargo.toml`:
@@ -139,7 +145,7 @@ impl NewPlugin {
             name: display_name(package),
             vendor: DEFAULT_VENDOR.to_owned(),
             id: default_id(package),
-            dependency: Dependency::Git(REPOSITORY.to_owned()),
+            dependency: Dependency::Version(VERSION.to_owned()),
         })
     }
 }
@@ -221,6 +227,7 @@ pub fn project(plugin: &NewPlugin) -> Result<Vec<ProjectFile>, Error> {
 /// The text of the new crate's `Cargo.toml`.
 fn manifest(plugin: &NewPlugin, description: &str) -> String {
     let source = match &plugin.dependency {
+        Dependency::Version(version) => format!("version = {}", toml_string(version)),
         Dependency::Git(url) => format!("git = {}", toml_string(url)),
         Dependency::Path(path) => format!("path = {}", toml_string(path)),
     };

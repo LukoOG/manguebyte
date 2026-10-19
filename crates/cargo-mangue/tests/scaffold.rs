@@ -23,7 +23,8 @@ use cargo_mangue::cargo::Cargo;
 use cargo_mangue::layout::{BundleSpec, bundle_version, plan};
 use cargo_mangue::platform::{Format, Target};
 use cargo_mangue::scaffold::{
-    DEFAULT_VENDOR, Dependency, Kind, NewPlugin, REPOSITORY, display_name, project, type_name,
+    DEFAULT_VENDOR, Dependency, Kind, NewPlugin, REPOSITORY, VERSION, display_name, project,
+    type_name,
 };
 
 const EFFECT: &str = include_str!("../templates/effect.rs");
@@ -268,7 +269,7 @@ fn the_manifest_is_a_plugin_crate_that_depends_on_manguebyte() {
     assert_eq!(plugin.name, "My Gain");
     assert_eq!(plugin.vendor, DEFAULT_VENDOR);
     assert_eq!(plugin.id, "com.example.my-gain");
-    assert_eq!(plugin.dependency, Dependency::Git(REPOSITORY.to_owned()));
+    assert_eq!(plugin.dependency, Dependency::Version(VERSION.to_owned()));
     assert!(REPOSITORY.starts_with("https://"));
 
     let expected = format!(
@@ -285,7 +286,7 @@ description = "My Gain: an audio effect built with Manguebyte"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-manguebyte = {{ git = "{REPOSITORY}", default-features = false, features = ["clap", "vst3", "lv2"] }}
+manguebyte = {{ version = "{VERSION}", default-features = false, features = ["clap", "vst3", "lv2"] }}
 
 # What `cargo mangue bundle`, `install` and `validate` call the plugin.
 [package.metadata.manguebyte]
@@ -294,6 +295,13 @@ id = "com.example.my-gain"
 "#
     );
     assert_eq!(generate(&plugin).manifest, expected);
+
+    // Following the git repository instead of a release.
+    plugin.dependency = Dependency::Git(REPOSITORY.to_owned());
+    assert!(generate(&plugin).manifest.contains(&format!(
+        "manguebyte = {{ git = \"{REPOSITORY}\", default-features = false, \
+         features = [\"clap\", \"vst3\", \"lv2\"] }}\n"
+    )));
 
     // Against a checkout, with everything else chosen too.
     plugin.kind = Kind::Instrument;

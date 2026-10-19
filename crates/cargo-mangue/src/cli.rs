@@ -141,6 +141,8 @@ pub struct NewArgs {
     pub id: Option<String>,
     /// A checkout of Manguebyte to build against.
     pub manguebyte_path: Option<PathBuf>,
+    /// Whether to follow Manguebyte's git repository instead of a release.
+    pub manguebyte_git: bool,
 }
 
 /// Reads the arguments that follow the program's name.
@@ -497,6 +499,7 @@ fn parse_new(mut parser: Parser) -> Result<Command, Error> {
     let mut vendor = None;
     let mut id = None;
     let mut manguebyte_path = None;
+    let mut manguebyte_git = false;
 
     while let Some(token) = parser.next()? {
         let option = match token {
@@ -526,6 +529,7 @@ fn parse_new(mut parser: Parser) -> Result<Command, Error> {
             "--manguebyte-path" => {
                 manguebyte_path = Some(PathBuf::from(parser.value(&option)?));
             }
+            "--manguebyte-git" => manguebyte_git = true,
             _ => return Err(parser.unknown(&option)),
         }
     }
@@ -536,6 +540,13 @@ fn parse_new(mut parser: Parser) -> Result<Command, Error> {
             parser.see_help()
         )));
     };
+    if manguebyte_git && manguebyte_path.is_some() {
+        return Err(Error::usage(format!(
+            "--manguebyte-path and --manguebyte-git each say where Manguebyte comes from; \
+             give one of them. {}",
+            parser.see_help()
+        )));
+    }
     Ok(Command::New(NewArgs {
         package,
         kind,
@@ -543,6 +554,7 @@ fn parse_new(mut parser: Parser) -> Result<Command, Error> {
         vendor,
         id,
         manguebyte_path,
+        manguebyte_git,
     }))
 }
 
@@ -776,7 +788,9 @@ Options:
                             change once the plugin has shipped.
                             Default: com.example.<name>
       --manguebyte-path <path>  Build against this checkout of Manguebyte
-                            instead of its git repository
+                            instead of its release on crates.io
+      --manguebyte-git      Follow Manguebyte's git repository, its
+                            newest work, instead of its release
   -h, --help                Show this text
 ";
 
@@ -1016,6 +1030,16 @@ mod tests {
         };
         assert_eq!(plain.kind, Kind::Effect);
         assert_eq!((plain.name, plain.vendor, plain.id), (None, None, None));
+        assert!(!plain.manguebyte_git && plain.manguebyte_path.is_none());
+
+        let Ok(Command::New(git)) = parsed(&["new", "my-gain", "--manguebyte-git"]) else {
+            panic!()
+        };
+        assert!(git.manguebyte_git);
+        assert!(
+            usage_error(&["new", "a", "--manguebyte-git", "--manguebyte-path", ".."])
+                .contains("give one of them")
+        );
 
         assert!(usage_error(&["new"]).contains("needs the name"));
         assert!(usage_error(&["new", "a", "b"]).contains("\"b\""));

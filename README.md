@@ -155,11 +155,23 @@ and the editors of hosted plugins.
 
 ## Quick start
 
-Manguebyte is not on crates.io yet. Depend on it straight from Git:
+Manguebyte is on [crates.io](https://crates.io/crates/manguebyte):
 
 ```toml
 [dependencies]
-manguebyte = { git = "https://github.com/alessonqueirozdev-hub/manguebyte" }
+manguebyte = "0.1"
+```
+
+To follow its newest work instead, depend on the repository:
+`manguebyte = { git = "https://github.com/alessonqueirozdev-hub/manguebyte" }`.
+
+To start a plugin, install the command-line tool and let it write the crate,
+which depends on the release `cargo mangue` came with (`--manguebyte-git`
+follows the repository instead):
+
+```sh
+cargo install cargo-mangue
+cargo mangue new my-gain
 ```
 
 Build a synth voice by putting processors in a tuple, then render it to a WAV

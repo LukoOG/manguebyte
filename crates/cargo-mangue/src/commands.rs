@@ -20,7 +20,7 @@ use crate::layout::{
 };
 use crate::lv2;
 use crate::platform::{Arch, Format, Os, Target};
-use crate::scaffold::{self, Dependency, NewPlugin};
+use crate::scaffold::{self, Dependency, NewPlugin, REPOSITORY};
 use crate::tools::SystemTools;
 use crate::validate::{self, Verdict};
 
@@ -510,6 +510,8 @@ fn new_plugin(args: &NewArgs) -> Result<(), Error> {
     if let Some(path) = &args.manguebyte_path {
         plugin.dependency =
             Dependency::Path(scaffold::resolve_manguebyte_path(path, &current_dir)?);
+    } else if args.manguebyte_git {
+        plugin.dependency = Dependency::Git(REPOSITORY.to_owned());
     }
     let files = scaffold::project(&plugin)?;
     let dir = current_dir.join(&plugin.package);
