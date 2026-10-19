@@ -34,8 +34,9 @@ key. The example plugins (`plugins/pluck`, `plugins/duck` and
 `plugins/aratu-bridge`) have `publish = false` and are never published.
 No crate under `crates/` has a `publish` key, so all of them are
 published, `manguebyte-pro-io` among them: it is under the GPLv3, not MIT
-or Apache-2.0, and whether it goes to crates.io with the rest is a
-decision to take before the first release.
+or Apache-2.0, and it goes to crates.io with the rest (decided on
+19 October 2026, before the first release). No other crate depends on it,
+so the MIT or Apache-2.0 crates stay free of it.
 
 ## Publishing
 

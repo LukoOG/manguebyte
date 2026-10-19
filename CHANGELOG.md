@@ -7,7 +7,10 @@ break the API.
 
 ## Unreleased
 
-Nothing has been published to crates.io yet. Everything below is on `main`.
+## [0.1.0] - 2026-10-19
+
+The first release on crates.io: 25 crates, `manguebyte-pro-io` under the
+GPLv3 and every other one under MIT or Apache-2.0.
 
 ### Plugins
 
