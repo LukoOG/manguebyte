@@ -38,6 +38,7 @@ says where. Nothing here contains JUCE code: see
 | [Keyboard state](#15-a-keyboard-an-interface-can-read-without-listening) | Listeners that may run on the audio thread | Atomics an interface polls; no listener, no lock | [`realtime.rs`](../crates/manguebyte-midi/tests/realtime.rs) |
 | [Slow-downs in silence](#10-a-fading-sound-cannot-slow-the-audio-thread-down) | A guard each plugin places in its own callback | Set by the framework around every plugin and every device callback | [`denormal.rs`](../crates/manguebyte-core/src/denormal.rs), both `abi.rs` |
 | [Instruments ready to play](#16-instruments-ready-to-play-measured-in-tests) | Classes to build an instrument from; none ready to play | Synthesised and modelled instruments and drum kits, their tuning and spectra measured in tests | [`instruments`](../crates/manguebyte-dsp/src/instruments) |
+| [Changing the audio device](#17-changing-the-audio-device-in-the-middle-of-a-song) | The device stops, and the callback is prepared again for the next one | Prepared once; the output changes under the engine with a crossfade or a short faded gap, the engine's output the same bit for bit | [`hotswap.rs`](../crates/manguebyte-devices/tests/hotswap.rs) |
 | [Changing the device mid-song](#17-changing-the-audio-device-in-the-middle-of-a-song) | `audioDeviceStopped`, then `audioDeviceAboutToStart` and preparing again | The engine runs on, prepared once: a crossfade, or a short faded gap where devices cannot overlap | [`hotswap.rs`](../crates/manguebyte-devices/tests/hotswap.rs) |
 
 ## 1. Automation on the exact sample
@@ -255,12 +256,14 @@ accepts no CLAP format.
 
 **Limit.** Editors open in the host's window on Windows only, through
 `manguebyte-window`'s Win32 backend, which CI tests with real windows; macOS
-and Linux windows are not there yet, and no editor has yet been tested by hand
-inside a DAW. No 64-bit audio, no presets. VST 3, LV2 and AU (version 2,
-not yet run on a Mac) are the other formats on `main`: JUCE's AUv3 and AAX
-support has no counterpart here yet. Both example
-plugins were also loaded and tested by hand in REAPER, without their editors;
-see [HOST_TESTS.md](HOST_TESTS.md).
+and Linux windows are not there yet. By hand, one editor has been opened
+inside a DAW: Mangue Pluck's, as a CLAP in REAPER on Windows, where it
+showed its title and knobs; working its knobs there has not been tested.
+No 64-bit audio, no presets. VST 3, LV2 and AU (version 2, whose example
+plugins pass Apple's `auval` in a macOS CI job) are the other formats on
+`main`: JUCE's AUv3 and AAX support has no counterpart here yet. Both
+example plugins were also loaded and tested by hand in REAPER before they
+had editors; see [HOST_TESTS.md](HOST_TESTS.md).
 
 ## 7. A plugin can be tested without a host
 
@@ -675,9 +678,9 @@ it has, and Manguebyte does not:
   (Manguebyte's AUv2 wrapper has only its own tests and `auval` in CI);
 - hosting of AU plugins and the editors of hosted plugins (Manguebyte hosts
   CLAP, VST 3 and LV2 plugins, without their editors, and scans for them);
-- SIMD wrappers and lookup tables among its DSP utilities, and more audio
-  formats (Opus, encoders for compressed formats);
-- iOS and Android;
+- SIMD wrappers and lookup tables among its DSP utilities;
+- iOS and Android (Manguebyte's audio and device crates are built for both
+  in CI, but not run on a device);
 - documentation, tutorials and a large community.
 
 [JUCE_PARITY.md](JUCE_PARITY.md) tracks that gap module by module, and

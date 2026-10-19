@@ -22,10 +22,20 @@ crate of the workspace shares one version number and is released together.
    `--no-verify` skips the builds, which is enough to check manifests and
    package contents.
 
-Each crate carries its own `README.md` and both licence files, because a
-package holds only the files under its folder; CI checks the licence copies
-against the root ones. A crate that depends on itself for its own tests does
-so through a path-only dev-dependency, which cargo drops on publish.
+Each crate carries its own `README.md` and its licence files, because a
+package holds only the files under its folder: both licence texts, which
+CI checks against the root ones, except `manguebyte-pro-io`, which carries
+the GPLv3 alone in `LICENSE`, as CI also checks. A crate that depends on
+itself for its own tests does so through a path-only dev-dependency, which
+cargo drops on publish.
+
+What `cargo publish --workspace` takes is set by each manifest's `publish`
+key. The example plugins (`plugins/pluck`, `plugins/duck` and
+`plugins/aratu-bridge`) have `publish = false` and are never published.
+No crate under `crates/` has a `publish` key, so all of them are
+published, `manguebyte-pro-io` among them: it is under the GPLv3, not MIT
+or Apache-2.0, and whether it goes to crates.io with the rest is a
+decision to take before the first release.
 
 ## Publishing
 
@@ -59,3 +69,21 @@ A published version cannot be deleted, only yanked
 (`cargo yank --version X.Y.Z <crate>`), which stops new projects from
 choosing it but keeps it for those that already depend on it. Yank only a
 version that is broken or unsafe, and publish the fix first.
+
+## Before a test in a DAW
+
+A test by hand in a DAW ([HOST_TESTS.md](HOST_TESTS.md)) starts by
+installing the example plugins again from the commit under test, in every
+format the test uses, with the DAW closed:
+
+```sh
+cargo mangue install -p mangue-pluck --release --format clap,vst3
+cargo mangue install -p mangue-duck --release --format clap,vst3
+cargo mangue install -p aratu-bridge --release --format clap,vst3
+```
+
+(`--format lv2` for LV2, and `--format au` on a Mac; `cargo run -p
+cargo-mangue -- mangue install ...` without `cargo-mangue` installed.) A
+DAW loads whatever is installed, however old: on 19 October 2026 an
+overload reported in REAPER came from an installed Mangue Pluck built
+before its output ceiling existed.

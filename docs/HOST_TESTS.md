@@ -47,3 +47,26 @@ renders were kept on the test machine.
 
 **Not tested here.** Plugin editors (the example plugins had none on that
 commit), the LV2 format, and a hardware MIDI keyboard.
+
+## REAPER 7.82, Windows, 19 October 2026
+
+**Setup.** REAPER 7.82 on Windows, with the CLAP builds of `plugins/pluck`
+and `plugins/aratu-bridge`, and for the bridge a page in Chromium served
+from `http://127.0.0.1`. The commit tested was not recorded.
+
+**What worked.**
+
+| Test | Result |
+|---|---|
+| Editor | Mangue Pluck's CLAP editor opened in REAPER and showed its title and knobs. Working the knobs was not tested |
+| Output ceiling | With every parameter of Mangue Pluck at its maximum, REAPER's master peaked at −1.1 dBFS, under the plugin's ceiling of −1 dBFS (`OUTPUT_CEILING_DB`) |
+| Aratu Bridge | The page sent 44 events; the plugin applied 44, with none late and none dropped, following REAPER's tempo |
+
+**What was found.** An overload reported at first was not the plugin's:
+the Mangue Pluck installed on the machine was a build from before its
+output ceiling. Reinstalling the example plugins before a test in a DAW is
+now a step in [RELEASING.md](RELEASING.md).
+
+**Not tested here.** Working an editor's knobs in a host, the VST 3
+editors, Mangue Duck's editor, the bridge from an `https://` page or in
+another browser or DAW.

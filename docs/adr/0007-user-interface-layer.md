@@ -295,7 +295,10 @@ host yet: that is what is left of item 9.
    parameters), as the second binary of item 8's test. Both are tested
    headless (layout at scales 1 to 2, drags, keys, automation, the meter),
    Duck's against golden images too. The hand test in REAPER is still to be done
-   and recorded.
+   and recorded for Duck's editor. Mangue Pluck's CLAP editor was opened by
+   hand in REAPER 7.82 on Windows on 19 October 2026 and showed its title
+   and knobs ([HOST_TESTS.md](../HOST_TESTS.md)); working its knobs there
+   was not tested.
 
 Not in phase 1: macOS and X11 backends, platform accessibility adapters,
 resizing, popups, text entry, GPU code, hot reloading of themes.
