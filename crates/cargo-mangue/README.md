@@ -9,8 +9,10 @@ cargo install cargo-mangue
 ```
 
 Then `cargo mangue new my-plugin` starts a plugin, and `cargo mangue bundle`,
-`install` and `validate` package it as CLAP, VST 3 or LV2, put it where hosts
-look, and run the official validators.
+`install` and `validate` package it as CLAP, VST 3, LV2 or, on macOS, an
+Audio Unit, put it where hosts look, and run the official validators
+(`clap-validator`, Steinberg's validator and Apple's `auval`; LV2 has none
+here).
 
 Part of the [Manguebyte Audio Framework](https://github.com/alessonqueirozdev-hub/manguebyte).
 

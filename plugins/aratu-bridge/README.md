@@ -26,6 +26,12 @@ a port already taken does not listen until its port is changed.
 The plugin's latency is the engine's master bus look-ahead (111 frames at
 48 kHz), which the DAW compensates. It has one stereo output and no editor.
 
+It has been tried by hand once, as a CLAP in REAPER 7.82 on Windows, with
+a page in Chromium served from `http://127.0.0.1`: the page sent 44
+events and the plugin applied 44, none late or dropped, following
+REAPER's tempo. Other DAWs, the VST 3 and AU builds, other browsers and
+`https://` pages are not tried yet (`docs/TECH_DEBT.md`, item 84).
+
 ## Build and install
 
 From the repository's root, with the framework's command-line tool:

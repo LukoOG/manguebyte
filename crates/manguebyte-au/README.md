@@ -6,6 +6,17 @@ Part of the [Manguebyte Audio Framework](https://github.com/alessonqueirozdev-hu
 [`manguebyte`](https://crates.io/crates/manguebyte), which gathers every part
 under one name; depend on this crate directly to use only this part.
 
+`export_au!(MyPlugin)` exports the same `Plugin` the CLAP, VST 3 and LV2
+wrappers take as an Audio Unit, through the plain C AudioUnit interface:
+parameters, scheduled parameters and MIDI on their frames, the host's
+transport, state and the present preset. `cargo mangue bundle --format au`
+writes the `.component` on macOS and `install --format au` puts it where
+hosts look. The wrapper's tests act as a host through its C interface on
+every system, against a stand-in for CoreFoundation elsewhere than macOS,
+and both example plugins pass Apple's `auval` in a macOS CI job. No DAW
+has loaded one yet. Not there: an editor, MIDI output, factory presets
+and AUv3.
+
 Documentation: <https://docs.rs/manguebyte-au>
 
 ## Licence

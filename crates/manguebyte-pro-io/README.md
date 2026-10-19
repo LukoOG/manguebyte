@@ -40,6 +40,13 @@ Documentation: <https://docs.rs/manguebyte-pro-io>
   driver's reset as a stream lost and restarts it, as it does a device that
   was unplugged and came back. Saved setups, fallbacks and device events
   work as with the system's devices.
+- Runs under an engine that changes devices while it plays
+  (`DeviceManager::start_engine`). A process loads one driver, so moving
+  to another driver, or a driver's reset, goes through a short faded gap,
+  never a crossfade: one driver closes, the next loads and fades in, and
+  the engine is not prepared again. `tests/hardware.rs` moves a running
+  engine from FlexASIO to ASIO4ALL and back (ignored unless both drivers
+  are installed).
 - Comes with a fake driver written in Rust (`FakeDevice`), a COM-shaped
   object with the driver interface's vtable, which runs all of the above on
   any system without hardware.

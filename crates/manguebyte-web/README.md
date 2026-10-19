@@ -8,9 +8,12 @@ organ through its rotating speaker, an 808-style drum machine, the 808's
 kick bass, an acid bass, drum kits from an acoustic one to the 808, 909,
 606 and CR-78 and kits for trap, techno, house, drum and bass and lo-fi,
 a polyphonic synthesiser with 68 presets, mallets, bowed strings, winds
-and a choir) through a chain of [effects](#effects), then gain
+and a choir, every drum kit with Aratu's Brazilian
+[percussion keys](#percussion-keys)) through a chain of
+[effects](#effects) (the drive among them, with a tube curve), then gain
 and pan, into a [master bus](#the-master-bus) with a shared reverb, a glue
-compressor and a true-peak limiter. Every kind and preset plays at one
+compressor and a true-peak limiter. Each part keeps a
+[scope and levels](#scopes-and-levels) for an editor to draw. Every kind and preset plays at one
 [loudness](#loudness), -24 LUFS on a standard phrase, and a sampler part
 measures each instrument as it loads to play it there. Events are 32-byte
 records that land on the exact frame they name, and the output is the
