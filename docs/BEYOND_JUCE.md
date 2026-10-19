@@ -643,7 +643,8 @@ renders is the song rendered with no device, bit for bit; each device at
 the engine's rate plays one unbroken stretch of the engine's frames,
 exactly, scaled only inside its fades; a reference tone never breaks on
 any device, the level never dips while two devices play, and the reset
-leaves 9 ms of silence; the devices' thread never touches the heap.
+leaves under 100 ms of silence (9 ms when it was measured); the devices'
+thread never touches the heap.
 `devices_that_cannot_overlap_hand_over_after_a_short_faded_gap` shows the
 second device starting on the very frame after the last one the first
 played, `a_device_at_another_rate_plays_the_same_whatever_its_blocks` the
