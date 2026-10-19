@@ -16,6 +16,11 @@
 //!   fallbacks for what is missing, runs one [`AudioCallback`] on them, and
 //!   follows the system as devices come and go ([`DeviceEvent`],
 //!   [`DeviceWatcher`]).
+//! - [`DeviceManager::start_engine`] runs the callback at a fixed
+//!   [`EngineFormat`], prepared once, and changes devices under it in the
+//!   middle of a song without stopping it: a crossfade where two devices
+//!   can play at once, a short faded gap where they cannot, a resampler
+//!   for a device at another rate ([`hotswap`]).
 //! - [`MockBackend`] stands in for the system with no hardware, for tests.
 //! - [`midi`] opens MIDI ports, real and virtual, keeps a player's timing
 //!   on the way to the audio thread, and sends packets from it on time
@@ -86,6 +91,7 @@ mod error;
 mod external;
 mod host;
 mod hotplug;
+pub mod hotswap;
 mod manager;
 #[cfg(feature = "midi")]
 pub mod midi;
@@ -109,6 +115,7 @@ pub use hotplug::{
     DEFAULT_POLL_INTERVAL, DeviceEvent, DeviceSnapshot, DeviceSummary, DeviceWatcher, LossCause,
     MIN_POLL_INTERVAL, STALL_TIMEOUT,
 };
+pub use hotswap::{DEFAULT_CROSSFADE, EngineFormat, SwapKind, SwapReport};
 pub use manager::{AudioCallback, DEFAULT_MAX_BLOCK_SIZE, DeviceIo, DeviceManager, StreamFormat};
 pub use mock::MockBackend;
 pub use settings::{ConfigRange, StreamSettings};

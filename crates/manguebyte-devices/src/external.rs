@@ -70,6 +70,15 @@ pub trait AudioBackend: Send + Sync + 'static {
     /// size for it.
     fn device_info(&self, direction: Direction, id: &str) -> Result<DeviceInfo, DeviceError>;
 
+    /// Whether the backend can start a second stream, on another device,
+    /// while one runs. A device manager with an
+    /// [`EngineFormat`](crate::EngineFormat) then crossfades from the old
+    /// device to the new one; otherwise it fades the old one out, stops
+    /// it, and fades the new one in. `false` unless overridden.
+    fn supports_concurrent_streams(&self) -> bool {
+        false
+    }
+
     /// Opens the devices of `request` and starts them.
     ///
     /// Once the devices are open, call `make` exactly once with the format
@@ -434,6 +443,10 @@ impl Backend for External {
 
     fn device_info(&self, direction: Direction, id: &str) -> Result<DeviceInfo, DeviceError> {
         self.backend.device_info(direction, id)
+    }
+
+    fn concurrent_streams(&self) -> bool {
+        self.backend.supports_concurrent_streams()
     }
 
     fn start(

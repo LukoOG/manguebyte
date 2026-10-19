@@ -64,7 +64,10 @@ struct MockState {
     listing_fails: bool,
     input_latency: Option<Duration>,
     output_latency: Option<Duration>,
-    stream: Option<MockStream>,
+    /// Running streams, oldest first.
+    streams: Vec<MockStream>,
+    /// Whether a second stream may start while one runs.
+    concurrent: bool,
     next_token: u64,
     #[cfg(feature = "midi")]
     midi_connections: Vec<MockMidiConnection>,
@@ -84,7 +87,8 @@ impl Default for MockState {
             listing_fails: false,
             input_latency: None,
             output_latency: None,
-            stream: None,
+            streams: Vec::new(),
+            concurrent: false,
             next_token: 0,
             #[cfg(feature = "midi")]
             midi_connections: Vec::new(),
@@ -263,20 +267,34 @@ impl MockBackend {
         state.output_latency = output;
     }
 
-    /// Whether a stream is running.
-    pub fn is_running(&self) -> bool {
-        self.state().stream.is_some()
+    /// Lets a second stream start while one runs, as most systems do
+    /// (`true`), or refuses it, as a backend that loads one driver at a
+    /// time does (`false`, the default). With several streams running,
+    /// [`render_on`](Self::render_on) and [`capture_on`](Self::capture_on)
+    /// say which device calls.
+    pub fn set_concurrent_streams(&self, on: bool) {
+        self.state().concurrent = on;
     }
 
-    /// The device and settings the running stream has in one direction.
+    /// Whether a stream is running.
+    pub fn is_running(&self) -> bool {
+        !self.state().streams.is_empty()
+    }
+
+    /// How many streams are running.
+    pub fn stream_count(&self) -> usize {
+        self.state().streams.len()
+    }
+
+    /// The device and settings the newest stream with that side has in one
+    /// direction.
     pub fn running(&self, direction: Direction) -> Option<(String, StreamSettings)> {
         let state = self.state();
-        let stream = state.stream.as_ref()?;
-        let side = match direction {
-            Direction::Input => stream.input.as_ref(),
-            Direction::Output => stream.output.as_ref(),
-        };
-        side.map(|(id, settings, _)| (id.clone(), *settings))
+        state.streams.iter().rev().find_map(|stream| {
+            stream
+                .side(direction)
+                .map(|(id, settings, _)| (id.clone(), *settings))
+        })
     }
 
     fn connected(state: &MockState, direction: Direction, id: &str) -> bool {
@@ -288,26 +306,43 @@ impl MockBackend {
 
     /// Asks the running stream for interleaved output, as the output
     /// device would. Returns `false`, leaving `output` alone, when no
-    /// stream plays, or when its output device has been removed.
+    /// stream plays, or when its output device has been removed. With
+    /// several streams running, the newest that plays is asked.
     ///
     /// Allocates nothing, so a test can count allocations around it.
     pub fn render(&self, output: &mut [f32]) -> bool {
+        self.render_where(output, None)
+    }
+
+    /// Asks the stream that plays to the output device `id` for
+    /// interleaved output, as that device would. Returns `false`, leaving
+    /// `output` alone, when no stream plays there, or when the device has
+    /// been removed.
+    ///
+    /// Allocates nothing.
+    pub fn render_on(&self, id: &str, output: &mut [f32]) -> bool {
+        self.render_where(output, Some(id))
+    }
+
+    /// The newest stream with a side in `direction`, on `device` if given,
+    /// whose device there is connected.
+    fn find(state: &MockState, direction: Direction, device: Option<&str>) -> Option<usize> {
+        let index = state.streams.iter().rposition(|stream| {
+            stream
+                .side(direction)
+                .is_some_and(|(id, _, _)| device.is_none_or(|device| device == id))
+        })?;
+        let (id, _, _) = state.streams[index].side(direction)?;
+        Self::connected(state, direction, id).then_some(index)
+    }
+
+    fn render_where(&self, output: &mut [f32], device: Option<&str>) -> bool {
         let mut state = self.state();
         let latency = state.output_latency;
-        let Some(id) = state
-            .stream
-            .as_ref()
-            .and_then(|stream| stream.output.as_ref())
-            .map(|(id, _, _)| id.as_str())
-        else {
+        let Some(index) = Self::find(&state, Direction::Output, device) else {
             return false;
         };
-        if !Self::connected(&state, Direction::Output, id) {
-            return false;
-        }
-        let Some(stream) = state.stream.as_mut() else {
-            return false;
-        };
+        let stream = &mut state.streams[index];
         let channels = stream
             .output
             .as_ref()
@@ -328,26 +363,30 @@ impl MockBackend {
 
     /// Hands the running stream interleaved captured audio, as the input
     /// device would. Returns `false` when no stream records, or when its
-    /// input device has been removed.
+    /// input device has been removed. With several streams running, the
+    /// newest that records is handed it.
     ///
     /// Allocates nothing.
     pub fn capture(&self, input: &[f32]) -> bool {
+        self.capture_where(input, None)
+    }
+
+    /// Hands the stream that records from the input device `id`
+    /// interleaved captured audio, as that device would. Returns `false`
+    /// when no stream records there, or when the device has been removed.
+    ///
+    /// Allocates nothing.
+    pub fn capture_on(&self, id: &str, input: &[f32]) -> bool {
+        self.capture_where(input, Some(id))
+    }
+
+    fn capture_where(&self, input: &[f32], device: Option<&str>) -> bool {
         let mut state = self.state();
         let latency = state.input_latency;
-        let Some(id) = state
-            .stream
-            .as_ref()
-            .and_then(|stream| stream.input.as_ref())
-            .map(|(id, _, _)| id.as_str())
-        else {
+        let Some(index) = Self::find(&state, Direction::Input, device) else {
             return false;
         };
-        if !Self::connected(&state, Direction::Input, id) {
-            return false;
-        }
-        let Some(stream) = state.stream.as_mut() else {
-            return false;
-        };
+        let stream = &mut state.streams[index];
         let channels = stream
             .input
             .as_ref()
@@ -370,14 +409,12 @@ impl MockBackend {
     pub fn report_device_lost(&self, direction: Direction) -> bool {
         let (errors, id) = {
             let state = self.state();
-            let Some(stream) = state.stream.as_ref() else {
-                return false;
-            };
-            let side = match direction {
-                Direction::Input => stream.input.as_ref(),
-                Direction::Output => stream.output.as_ref(),
-            };
-            let Some((id, _, health)) = side else {
+            let Some((stream, (id, _, health))) = state
+                .streams
+                .iter()
+                .rev()
+                .find_map(|stream| Some((stream, stream.side(direction)?)))
+            else {
                 return false;
             };
             health.mark_lost();
@@ -389,6 +426,25 @@ impl MockBackend {
             format!("the mock device {id} was unplugged"),
         )));
         true
+    }
+
+    /// Makes the newest stream with a side in `direction` ask to be opened
+    /// again, as a driver does when its settings change under it (an ASIO
+    /// reset request, for one). Returns whether a stream was running there.
+    pub fn request_restart(&self, direction: Direction) -> bool {
+        let state = self.state();
+        let side = state
+            .streams
+            .iter()
+            .rev()
+            .find_map(|stream| stream.side(direction));
+        match side {
+            Some((_, _, health)) => {
+                health.request_restart();
+                true
+            }
+            None => false,
+        }
     }
 
     /// Delivers raw MIDI bytes from an input port to whoever has it open.
@@ -480,11 +536,11 @@ impl Drop for StreamGuard {
         };
         let stream = {
             let mut state = lock(&state);
-            if state.stream.as_ref().map(|stream| stream.token) == Some(self.token) {
-                state.stream.take()
-            } else {
-                None
-            }
+            let index = state
+                .streams
+                .iter()
+                .position(|stream| stream.token == self.token);
+            index.map(|index| state.streams.remove(index))
         };
         // The callback goes back to the manager as the stream is dropped,
         // outside the lock.
@@ -529,6 +585,15 @@ impl MidiSender for MockMidiOutput {
         let port = self.port.clone();
         state.sent_midi.push((port, bytes.to_vec()));
         Ok(())
+    }
+}
+
+impl MockStream {
+    fn side(&self, direction: Direction) -> Option<&(String, StreamSettings, Arc<StreamHealth>)> {
+        match direction {
+            Direction::Input => self.input.as_ref(),
+            Direction::Output => self.output.as_ref(),
+        }
     }
 }
 
@@ -609,6 +674,10 @@ impl Backend for MockBackend {
             .ok_or_else(|| DeviceError::DeviceNotFound(id.to_owned()))
     }
 
+    fn concurrent_streams(&self) -> bool {
+        self.state().concurrent
+    }
+
     fn start(
         &self,
         request: &StreamRequest,
@@ -616,7 +685,7 @@ impl Backend for MockBackend {
         on_error: ErrorSink,
     ) -> Result<Started, DeviceError> {
         let state = self.state();
-        if state.stream.is_some() {
+        if !state.concurrent && !state.streams.is_empty() {
             return Err(DeviceError::UnsupportedSettings(String::from(
                 "the mock runs one stream at a time",
             )));
@@ -660,7 +729,7 @@ impl Backend for MockBackend {
         drop(state);
         let mut callback = make(format);
         let mut state = self.state();
-        if state.stream.is_some() {
+        if !state.concurrent && !state.streams.is_empty() {
             return Err(DeviceError::UnsupportedSettings(String::from(
                 "the mock runs one stream at a time",
             )));
@@ -732,7 +801,7 @@ impl Backend for MockBackend {
         let keep = |opened: Option<(DeviceSummary, StreamSettings)>, health: Arc<StreamHealth>| {
             opened.map(|(device, settings)| (device.id, settings, health))
         };
-        state.stream = Some(MockStream {
+        state.streams.push(MockStream {
             token,
             kind,
             errors: on_error,

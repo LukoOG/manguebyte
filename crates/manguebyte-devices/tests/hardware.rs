@@ -199,6 +199,96 @@ fn the_device_manager_runs_and_restores_the_system_default() {
     assert!(rendered > 10_000, "only {rendered} frames");
 }
 
+/// Runs an engine of silence and changes its output device under it: to
+/// another output when there is one (a crossfade, both playing), then the
+/// same device opened again (a gap). Reports how each change went.
+#[test]
+#[ignore = "needs an audio output device"]
+fn the_engine_runs_on_while_the_output_device_changes() {
+    use std::sync::atomic::AtomicU64;
+
+    use manguebyte_devices::{
+        AudioCallback, DeviceChoice, DeviceIo, DeviceManager, DeviceRef, DeviceSetup, Direction,
+        EngineFormat, StreamFormat,
+    };
+
+    /// Leaves every block silent, and checks that the frames follow on.
+    struct Silence {
+        prepared: Arc<AtomicUsize>,
+        frames: Arc<AtomicU64>,
+        wrong: Arc<AtomicUsize>,
+    }
+
+    impl AudioCallback for Silence {
+        fn prepare(&mut self, _: &StreamFormat) {
+            self.prepared.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn process(&mut self, io: &mut DeviceIo<'_>) {
+            let frames = io.num_frames() as u64;
+            let expected = self.frames.fetch_add(frames, Ordering::Relaxed);
+            if io.info.frame != expected || io.output.peak() != 0.0 {
+                self.wrong.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    let prepared = Arc::new(AtomicUsize::new(0));
+    let frames = Arc::new(AtomicU64::new(0));
+    let wrong = Arc::new(AtomicUsize::new(0));
+    let mut manager = DeviceManager::new();
+    let outputs = manager.devices().unwrap().outputs;
+    println!("{}: {outputs:?}", manager.host_name());
+    let format = EngineFormat::new(48_000, 512, 0, 2);
+    let silence = Silence {
+        prepared: Arc::clone(&prepared),
+        frames: Arc::clone(&frames),
+        wrong: Arc::clone(&wrong),
+    };
+    manager
+        .start_engine(&DeviceSetup::default(), format, silence)
+        .unwrap();
+    let run = |manager: &mut DeviceManager, what: &str| {
+        let before = frames.load(Ordering::Relaxed);
+        let started = std::time::Instant::now();
+        while started.elapsed() < Duration::from_millis(800) {
+            for event in manager.poll_devices() {
+                println!("{what}: {event}");
+                if let Some(result) = manager.follow(&event) {
+                    result.unwrap();
+                }
+            }
+            sleep(Duration::from_millis(20));
+        }
+        let swap = manager.last_swap().unwrap();
+        println!(
+            "{what}: {:?} on {:?} at {} Hz, {:?} of silence, reopened in {:?}, {} underruns, \
+             {} engine frames since",
+            swap.kind,
+            manager.running_device(Direction::Output).map(|d| &d.name),
+            manager.format().unwrap().sample_rate,
+            swap.silence,
+            swap.reopen,
+            swap.underruns,
+            frames.load(Ordering::Relaxed) - before
+        );
+        assert!(frames.load(Ordering::Relaxed) > before + 10_000, "{what}");
+    };
+    run(&mut manager, "start");
+    let first = manager.running_device(Direction::Output).cloned().unwrap();
+    if let Some(other) = outputs.iter().find(|device| device.id != first.id) {
+        let choice = DeviceChoice::Device(DeviceRef::from(other));
+        manager
+            .apply(&DeviceSetup::default().with_output(choice))
+            .unwrap();
+        run(&mut manager, "to another output");
+    }
+    manager.restart().unwrap();
+    run(&mut manager, "the same output again");
+    assert_eq!(prepared.load(Ordering::Relaxed), 1);
+    assert_eq!(wrong.load(Ordering::Relaxed), 0);
+}
+
 #[cfg(all(feature = "midi", unix, not(target_os = "android")))]
 #[test]
 #[ignore = "needs the system MIDI service"]

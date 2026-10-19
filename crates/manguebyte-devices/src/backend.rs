@@ -93,6 +93,10 @@ pub(crate) trait Backend: Send + Sync {
     /// Everything about one device, with its configurations.
     fn device_info(&self, direction: Direction, id: &str) -> Result<DeviceInfo, DeviceError>;
 
+    /// Whether a second stream can be started while one runs, on another
+    /// device, so that the manager can crossfade from one to the other.
+    fn concurrent_streams(&self) -> bool;
+
     /// Opens the devices of `request`, hands their format to `make`, which
     /// returns the callback, and starts the stream. If anything fails after
     /// `make` was called, the callback it returned is dropped.
@@ -194,6 +198,12 @@ impl Backend for SystemBackend {
             .into_iter()
             .find(|device| device.id == id)
             .ok_or_else(|| DeviceError::DeviceNotFound(id.to_owned()))
+    }
+
+    fn concurrent_streams(&self) -> bool {
+        // Every host runs several streams, except ASIO, whose drivers are
+        // loaded one per process.
+        self.host().name() != "ASIO"
     }
 
     fn start(

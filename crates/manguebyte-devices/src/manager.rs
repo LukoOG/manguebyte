@@ -3,27 +3,30 @@
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use manguebyte_core::AudioBuffer;
-#[cfg(feature = "midi")]
-use manguebyte_core::spsc::Producer;
+use manguebyte_core::spsc::{self, Producer};
 
 #[cfg(feature = "midi")]
 use crate::backend::MidiSender;
 use crate::backend::{
-    Backend, Endpoint, EngineCallback, ErrorSink, OpenedEndpoint, OpenedFormat, StreamRequest,
-    SystemBackend,
+    Backend, Endpoint, EngineCallback, ErrorSink, OpenedEndpoint, OpenedFormat, Started,
+    StreamRequest, SystemBackend,
 };
 use crate::hotplug::{DeviceEvent, DeviceWatcher, Poller, WatchSlot, WatchedStream};
+use crate::hotswap::{
+    Core, DEFAULT_CROSSFADE, Edge, EdgeInit, EdgeParts, EdgeShared, EngineFormat, Incoming, Retire,
+    Successor, SwapKind, SwapRecord, SwapReport,
+};
 #[cfg(feature = "midi")]
 use crate::midi::{MidiError, MidiInputMessage, MidiReceiver, MidiSink, Timed, merged_receiver};
 #[cfg(feature = "midi")]
-use crate::setup::{DeviceRef, Fallback};
-use crate::setup::{Plan, plan};
+use crate::setup::DeviceRef;
+use crate::setup::{Fallback, Plan, plan};
 use crate::{
     AudioHost, CallbackInfo, DeviceError, DeviceInfo, DeviceSetup, DeviceSnapshot, DeviceSummary,
-    Direction, DuplexSettings, HostInfo, MockBackend, RestoreReport, StreamSettings,
+    Direction, DuplexSettings, HostInfo, LossCause, MockBackend, RestoreReport, StreamSettings,
 };
 
 /// The largest block a device manager hands its callback unless told
@@ -32,6 +35,11 @@ pub const DEFAULT_MAX_BLOCK_SIZE: usize = 1_024;
 
 /// How long a stopping stream may take to give its callback back.
 const RETURN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long a swap waits, beyond the fade itself, for an old device to
+/// finish fading out before it is stopped anyway: a device that stalled
+/// does not hold the swap up for longer.
+const FADE_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// The format a callback will run with, as told to
 /// [`AudioCallback::prepare`].
@@ -59,7 +67,7 @@ pub struct DeviceIo<'a> {
     /// When the block is heard and was captured.
     pub info: CallbackInfo,
     #[cfg(feature = "midi")]
-    midi: &'a mut MidiReceiver,
+    pub(crate) midi: &'a mut MidiReceiver,
 }
 
 impl DeviceIo<'_> {
@@ -104,7 +112,10 @@ impl DeviceIo<'_> {
 ///
 /// The manager keeps the callback across restarts: when the devices
 /// change, it stops the stream, gets the callback back, calls
-/// [`prepare`](Self::prepare) with the new format and starts again.
+/// [`prepare`](Self::prepare) with the new format and starts again. A
+/// callback started with
+/// [`DeviceManager::start_engine`] is prepared once, with its
+/// [`EngineFormat`], and never again: the devices change under it.
 pub trait AudioCallback: Send + 'static {
     /// Called before the stream starts, on the thread that starts it, with
     /// the format it will run with. Allocate here.
@@ -130,10 +141,10 @@ where
 }
 
 /// The callback, and what it reads MIDI from, while no stream holds them.
-struct Parked {
-    callback: Box<dyn AudioCallback>,
+pub(crate) struct Parked {
+    pub(crate) callback: Box<dyn AudioCallback>,
     #[cfg(feature = "midi")]
-    midi: MidiReceiver,
+    pub(crate) midi: MidiReceiver,
 }
 
 /// What a stream runs. When the stream drops it, it sends the callback
@@ -177,6 +188,50 @@ struct Running {
     format: StreamFormat,
     input: Option<OpenedEndpoint>,
     output: Option<OpenedEndpoint>,
+    /// The edge the stream runs, with an engine format.
+    edge: Option<EdgeLink>,
+}
+
+impl Running {
+    /// Whether the backend said a device of the stream went away.
+    fn is_lost(&self) -> bool {
+        self.output
+            .iter()
+            .chain(&self.input)
+            .any(|endpoint| endpoint.health.is_lost())
+    }
+
+    /// Whether the stream's edge has faded out, or its device is gone, so
+    /// that it can be dropped.
+    fn is_finished(&self) -> bool {
+        self.is_lost() || self.edge.as_ref().is_none_or(|edge| edge.shared.is_faded())
+    }
+}
+
+/// How the manager reaches a running stream's edge.
+struct EdgeLink {
+    shared: Arc<EdgeShared>,
+    commands: Producer<Retire>,
+    /// The device's sample rate.
+    rate: u32,
+}
+
+/// What a manager with an engine format keeps.
+struct EngineMode {
+    format: EngineFormat,
+    fade: Duration,
+    /// The engine, while no stream runs it.
+    core: Option<Box<Core>>,
+    /// Where an edge dropped with the engine sends it.
+    returns: (Sender<Box<Core>>, Receiver<Box<Core>>),
+    /// Streams fading out while the running one fades in, oldest first.
+    retiring: Vec<Running>,
+    /// Whether the running stream's device is known to be gone, so that
+    /// waiting for it to fade out is pointless.
+    dead: bool,
+    /// Whether a stream has run the engine yet: later ones fade in.
+    started: bool,
+    last_swap: Option<SwapRecord>,
 }
 
 /// Opens the input, output and MIDI devices a [`DeviceSetup`] names, runs
@@ -223,15 +278,64 @@ struct Running {
 /// [`poll_devices`]: Self::poll_devices
 /// [`watch`]: Self::watch
 /// [`follow`]: Self::follow
+///
+/// # Changing devices without stopping
+///
+/// [`start`](Self::start) prepares the callback for each device it opens,
+/// so changing devices stops it and prepares it again.
+/// [`start_engine`](Self::start_engine) instead fixes the callback's
+/// format once, as an [`EngineFormat`], and prepares it once. From then
+/// on [`apply`](Self::apply), [`restart`](Self::restart) and
+/// [`follow`](Self::follow) change the devices under the running callback,
+/// in the middle of a song: it is never stopped or prepared again, and it
+/// runs on, frame after frame, as if nothing had happened.
+///
+/// Where the backend can run two streams at once and the output device
+/// changes, the new device fades in while the old one fades out, both
+/// playing; otherwise (one ASIO driver per process, the same device opened
+/// again, a driver's reset request) the old device fades out, is closed,
+/// and the new one fades in, with only the time the backend takes to
+/// close and open in between. A device at another rate than the engine's
+/// is fed through a resampler; one at the engine's rate with its output
+/// channels is fed directly, with nothing copied or delayed.
+/// [`last_swap`](Self::last_swap) says how the last change went. The
+/// [`hotswap`](crate::hotswap) module tells the whole story.
+///
+/// ```
+/// use manguebyte_devices::{
+///     DeviceChoice, DeviceIo, DeviceManager, DeviceRef, DeviceSetup, Direction, EngineFormat,
+///     MockBackend, SwapKind,
+/// };
+///
+/// let mock = MockBackend::new();
+/// mock.set_concurrent_streams(true);
+/// mock.add_device(Direction::Output, MockBackend::device("a", "Speakers", 2, 48_000));
+/// mock.add_device(Direction::Output, MockBackend::device("b", "Headphones", 2, 44_100));
+///
+/// let mut manager = DeviceManager::headless(&mock);
+/// let format = EngineFormat::new(48_000, 256, 0, 2);
+/// manager.start_engine(&DeviceSetup::default(), format, |io: &mut DeviceIo<'_>| {
+///     io.output.channel_mut(0).fill(0.5);
+/// })?;
+///
+/// // Mid-song, to the headphones, at another rate.
+/// let headphones = DeviceChoice::Device(DeviceRef::new("b", "Headphones"));
+/// manager.apply(&DeviceSetup::default().with_output(headphones))?;
+/// assert_eq!(manager.last_swap().unwrap().kind, SwapKind::Crossfade);
+/// assert_eq!(manager.engine_format(), Some(format));
+/// # Ok::<(), manguebyte_devices::DeviceError>(())
+/// ```
 pub struct DeviceManager {
     backend: Arc<dyn Backend>,
     setup: DeviceSetup,
     max_block_size: usize,
     drift_correction: bool,
+    crossfade: Duration,
     errors: ErrorSink,
     callback: Option<Box<dyn AudioCallback>>,
     returns: (Sender<Parked>, Receiver<Parked>),
     running: Option<Running>,
+    engine: Option<EngineMode>,
     watched: WatchSlot,
     generation: u64,
     poller: Poller,
@@ -333,10 +437,12 @@ impl DeviceManager {
             setup: DeviceSetup::default(),
             max_block_size: DEFAULT_MAX_BLOCK_SIZE,
             drift_correction: true,
+            crossfade: DEFAULT_CROSSFADE,
             errors: Arc::new(|error| eprintln!("manguebyte: audio stream error: {error}")),
             callback: None,
             returns: mpsc::channel(),
             running: None,
+            engine: None,
             watched,
             generation: 0,
             #[cfg(feature = "midi")]
@@ -374,7 +480,9 @@ impl DeviceManager {
     }
 
     /// Sets the largest block the callback is handed. Takes effect when
-    /// the stream next starts.
+    /// the stream next starts. A callback started with
+    /// [`start_engine`](Self::start_engine) is handed blocks of up to its
+    /// [`EngineFormat::max_block_size`] instead.
     ///
     /// # Panics
     ///
@@ -414,6 +522,7 @@ impl DeviceManager {
         callback: impl AudioCallback,
     ) -> Result<RestoreReport, DeviceError> {
         self.stop();
+        drop(self.leave_engine());
         if let Some(mut old) = self.callback.take() {
             old.release();
         }
@@ -422,8 +531,92 @@ impl DeviceManager {
         self.open()
     }
 
+    /// Opens the devices of `setup` and runs `callback` on them at a fixed
+    /// format, so that the devices can change later without stopping it.
+    ///
+    /// The callback is prepared now, once, with `format`, and is never
+    /// prepared again while it runs: whatever devices the setup opens,
+    /// now and after [`apply`](Self::apply), [`restart`](Self::restart) or
+    /// [`follow`](Self::follow), it runs at `format`'s rate, with its
+    /// channels and blocks of at most its largest block, and its
+    /// [`CallbackInfo::frame`] counts on across every change. See
+    /// [Changing devices without stopping](Self#changing-devices-without-stopping).
+    ///
+    /// Fallbacks are reported as by [`start`](Self::start). A stream
+    /// already running is stopped first, and its callback dropped.
+    pub fn start_engine(
+        &mut self,
+        setup: &DeviceSetup,
+        format: EngineFormat,
+        callback: impl AudioCallback,
+    ) -> Result<RestoreReport, DeviceError> {
+        self.stop();
+        drop(self.leave_engine());
+        if let Some(mut old) = self.callback.take() {
+            old.release();
+        }
+        let mut callback: Box<dyn AudioCallback> = Box::new(callback);
+        callback.prepare(&format.stream_format());
+        #[cfg(feature = "midi")]
+        let midi = {
+            if self.midi_receiver.is_none() {
+                self.renew_midi();
+            }
+            let Some(mut midi) = self.midi_receiver.take() else {
+                return Err(DeviceError::NoCallback);
+            };
+            midi.restart();
+            midi
+        };
+        self.engine = Some(EngineMode {
+            format,
+            fade: self.crossfade,
+            core: Some(Core::new(Parked {
+                callback,
+                #[cfg(feature = "midi")]
+                midi,
+            })),
+            returns: mpsc::channel(),
+            retiring: Vec::new(),
+            dead: false,
+            started: false,
+            last_swap: None,
+        });
+        self.setup = setup.clone();
+        self.open()
+    }
+
+    /// The format the callback runs at, when it was started with
+    /// [`start_engine`](Self::start_engine).
+    pub fn engine_format(&self) -> Option<EngineFormat> {
+        self.engine.as_ref().map(|engine| engine.format)
+    }
+
+    /// Sets how long a device fades in and out when a callback started
+    /// with [`start_engine`](Self::start_engine) changes devices;
+    /// [`DEFAULT_CROSSFADE`](crate::DEFAULT_CROSSFADE) unless told
+    /// otherwise. Zero switches at once, with a click.
+    pub fn set_crossfade(&mut self, fade: Duration) {
+        self.crossfade = fade;
+        if let Some(engine) = &mut self.engine {
+            engine.fade = fade;
+        }
+    }
+
+    /// How the last change of devices under a callback started with
+    /// [`start_engine`](Self::start_engine) went. The silence it reports
+    /// is known once the new device has played.
+    pub fn last_swap(&self) -> Option<SwapReport> {
+        self.engine
+            .as_ref()?
+            .last_swap
+            .as_ref()
+            .map(SwapRecord::report)
+    }
+
     /// Changes the setup, and restarts the stream on it with the same
-    /// callback.
+    /// callback. With an [`EngineFormat`], the new devices take over from
+    /// the old ones without stopping the callback.
     pub fn apply(&mut self, setup: &DeviceSetup) -> Result<RestoreReport, DeviceError> {
         self.setup = setup.clone();
         self.open()
@@ -437,8 +630,12 @@ impl DeviceManager {
     }
 
     /// Stops the stream. The callback is kept for [`restart`](Self::restart),
-    /// and MIDI ports stay open.
+    /// and MIDI ports stay open. The stream stops at once, without a fade.
     pub fn stop(&mut self) {
+        if self.engine.is_some() {
+            self.collect_core();
+            return;
+        }
         let Some(running) = self.running.take() else {
             return;
         };
@@ -460,6 +657,9 @@ impl DeviceManager {
     /// Stops the stream and gives the callback back.
     pub fn take_callback(&mut self) -> Option<Box<dyn AudioCallback>> {
         self.stop();
+        if self.engine.is_some() {
+            return self.leave_engine();
+        }
         self.callback.take()
     }
 
@@ -502,7 +702,11 @@ impl DeviceManager {
     /// including a running stream whose device was lost. The first call only
     /// learns what is there. Call it from a timer of the application's
     /// own, about every [`DEFAULT_POLL_INTERVAL`](crate::DEFAULT_POLL_INTERVAL).
+    ///
+    /// With an [`EngineFormat`], it also closes the old stream of a
+    /// crossfade once it has faded out.
     pub fn poll_devices(&mut self) -> Vec<DeviceEvent> {
+        self.finish_crossfades(false);
         self.poller.poll()
     }
 
@@ -532,18 +736,27 @@ impl DeviceManager {
     pub fn follow(&mut self, event: &DeviceEvent) -> Option<Result<RestoreReport, DeviceError>> {
         match event {
             DeviceEvent::StreamLost {
-                direction, device, ..
+                direction,
+                device,
+                cause,
             } => {
                 // An event about a stream that has been replaced since,
                 // following an earlier event, needs nothing more.
                 let running = self.running_device(*direction);
                 let current = self.running.is_none() || running.is_some_and(|d| d.id == device.id);
+                if current && *cause != LossCause::RestartRequested {
+                    // Its device plays nothing more: there is no fade-out
+                    // to wait for.
+                    if let Some(engine) = &mut self.engine {
+                        engine.dead = true;
+                    }
+                }
                 current.then(|| self.restart())
             }
             DeviceEvent::DeviceAdded { .. }
             | DeviceEvent::DeviceRemoved { .. }
             | DeviceEvent::DefaultChanged { .. } => {
-                if self.callback.is_none() && self.running.is_none() {
+                if self.callback.is_none() && self.engine.is_none() && self.running.is_none() {
                     return None;
                 }
                 let planned = self.plan_now().ok()?;
@@ -588,46 +801,54 @@ impl DeviceManager {
         }
     }
 
-    fn open(&mut self) -> Result<RestoreReport, DeviceError> {
-        self.stop();
-        let Some(callback) = self.callback.take() else {
-            return Err(DeviceError::NoCallback);
-        };
-        let mut report = RestoreReport::default();
-
+    /// Selects the setup's host and plans its devices, noting in `report`
+    /// what had to change, and connects its MIDI ports.
+    fn plan_open(&mut self, report: &mut RestoreReport) -> Result<Plan, DeviceError> {
         let wanted_host = self.setup.host.clone();
         if self.backend.select_host(wanted_host.as_deref()).is_err() {
             let _ = self.backend.select_host(None);
-            report
-                .fallbacks
-                .push(crate::setup::Fallback::HostUnavailable {
-                    wanted: wanted_host.unwrap_or_default(),
-                    used: self.backend.host_name(),
-                });
+            report.fallbacks.push(Fallback::HostUnavailable {
+                wanted: wanted_host.unwrap_or_default(),
+                used: self.backend.host_name(),
+            });
         }
-        let planned = match self.plan_now() {
-            Ok(planned) => planned,
-            Err(error) => {
-                self.callback = Some(callback);
-                return Err(error);
-            }
-        };
+        let planned = self.plan_now()?;
         report.fallbacks.extend(planned.fallbacks.iter().cloned());
         #[cfg(feature = "midi")]
-        self.connect_midi(&planned, &mut report);
+        self.connect_midi(&planned, report);
+        Ok(planned)
+    }
 
+    /// The stream to start for `planned`.
+    fn request(planned: &Plan, max_block_size: usize, drift_correction: bool) -> StreamRequest {
         let endpoint = |side: &Option<(DeviceSummary, StreamSettings)>| {
             side.as_ref().map(|(device, settings)| Endpoint {
                 id: device.id.clone(),
                 settings: *settings,
             })
         };
-        let mut request = StreamRequest {
+        StreamRequest {
             input: endpoint(&planned.input),
             output: endpoint(&planned.output),
-            duplex: DuplexSettings::new(self.max_block_size)
-                .with_drift_correction(self.drift_correction),
+            duplex: DuplexSettings::new(max_block_size).with_drift_correction(drift_correction),
+        }
+    }
+
+    fn open(&mut self) -> Result<RestoreReport, DeviceError> {
+        if self.engine.is_some() {
+            return self.open_engine();
+        }
+        self.stop();
+        if self.callback.is_none() {
+            return Err(DeviceError::NoCallback);
+        }
+        let mut report = RestoreReport::default();
+        let planned = self.plan_open(&mut report)?;
+        let Some(callback) = self.callback.take() else {
+            return Err(DeviceError::NoCallback);
         };
+
+        let mut request = Self::request(&planned, self.max_block_size, self.drift_correction);
         if request.input.is_none() && request.output.is_none() {
             self.callback = Some(callback);
             return Ok(report);
@@ -663,6 +884,39 @@ impl DeviceManager {
                 }
             }
         }
+    }
+
+    /// Makes a stream that started the running one, and has the pollers
+    /// watch it.
+    fn register(&mut self, started: Started, format: StreamFormat, edge: Option<EdgeLink>) {
+        self.generation += 1;
+        let endpoints = [
+            (Direction::Output, started.output.as_ref()),
+            (Direction::Input, started.input.as_ref()),
+        ]
+        .into_iter()
+        .filter_map(|(direction, endpoint)| {
+            let endpoint = endpoint?;
+            Some((
+                direction,
+                endpoint.device.clone(),
+                Arc::clone(&endpoint.health),
+            ))
+        })
+        .collect();
+        if let Ok(mut watched) = self.watched.lock() {
+            *watched = Some(WatchedStream {
+                generation: self.generation,
+                endpoints,
+            });
+        }
+        self.running = Some(Running {
+            stream: started.stream,
+            format,
+            input: started.input,
+            output: started.output,
+            edge,
+        });
     }
 
     /// Starts `request` with `callback`. On failure, hands the callback
@@ -712,39 +966,13 @@ impl DeviceManager {
 
         match result {
             Ok(started) => {
-                self.generation += 1;
-                let endpoints = [
-                    (Direction::Output, started.output.as_ref()),
-                    (Direction::Input, started.input.as_ref()),
-                ]
-                .into_iter()
-                .filter_map(|(direction, endpoint)| {
-                    let endpoint = endpoint?;
-                    Some((
-                        direction,
-                        endpoint.device.clone(),
-                        Arc::clone(&endpoint.health),
-                    ))
-                })
-                .collect();
-                if let Ok(mut watched) = self.watched.lock() {
-                    *watched = Some(WatchedStream {
-                        generation: self.generation,
-                        endpoints,
-                    });
-                }
                 let format = prepared.unwrap_or(StreamFormat {
                     sample_rate: f64::from(started.format.sample_rate),
                     max_block_size,
                     input_channels: started.format.input_channels,
                     output_channels: started.format.output_channels,
                 });
-                self.running = Some(Running {
-                    stream: started.stream,
-                    format,
-                    input: started.input,
-                    output: started.output,
-                });
+                self.register(started, format, None);
                 Ok(())
             }
             Err(error) => {
@@ -770,6 +998,403 @@ impl DeviceManager {
                 }
             }
         }
+    }
+}
+
+/// Running a callback at a fixed [`EngineFormat`], and changing devices
+/// under it.
+impl DeviceManager {
+    fn open_engine(&mut self) -> Result<RestoreReport, DeviceError> {
+        self.finish_crossfades(true);
+        let mut report = RestoreReport::default();
+        let mut planned = self.plan_open(&mut report)?;
+        // A backend that loads one driver at a time cannot describe another
+        // while a stream runs on one, and plans the device it cannot
+        // describe away. It could not have run beside the old stream anyway:
+        // the old stream fades out and stops, and the setup is planned
+        // again.
+        let mut faded = None;
+        let undescribed = planned.fallbacks.iter().any(|fallback| {
+            matches!(
+                fallback,
+                Fallback::NoDevice {
+                    wanted: Some(_),
+                    ..
+                }
+            )
+        });
+        if undescribed && self.running.is_some() && !self.backend.concurrent_streams() {
+            faded = self.fade_out_running().map(|old| (old, Instant::now()));
+            self.collect_core();
+            report = RestoreReport::default();
+            planned = self.plan_open(&mut report)?;
+        }
+        let Some(engine) = &self.engine else {
+            return Err(DeviceError::NoCallback);
+        };
+        let mut request = Self::request(
+            &planned,
+            engine.format.max_block_size,
+            self.drift_correction,
+        );
+        if request.input.is_none() && request.output.is_none() {
+            self.collect_core();
+            return Ok(report);
+        }
+        match self.swap(&request, faded.clone()) {
+            Ok(()) => Ok(report),
+            Err(error) => {
+                // An input that will not open must not keep the output
+                // silent: try again without it.
+                let (Some(_), Some(_), Some((input, _))) =
+                    (&request.input, &request.output, &planned.input)
+                else {
+                    return Err(error);
+                };
+                request.input = None;
+                self.swap(&request, faded)?;
+                report.fallbacks.push(Fallback::InputDropped {
+                    device: input.clone(),
+                    reason: error.to_string(),
+                });
+                Ok(report)
+            }
+        }
+    }
+
+    /// Starts `request` in place of the running stream and hands it the
+    /// engine: beside the old stream, crossfading, when the backend allows
+    /// and the output device changes; otherwise after the old stream has
+    /// faded out and stopped. `faded` is an old stream that has already
+    /// faded out and stopped, and when it did.
+    fn swap(
+        &mut self,
+        request: &StreamRequest,
+        faded: Option<(Arc<EdgeShared>, Instant)>,
+    ) -> Result<(), DeviceError> {
+        let Some(engine) = &mut self.engine else {
+            return Err(DeviceError::NoCallback);
+        };
+        let dead =
+            std::mem::take(&mut engine.dead) || self.running.as_ref().is_some_and(Running::is_lost);
+        let crossfade = !dead
+            && faded.is_none()
+            && engine.format.output_channels > 0
+            && self.backend.concurrent_streams()
+            && match (&self.running, &request.output) {
+                (Some(running), Some(next)) => {
+                    running.edge.is_some()
+                        && running
+                            .output
+                            .as_ref()
+                            .is_some_and(|now| now.device.id != next.id)
+                }
+                _ => false,
+            };
+        // A new device that will not open beside the old one may still
+        // open in its place.
+        if crossfade && self.crossfade(request).is_ok() {
+            return Ok(());
+        }
+
+        let Some(engine) = &self.engine else {
+            return Err(DeviceError::NoCallback);
+        };
+        let fade = engine.fade;
+        let fade_in = engine.started;
+        // What takes long to make is made while the old device still plays.
+        let parts = Self::parts(request, &engine.format);
+        let (kind, old, began) = match faded {
+            Some((old, began)) => (SwapKind::Gap, Some(old), began),
+            None => {
+                let (kind, old) = match (&self.running, dead) {
+                    (None, _) => (SwapKind::Start, None),
+                    (Some(running), true) => (
+                        SwapKind::Recovered,
+                        running.edge.as_ref().map(|link| Arc::clone(&link.shared)),
+                    ),
+                    (Some(_), false) => (SwapKind::Gap, self.fade_out_running()),
+                };
+                (kind, old, Instant::now())
+            }
+        };
+
+        self.collect_core();
+        let core = self.engine.as_mut().and_then(|engine| engine.core.take());
+        let Some(core) = core else {
+            return Err(DeviceError::NoCallback);
+        };
+        let new = self.launch(request, Some(core), None, fade_in, parts)?;
+        if let Some(engine) = &mut self.engine {
+            engine.started = true;
+            engine.last_swap = Some(SwapRecord {
+                kind,
+                fade,
+                reopen: began.elapsed(),
+                old,
+                new,
+            });
+        }
+        Ok(())
+    }
+
+    /// Fades the running stream out, and waits until its device has gone
+    /// silent, or until it plainly is not calling. The stream still runs,
+    /// silent, holding the engine. Returns what its edge shares.
+    fn fade_out_running(&mut self) -> Option<Arc<EdgeShared>> {
+        let fade = self.engine.as_ref()?.fade;
+        let link = self.running.as_mut()?.edge.as_mut()?;
+        let shared = Arc::clone(&link.shared);
+        let retire = Retire {
+            fade,
+            successor: None,
+        };
+        if link.commands.push(retire).is_ok() {
+            // The old device fades out on its own thread.
+            let deadline = Instant::now() + fade + FADE_TIMEOUT;
+            while let Some(running) = &self.running {
+                if running.is_finished() || Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        Some(shared)
+    }
+
+    /// Starts `request` beside the running stream, which goes on running
+    /// the engine, copies what it renders to the new one until the new
+    /// one plays, and then fades out and hands the engine over.
+    fn crossfade(&mut self, request: &StreamRequest) -> Result<(), DeviceError> {
+        let (Some(engine), Some(running)) = (&self.engine, &self.running) else {
+            return Err(DeviceError::NoCallback);
+        };
+        let Some(link) = &running.edge else {
+            return Err(DeviceError::NoCallback);
+        };
+        let format = engine.format;
+        let fade = engine.fade;
+        // A quarter of a second, and never less than sixteen blocks: the
+        // new edge keeps a block of each device of it, and lets go of the
+        // rest when it starts.
+        let frames = (format.sample_rate as usize / 4).max(16 * format.max_block_size);
+        let (ring, ring_out) = spsc::channel::<f32>(frames * format.output_channels);
+        let (handoff, handoff_out) = spsc::channel::<Box<Core>>(1);
+        let incoming = Incoming {
+            ring: ring_out,
+            handoff: handoff_out,
+            predecessor: Arc::clone(&link.shared),
+            predecessor_rate: link.rate,
+        };
+        let old = self.running.take();
+        let parts = Self::parts(request, &format);
+        let new = match self.launch(request, None, Some(incoming), true, parts) {
+            Ok(new) => new,
+            Err(error) => {
+                self.running = old;
+                return Err(error);
+            }
+        };
+        let Some(mut old) = old else {
+            return Ok(());
+        };
+        let old_shared = old.edge.as_ref().map(|link| Arc::clone(&link.shared));
+        if let Some(link) = &mut old.edge {
+            let retire = Retire {
+                fade,
+                successor: Some(Successor {
+                    ring: Some(ring),
+                    handoff,
+                    shared: Arc::clone(&new),
+                }),
+            };
+            let _ = link.commands.push(retire);
+        }
+        if let Some(engine) = &mut self.engine {
+            engine.retiring.push(old);
+            engine.started = true;
+            engine.last_swap = Some(SwapRecord {
+                kind: SwapKind::Crossfade,
+                fade,
+                reopen: Duration::ZERO,
+                old: old_shared,
+                new,
+            });
+        }
+        Ok(())
+    }
+
+    /// An edge's resamplers for the rate `request` asks of its device,
+    /// when it asks for one.
+    fn parts(request: &StreamRequest, format: &EngineFormat) -> Option<EdgeParts> {
+        let rate = request
+            .output
+            .as_ref()
+            .or(request.input.as_ref())
+            .and_then(|endpoint| endpoint.settings.sample_rate)?;
+        Some(EdgeParts::new(format, rate))
+    }
+
+    /// Starts `request` with a new edge, which runs `core` or waits for it
+    /// from `incoming`, and makes it the running stream. On failure the
+    /// core is back with the manager, unless the backend lost it.
+    fn launch(
+        &mut self,
+        request: &StreamRequest,
+        core: Option<Box<Core>>,
+        incoming: Option<Incoming>,
+        fade_in: bool,
+        parts: Option<EdgeParts>,
+    ) -> Result<Arc<EdgeShared>, DeviceError> {
+        let Some(engine) = &self.engine else {
+            return Err(DeviceError::NoCallback);
+        };
+        let format = engine.format;
+        let had_core = core.is_some();
+        let shared = EdgeShared::new();
+        let (commands, commands_out) = spsc::channel::<Retire>(2);
+        let mut init = Some(EdgeInit {
+            engine: format,
+            fade: engine.fade,
+            fade_in,
+            core,
+            incoming,
+            shared: Arc::clone(&shared),
+            commands: commands_out,
+            returns: engine.returns.0.clone(),
+            parts,
+        });
+        let mut opened = None;
+        let result = self.backend.start(
+            request,
+            &mut |device: OpenedFormat| -> EngineCallback {
+                opened = Some(device);
+                let mut edge = init.take().map(|init| Edge::new(init, device));
+                Box::new(move |input, output, info| {
+                    if let Some(edge) = &mut edge {
+                        edge.run(input, output, info);
+                    }
+                })
+            },
+            Arc::clone(&self.errors),
+        );
+        match result {
+            Ok(started) => {
+                let device = opened.unwrap_or(started.format);
+                let rate = match device.sample_rate {
+                    0 => format.sample_rate,
+                    rate => rate,
+                };
+                let stream_format = StreamFormat {
+                    sample_rate: f64::from(rate),
+                    max_block_size: format.max_block_size,
+                    input_channels: device.input_channels,
+                    output_channels: device.output_channels,
+                };
+                let link = EdgeLink {
+                    shared: Arc::clone(&shared),
+                    commands,
+                    rate,
+                };
+                self.register(started, stream_format, Some(link));
+                Ok(shared)
+            }
+            Err(error) => {
+                // Either the backend failed before making the edge, and
+                // the core is still here, or it dropped the edge, which
+                // sent the core back.
+                let core = match init.take() {
+                    Some(init) => init.core,
+                    None if had_core => self
+                        .engine
+                        .as_ref()
+                        .and_then(|engine| engine.returns.1.recv_timeout(RETURN_TIMEOUT).ok()),
+                    None => None,
+                };
+                match (core, &mut self.engine) {
+                    (Some(core), Some(engine)) => engine.core = Some(core),
+                    (None, _) if had_core => {
+                        // Lost with the edge, and the MIDI queue with it.
+                        #[cfg(feature = "midi")]
+                        self.renew_midi();
+                    }
+                    _ => {}
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Stops every stream and brings the engine back to the manager.
+    fn collect_core(&mut self) {
+        let Some(engine) = &mut self.engine else {
+            return;
+        };
+        let retiring = std::mem::take(&mut engine.retiring);
+        let running = self.running.take();
+        if running.is_some() {
+            if let Ok(mut watched) = self.watched.lock() {
+                *watched = None;
+            }
+        }
+        let any = !retiring.is_empty() || running.is_some();
+        // Oldest first: each hands the engine on to the stream after it,
+        // and the last one to the manager.
+        drop(retiring);
+        drop(running);
+        let lost = any
+            && engine.core.is_none()
+            && match engine.returns.1.recv_timeout(RETURN_TIMEOUT) {
+                Ok(core) => {
+                    engine.core = Some(core);
+                    false
+                }
+                Err(_) => true,
+            };
+        if lost {
+            // The backend never dropped the edge: the engine is gone, and
+            // the MIDI queue with it.
+            #[cfg(feature = "midi")]
+            self.renew_midi();
+        }
+    }
+
+    /// Closes the old streams of crossfades that have faded out. With
+    /// `wait`, first waits for those still fading, a little longer than
+    /// the fade, and then closes them all.
+    fn finish_crossfades(&mut self, wait: bool) {
+        let Some(engine) = &mut self.engine else {
+            return;
+        };
+        if wait {
+            let deadline = Instant::now() + engine.fade + FADE_TIMEOUT;
+            while engine.retiring.iter().any(|old| !old.is_finished()) && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            engine.retiring.clear();
+        } else {
+            engine.retiring.retain(|old| !old.is_finished());
+        }
+    }
+
+    /// Leaves the engine format: stops the streams, and gives the callback
+    /// back, released.
+    fn leave_engine(&mut self) -> Option<Box<dyn AudioCallback>> {
+        self.engine.as_ref()?;
+        self.collect_core();
+        let core = self.engine.take()?.core?;
+        let Parked {
+            mut callback,
+            #[cfg(feature = "midi")]
+            midi,
+        } = core.parked;
+        callback.release();
+        #[cfg(feature = "midi")]
+        {
+            self.midi_receiver = Some(midi);
+        }
+        Some(callback)
     }
 }
 
@@ -937,5 +1562,6 @@ impl Drop for DeviceManager {
     fn drop(&mut self) {
         // The stream goes before the MIDI ports that feed it.
         self.stop();
+        drop(self.leave_engine());
     }
 }

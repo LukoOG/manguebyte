@@ -125,6 +125,129 @@ fn every_driver_runs_two_seconds_of_silence_and_survives_its_resets() {
     }
 }
 
+/// Runs an engine of silence through the device manager and changes the
+/// driver under it, FlexASIO to ASIO4ALL and back. ASIO loads one driver
+/// per process, so each change fades out, closes one driver, loads the
+/// other and fades in; the engine is never prepared again and its frames
+/// follow on. Prints the silence each change left.
+#[test]
+#[ignore = "needs FlexASIO and ASIO4ALL"]
+fn the_engine_runs_on_while_the_driver_changes() {
+    use manguebyte_devices::{AudioCallback, EngineFormat, StreamFormat};
+
+    /// Leaves every block silent, checks that the frames follow on, and
+    /// keeps the longest time between two blocks.
+    struct Silence {
+        prepared: Arc<AtomicU64>,
+        frames: Arc<AtomicU64>,
+        wrong: Arc<AtomicU64>,
+        origin: Instant,
+        last: u64,
+        longest: Arc<AtomicU64>,
+    }
+
+    impl AudioCallback for Silence {
+        fn prepare(&mut self, _: &StreamFormat) {
+            self.prepared.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn process(&mut self, io: &mut DeviceIo<'_>) {
+            let frames = io.num_frames() as u64;
+            let expected = self.frames.fetch_add(frames, Ordering::Relaxed);
+            if io.info.frame != expected || io.output.peak() != 0.0 {
+                self.wrong.fetch_add(1, Ordering::Relaxed);
+            }
+            let now = self.origin.elapsed().as_nanos() as u64;
+            if self.last > 0 {
+                self.longest.fetch_max(now - self.last, Ordering::Relaxed);
+            }
+            self.last = now;
+        }
+    }
+
+    let entries = drivers().unwrap();
+    let find = |name: &str| {
+        entries
+            .iter()
+            .find(|entry| entry.name.to_lowercase().contains(name))
+            .cloned()
+    };
+    let (Some(flex), Some(asio4all)) = (find("flexasio"), find("asio4all")) else {
+        println!("FlexASIO or ASIO4ALL is not installed: {entries:?}");
+        return;
+    };
+    let setup = |entry: &manguebyte_pro_io::DriverEntry| {
+        let device = DeviceChoice::Device(DeviceRef::new(
+            format!("{ID_PREFIX}{}", entry.name),
+            entry.description.clone(),
+        ));
+        DeviceSetup::default().with_output(device)
+    };
+    let prepared = Arc::new(AtomicU64::new(0));
+    let frames = Arc::new(AtomicU64::new(0));
+    let wrong = Arc::new(AtomicU64::new(0));
+    let longest = Arc::new(AtomicU64::new(0));
+    let mut manager = DeviceManager::with_audio_backend(ProIoBackend::new());
+    // Described now, as a settings dialog would, while no driver is
+    // loaded: a driver cannot be described while another one runs.
+    for entry in [&flex, &asio4all] {
+        let id = format!("{ID_PREFIX}{}", entry.name);
+        manager.device_info(Direction::Output, &id).unwrap();
+    }
+    let silence = Silence {
+        prepared: Arc::clone(&prepared),
+        frames: Arc::clone(&frames),
+        wrong: Arc::clone(&wrong),
+        origin: Instant::now(),
+        last: 0,
+        longest: Arc::clone(&longest),
+    };
+    let format = EngineFormat::new(48_000, 1_024, 0, 2);
+    manager
+        .start_engine(&setup(&flex), format, silence)
+        .unwrap();
+    let run = |manager: &mut DeviceManager, what: &str| {
+        let before = frames.load(Ordering::Relaxed);
+        let started = Instant::now();
+        // Until the new driver has played, and some more.
+        while started.elapsed() < RUN
+            || (manager.last_swap().unwrap().silence.is_none()
+                && started.elapsed() < Duration::from_secs(5))
+        {
+            for event in manager.poll_devices() {
+                println!("{what}: {event}");
+                if let Some(result) = manager.follow(&event) {
+                    result.unwrap();
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let swap = manager.last_swap().unwrap();
+        println!(
+            "{what}: {:?} on {:?} at {} Hz, {:?} of silence, closed and loaded in {:?}, {} engine \
+             frames since, at most {:?} between two blocks",
+            swap.kind,
+            manager.running_device(Direction::Output).map(|d| &d.name),
+            manager.format().unwrap().sample_rate,
+            swap.silence,
+            swap.reopen,
+            frames.load(Ordering::Relaxed) - before,
+            Duration::from_nanos(longest.load(Ordering::Relaxed))
+        );
+        assert!(frames.load(Ordering::Relaxed) > before, "{what}");
+    };
+    run(&mut manager, "FlexASIO");
+    for (entry, what) in [(&asio4all, "to ASIO4ALL"), (&flex, "back to FlexASIO")] {
+        let started = Instant::now();
+        longest.store(0, Ordering::Relaxed);
+        manager.apply(&setup(entry)).unwrap();
+        println!("{what}: apply returned after {:?}", started.elapsed());
+        run(&mut manager, what);
+    }
+    assert_eq!(prepared.load(Ordering::Relaxed), 1);
+    assert_eq!(wrong.load(Ordering::Relaxed), 0);
+}
+
 #[test]
 #[ignore = "needs installed drivers"]
 fn every_driver_runs_duplex_through_the_device_manager() {
