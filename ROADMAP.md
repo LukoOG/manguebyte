@@ -30,16 +30,34 @@ Everything a standalone audio application needs, short of a user interface.
 **Devices**
 - ✅ Audio input and full-duplex streams
 - ✅ Device enumeration and selection; choosing sample rate and buffer size
-- ⬜ Hot-plug and default-device change notifications
-- ⬜ Clock-drift compensation between duplex devices by adaptive resampling
-  (the resampler it needs now exists)
-- ⬜ Choosing the audio host (JACK, PipeWire)
-- ✅ ASIO drivers, in the opt-in crate `manguebyte-pro-io`, which is under
-  the GPLv3 because it declares Steinberg's interface under the SDK's GPLv3
-  option; closed-source programs use `cpal`'s own `asio` feature instead.
+- ✅ Hot-plug: devices and MIDI ports added and removed, the default
+  changing and a stream's device lost, reported by `DeviceManager` and
+  `DeviceWatcher`, which poll (every second by default) because no backend
+  notifies; the systems' own change notifications are not used
+- ✅ Clock-drift compensation between duplex devices by adaptive
+  resampling of the input
+- ✅ Choosing the audio host: WASAPI, CoreAudio, ALSA and AAudio, JACK behind
+  the `jack` feature, and ASIO by either path below. No PipeWire host of
+  its own, and JACK has not been run on real hardware
+- ✅ ASIO drivers, by two paths. The opt-in crate `manguebyte-pro-io`
+  speaks to the drivers itself and runs behind the device manager through
+  the public `AudioBackend` seam; it is under the GPLv3 because it declares
+  Steinberg's interface under the SDK's GPLv3 option, and has run on three
+  drivers on Windows x86-64. Closed-source programs use `cpal`'s own `asio`
+  feature instead, with an SDK they license themselves.
   ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
+- ✅ Changing devices under a running engine (`DeviceManager::start_engine`):
+  the callback is prepared once at a fixed `EngineFormat`, and the devices
+  change under it with a crossfade where the backend runs two streams at
+  once, or a short faded gap where it cannot (an ASIO driver, the same
+  device opened again, a driver's reset request). The crossfade is proven
+  on the headless backend only: two real outputs have not crossfaded yet
 - ✅ MIDI input and output ports, with jitter-free timing into the audio
-  thread
+  thread, and packets sent from the audio thread when their frame is heard
+  (`midi_output_queue`, `MidiOutput`)
+- ⬜ MIDI output through the systems' own Universal MIDI Packet APIs: every
+  port speaks MIDI 1.0 bytes for now, MIDI 2.0 going out by the default
+  translation
 
 **MIDI**
 - ✅ System common, system real-time and SysEx messages
@@ -54,7 +72,12 @@ Everything a standalone audio application needs, short of a user interface.
   standalone runner, the harness and every wrapper read MIDI through
 - ✅ MIDI-CI: discovery, profiles, property exchange and process inquiry,
   and a device agent an application drives
-- ⬜ MIDI 2.0 out of processors: per-note events written back as packets
+- ✅ MIDI 2.0 out of plugins: notes, per-note expressions and any MIDI 2.0
+  channel voice message, written as MIDI 2.0 packets, as MIDI 1.0 by the
+  default translation or as MPE, and sent through CLAP, VST 3 and the
+  standalone runner. LV2 and AU send none yet, a `manguebyte-dsp`
+  `Processor` cannot send events by itself, and `manguebyte-host` does not
+  read what the plugins it hosts send
 
 **DSP**
 - ✅ FFT of any length, real FFT and window functions
@@ -167,8 +190,9 @@ Write a processor once and ship it in every format.
   by the CLAP project's validator
 - 🚧 CLAP `gui`, `timer-support` and `posix-fd-support` for plugins with an
   editor, tested through the C interface against fake editors and hosts,
-  including `manguebyte-gui` editors in a headless window; not yet opened
-  in a real host
+  including `manguebyte-gui` editors in a headless window. Mangue Pluck's
+  CLAP editor has been opened by hand in REAPER on Windows; no other host
+  has opened one
 - ⬜ CLAP extensions still to come: per-note automation, note-end and voice
   info, 64-bit audio, tail, presets, remote controls
 - ✅ VST 3: audio and event buses, every automation point on its frame,
@@ -187,16 +211,24 @@ Write a processor once and ship it in every format.
   with formats, parameters, scheduled parameters and MIDI on their
   frames, the host's transport and state; `.component` bundles written and
   installed by `cargo mangue`; tested through its C interface on every
-  system, and checked by `auval` in a macOS CI job that has yet to run. No
-  editor, MIDI output or presets
+  system, and both example plugins pass Apple's `auval` in a macOS CI job.
+  Not yet loaded in a DAW. No editor, MIDI output or factory presets
 - ⬜ Audio Unit, version 3 (app extension)
 - 🚧 LV2: audio and sidechain ports, parameters as control ports, MIDI and
   transport on their frames, state, latency and generated Turtle files,
   tested in process through the C interface; `.lv2` bundles written by
   `cargo mangue bundle --format lv2`, and the examples' found and read by
-  lilv in CI. Not yet checked by `lv2lint` or run in a host; no editor
-- ✅ Standalone application wrapper: sound card, MIDI ports, input for
-  effects
+  lilv in CI. Not yet checked by `lv2lint` or run in any host but the
+  framework's own (`manguebyte-host`); no editor, no MIDI output
+- ✅ Standalone application wrapper: sound card, MIDI ports in and out,
+  input for effects
+- 🚧 Aratu Bridge (`plugins/aratu-bridge`): an example CLAP, VST 3 and AU
+  instrument that plays an Aratu page's music in a DAW, in time with its
+  transport, from the control calls and events the page sends over a
+  local WebSocket ([docs/ARATU_BRIDGE.md](docs/ARATU_BRIDGE.md)). Tried
+  by hand once, as a CLAP in REAPER on Windows with a Chromium page on
+  `http://127.0.0.1`; other DAWs, other browsers and `https://` pages are
+  not tried yet. No editor, one stereo output
 - 🚧 Tooling: `cargo mangue` bundles (CLAP, VST 3, LV2 and AU), installs and
   validates plugins and creates new plugin crates from templates; macOS
   bundles get an ad-hoc signature and universal binaries. Signing with a
@@ -227,8 +259,10 @@ our own, and nothing claimed before its test exists.
   editors open in one process; macOS and Linux follow as CI proves each
 - 🚧 Editors for the example plugins: Mangue Duck's (knobs, a bypass switch
   and a gain-reduction meter) and Mangue Pluck's (a knob for each
-  parameter), tested headless and in real Win32 windows; not yet opened in
-  a host by hand
+  parameter), tested headless and in real Win32 windows. Mangue Pluck's
+  CLAP editor has been opened by hand in REAPER on Windows, showing its
+  title and knobs; working its knobs there, and Mangue Duck's editor in a
+  host, are not tested by hand yet
 - 🚧 Layout, styling and a widget set (`manguebyte-ui`): row, column and
   stack layout, theme tokens, label, knob, slider, toggle, meter and canvas
   done; text entry (a text field, and values typed into knobs and
@@ -260,15 +294,21 @@ our own, and nothing claimed before its test exists.
 
 ## Phase 5: everywhere
 
-- ⬜ iOS and Android
+- 🚧 iOS and Android: the core, DSP, MIDI, formats and device crates and
+  the facade are built in CI for `aarch64-apple-ios` and
+  `aarch64-linux-android` (CoreAudio and CoreMIDI; AAudio and AMidi), but
+  not run on a device; no plugin format for either
 - 🚧 WebAssembly and Web Audio: `manguebyte-web`, an engine running in a
   browser's AudioWorklet, fed 32-byte timestamped records through a
   shared-memory ring, with a synth, a drum kit, an SFZ sampler, the
   instruments of `manguebyte-dsp` (plucked strings, FM, an organ, an
-  808-style kit and bass, an acid bass), thirteen
-  effects and a master bus with a true-peak limiter;
-  tested natively and in Node.js, its demo tried once in Chromium, not yet
-  under load. Its first user will be
+  808-style kit and bass, an acid bass, drum kits with Brazilian
+  percussion on every kit, the polyphonic synthesiser, mallets, bowed
+  strings, winds and a choir), thirteen effects (the drive with a tube
+  curve), a master bus with a true-peak limiter, and a scope and levels
+  for every part; tested natively and in Node.js, its demo tried once in
+  Chromium, not yet under load. The same engine plays in a DAW through the
+  Aratu Bridge. Its first user is
   [Aratu](https://github.com/alessonqueirozdev-hub/aratu)
 - ⬜ Embedded targets
 
