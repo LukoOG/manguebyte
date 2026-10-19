@@ -25,11 +25,13 @@ Nothing has been published to crates.io yet. Everything below is on `main`.
   socket renders bit for bit as the engine renders it alone, through
   `Harness` in several block patterns and hosted as a CLAP
   (`manguebyte-host/tests/clap_aratu_bridge.rs`); `process` never touches
-  the heap while a page sends everything it can. Limits: TECH_DEBT 84.
+  the heap while a page sends everything it can. Tried by hand as a CLAP
+  in REAPER 7.82 on Windows, with a Chromium page on `http://127.0.0.1`:
+  the page sent 44 events and the plugin applied 44, none late or
+  dropped, following REAPER's tempo. Limits: TECH_DEBT 84.
 - `SamplerLoader::load_boxed` and `take_retired` hand instruments made
   on another thread to a sampler, and back, without allocating or
   freeing on the thread the loader is on.
-
 - Plugins send notes, expressions and MIDI out. A plugin that sets
   `Plugin::NOTE_OUTPUT` writes, from the new `process_with_output`
   (whose default calls `process`), into an `output::OutputBuffer` with
@@ -141,9 +143,10 @@ Nothing has been published to crates.io yet. Everything below is on `main`.
   that sound the same as with no host, bit for bit, and no CoreFoundation
   object leaked. `info_plist` writes the bundle's `Info.plist`, which
   `export_au!` makes available to `cargo mangue` through a hidden
-  `__manguebyte_au_info_plist`. Both example plugins export an AU. A new
-  macOS CI job installs both as components and runs Apple's `auval` on
-  them; it has not run yet.
+  `__manguebyte_au_info_plist`. Both example plugins export an AU. A
+  macOS CI job runs the wrapper's tests against the system's
+  CoreFoundation, installs both examples as components and runs Apple's
+  `auval` on them, which both pass. No DAW has loaded them yet.
 - `cargo mangue bundle --format au` writes `Name.component` on macOS (the
   library, `PkgInfo`, and the `Info.plist` from the plugin's code through a
   small program, as for LV2's Turtle files), signed ad hoc; it is refused
@@ -499,7 +502,6 @@ display, and no editor has been opened inside a real host yet.
   seconds mapped onto the DAW's position or in beats, its state, the
   DAW's transport and the plugin's counters (`js/tests/bridge.test.mjs`,
   against a stand-in socket and golden bytes shared with the Rust side).
-
 - `manguebyte-web`, a new crate: an engine for the browser that builds,
   runs and is tested natively too. Numbered parts play an eight-voice synth
   or a General MIDI drum kit through an optional low-pass filter, an
@@ -1442,7 +1444,6 @@ display, and no editor has been opened inside a real host yet.
 - The masking model and transient detector the two encoders share are
   in a module of their own; a test helper measures the noise-to-mask
   ratio of a decode against its source with a model apart from theirs.
-
 - `metadata`: one model for what files say beside their audio, the same
   for every format. Typed fields for title, artist, album, date, track,
   genre, comment, copyright, tempo, key, ISRC, the Broadcast Wave
@@ -1706,6 +1707,13 @@ display, and no editor has been opened inside a real host yet.
   two-binaries test on the release bundles; and a check fails if two
   packages have an example of the same name, which cargo would build to
   one file.
+- `docs/HOST_TESTS.md` records the tests done by hand in real hosts:
+  REAPER 7.82 on Windows on 14 October 2026 (both example plugins as CLAP
+  and VST 3) and on 19 October 2026 (Mangue Pluck's CLAP editor opened,
+  its output under its -1 dBFS ceiling with every parameter at its
+  maximum, and the Aratu Bridge applying every event a page sent).
+  `docs/RELEASING.md` asks for the example plugins to be installed again
+  before such a test.
 
 ### Fixed
 
@@ -1723,7 +1731,6 @@ display, and no editor has been opened inside a real host yet.
   the parameter values the host had sent in that block, so a plugin that
   follows events alone kept the old ones. The next block now starts with
   every parameter's value, as the LV2 wrapper's does.
-
 - `Gain` was not identical bit for bit across block sizes while it glided:
   `Smoothed::skip` added a multiple of the step where stepping adds it once
   per sample, and setting the same target again restarted the glide. Both
