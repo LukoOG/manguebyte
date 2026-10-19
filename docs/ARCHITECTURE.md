@@ -50,8 +50,9 @@ nothing beside or above it.
 | `manguebyte-formats` | Audio files: whole or streamed, read and written, with play and record bridges, and a transport source over a streamed file | core |
 | `manguebyte-osc` | Open Sound Control, with a real-time bridge | core |
 | `manguebyte-analysis` | Loudness, true peak, level meters, spectrum, pitch | core, dsp |
-| `manguebyte-devices` | Audio hosts, sound card input, output and duplex with drift correction, the device manager and hot-plug; MIDI ports | core, midi, dsp (its `Resampler`), `cpal`, `midir` |
-| `manguebyte-plugin` | `Plugin` trait, state, `Harness` for testing without a host | core, midi, dsp, params |
+| `manguebyte-devices` | Audio hosts, sound card input, output and duplex with drift correction, the device manager, hot-plug and devices changed under a running engine; MIDI ports in and out; the `AudioBackend` seam for backends from other crates | core, midi, dsp (its `Resampler`), `cpal`, `midir` |
+| `manguebyte-pro-io` | ASIO drivers spoken to directly, as a backend for the device manager. Under the GPLv3, opt-in, and depended on by no other crate (`scripts/check-layering.sh` checks) | core, devices |
+| `manguebyte-plugin` | `Plugin` trait, the notes and MIDI a plugin sends out, state, `Harness` for testing without a host | core, midi, dsp, params |
 | `manguebyte-graph` | A processing graph that is rewired while it plays | core, dsp |
 | `manguebyte-standalone` | Runs a `Plugin` on the sound card and MIDI ports | core, midi, dsp, params, plugin, devices |
 | `manguebyte-clap` | Turns a `Plugin` into a CLAP plugin | core, midi, dsp, params, plugin, `clap-sys` |

@@ -94,7 +94,11 @@ bridge does not defend against local software, only against web pages.
 
 ## Browser constraints
 
-What is known, and what must still be tried in real browsers:
+What is known, and what must still be tried in real browsers. So far the
+bridge has been tried by hand once: on 19 October 2026, a page in
+Chromium served from `http://127.0.0.1` played through the CLAP build in
+REAPER 7.82 on Windows, which applied all 44 events the page sent, none
+late or dropped, following REAPER's tempo.
 
 - **Mixed content.** An `https://` page may open `ws://127.0.0.1` and
   `ws://localhost`: the W3C *Secure Contexts* specification counts
