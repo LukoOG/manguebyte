@@ -1,0 +1,42 @@
+name: Bug report
+description: Something does not work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. Imperfect English is completely fine.
+        For a security problem, please follow SECURITY.md instead of opening an issue.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce it
+      description: The smallest code, file or steps that show the problem.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The crate versions, or the commit of `main`.
+      placeholder: manguebyte 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Operating system, and the host, DAW, browser or audio device if it matters.
+      placeholder: Windows 11, REAPER 7.82, WASAPI
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else
+      description: Logs, audio files, screenshots.

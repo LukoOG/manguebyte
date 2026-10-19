@@ -149,11 +149,21 @@ state otherwise, any contribution you intentionally submit for inclusion in
 the project, as defined in the Apache-2.0 license, is dual licensed in the
 same way, without any additional terms or conditions.
 
+The one exception is `crates/manguebyte-pro-io`, which is under the GPLv3
+only (see its README for why): a contribution to it is under the GPLv3.
+
 By contributing you confirm that the work is your own, or that you have the
 right to submit it under these licenses.
+
+## Security
+
+Do not open a public issue for a security problem. Report it privately as
+[SECURITY.md](SECURITY.md) describes.
 
 ## Conduct
 
 Be kind, be patient and assume good faith. Criticise code, not people. This
 project wants contributors of every background and experience level, and
-harassment or disrespect of any kind is not accepted.
+harassment or disrespect of any kind is not accepted. The
+[Code of Conduct](CODE_OF_CONDUCT.md) sets this out in full and says how to
+report a problem.

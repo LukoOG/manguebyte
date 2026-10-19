@@ -1,0 +1,28 @@
+name: Feature request
+description: Propose something Manguebyte should do.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check ROADMAP.md first: it may be planned already. For a large change,
+        agree on the approach here before writing the code.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do, and why it is hard or impossible today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you propose
+      description: The API or behaviour you have in mind, and what it must not break (real-time safety, block-size independence, licences).
+    validations:
+      required: true
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Specifications, papers or public documentation. Please do not paste code from JUCE or from GPL, LGPL, AGPL or MPL projects.
