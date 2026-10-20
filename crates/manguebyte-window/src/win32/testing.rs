@@ -41,6 +41,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use manguebyte_gfx::{IRect, Pixmap};
+use windows_sys::Win32::Foundation::ERROR_CANNOT_FIND_WND_CLASS;
 use windows_sys::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLACK_BRUSH, BitBlt, ClientToScreen, CreateCompatibleDC,
@@ -175,30 +176,46 @@ impl TopLevel {
         let class = class_name("TestParent", module);
         // SAFETY: BLACK_BRUSH is a stock object; it needs no release.
         let black = unsafe { GetStockObject(BLACK_BRUSH) };
-        register_class(module, &class, Some(parent_procedure), black, STATE_BYTES)?;
-        // SAFETY: the class is registered for `module`; a top-level window
-        // with no parent, menu or creation parameter.
-        let hwnd = unsafe {
-            CreateWindowExW(
-                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-                class.as_ptr(),
-                ptr::null(),
-                WS_POPUP | WS_CLIPCHILDREN,
-                0,
-                0,
-                width.min(16_384) as i32,
-                height.min(16_384) as i32,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                module,
-                ptr::null(),
-            )
-        };
-        if hwnd.is_null() {
+        let mut attempts = 0;
+        let hwnd = loop {
+            register_class(module, &class, Some(parent_procedure), black, STATE_BYTES)?;
+            // SAFETY: the class is registered for `module`; a top-level
+            // window with no parent, menu or creation parameter.
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                    class.as_ptr(),
+                    ptr::null(),
+                    WS_POPUP | WS_CLIPCHILDREN,
+                    0,
+                    0,
+                    width.min(16_384) as i32,
+                    height.min(16_384) as i32,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    module,
+                    ptr::null(),
+                )
+            };
+            if !hwnd.is_null() {
+                break hwnd;
+            }
             let error = last_error("CreateWindowExW");
+            attempts += 1;
+            // Another test's last window took the class away between our
+            // registration and our creation, as tests run on several
+            // threads at once: register again, as the editor windows do.
+            let class_vanished = error
+                == WindowError::Platform {
+                    call: "CreateWindowExW",
+                    code: ERROR_CANNOT_FIND_WND_CLASS,
+                };
+            if class_vanished && attempts < 4 {
+                continue;
+            }
             unregister_class(module, &class);
             return Err(error);
-        }
+        };
         let state = Rc::new(ParentState::default());
         set_state_slot(hwnd, Rc::as_ptr(&state).expose_provenance() as isize);
         // SAFETY: our own window, shown without activating it, then painted.
