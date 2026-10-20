@@ -397,3 +397,7 @@ and is mentioned here only to describe the kind of framework this project
 aims to be.
 
 ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
+VST is a trademark of Steinberg Media Technologies GmbH. Audio Units, Mac and
+macOS are trademarks of Apple Inc. AAX and Pro Tools are trademarks of Avid
+Technology, Inc. REAPER is a trademark of Cockos Incorporated. Manguebyte is
+not affiliated with, sponsored by or endorsed by any of them.
