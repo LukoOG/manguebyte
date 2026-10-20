@@ -543,9 +543,12 @@ fn fixed(value: f64, factor: i64) -> i64 {
 ///
 /// A field the framework's transport does not know is left at zero with
 /// its flag clear, so the plugin can tell "not known" from "zero". The
-/// position in seconds is worked out from the position in frames. The
-/// loop's position in seconds is worked out from the tempo of this block,
-/// which is exact only if the tempo does not change inside the loop.
+/// position in seconds and the bar's number are the transport's own when it
+/// knows them, as a `TransportClock`'s does, and otherwise worked out from
+/// the position in frames and from the bar's start in a steady time
+/// signature. The loop's position in seconds is worked out from the tempo
+/// of this block, which is exact only if the tempo does not change inside
+/// the loop.
 pub(crate) fn transport_event(transport: &Transport, sample_rate: f64) -> clap_event_transport {
     let mut flags = 0;
     if transport.playing {
@@ -578,7 +581,9 @@ pub(crate) fn transport_event(transport: &Transport, sample_rate: f64) -> clap_e
             // Quarter notes in a bar: beats per bar times the length of a
             // beat, which is 4 over the lower figure.
             let bar = f64::from(tsig_num) * 4.0 / f64::from(tsig_denom.max(1));
-            if bar > 0.0 {
+            if let Some(number) = transport.bar_number {
+                bar_number = number.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+            } else if bar > 0.0 {
                 bar_number = (start / bar).round() as i32;
             }
         }
@@ -594,12 +599,21 @@ pub(crate) fn transport_event(transport: &Transport, sample_rate: f64) -> clap_e
     }
 
     let mut song_pos_seconds = 0;
-    if let Some(frames) = transport.position_samples {
-        if sample_rate > 0.0 {
-            flags |= CLAP_TRANSPORT_HAS_SECONDS_TIMELINE;
-            song_pos_seconds = fixed(frames as f64 / sample_rate, CLAP_SECTIME_FACTOR);
-        }
+    let seconds = transport
+        .position_seconds
+        .filter(|seconds| seconds.is_finite())
+        .or_else(|| {
+            let frames = transport.position_samples?;
+            (sample_rate > 0.0).then(|| frames as f64 / sample_rate)
+        });
+    if let Some(seconds) = seconds {
+        flags |= CLAP_TRANSPORT_HAS_SECONDS_TIMELINE;
+        song_pos_seconds = fixed(seconds, CLAP_SECTIME_FACTOR);
     }
+    let tempo_inc = match (tempo, transport.tempo_increment) {
+        (Some(_), Some(increment)) if increment.is_finite() => increment,
+        _ => 0.0,
+    };
 
     clap_event_transport {
         header: header::<clap_event_transport>(0, CLAP_EVENT_TRANSPORT),
@@ -607,7 +621,7 @@ pub(crate) fn transport_event(transport: &Transport, sample_rate: f64) -> clap_e
         song_pos_beats,
         song_pos_seconds,
         tempo: tempo.unwrap_or(0.0),
-        tempo_inc: 0.0,
+        tempo_inc,
         loop_start_beats,
         loop_end_beats,
         loop_start_seconds,
@@ -1080,6 +1094,16 @@ mod tests {
         let event = transport_event(&vague, 0.0);
         assert_eq!(event.flags, 0);
         assert_eq!(event.tempo, 0.0);
+
+        // What a tempo map knows goes through as it is: the bar's number
+        // across changes of time signature, the time, and a ramp's slope.
+        transport.bar_number = Some(41);
+        transport.position_seconds = Some(2.5);
+        transport.tempo_increment = Some(1e-4);
+        let event = transport_event(&transport, 48_000.0);
+        assert_eq!(event.bar_number, 41);
+        assert_eq!(event.song_pos_seconds, 5 << 30);
+        assert_eq!(event.tempo_inc, 1e-4);
     }
 
     #[test]

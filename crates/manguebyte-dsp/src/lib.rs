@@ -63,6 +63,7 @@ mod svf;
 mod synth;
 #[cfg(test)]
 mod testing;
+pub mod timeline;
 pub mod wavetable;
 pub mod window;
 

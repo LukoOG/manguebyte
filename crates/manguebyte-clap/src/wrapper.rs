@@ -65,7 +65,7 @@ use clap_sys::ext::posix_fd_support::CLAP_EXT_POSIX_FD_SUPPORT;
 use clap_sys::ext::state::{CLAP_EXT_STATE, clap_plugin_state};
 use clap_sys::ext::timer_support::CLAP_EXT_TIMER_SUPPORT;
 use clap_sys::factory::plugin_factory::{CLAP_PLUGIN_FACTORY_ID, clap_plugin_factory};
-use clap_sys::fixedpoint::CLAP_BEATTIME_FACTOR;
+use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
 use clap_sys::host::clap_host;
 use clap_sys::id::{CLAP_INVALID_ID, clap_id};
 use clap_sys::plugin::{clap_plugin, clap_plugin_descriptor};
@@ -849,6 +849,12 @@ fn convert_transport(clap: &clap_event_transport) -> Transport {
         bar_start_beats: timeline.then(|| beats(clap.bar_start)),
         loop_beats: (timeline && has(CLAP_TRANSPORT_IS_LOOP_ACTIVE))
             .then(|| (beats(clap.loop_start_beats), beats(clap.loop_end_beats))),
+        position_seconds: has(CLAP_TRANSPORT_HAS_SECONDS_TIMELINE)
+            .then(|| clap.song_pos_seconds as f64 / CLAP_SECTIME_FACTOR as f64),
+        bar_number: timeline.then_some(i64::from(clap.bar_number)),
+        tempo_increment: has(CLAP_TRANSPORT_HAS_TEMPO)
+            .then_some(clap.tempo_inc)
+            .filter(|increment| increment.is_finite()),
     }
 }
 
@@ -1711,4 +1717,65 @@ unsafe extern "C" fn latency_get<P: Plugin>(plugin: *const clap_plugin) -> u32 {
         unsafe { instance::<P>(plugin) }
             .map_or(0, |instance| instance.latency.load(Ordering::Relaxed))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clap_transport(flags: u32) -> clap_event_transport {
+        clap_event_transport {
+            header: clap_event_header {
+                size: size_of::<clap_event_transport>() as u32,
+                time: 0,
+                space_id: CLAP_CORE_EVENT_SPACE_ID,
+                type_: CLAP_EVENT_TRANSPORT,
+                flags: 0,
+            },
+            flags,
+            song_pos_beats: 21 * CLAP_BEATTIME_FACTOR / 2,
+            song_pos_seconds: 5 * CLAP_SECTIME_FACTOR,
+            tempo: 126.0,
+            tempo_inc: 0.001,
+            loop_start_beats: 8 * CLAP_BEATTIME_FACTOR,
+            loop_end_beats: 16 * CLAP_BEATTIME_FACTOR,
+            loop_start_seconds: 0,
+            loop_end_seconds: 0,
+            bar_start: 9 * CLAP_BEATTIME_FACTOR,
+            bar_number: 3,
+            tsig_num: 3,
+            tsig_denom: 4,
+        }
+    }
+
+    #[test]
+    fn every_field_of_the_hosts_transport_is_read() {
+        let all = CLAP_TRANSPORT_HAS_TEMPO
+            | CLAP_TRANSPORT_HAS_BEATS_TIMELINE
+            | CLAP_TRANSPORT_HAS_SECONDS_TIMELINE
+            | CLAP_TRANSPORT_HAS_TIME_SIGNATURE
+            | CLAP_TRANSPORT_IS_PLAYING
+            | CLAP_TRANSPORT_IS_RECORDING
+            | CLAP_TRANSPORT_IS_LOOP_ACTIVE;
+        let transport = convert_transport(&clap_transport(all));
+        assert_eq!(
+            transport,
+            Transport {
+                playing: true,
+                recording: true,
+                tempo_bpm: Some(126.0),
+                time_signature: Some((3, 4)),
+                position_samples: None,
+                position_beats: Some(10.5),
+                bar_start_beats: Some(9.0),
+                loop_beats: Some((8.0, 16.0)),
+                position_seconds: Some(5.0),
+                bar_number: Some(3),
+                tempo_increment: Some(0.001),
+            }
+        );
+
+        // What the flags do not vouch for is unknown.
+        assert_eq!(convert_transport(&clap_transport(0)), Transport::STOPPED);
+    }
 }

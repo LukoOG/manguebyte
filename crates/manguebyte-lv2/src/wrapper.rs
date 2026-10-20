@@ -522,6 +522,13 @@ impl Position {
             position_beats: position,
             bar_start_beats: bar_start,
             loop_beats: None,
+            position_seconds: None,
+            // `time:bar` counts bars from 0, as the framework does.
+            bar_number: self
+                .bar
+                .filter(|bar| bar.is_finite() && bar.abs() < 9.0e18)
+                .map(|bar| bar.floor() as i64),
+            tempo_increment: None,
         }
     }
 }

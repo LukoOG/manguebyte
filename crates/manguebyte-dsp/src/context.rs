@@ -1,12 +1,31 @@
 use manguebyte_core::{AudioBuffer, Sample};
 
 use crate::event::{Event, EventBuffer};
+use crate::timeline::BlockTimeline;
 
 /// Where the music is and how fast it is moving, at the start of a block.
 ///
-/// A host fills in what it knows; a field it cannot provide is `None`. A
-/// standalone program that keeps its own time can drive one with
-/// [`advance`](Self::advance).
+/// A host fills in what it knows; a field it cannot provide is `None`.
+/// What each plugin format gives:
+///
+/// | Field | CLAP | VST 3 | AU | LV2 |
+/// |---|---|---|---|---|
+/// | `playing`, `recording` | yes | yes | yes | playing (`time:speed`) |
+/// | `tempo_bpm`, `time_signature` | yes | yes | yes | yes |
+/// | `position_samples` | no | yes | yes | yes (`time:frame`) |
+/// | `position_seconds` | yes | no | no | no |
+/// | `position_beats`, `bar_start_beats` | yes | yes | yes | yes |
+/// | `bar_number` | yes | no | no | yes (`time:bar`) |
+/// | `tempo_increment` | yes (`tempo_inc`) | no | no | no |
+/// | `loop_beats` | yes | yes (cycle) | yes (cycle) | no |
+///
+/// A [`TransportClock`](crate::timeline::TransportClock) fills in every
+/// field from its tempo map. A simple program can also drive one by hand
+/// with [`advance`](Self::advance).
+///
+/// Build one from [`STOPPED`](Self::STOPPED) or
+/// [`playing_at`](Self::playing_at) with `..`, so that a field added later
+/// does not break the code.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Transport {
     /// Whether the timeline is moving.
@@ -27,6 +46,18 @@ pub struct Transport {
     pub bar_start_beats: Option<f64>,
     /// The looped region, in quarter notes, when looping is on.
     pub loop_beats: Option<(f64, f64)>,
+    /// Position of the block's first frame, in seconds from the start of
+    /// the timeline.
+    pub position_seconds: Option<f64>,
+    /// The bar the block's first frame is in, counted from 0, as CLAP and
+    /// LV2 count them. Unlike a bar worked out from `bar_start_beats`, it
+    /// stays right across changes of time signature.
+    pub bar_number: Option<i64>,
+    /// How much the tempo changes from one frame to the next during the
+    /// block, in beats per minute per frame, as CLAP's `tempo_inc`: zero
+    /// at a steady tempo, and the slope of a ramp otherwise.
+    /// [`advance`](Self::advance) does not apply it.
+    pub tempo_increment: Option<f64>,
 }
 
 impl Transport {
@@ -40,10 +71,16 @@ impl Transport {
         position_beats: None,
         bar_start_beats: None,
         loop_beats: None,
+        position_seconds: None,
+        bar_number: None,
+        tempo_increment: None,
     };
 
-    /// A transport playing from the start at `tempo_bpm`, for programs that
-    /// keep their own time.
+    /// A transport playing from the start at `tempo_bpm` in 4/4, for
+    /// programs that keep their own time. The fields that a later change
+    /// of position would leave stale (`position_seconds`, `bar_number`,
+    /// `tempo_increment`) are unknown; a
+    /// [`TransportClock`](crate::timeline::TransportClock) gives them all.
     pub fn playing_at(tempo_bpm: f64) -> Self {
         Self {
             playing: true,
@@ -71,8 +108,13 @@ impl Transport {
         Some(position + offset as f64 * self.beats_per_sample(sample_rate)?)
     }
 
-    /// Moves the position on by `frames`, as a host does between blocks.
-    /// Does nothing while stopped. Real-time safe.
+    /// Moves the position on by `frames`, as a host does between blocks,
+    /// at a steady tempo in a steady time signature. Does nothing while
+    /// stopped. Real-time safe.
+    ///
+    /// The bar number moves on by as many bars as the bar's start does.
+    /// For tempo ramps and changes of time signature, drive the transport
+    /// with a [`TransportClock`](crate::timeline::TransportClock) instead.
     pub fn advance(&mut self, frames: usize, sample_rate: f64) {
         if !self.playing {
             return;
@@ -80,6 +122,9 @@ impl Transport {
         if let Some(position) = &mut self.position_samples {
             let frames = i64::try_from(frames).unwrap_or(i64::MAX);
             *position = position.saturating_add(frames);
+        }
+        if let Some(seconds) = &mut self.position_seconds {
+            *seconds += frames as f64 / sample_rate;
         }
         let Some(step) = self.beats_per_sample(sample_rate) else {
             return;
@@ -98,7 +143,14 @@ impl Transport {
         if let Some((numerator, denominator)) = self.time_signature {
             let bar = f64::from(numerator) * 4.0 / f64::from(denominator.max(1));
             if bar > 0.0 {
-                self.bar_start_beats = Some((beats / bar).floor() * bar);
+                let start = (beats / bar).floor() * bar;
+                if let (Some(number), Some(old)) = (&mut self.bar_number, self.bar_start_beats) {
+                    let moved = ((start - old) / bar).round();
+                    if moved.is_finite() {
+                        *number = number.saturating_add(moved as i64);
+                    }
+                }
+                self.bar_start_beats = Some(start);
             }
         }
     }
@@ -134,6 +186,15 @@ pub struct ProcessContext<'a, S: Sample = f32> {
     /// The sidechain and the transport describe the whole block, so a
     /// processor reads them at `offset + n` for its frame `n`.
     pub offset: usize,
+    /// The tempo map behind the transport and the block's place on it,
+    /// when the transport comes from a
+    /// [`TransportClock`](crate::timeline::TransportClock), as in the
+    /// standalone runner and the plugin `Harness`: where every frame of the
+    /// block is in the music, and where tempo changes, time signatures and
+    /// loops fall inside it. `None` in a plugin host, which gives only the
+    /// [`transport`](Self::transport). Like the transport, it describes
+    /// the whole block.
+    pub timeline: Option<BlockTimeline<'a>>,
 }
 
 impl<'a, S: Sample> ProcessContext<'a, S> {
@@ -144,6 +205,7 @@ impl<'a, S: Sample> ProcessContext<'a, S> {
             transport,
             sidechain: None,
             offset: 0,
+            timeline: None,
         }
     }
 
@@ -157,6 +219,13 @@ impl<'a, S: Sample> ProcessContext<'a, S> {
     #[must_use]
     pub fn with_sidechain(mut self, sidechain: &'a AudioBuffer<S>) -> Self {
         self.sidechain = Some(sidechain);
+        self
+    }
+
+    /// Adds the tempo map and the block's place on it.
+    #[must_use]
+    pub fn with_timeline(mut self, timeline: BlockTimeline<'a>) -> Self {
+        self.timeline = Some(timeline);
         self
     }
 
@@ -341,6 +410,9 @@ mod tests {
     fn transport_advances_in_samples_beats_and_bars() {
         let mut transport = Transport::playing_at(120.0);
         transport.time_signature = Some((3, 4));
+        assert_eq!(transport.bar_number, None);
+        transport.bar_number = Some(0);
+        transport.position_seconds = Some(0.0);
         assert!(close(transport.beats_per_sample(RATE), 2.0 / RATE));
 
         // Half a second at 120 bpm is one beat.
@@ -355,6 +427,15 @@ mod tests {
         transport.advance(84_000, RATE);
         assert!(close(transport.position_beats, 4.5));
         assert!(close(transport.bar_start_beats, 3.0));
+        assert_eq!(transport.bar_number, Some(1));
+        assert!(close(transport.position_seconds, 2.25));
+
+        // The bar's number follows the bar's start, wherever the count
+        // began.
+        transport.bar_number = Some(10);
+        transport.advance(72_000, RATE);
+        assert!(close(transport.position_beats, 7.5));
+        assert_eq!(transport.bar_number, Some(11));
     }
 
     #[test]

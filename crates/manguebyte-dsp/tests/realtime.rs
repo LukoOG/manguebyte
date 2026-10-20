@@ -1425,3 +1425,53 @@ fn pulling_from_sources_does_not_use_the_heap() {
     });
     assert!(buffer.peak().is_finite());
 }
+
+#[test]
+fn advancing_a_transport_clock_does_not_use_the_heap() {
+    use manguebyte_dsp::timeline::{TempoCurve, TempoMap, TimeSignature, TransportClock};
+
+    let mut map = TempoMap::new(120.0, TimeSignature::FOUR_FOUR).unwrap();
+    map.set_tempo(2.0, 120.0, TempoCurve::Linear).unwrap();
+    map.set_tempo(6.0, 90.0, TempoCurve::Step).unwrap();
+    map.set_signature(1, TimeSignature::new(7, 8)).unwrap();
+    let (mut clock, control) = TransportClock::with_control(map.clone(), 48_000.0);
+    let mut faster = map.clone();
+    faster.set_tempo(0.0, 140.0, TempoCurve::Step).unwrap();
+    // Commands and maps are sent off the audio thread, which allocates.
+    control.play();
+    control.set_loop_beats(Some((1.0, 3.5)));
+    control.set_tempo_map(faster).unwrap();
+    let events = EventBuffer::with_capacity(1);
+
+    let mut counted = 0usize;
+    assert_no_heap_use("transport clock", || {
+        for round in 0..40 {
+            for frames in [256, 1, 64, 255, 0, 4_096, 17] {
+                let block = clock.next_block(frames);
+                let timeline = block.with_map(clock.map());
+                let transport = timeline.transport();
+                let context =
+                    ProcessContext::<f32>::new(&events, &transport).with_timeline(timeline);
+                counted += block.pieces().count() + block.wraps().count();
+                counted += timeline.changes().count();
+                counted += timeline.offsets_of_beat(2.0).count();
+                if let Some(timeline) = context.timeline {
+                    let last = frames.saturating_sub(1);
+                    counted += (timeline.beat_at(last) + timeline.tempo_at(last)) as usize;
+                    counted += timeline.position_at(last / 2).bar as usize;
+                }
+                let _ = map.bbt_at_beat(transport.position_beats.unwrap(), 960);
+            }
+            // Working the clock on the audio thread itself.
+            match round % 4 {
+                0 => clock.seek_beat(0.5),
+                1 => clock.set_loop_frames(Some((1_000, 5_000))),
+                2 => clock.set_loop_beats(Some((1.0, 3.5))),
+                _ => clock.set_sample_rate(if round % 8 == 3 { 96_000.0 } else { 48_000.0 }),
+            }
+        }
+    });
+    assert!(counted > 0);
+    // The map the new one replaced came back to be freed here.
+    assert_eq!(control.collect(), 1);
+}

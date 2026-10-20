@@ -814,6 +814,11 @@ fn convert_transport(context: &vst::ProcessContext) -> Transport {
         bar_start_beats: has(flags::kBarPositionValid as u32).then_some(context.barPositionMusic),
         loop_beats: (has(flags::kCycleActive as u32) && has(flags::kCycleValid as u32))
             .then_some((context.cycleStartMusic, context.cycleEndMusic)),
+        // VST 3 gives neither the time in seconds, the bar's number nor
+        // the tempo's slope.
+        position_seconds: None,
+        bar_number: None,
+        tempo_increment: None,
     }
 }
 
