@@ -390,5 +390,8 @@ engine.noteOn(0, 36, 1, engine.context.currentTime + 0.1);
 
 They are listed in [TECH_DEBT.md](TECH_DEBT.md), item 84: one stereo
 output (no output bus per part group yet), no editor, one page per plugin
-instance, the parameter descriptions at their defaults, the browser
-questions above, and no test in a real DAW or browser yet.
+instance, the parameter descriptions at their defaults, and the browser
+questions above. It has been tried by hand once, as a CLAP in REAPER 7.82
+on Windows with a Chromium page on `http://127.0.0.1`
+([HOST_TESTS.md](HOST_TESTS.md)); other DAWs, the VST 3 and AU builds and
+other browsers have not been tried.
