@@ -46,6 +46,7 @@ nothing beside or above it.
 | `manguebyte-core` | `AudioBuffer`, `Sample`, smoothing, atomics, wait-free queue, real-time log, the `AudioSource` trait and audio in memory as a source | nothing |
 | `manguebyte-midi` | MIDI 1.0 and 2.0 messages, translation, MPE, MIDI files, MIDI-CI (messages, property chunks, a device agent with no I/O), sample-accurate event buffers | nothing |
 | `manguebyte-params` | Parameters, ranges, smoothing, saved state, descriptions as data and JSON | core |
+| `manguebyte-state` | Application state ([ADR 0008](adr/0008-application-state.md)): a document tree with stable ids, undoable transactions, gestures and merging, change journals instead of listeners, a mirror of a plugin's parameters, text and binary forms with migrations, a settings file, snapshots handed to the audio thread | core, params |
 | `manguebyte-dsp` | `Processor`, events, MIDI 1.0, MPE and MIDI 2.0 read into per-note events (`NoteInput`), sources built from sources (mixer, resampler, channel router) and sources as processors, transport, synth, filters, effects, dynamics with sidechain keying, convolution, FIR filtering, wavetable oscillator, FFT, instrument voices | core, midi |
 | `manguebyte-formats` | Audio files: whole or streamed, read and written, with play and record bridges, and a transport source over a streamed file | core |
 | `manguebyte-osc` | Open Sound Control, with a real-time bridge | core |
@@ -192,6 +193,20 @@ in the diagram above: build off-thread, hand over through a queue, return the
 old value through a queue to be freed. `manguebyte-graph` is that pattern in
 full: a whole compiled graph is swapped in, and the one it replaces travels
 back to be dropped.
+
+An editor's own state, beyond parameters, is a `manguebyte-state` document
+([ADR 0008](adr/0008-application-state.md)). It belongs to the editor's
+thread, or sits behind a mutex in a `SharedDocument` that the parameter
+struct carries (as `ExtraState`) so that `save_state` writes it after the
+values; the host's thread takes that mutex to save and restore, the audio
+thread never does. Every change is an undoable transaction; nothing is
+notified, and readers drain the document's change journal with cursors of
+their own. The document mirrors the parameters without owning them: user
+edits write the atomics as undoable steps, host automation is copied into
+the mirror by polling and never enters the history. What the audio thread
+needs from the document is built from it off that thread and published with
+`manguebyte_state::snapshot`, the same swap pattern on two wait-free
+queues.
 
 ## Data flow
 

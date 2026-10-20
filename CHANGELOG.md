@@ -69,6 +69,42 @@ break the API.
   unchanged, which misaligned a sidechain. Each piece now gets the events
   that fall in it, on their frames, and an offset that says where it
   begins.
+### Application state
+
+- `manguebyte-state`, a new crate for what an editor edits, undoes, saves
+  and hands to the audio thread: the part of JUCE's
+  `juce_data_structures` a plugin with a real editor needs, designed in
+  ADR 0008. A `Document` is a tree of typed nodes (numbers, text,
+  switches, bytes, references to parameters and to other nodes) with ids
+  that never change and are never reused. Every change is a named
+  transaction through `Document::edit`, taken back whole if it fails, and
+  undone and redone as one; `begin_gesture` and `end_gesture` make a knob
+  drag one step, `edit_merging` merges a series by key, a new step
+  discards the redo branch, and `HistoryLimits` bound the history by steps
+  and bytes. There are no listeners: readers drain a change journal with
+  cursors of their own (`Document::changes`), or poll a `VersionWatch`
+  from another thread. `Document::link_params` mirrors a plugin's
+  parameters on a node: `Tx::set_param` is an undoable step that writes
+  the atomic, `sync_params` copies host automation in without touching
+  the history. A versioned text form (`to_text`) and a compact binary one
+  (`to_bytes`) load tolerantly, reporting what they skipped, and
+  `Migrations` bring an application's older schemas up to date.
+  `Settings` keeps keys and values in the user's configuration folder.
+  `snapshot::channel` hands snapshots built from a document to the audio
+  thread, which never allocates, frees or locks to read them (tested
+  under the counting allocator). Random edit sequences, gestures, series
+  and failed edits are undone back to every earlier tree and checked
+  exactly. Limits: TECH_DEBT 87.
+- `manguebyte-params`: `ExtraState`, state a `ParamSet` keeps beside its
+  values, such as a document. `param_set!` lists such fields after
+  `extra`; `ParamSet::save_extra` and `load_extra` reach them, and
+  default to nothing.
+- `manguebyte-plugin`: `save_state` writes a parameter set's extra state
+  after the values, as named sections, in plugin state version 2;
+  `load_state` reads versions 1 and 2. State without extra state is
+  version 1, exactly as before. `manguebyte_state::SharedDocument` is
+  such state, so a plugin's saved state, in every format, carries its
+  document.
 
 ## [0.1.0] - 2026-10-19
 

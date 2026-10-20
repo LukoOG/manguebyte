@@ -268,6 +268,16 @@ our own, and nothing claimed before its test exists.
   done; text entry (a text field, and values typed into knobs and
   sliders, with the clipboard), popup menus with submenus, a combo box,
   hover and tooltips done; drag and drop, scrolling and lists not started
+- 🚧 Application state with undo and redo (`manguebyte-state`,
+  [ADR 0008](docs/adr/0008-application-state.md)): a document tree with
+  stable ids, named transactions, gestures as one step, merging by key,
+  history limits, change journals polled instead of listeners, a mirror
+  of the parameters that keeps host automation out of the history, the
+  document saved with the plugin's state as text or binary with
+  migrations, a settings file, and snapshots handed to the audio thread
+  without allocating. Tested, including random edit sequences undone to
+  every earlier tree; no example plugin's editor uses it yet, and it has
+  not been in a DAW ([TECH_DEBT](docs/TECH_DEBT.md) item 87)
 - ⬜ Audio widgets: waveform, spectrum, keyboard, envelope and EQ editors
 - 🚧 Accessibility: every widget describes itself (the method has no
   default) and the test harness finds widgets only that way; platform
