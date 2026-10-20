@@ -105,6 +105,63 @@ break the API.
   version 1, exactly as before. `manguebyte_state::SharedDocument` is
   such state, so a plugin's saved state, in every format, carries its
   document.
+### Transport and timeline
+
+- A tempo map, a transport clock and timeline primitives, in
+  `manguebyte_dsp::timeline` (issue #8). `TempoMap` holds tempo points,
+  each a step or a linear ramp to the next, and time signatures on bar
+  lines, and converts between frames, seconds, quarter notes (PPQ
+  positions) and bars, beats and ticks, in closed form both ways. A ramp
+  is linear in time, as CLAP's `tempo_inc` describes one, so the tempo
+  squared is linear in beats and every conversion is an algebraic formula
+  that stays exact as a ramp flattens; the type's documentation derives
+  them. A position lands on the first frame at or after it, and a frame's
+  tempo and bar follow the same rule, so where a change lands and what a
+  frame reports always agree. `TempoMap::from_midi_file` reads a Standard
+  MIDI File's tempo and time signatures, and gives the same times as
+  `MidiFile::tick_to_seconds`.
+- `TransportClock` plays a map block by block: play, stop, seeking by
+  frame or beat, a loop in beats or frames, a new map or sample rate that
+  keeps the musical position. Each `ClockBlock` gives the `Transport` for
+  the block, the `Piece`s it is cut into where the loop goes round (as
+  many times as a short loop needs), and, as a `BlockTimeline` with its
+  map, the beat, tempo and bar of every frame, the frames any beat lands
+  on and the tempo points and time signatures inside the block. The
+  position is a whole frame and everything musical is worked out from it,
+  so the positions are bit for bit the same over six block patterns, at
+  44.1, 48 and 96 kHz, through a ramp, two time signatures and a loop.
+  `ClockControl` works a clock from another thread: commands and new maps
+  go through the wait-free queue, the replaced map comes back to be freed
+  there, and the position, tempo and state are published as atomics.
+  Advancing the clock is under the allocation guard
+  (`crates/manguebyte-dsp/tests/realtime.rs`).
+- `ProcessContext::timeline` (`with_timeline`) hands a processor the map
+  and the block's place on it when the transport comes from a clock.
+- `Harness` plays a tempo map: `with_tempo_map`, `set_tempo_map`,
+  `tempo_map`, `transport_clock`, `play`, `stop`, `set_recording`,
+  `seek_beat`, `seek_frame` and `set_loop_beats`, so a test automates
+  tempo and meter and checks what the plugin did with them. The plugin
+  sees the map in its context.
+- The standalone runner has a real transport: `Standalone::transport`
+  gives a `ClockControl` (play, stop, seek, loop, a new tempo map while it
+  plays), and `Engine::with_transport_clock` and `Engine::transport_clock`
+  put a clock of the caller's in the engine.
+- The CLAP wrapper reads the host's position in seconds, bar number and
+  tempo increment, and the LV2 wrapper `time:bar`. The CLAP host sends
+  them on when the transport knows them.
+- Limits: TECH_DEBT 86.
+
+### Breaking
+
+- `Transport` has three new public fields, `position_seconds`,
+  `bar_number` and `tempo_increment`. A struct literal that names every
+  field must name them too, or end with `..Transport::STOPPED`.
+  `Transport::advance` moves the first two on.
+- `Harness::with_tempo` panics on a tempo that is not positive and finite,
+  where it used to report it as it was, and `Harness::new` on such a sample
+  rate. The harness's transport now comes from a clock: its beats are
+  worked out from the frame instead of added up block by block, which can
+  differ in the last bits, and it gives the three new fields.
 
 ## [0.1.0] - 2026-10-19
 

@@ -303,7 +303,11 @@ our own, and nothing claimed before its test exists.
   VST 3 file listed in a process of its own with a time limit, crashes and
   hangs reported, a cache keyed by path, time and size
 - ⬜ Hosting AU plugins, and hosted plugins' editors
-- ⬜ Transport, tempo map and timeline primitives
+- ✅ Transport, tempo map and timeline primitives: a tempo map with steps,
+  linear ramps and time signatures, exact conversions between frames,
+  seconds, quarter notes and bars, beats and ticks, and a real-time
+  transport clock with loops and seeking, driving the harness and the
+  standalone runner
 
 ## Phase 5: everywhere
 
