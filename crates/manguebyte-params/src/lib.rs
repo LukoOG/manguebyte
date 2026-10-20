@@ -5,7 +5,8 @@
 //!   value each, and [`Param`] is what they have in common.
 //! - [`FloatRange`] shapes how a control feels: linear, skewed or logarithmic.
 //! - [`ParamSet`] groups parameters, finds them by identifier, and saves and
-//!   restores them as [`ParamState`].
+//!   restores them as [`ParamState`]; a set may also carry
+//!   [`ExtraState`], such as a document, saved beside the values.
 //! - [`ParamSmoother`] gives the audio thread a click-free view of a value.
 //! - [`ParamDescription`] is what an editor needs to draw a control for a
 //!   parameter, as data: [`Param::describe`] makes one,
@@ -40,5 +41,5 @@ pub use describe::{Curve, ParamDescription, ParamScale};
 pub use manguebyte_core::ParamId;
 pub use param::{BoolParam, ChoiceParam, FloatParam, IntParam, Param, ParamFlags, ParamInfo};
 pub use range::FloatRange;
-pub use set::{LoadReport, ParamSet, ParamSetError, ParamState, ParseStateError};
+pub use set::{ExtraState, LoadReport, ParamSet, ParamSetError, ParamState, ParseStateError};
 pub use smoother::{Changed, ParamSmoother, Smoothing};

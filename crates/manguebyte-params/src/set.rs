@@ -239,6 +239,79 @@ pub trait ParamSet: Send + Sync {
         }
         report
     }
+
+    /// Hands `section` every piece of state the set keeps beyond its
+    /// parameter values, such as an editor's document, as a name and a
+    /// text. Nothing unless the set has [`ExtraState`] fields, which
+    /// [`param_set!`](crate::param_set) lists after `extra`.
+    ///
+    /// Plugin state (`manguebyte_plugin::save_state`) saves these pieces
+    /// after the values. Called off the audio thread; allocates.
+    fn save_extra(&self, section: &mut dyn FnMut(&str, &str)) {
+        let _ = section;
+    }
+
+    /// Restores one piece written by [`save_extra`](Self::save_extra).
+    /// Returns whether a field recognised the name and restored it; a piece
+    /// nothing recognises is skipped, as an unknown parameter is.
+    fn load_extra(&self, name: &str, text: &str) -> bool {
+        let _ = (name, text);
+        false
+    }
+}
+
+/// State a [`ParamSet`] keeps beside its parameter values: a document, a
+/// sample map, anything that is not a number a host automates.
+///
+/// List a field of this type after `extra` in [`param_set!`](crate::param_set)
+/// and it is saved and restored with the parameters' values, under names it
+/// chooses. Both methods are called off the audio thread, by whichever
+/// thread saves or restores state, and may allocate and lock.
+///
+/// ```
+/// use std::sync::Mutex;
+/// use manguebyte_params::{ExtraState, FloatParam, FloatRange, ParamSet, param_set};
+///
+/// /// A note the user typed, kept with the preset.
+/// #[derive(Default)]
+/// struct Notes(Mutex<String>);
+///
+/// impl ExtraState for Notes {
+///     fn save_extra(&self, section: &mut dyn FnMut(&str, &str)) {
+///         section("notes", &self.0.lock().unwrap());
+///     }
+///     fn load_extra(&self, name: &str, text: &str) -> bool {
+///         if name != "notes" {
+///             return false;
+///         }
+///         *self.0.lock().unwrap() = text.to_owned();
+///         true
+///     }
+/// }
+///
+/// struct Params { gain: FloatParam, notes: Notes }
+/// param_set!(Params { gain, extra notes });
+///
+/// let params = Params {
+///     gain: FloatParam::new("gain", "Gain", FloatRange::linear(0.0, 1.0), 0.5),
+///     notes: Notes::default(),
+/// };
+/// assert_eq!(params.len(), 1, "an extra field is not a parameter");
+/// assert!(params.load_extra("notes", "Bright, for the chorus"));
+/// assert!(!params.load_extra("colour", "red"));
+/// let mut saved = Vec::new();
+/// params.save_extra(&mut |name, text| saved.push((name.to_owned(), text.to_owned())));
+/// assert_eq!(saved, [("notes".to_owned(), "Bright, for the chorus".to_owned())]);
+/// ```
+pub trait ExtraState: Send + Sync {
+    /// Calls `section` with a name and a text for each piece to save. A
+    /// name is printable ASCII with no spaces and no `=`; the text may be
+    /// anything.
+    fn save_extra(&self, section: &mut dyn FnMut(&str, &str));
+
+    /// Restores the piece saved under `name`. Returns `false` if the name
+    /// is not one of this field's, so that the next field can try.
+    fn load_extra(&self, name: &str, text: &str) -> bool;
 }
 
 /// Implements [`ParamSet`] for a struct by listing its parameter fields.
@@ -261,12 +334,29 @@ pub trait ParamSet: Send + Sync {
 /// };
 /// assert_eq!(synth.len(), 2);
 /// ```
+///
+/// A field prefixed with `extra` is not a parameter but [`ExtraState`],
+/// saved and restored beside the values through
+/// [`ParamSet::save_extra`] and [`ParamSet::load_extra`]; the example on
+/// [`ExtraState`] shows one. A `nested` set's extra state is included too.
 #[macro_export]
 macro_rules! param_set {
     ($type:ty { $($body:tt)* }) => {
         impl $crate::ParamSet for $type {
             fn visit<'a>(&'a self, visitor: &mut dyn FnMut(&'a dyn $crate::Param)) {
                 $crate::param_set!(@fields self, visitor, $($body)*);
+            }
+
+            #[allow(unused_variables)]
+            fn save_extra(&self, section: &mut dyn FnMut(&str, &str)) {
+                $crate::param_set!(@save self, section, $($body)*);
+            }
+
+            #[allow(unused_variables, unused_mut)]
+            fn load_extra(&self, name: &str, text: &str) -> bool {
+                let mut loaded = false;
+                $crate::param_set!(@load self, name, text, loaded, $($body)*);
+                loaded
             }
         }
     };
@@ -275,9 +365,39 @@ macro_rules! param_set {
         $crate::ParamSet::visit(&$self.$field, $visitor);
         $crate::param_set!(@fields $self, $visitor, $($($rest)*)?);
     };
+    (@fields $self:ident, $visitor:ident, extra $field:ident $(, $($rest:tt)*)?) => {
+        $crate::param_set!(@fields $self, $visitor, $($($rest)*)?);
+    };
     (@fields $self:ident, $visitor:ident, $field:ident $(, $($rest:tt)*)?) => {
         $visitor(&$self.$field);
         $crate::param_set!(@fields $self, $visitor, $($($rest)*)?);
+    };
+    (@save $self:ident, $section:ident, ) => {};
+    (@save $self:ident, $section:ident, nested $field:ident $(, $($rest:tt)*)?) => {
+        $crate::ParamSet::save_extra(&$self.$field, $section);
+        $crate::param_set!(@save $self, $section, $($($rest)*)?);
+    };
+    (@save $self:ident, $section:ident, extra $field:ident $(, $($rest:tt)*)?) => {
+        $crate::ExtraState::save_extra(&$self.$field, $section);
+        $crate::param_set!(@save $self, $section, $($($rest)*)?);
+    };
+    (@save $self:ident, $section:ident, $field:ident $(, $($rest:tt)*)?) => {
+        $crate::param_set!(@save $self, $section, $($($rest)*)?);
+    };
+    (@load $self:ident, $name:ident, $text:ident, $loaded:ident, ) => {};
+    (@load $self:ident, $name:ident, $text:ident, $loaded:ident,
+        nested $field:ident $(, $($rest:tt)*)?) => {
+        $loaded = $loaded || $crate::ParamSet::load_extra(&$self.$field, $name, $text);
+        $crate::param_set!(@load $self, $name, $text, $loaded, $($($rest)*)?);
+    };
+    (@load $self:ident, $name:ident, $text:ident, $loaded:ident,
+        extra $field:ident $(, $($rest:tt)*)?) => {
+        $loaded = $loaded || $crate::ExtraState::load_extra(&$self.$field, $name, $text);
+        $crate::param_set!(@load $self, $name, $text, $loaded, $($($rest)*)?);
+    };
+    (@load $self:ident, $name:ident, $text:ident, $loaded:ident,
+        $field:ident $(, $($rest:tt)*)?) => {
+        $crate::param_set!(@load $self, $name, $text, $loaded, $($($rest)*)?);
     };
 }
 
@@ -659,6 +779,63 @@ mod tests {
         assert_eq!(state.len(), 1);
         assert_eq!(state.get("a"), Some(2.0));
         assert_eq!(state.iter().collect::<Vec<_>>(), [("a", 2.0)]);
+    }
+
+    /// Keeps one named text, as a document would.
+    struct Text(&'static str, std::sync::Mutex<String>);
+
+    impl ExtraState for Text {
+        fn save_extra(&self, section: &mut dyn FnMut(&str, &str)) {
+            section(self.0, &self.1.lock().unwrap());
+        }
+        fn load_extra(&self, name: &str, text: &str) -> bool {
+            if name != self.0 {
+                return false;
+            }
+            *self.1.lock().unwrap() = text.to_owned();
+            true
+        }
+    }
+
+    struct Inner {
+        level: FloatParam,
+        notes: Text,
+    }
+    param_set!(Inner { extra notes, level });
+
+    struct Outer {
+        doc: Text,
+        inner: Inner,
+        mono: BoolParam,
+    }
+    param_set!(Outer { extra doc, nested inner, mono, });
+
+    #[test]
+    fn extra_state_is_found_in_nested_sets_and_is_not_a_parameter() {
+        let text = |name, value: &str| Text(name, std::sync::Mutex::new(value.to_owned()));
+        let outer = Outer {
+            doc: text("doc", "tree"),
+            inner: Inner {
+                level: seconds("level", "Level", 0.5),
+                notes: text("notes", "hello"),
+            },
+            mono: BoolParam::new("mono", "Mono", false),
+        };
+        assert_eq!(outer.len(), 2);
+        let mut saved = Vec::new();
+        outer.save_extra(&mut |name, text| saved.push(format!("{name}:{text}")));
+        assert_eq!(saved, ["doc:tree", "notes:hello"]);
+
+        assert!(outer.load_extra("notes", "bye"));
+        assert!(outer.load_extra("doc", "forest"));
+        assert!(!outer.load_extra("other", "x"));
+        assert_eq!(*outer.inner.notes.1.lock().unwrap(), "bye");
+        assert_eq!(*outer.doc.1.lock().unwrap(), "forest");
+
+        // A set with no extra fields saves nothing and recognises nothing.
+        let synth = synth();
+        synth.save_extra(&mut |_, _| panic!("no extra state"));
+        assert!(!synth.load_extra("doc", "tree"));
     }
 
     #[test]
