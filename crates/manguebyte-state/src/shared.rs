@@ -14,10 +14,13 @@ use crate::{Document, Migrations, VersionWatch};
 /// Put it in the parameter struct, list it after `extra` in `param_set!`,
 /// and `manguebyte_plugin::save_state` writes it after the parameter
 /// values, as a section named `document` (or [`with_section`](Self::with_section)'s
-/// name) holding [`Document::to_text`]. Restoring state reads it with
+/// name) holding [`Document::to_text`], with the parameter mirror brought
+/// up to date first ([`Document::sync_params`]), since the editor that
+/// would have synced it may be closed. Restoring state reads it with
 /// [`Document::from_text_with`] and puts it in place with
-/// [`Document::replace`]: the history is cleared, since a host's restore is
-/// the host's to undo, and the parameter link is kept.
+/// [`Document::replace_keeping_params`]: the history is cleared, since a
+/// host's restore is the host's to undo, the parameter link is kept, and
+/// the parameter values restored from the same state win over the mirror.
 ///
 /// The mutex is only ever taken by the editor and by the thread a host
 /// saves and restores state on, never by the audio thread, which gets
@@ -131,7 +134,11 @@ impl SharedDocument {
 
 impl ExtraState for SharedDocument {
     fn save_extra(&self, section: &mut dyn FnMut(&str, &str)) {
-        let text = self.lock().to_text();
+        let text = {
+            let mut doc = self.lock();
+            doc.sync_params();
+            doc.to_text()
+        };
         section(&self.section, &text);
     }
 
@@ -145,7 +152,7 @@ impl ExtraState for SharedDocument {
         };
         match loaded {
             Ok((doc, _)) => {
-                self.lock().replace(doc);
+                self.lock().replace_keeping_params(doc);
                 true
             }
             // Text that is not a document leaves the document as it was.

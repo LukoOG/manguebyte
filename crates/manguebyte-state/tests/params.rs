@@ -256,6 +256,29 @@ fn plugin_state_carries_the_document() {
 }
 
 #[test]
+fn saved_state_holds_automation_the_mirror_never_saw() {
+    // The editor is closed, so nothing syncs the mirror while the host
+    // automates; then the host saves.
+    let params = Sampler::new().params();
+    params.cutoff.set_plain(5_000.0);
+    let saved = save_state::<Sampler>(&params);
+    assert!(saved.contains("\ncutoff=5000\n"));
+    assert!(saved.contains(" cutoff = float 5000\n"), "{saved}");
+
+    // State whose document disagrees with its values, as a hand edit or a
+    // race could make: the values win.
+    let skewed = saved.replace("cutoff = float 5000", "cutoff = float 50");
+    let fresh = Sampler::new().params();
+    load_state::<Sampler>(&fresh, &skewed).unwrap();
+    assert_eq!(fresh.cutoff.value(), 5_000.0);
+    let doc = fresh.doc.lock();
+    assert_eq!(
+        doc.get(mirror(&doc), "cutoff"),
+        Some(&Value::Float(5_000.0))
+    );
+}
+
+#[test]
 fn a_replaced_document_wins_over_the_live_parameters() {
     let params = Sampler::new().params();
     let mut doc = params.doc.lock();

@@ -618,27 +618,47 @@ impl Document {
         self.history.clear();
     }
 
-    /// Replaces the whole document with `other`, as when a host restores
-    /// state or the user opens a file. Not a step of history: the history
-    /// is cleared, an open gesture ended, and the journal records one
-    /// [`ChangeKind::Replaced`].
+    /// Replaces the whole document with `other`, as when the user opens a
+    /// file. Not a step of history: the history is cleared, an open gesture
+    /// ended, and the journal records one [`ChangeKind::Replaced`].
     ///
     /// Linked parameters stay linked if `other` has a node with the
     /// mirror's id, and then **the document wins**: each parameter takes
     /// the value its mirror property holds. Otherwise the link is dropped.
     /// What `other` was linked to is not kept.
     pub fn replace(&mut self, other: Document) {
+        if self.take(other) {
+            self.restore_params_from(Origin::Load);
+        }
+    }
+
+    /// Replaces the whole document with `other`, as
+    /// [`replace`](Self::replace) does, except that **the parameters win**:
+    /// the mirror is rewritten from them. For a host restoring a plugin's
+    /// state, where the parameter values were restored from the same state
+    /// and are the truth; [`SharedDocument`](crate::SharedDocument) does
+    /// this.
+    pub fn replace_keeping_params(&mut self, other: Document) {
+        if self.take(other) {
+            self.sync_params_from(Origin::Load);
+        }
+    }
+
+    /// Takes `other`'s tree and schema. Returns whether the parameter link
+    /// survived.
+    fn take(&mut self, other: Document) -> bool {
         self.clear_history();
         self.tree = other.tree;
         self.schema = other.schema;
         self.journal
             .record(NodeId::ROOT, ChangeKind::Replaced, Origin::Load);
-        if let Some(link) = &self.link {
-            if self.tree.nodes.contains_key(&link.node) {
-                self.restore_params_from(Origin::Load);
-            } else {
+        match &self.link {
+            Some(link) if self.tree.nodes.contains_key(&link.node) => true,
+            Some(_) => {
                 self.link = None;
+                false
             }
+            None => false,
         }
     }
 
