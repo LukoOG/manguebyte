@@ -39,7 +39,6 @@ says where. Nothing here contains JUCE code: see
 | [Slow-downs in silence](#10-a-fading-sound-cannot-slow-the-audio-thread-down) | A guard each plugin places in its own callback | Set by the framework around every plugin and every device callback | [`denormal.rs`](../crates/manguebyte-core/src/denormal.rs), both `abi.rs` |
 | [Instruments ready to play](#16-instruments-ready-to-play-measured-in-tests) | Classes to build an instrument from; none ready to play | Synthesised and modelled instruments and drum kits, their tuning and spectra measured in tests | [`instruments`](../crates/manguebyte-dsp/src/instruments) |
 | [Changing the audio device](#17-changing-the-audio-device-in-the-middle-of-a-song) | The device stops, and the callback is prepared again for the next one | Prepared once; the output changes under the engine with a crossfade or a short faded gap, the engine's output the same bit for bit | [`hotswap.rs`](../crates/manguebyte-devices/tests/hotswap.rs) |
-| [Changing the device mid-song](#17-changing-the-audio-device-in-the-middle-of-a-song) | `audioDeviceStopped`, then `audioDeviceAboutToStart` and preparing again | The engine runs on, prepared once: a crossfade, or a short faded gap where devices cannot overlap | [`hotswap.rs`](../crates/manguebyte-devices/tests/hotswap.rs) |
 
 ## 1. Automation on the exact sample
 
