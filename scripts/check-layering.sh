@@ -17,6 +17,7 @@ audio_crates=(
     manguebyte-core
     manguebyte-midi
     manguebyte-params
+    manguebyte-state
     manguebyte-dsp
     manguebyte-formats
     manguebyte-osc

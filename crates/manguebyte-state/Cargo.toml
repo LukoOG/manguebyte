@@ -1,0 +1,23 @@
+[package]
+name = "manguebyte-state"
+description = "Application state for the Manguebyte Audio Framework: a document tree with undo and redo, change journals, parameter links, saved state, settings files and snapshots for the audio thread."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+manguebyte-core.workspace = true
+manguebyte-params.workspace = true
+
+[dev-dependencies]
+manguebyte-dsp.workspace = true
+manguebyte-plugin.workspace = true
+
+[lints]
+workspace = true
