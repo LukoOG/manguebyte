@@ -281,8 +281,11 @@ our own, and nothing claimed before its test exists.
 
 - ✅ Audio processing graph, rewired while it plays, with automatic latency
   compensation
-- ⬜ Graph extras: sidechain and per-node event routing, feedback through an
-  explicit delay, crossfaded swaps, buffer reuse
+- ✅ Graph extras: sidechain routing with buses and channels, per-node event
+  routing (nodes that send events included), feedback through an explicit
+  delay in frames that keeps the output independent of the block size, and
+  latency compensation across all of them, all editable while it plays
+- ⬜ Graph extras still to come: crossfaded swaps, buffer reuse and pruning
 - ✅ Hosting CLAP, VST 3 and LV2 plugins as processors, through one
   interface for all three formats, with every event on its frame; LV2
   bundles read with the host's own Turtle reader

@@ -7,6 +7,69 @@ break the API.
 
 ## Unreleased
 
+### Graph
+
+- Sidechains, events and feedback are routed through `manguebyte-graph`
+  (issue #9). Every change is additive; nothing in 0.1.0 was removed or
+  changed its signature.
+  - **Buses and channels.** Every node has a main input and a sidechain
+    (`Bus`), which it receives as `ProcessContext::sidechain`, as a plugin
+    receives its second bus. `connect_sidechain` feeds the sidechain, and
+    `connect_with` takes a `Route`: the bus, a range of channels from the
+    source into a range of the target, and an optional delay.
+    `Graph::SIDECHAIN` is the sidechain the engine itself is given, as a
+    source. A node with nothing routed to its sidechain receives the
+    engine's own, as before. A `Compressor` keyed by another node sounds
+    bit for bit as one keyed directly, in five block patterns, and so does
+    Mangue Duck hosted as a CLAP and keyed through a graph
+    (`manguebyte-host/tests/clap_duck.rs`).
+  - **Events.** `connect_events` sends one node's events to another, from
+    `Graph::INPUT` (the engine's events) and to `Graph::OUTPUT`
+    (`GraphEngine::output_events`). `add_with_events` adds a node that
+    sends events, with a closure that collects them after each block, for
+    an arpeggiator of one's own or a hosted plugin's `output_events`.
+    Events arrive on their frames, held back with the audio when latency
+    compensation delays a path; on a shared frame they are merged in a
+    fixed order (the engine's first, then by node in the order the nodes
+    were added), whatever the block sizes and the order of connecting. A
+    node with no event connection receives the engine's events, as
+    before. Each input holds `EVENT_CAPACITY` (1,024) events a block;
+    `GraphEngine::lost_events` counts what did not fit.
+  - **Feedback.** `connect_feedback(from, to, frames)`, or a `Route` with
+    a delay, is the only connection that may close a loop, a node's loop
+    onto itself included; any other loop is refused with
+    `GraphError::Cycle`, whose message now says that feedback needs a
+    delay. The delay is in frames, not blocks, so a loop does not change
+    with the block size: a delay of at least the largest block is free,
+    and a shorter one, down to one frame, makes the engine run the graph in
+    pieces no longer than it. A comb filter built this way matches the
+    recursion computed frame by frame, bit for bit, with delays of 1, 3, 8
+    and 13 frames in five block patterns.
+  - **Latency compensation** now also lines up sidechains and events with
+    the main inputs, and events with the graph's output. Feedback
+    connections are not compensated: they delay by exactly what they say.
+  - **Live edits.** A new plan takes over, from the plan it replaces, the
+    contents of every delay both have (feedback, compensation, events held
+    back), with a swap of vectors on the audio thread. An edit elsewhere in
+    the graph is no longer heard on a compensated path or in a loop. The
+    engine stays free of allocation, locks and frees while it processes
+    and while it applies edits, which the allocation guard in
+    `tests/graph.rs` checks for a graph that uses all of the above.
+  - A node with a single input receives it copied rather than summed into
+    silence, so a negative zero keeps its sign and a hosted plugin in a
+    graph sounds bit for bit as it does alone.
+  - Limits: TECH_DEBT 88.
+
+### Fixed
+
+- A block longer than a graph was prepared for was run in pieces with all
+  of its events given to the first piece, at offsets past that piece's
+  end, so they took effect at the end of the first piece instead of on
+  their frames; the later pieces were also given the context's offset
+  unchanged, which misaligned a sidechain. Each piece now gets the events
+  that fall in it, on their frames, and an offset that says where it
+  begins.
+
 ## [0.1.0] - 2026-10-19
 
 The first release on crates.io: 25 crates, `manguebyte-pro-io` under the
