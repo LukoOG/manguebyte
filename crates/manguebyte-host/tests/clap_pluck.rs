@@ -992,12 +992,9 @@ fn a_hosted_plugin_is_a_node_in_a_graph() {
         "the graph or the host used the heap"
     );
     let expected = reference(256, &[256, 100, 3], &schedule);
-    // Equal as numbers: the graph sums a node's output into silence, which
-    // may turn a negative zero into a positive one.
-    assert!(
-        audio == expected,
-        "the plugin sounds different inside a graph"
-    );
+    // To the bit: a single connection into the output is copied, not
+    // summed into silence, so even the sign of a zero survives.
+    assert_same_bits(&audio, &expected, "the plugin inside a graph");
     assert!(audio.peak() > 0.05);
 
     // The main half still reaches the plugin while the graph runs it.

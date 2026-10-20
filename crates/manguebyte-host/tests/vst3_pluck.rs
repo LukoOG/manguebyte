@@ -1418,12 +1418,9 @@ fn a_hosted_plugin_is_a_node_in_a_graph() {
         "the graph or the host used the heap"
     );
     let expected = reference(256, &[256, 100, 3], &schedule);
-    // Equal as numbers: the graph sums a node's output into silence, which
-    // may turn a negative zero into a positive one.
-    assert!(
-        audio == expected,
-        "the plugin sounds different inside a graph"
-    );
+    // To the bit: a single connection into the output is copied, not
+    // summed into silence, so even the sign of a zero survives.
+    assert_same_bits(&audio, &expected, "the plugin inside a graph");
 
     plugin.set_param(level(), 0.0).unwrap();
     let mut quiet = AudioBuffer::<f32>::new(2, 256);

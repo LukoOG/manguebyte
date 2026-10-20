@@ -239,6 +239,64 @@ fn the_sidechain_reaches_the_plugin_exactly_as_it_does_with_no_host() {
 }
 
 #[test]
+fn keyed_by_another_node_of_a_graph_it_sounds_as_it_does_alone() {
+    use manguebyte_core::source::BufferSource;
+    use manguebyte_dsp::ProcessSpec;
+    use manguebyte_dsp::sources::SourceProcessor;
+    use manguebyte_graph::Graph;
+
+    let library = library();
+    let input = programme(2, FRAMES);
+    let sidechain = key(2, FRAMES);
+    let schedule = automation();
+    let cases: [(usize, &[usize]); 2] = [(256, &[256]), (512, &[1, 511, 7, 300, 64, 2, 129])];
+    for (max_block, pattern) in cases {
+        let expected = reference(max_block, pattern, &schedule, &input, Some(&sidechain));
+        // Played by a node of the graph, or routed from the sidechain the
+        // graph itself is given.
+        for from_node in [true, false] {
+            let what = format!("blocks of {pattern:?}, keyed by a node: {from_node}");
+            let mut plugin = library.create(ID).unwrap();
+            let spec = ProcessSpec {
+                sample_rate: RATE,
+                max_block_size: max_block,
+                num_channels: 2,
+            };
+            let (mut graph, mut engine) = Graph::<f32>::new(spec);
+            let duck = graph.add(plugin.activate(RATE, max_block).unwrap());
+            let key = if from_node {
+                graph.add(SourceProcessor::new(BufferSource::new(sidechain.clone())))
+            } else {
+                Graph::<f32>::SIDECHAIN
+            };
+            graph.connect(Graph::<f32>::INPUT, duck).unwrap();
+            graph.connect_sidechain(key, duck).unwrap();
+            graph.connect(duck, Graph::<f32>::OUTPUT).unwrap();
+            graph.commit().unwrap();
+
+            let mut audio = input.clone();
+            let given = (!from_node).then_some(&sidechain);
+            let rendered = render(
+                &mut engine,
+                RATE,
+                &schedule,
+                pattern,
+                max_block,
+                &mut audio,
+                given,
+            );
+            // The node hears the graph's automation, and the key on its
+            // own frames, so the two agree to the bit.
+            assert_same_bits(&audio, &expected, &what);
+            assert_eq!(rendered.heap_calls, 0, "{what}: the graph used the heap");
+            drop((graph, engine));
+            plugin.deactivate().unwrap();
+            assert_eq!(plugin.failed_blocks(), 0);
+        }
+    }
+}
+
+#[test]
 fn the_sidechain_is_what_makes_the_difference() {
     let library = library();
     let input = programme(2, FRAMES);

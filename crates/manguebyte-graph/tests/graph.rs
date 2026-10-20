@@ -4,11 +4,15 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use manguebyte_core::AudioBuffer;
-use manguebyte_dsp::{ProcessSpec, Processor};
-use manguebyte_graph::{Graph, GraphEngine, GraphError, NodeId};
+use manguebyte_core::source::BufferSource;
+use manguebyte_dsp::event::{Event, EventBuffer, EventKind, NoteRef};
+use manguebyte_dsp::sources::SourceProcessor;
+use manguebyte_dsp::{Compressor, KeySource, ProcessContext, ProcessSpec, Processor, Transport};
+use manguebyte_graph::{Bus, Graph, GraphEngine, GraphError, NodeId, Route};
 
 // --- Watching the heap ---------------------------------------------------
 
@@ -587,4 +591,695 @@ fn sources_play_into_the_graph_as_nodes() {
     });
     assert_eq!(calls, 0);
     assert_eq!(heard, [5.5, 6.0, 6.5, 7.0, 7.5, 8.0, 5.0, 5.0]);
+}
+
+// --- Sidechains, events and feedback --------------------------------------
+
+/// Block patterns that cut the same audio in very different places,
+/// including blocks longer than the graph was prepared for (8 frames).
+const PATTERNS: [&[usize]; 5] = [&[8], &[1], &[3, 5, 2, 7, 1], &[20], &[13, 1, 4]];
+
+fn note(offset: u32, key: u8) -> Event {
+    Event {
+        offset,
+        kind: EventKind::NoteOn {
+            note: NoteRef::new(0, key),
+            velocity: 1.0,
+        },
+    }
+}
+
+fn key_of(kind: &EventKind) -> u8 {
+    match kind {
+        EventKind::NoteOn { note, .. } => note.key,
+        other => panic!("unexpected event {other:?}"),
+    }
+}
+
+/// Plays a buffer, as a node.
+fn player(samples: &[f32]) -> SourceProcessor<BufferSource<f32>> {
+    let mut buffer = AudioBuffer::<f32>::new(1, samples.len());
+    buffer.channel_mut(0).copy_from_slice(samples);
+    SourceProcessor::new(BufferSource::new(buffer))
+}
+
+/// Runs `input` through the engine in blocks of `pattern`, with the events
+/// of `schedule` (frame, key) and an optional sidechain, and returns the
+/// output and the output events with their frames on the whole timeline.
+fn render(
+    engine: &mut GraphEngine,
+    input: &[f32],
+    pattern: &[usize],
+    schedule: &[(usize, u8)],
+    sidechain: Option<&[f32]>,
+) -> (Vec<f32>, Vec<(usize, u8)>) {
+    let mut output = Vec::with_capacity(input.len());
+    let mut sent = Vec::new();
+    let mut events = EventBuffer::with_capacity(64);
+    let mut done = 0;
+    let mut block = 0;
+    while done < input.len() {
+        let length = pattern[block % pattern.len()].min(input.len() - done);
+        block += 1;
+        let mut buffer = AudioBuffer::<f32>::new(1, length);
+        buffer
+            .channel_mut(0)
+            .copy_from_slice(&input[done..done + length]);
+        events.clear();
+        for &(frame, key) in schedule {
+            if (done..done + length).contains(&frame) {
+                events.push(note((frame - done) as u32, key)).unwrap();
+            }
+        }
+        let mut side = AudioBuffer::<f32>::new(1, length);
+        if let Some(sidechain) = sidechain {
+            side.channel_mut(0)
+                .copy_from_slice(&sidechain[done..done + length]);
+        }
+        let transport = Transport::STOPPED;
+        let mut context = ProcessContext::new(&events, &transport);
+        if sidechain.is_some() {
+            context = context.with_sidechain(&side);
+        }
+        engine.process_with(&mut buffer, &context);
+        output.extend_from_slice(buffer.channel(0));
+        for event in engine.output_events() {
+            sent.push((done + event.offset as usize, key_of(&event.kind)));
+        }
+        done += length;
+    }
+    (output, sent)
+}
+
+fn same_bits(a: &[f32], b: &[f32]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
+}
+
+/// Something to compress: a tone that is not the same on any two frames.
+fn programme(frames: usize) -> Vec<f32> {
+    (0..frames)
+        .map(|frame| 0.6 * (frame as f32 * 0.37).sin())
+        .collect()
+}
+
+/// A key that comes and goes.
+fn key_signal(frames: usize) -> Vec<f32> {
+    (0..frames)
+        .map(|frame| if (frame / 40) % 2 == 0 { 0.9 } else { 0.0 })
+        .collect()
+}
+
+fn ducker() -> Compressor<f32> {
+    Compressor::<f32>::new()
+        .with_key_source(KeySource::Sidechain)
+        .with_threshold_db(-30.0)
+        .with_ratio(10.0)
+        .with_attack_ms(0.05)
+        .with_release_ms(0.5)
+}
+
+/// The compressor keyed directly, with no graph.
+fn ducked_alone(input: &[f32], key: &[f32], pattern: &[usize]) -> Vec<f32> {
+    let mut compressor = ducker();
+    compressor.prepare(&MONO);
+    let mut output = Vec::with_capacity(input.len());
+    let mut done = 0;
+    let mut block = 0;
+    while done < input.len() {
+        let length = pattern[block % pattern.len()].min(input.len() - done);
+        block += 1;
+        let mut buffer = AudioBuffer::<f32>::new(1, length);
+        buffer
+            .channel_mut(0)
+            .copy_from_slice(&input[done..done + length]);
+        let mut side = AudioBuffer::<f32>::new(1, length);
+        side.channel_mut(0)
+            .copy_from_slice(&key[done..done + length]);
+        let context = ProcessContext::empty().with_sidechain(&side);
+        compressor.process_with(&mut buffer, &context);
+        output.extend_from_slice(buffer.channel(0));
+        done += length;
+    }
+    output
+}
+
+#[test]
+fn a_compressor_keyed_by_another_node_matches_one_keyed_directly() {
+    let frames = if cfg!(miri) { 64 } else { 1_000 };
+    let input = programme(frames);
+    let key = key_signal(frames);
+    let mut first: Option<Vec<f32>> = None;
+    for pattern in PATTERNS {
+        let expected = ducked_alone(&input, &key, pattern);
+        assert!(!same_bits(&expected, &input), "nothing was ducked");
+
+        // Keyed by a node that plays the key.
+        let (mut graph, mut engine) = self::graph();
+        let source = graph.add(player(&key));
+        let duck = graph.add(ducker());
+        graph.connect(INPUT, duck).unwrap();
+        graph.connect_sidechain(source, duck).unwrap();
+        graph.connect(duck, OUTPUT).unwrap();
+        graph.commit().unwrap();
+        let (output, _) = render(&mut engine, &input, pattern, &[], None);
+        assert!(
+            same_bits(&output, &expected),
+            "{pattern:?}: keyed by a node"
+        );
+
+        // Keyed by the sidechain the engine is given, routed explicitly.
+        let (mut graph, mut engine) = self::graph();
+        let duck = graph.add(ducker());
+        graph.connect(INPUT, duck).unwrap();
+        graph
+            .connect_sidechain(Graph::<f32>::SIDECHAIN, duck)
+            .unwrap();
+        graph.connect(duck, OUTPUT).unwrap();
+        graph.commit().unwrap();
+        let (output, _) = render(&mut engine, &input, pattern, &[], Some(&key));
+        assert!(
+            same_bits(&output, &expected),
+            "{pattern:?}: routed sidechain"
+        );
+
+        // A node with nothing routed to its sidechain still receives the
+        // engine's own, as it did before sidechains could be routed.
+        let (mut graph, mut engine) = self::graph();
+        let duck = graph.add(ducker());
+        graph.connect(INPUT, duck).unwrap();
+        graph.connect(duck, OUTPUT).unwrap();
+        graph.commit().unwrap();
+        let (output, _) = render(&mut engine, &input, pattern, &[], Some(&key));
+        assert!(same_bits(&output, &expected), "{pattern:?}: passed through");
+
+        match &first {
+            Some(first) => assert!(same_bits(&output, first), "{pattern:?}: depends on blocks"),
+            None => first = Some(output),
+        }
+    }
+}
+
+/// What a probe has heard: each event's frame on the timeline and key.
+type Heard = Arc<Mutex<Vec<Timed>>>;
+
+/// A note on the timeline: its frame and its key.
+type Timed = (usize, u8);
+
+/// Outputs its main input plus a hundred times its sidechain, and writes
+/// down every event it receives on the frame of the timeline it lands on.
+struct Probe {
+    elapsed: usize,
+    heard: Heard,
+}
+impl Probe {
+    fn new() -> (Self, Heard) {
+        let heard = Arc::new(Mutex::new(Vec::with_capacity(4_096)));
+        let probe = Self {
+            elapsed: 0,
+            heard: Arc::clone(&heard),
+        };
+        (probe, heard)
+    }
+}
+impl Processor for Probe {
+    fn prepare(&mut self, _: &ProcessSpec) {}
+    fn process(&mut self, buffer: &mut AudioBuffer) {
+        self.process_with(buffer, &ProcessContext::empty());
+    }
+    fn process_with(&mut self, buffer: &mut AudioBuffer, context: &ProcessContext<'_>) {
+        for frame in 0..buffer.num_frames() {
+            let side = context.sidechain_peak(frame).unwrap_or(0.0) as f32;
+            buffer.channel_mut(0)[frame] += 100.0 * side;
+        }
+        let mut heard = self.heard.lock().unwrap();
+        for event in context.events {
+            heard.push((self.elapsed + event.offset as usize, key_of(&event.kind)));
+        }
+        self.elapsed += buffer.num_frames();
+    }
+}
+
+/// Plays a note every `period` frames from frame `phase` on, the key
+/// counting up from `first_key`, and sends it out as an event.
+struct Arpeggiator {
+    period: usize,
+    phase: usize,
+    next_key: u8,
+    elapsed: usize,
+    played: Vec<Event>,
+}
+impl Arpeggiator {
+    fn new(period: usize, phase: usize, first_key: u8) -> Self {
+        Self {
+            period,
+            phase,
+            next_key: first_key,
+            elapsed: 0,
+            played: Vec::with_capacity(64),
+        }
+    }
+    fn collect(&mut self, out: &mut EventBuffer) {
+        for event in self.played.drain(..) {
+            out.push(event).unwrap();
+        }
+    }
+}
+impl Processor for Arpeggiator {
+    fn prepare(&mut self, _: &ProcessSpec) {}
+    fn process(&mut self, buffer: &mut AudioBuffer) {
+        for frame in 0..buffer.num_frames() {
+            let time = self.elapsed + frame;
+            if time >= self.phase && (time - self.phase) % self.period == 0 {
+                self.played.push(note(frame as u32, self.next_key));
+                self.next_key = self.next_key.wrapping_add(1) % 128;
+            }
+        }
+        self.elapsed += buffer.num_frames();
+    }
+}
+
+fn arpeggiator(graph: &mut Graph, period: usize, phase: usize, first_key: u8) -> NodeId {
+    graph.add_with_events(
+        Arpeggiator::new(period, phase, first_key),
+        |arp: &mut Arpeggiator, out: &mut EventBuffer| arp.collect(out),
+    )
+}
+
+#[test]
+fn events_reach_downstream_nodes_on_their_frames_and_merge_in_a_fixed_order() {
+    let frames = 60;
+    let schedule = [(4, 100), (13, 101), (40, 102)];
+    let mut first: Option<(Vec<Timed>, Vec<Timed>)> = None;
+    for pattern in PATTERNS {
+        let (mut graph, mut engine) = graph();
+        // Added first, so on a shared frame its notes come first, although
+        // it is connected last.
+        let low = arpeggiator(&mut graph, 9, 4, 0);
+        let high = arpeggiator(&mut graph, 13, 0, 50);
+        let (probe, heard) = Probe::new();
+        let probe = graph.add(probe);
+        graph.connect(INPUT, probe).unwrap();
+        graph.connect_events(high, probe).unwrap();
+        graph.connect_events(INPUT, probe).unwrap();
+        graph.connect_events(low, probe).unwrap();
+        graph.connect_events(low, OUTPUT).unwrap();
+        graph.connect(probe, OUTPUT).unwrap();
+        graph.commit().unwrap();
+
+        let input = vec![0.0; frames];
+        let (_, sent) = render(&mut engine, &input, pattern, &schedule, None);
+        let heard = heard.lock().unwrap().clone();
+
+        // Every note exactly where it was played.
+        let low_notes: Vec<(usize, u8)> = (0..)
+            .map(|n: usize| (4 + 9 * n, n as u8))
+            .take_while(|&(frame, _)| frame < frames)
+            .collect();
+        assert_eq!(sent, low_notes, "{pattern:?}: the graph's output");
+        let mut expected: Vec<(usize, u8)> = Vec::new();
+        for frame in 0..frames {
+            // The engine's events first, then the nodes in the order they
+            // were added.
+            for &(at, key) in &schedule {
+                if at == frame {
+                    expected.push((at, key));
+                }
+            }
+            if frame >= 4 && (frame - 4) % 9 == 0 {
+                expected.push((frame, ((frame - 4) / 9) as u8));
+            }
+            if frame % 13 == 0 {
+                expected.push((frame, 50 + (frame / 13) as u8));
+            }
+        }
+        assert_eq!(heard, expected, "{pattern:?}: what the node received");
+        // Frame 13 really is shared by three sources, and 4 and 40 by two.
+        assert_eq!(expected.iter().filter(|e| e.0 == 13).count(), 3);
+        assert_eq!(engine.lost_events(), 0);
+
+        match &first {
+            Some(first) => assert_eq!(&(heard, sent), first, "{pattern:?}"),
+            None => first = Some((heard, sent)),
+        }
+    }
+}
+
+#[test]
+fn a_node_without_event_connections_hears_the_engines_events_on_their_frames() {
+    // A block longer than the graph was prepared for is run in pieces;
+    // each event still lands on its own frame.
+    let (mut graph, mut engine) = graph();
+    let (probe, heard) = Probe::new();
+    let probe = graph.add(probe);
+    graph.connect(probe, OUTPUT).unwrap();
+    graph.commit().unwrap();
+    let schedule = [(3, 1), (12, 2), (19, 3)];
+    render(&mut engine, &[0.0; 20], &[20], &schedule, None);
+    assert_eq!(*heard.lock().unwrap(), schedule);
+}
+
+#[test]
+fn paths_of_different_latency_line_up_at_main_sidechain_events_and_output() {
+    let (mut graph, mut engine) = graph();
+    let late = graph.add(Late::new(5));
+    let (probe, heard) = Probe::new();
+    let probe = graph.add(probe);
+    let arp = arpeggiator(&mut graph, 1_000, 2, 7);
+    // Main input through five frames of latency; sidechain and events
+    // straight from the input and from an arpeggiator.
+    graph.connect(INPUT, late).unwrap();
+    graph.connect(late, probe).unwrap();
+    graph.connect_sidechain(INPUT, probe).unwrap();
+    graph.connect_events(INPUT, probe).unwrap();
+    graph.connect_events(arp, probe).unwrap();
+    graph.connect_events(arp, OUTPUT).unwrap();
+    graph.connect(probe, OUTPUT).unwrap();
+    // A path with no latency straight to the output as well.
+    graph.connect(INPUT, OUTPUT).unwrap();
+    graph.commit().unwrap();
+    assert_eq!(graph.latency_samples(), 5);
+
+    let mut impulse = vec![0.0f32; 16];
+    impulse[0] = 1.0;
+    let (output, sent) = render(&mut engine, &impulse, &[3, 4, 9], &[(1, 60)], None);
+    // The impulse arrives at the node's main input and sidechain on the
+    // same frame, and the dry path is held back to meet it: 1 + 100 + 1.
+    let mut expected = vec![0.0f32; 16];
+    expected[5] = 102.0;
+    assert_eq!(output, expected);
+    // Events are held back by the same five frames.
+    assert_eq!(*heard.lock().unwrap(), [(6, 60), (7, 7)]);
+    assert_eq!(sent, [(7, 7)]);
+    assert_eq!(engine.lost_events(), 0);
+}
+
+#[test]
+fn routes_pick_buses_and_channels() {
+    let stereo = ProcessSpec {
+        num_channels: 2,
+        ..MONO
+    };
+    let (mut graph, mut engine) = Graph::<f32>::new(stereo);
+    let left = graph.add(Constant(0.25));
+    let probe = graph.add(Probe::new().0);
+    // Only channel 0 of the constant, into channel 1 of the sidechain and
+    // of the main input. The probe adds the loudest sidechain channel to
+    // its channel 0.
+    graph
+        .connect_with(left, probe, Route::SIDECHAIN.channels(0, 1, 1))
+        .unwrap();
+    graph
+        .connect_with(left, probe, Route::MAIN.channels(0, 1, 1))
+        .unwrap();
+    graph.connect(probe, OUTPUT).unwrap();
+    graph.commit().unwrap();
+    let mut block = AudioBuffer::<f32>::new(2, 4);
+    engine.process(&mut block);
+    assert_eq!(block.channel(0), &[25.0; 4]);
+    assert_eq!(block.channel(1), &[0.25; 4]);
+
+    assert_eq!(Route::SIDECHAIN.bus(), Bus::Sidechain);
+    assert_eq!(Route::default(), Route::MAIN);
+    assert_eq!(Route::MAIN.to_bus(Bus::Sidechain), Route::SIDECHAIN);
+    // Disconnecting takes away exactly the route that was made.
+    graph.disconnect_sidechain(left, probe).unwrap();
+    graph.commit().unwrap();
+    engine.process(&mut block);
+    assert_eq!(block.channel(0), &[25.0; 4]);
+    graph
+        .disconnect_with(left, probe, Route::SIDECHAIN.channels(0, 1, 1))
+        .unwrap();
+    graph.commit().unwrap();
+    engine.process(&mut block);
+    assert_eq!(block.channel(0), &[0.0; 4]);
+    assert_eq!(block.channel(1), &[0.25; 4]);
+}
+
+/// The comb filter `y[n] = x[n] + gain * y[n - delay]`, computed one frame
+/// at a time in the same arithmetic as the graph.
+fn comb(input: &[f32], gain: f32, delay: usize) -> Vec<f32> {
+    let mut output: Vec<f32> = Vec::with_capacity(input.len());
+    for (frame, &x) in input.iter().enumerate() {
+        let back = frame
+            .checked_sub(delay)
+            .map_or(0.0, |earlier| gain * output[earlier]);
+        output.push(x + back);
+    }
+    output
+}
+
+/// `INPUT -> sum -> OUTPUT`, with `sum -> gain` fed back into `sum`.
+fn comb_graph(delay: usize) -> (Graph, GraphEngine, NodeId) {
+    let (mut graph, engine) = graph();
+    let sum = graph.add(Scale(1.0));
+    let gain = graph.add(Scale(0.5));
+    graph.connect(INPUT, sum).unwrap();
+    graph.connect(sum, gain).unwrap();
+    graph.connect_feedback(gain, sum, delay).unwrap();
+    graph.connect(sum, OUTPUT).unwrap();
+    graph.commit().unwrap();
+    (graph, engine, sum)
+}
+
+#[test]
+fn a_feedback_loop_is_a_comb_filter_whatever_the_blocks() {
+    let frames = if cfg!(miri) { 40 } else { 200 };
+    let mut input = vec![0.0f32; frames];
+    input[0] = 1.0;
+    input[17] = -0.75;
+    input[18] = 0.3;
+    // Shorter than a block, a block, and longer.
+    for delay in [1, 3, 8, 13] {
+        let expected = comb(&input, 0.5, delay);
+        assert!(expected[delay] == 0.5 && expected[2 * delay] == 0.25);
+        for pattern in PATTERNS {
+            let (_graph, mut engine, _) = comb_graph(delay);
+            let (output, _) = render(&mut engine, &input, pattern, &[], None);
+            assert!(
+                same_bits(&output, &expected),
+                "delay {delay}, blocks {pattern:?}: {output:?}"
+            );
+        }
+    }
+
+    // A node may feed itself: y[n] = 0.5 * (x[n] + y[n - 4]).
+    let (mut graph, mut engine) = graph();
+    let node = graph.add(Scale(0.5));
+    graph.connect(INPUT, node).unwrap();
+    graph.connect_feedback(node, node, 4).unwrap();
+    graph.connect(node, OUTPUT).unwrap();
+    graph.commit().unwrap();
+    let (output, _) = render(&mut engine, &input[..12], &[5], &[], None);
+    assert_eq!(
+        output[..9],
+        [0.5, 0.0, 0.0, 0.0, 0.25, 0.0, 0.0, 0.0, 0.125]
+    );
+    // Feedback is not latency: nothing was compensated.
+    assert_eq!(graph.latency_samples(), 0);
+}
+
+#[test]
+fn a_loop_without_a_delay_is_refused() {
+    let (mut graph, _engine) = graph();
+    let a = graph.add(Scale(1.0));
+    let b = graph.add(Scale(1.0));
+    let c = arpeggiator(&mut graph, 4, 0, 0);
+    graph.connect(a, b).unwrap();
+
+    assert_eq!(graph.connect(b, a), Err(GraphError::Cycle));
+    assert_eq!(graph.connect_sidechain(b, a), Err(GraphError::Cycle));
+    // Events count too: a -> b -> c -> a.
+    graph.connect_events(b, c).unwrap();
+    assert_eq!(graph.connect_events(c, a), Err(GraphError::Cycle));
+    assert_eq!(graph.connect(c, a), Err(GraphError::Cycle));
+    let message = GraphError::Cycle.to_string();
+    assert!(
+        message.contains("loop") && message.contains("delay"),
+        "{message}"
+    );
+
+    // Through a delay it is allowed, also into a sidechain or from a node
+    // to itself; a delay of zero is not a delay.
+    assert_eq!(
+        graph.connect_feedback(b, a, 0),
+        Err(GraphError::InvalidConnection)
+    );
+    graph.connect_feedback(c, a, 4).unwrap();
+    graph
+        .connect_with(b, a, Route::SIDECHAIN.delayed(16))
+        .unwrap();
+    graph.connect_feedback(a, a, 1).unwrap();
+    assert_eq!(graph.connect(a, a), Err(GraphError::InvalidConnection));
+    graph.commit().unwrap();
+
+    // Other routes that make no sense.
+    assert_eq!(
+        graph.connect_sidechain(a, OUTPUT),
+        Err(GraphError::InvalidConnection)
+    );
+    assert_eq!(
+        graph.connect_with(a, b, Route::MAIN.channels(0, 0, 0)),
+        Err(GraphError::InvalidConnection)
+    );
+    assert_eq!(
+        graph.connect(a, Graph::<f32>::SIDECHAIN),
+        Err(GraphError::InvalidConnection)
+    );
+    assert_eq!(
+        graph.connect_events(Graph::<f32>::SIDECHAIN, a),
+        Err(GraphError::InvalidConnection)
+    );
+    assert_eq!(
+        graph.connect_events(a, a),
+        Err(GraphError::InvalidConnection)
+    );
+
+    // Once the event link is gone, the loop it closed is no loop.
+    graph.disconnect_feedback(c, a, 4).unwrap();
+    graph
+        .disconnect_with(b, a, Route::SIDECHAIN.delayed(16))
+        .unwrap();
+    graph.disconnect_feedback(a, a, 1).unwrap();
+    graph.disconnect_events(b, c).unwrap();
+    graph.connect(c, a).unwrap();
+    graph.commit().unwrap();
+}
+
+#[test]
+fn processing_and_swapping_a_routed_graph_uses_no_heap() {
+    let (mut graph, mut engine) = graph();
+    let key = graph.add(Counter(0.0));
+    let duck = graph.add(ducker());
+    let late = graph.add(Late::new(3));
+    let arp = arpeggiator(&mut graph, 3, 1, 0);
+    let (probe, _heard) = Probe::new();
+    let probe = graph.add(probe);
+    let gain = graph.add(Scale(0.25));
+    graph.connect(INPUT, late).unwrap();
+    graph.connect(late, duck).unwrap();
+    graph.connect_sidechain(key, duck).unwrap();
+    graph.connect(duck, probe).unwrap();
+    graph
+        .connect_sidechain(Graph::<f32>::SIDECHAIN, probe)
+        .unwrap();
+    graph.connect_events(INPUT, probe).unwrap();
+    graph.connect_events(arp, probe).unwrap();
+    graph.connect_events(arp, OUTPUT).unwrap();
+    graph.connect(probe, gain).unwrap();
+    graph.connect_feedback(gain, probe, 5).unwrap();
+    graph.connect(probe, OUTPUT).unwrap();
+    graph.connect(INPUT, OUTPUT).unwrap();
+    graph.commit().unwrap();
+
+    let mut buffer = AudioBuffer::<f32>::new(1, 21);
+    let mut side = AudioBuffer::<f32>::new(1, 21);
+    side.channel_mut(0).fill(0.5);
+    let mut events = EventBuffer::with_capacity(8);
+    events.push(note(2, 1)).unwrap();
+    events.push(note(17, 2)).unwrap();
+    let transport = Transport::playing_at(120.0);
+    let context = ProcessContext::new(&events, &transport).with_sidechain(&side);
+    // Once outside the guard, so that the swap's garbage is not counted.
+    engine.process_with(&mut buffer, &context);
+
+    // Blocks of every kind: in pieces, whole, and one frame.
+    let calls = heap_calls_during(|| {
+        for length in [21, 8, 1, 5] {
+            buffer.set_num_frames(length);
+            buffer.channel_mut(0).fill(0.1);
+            engine.process_with(&mut buffer, &context);
+        }
+    });
+    assert_eq!(calls, 0, "processing used the heap");
+    assert!(buffer.peak().is_finite() && buffer.peak() > 0.0);
+    assert!(!engine.output_events().is_empty());
+
+    // An edit: the new plan takes over the delays and the engine sends the
+    // old one back, without touching the heap on this side.
+    let extra = graph.add(Scale(2.0));
+    graph.connect(gain, extra).unwrap();
+    graph.connect_events(INPUT, OUTPUT).unwrap();
+    graph.commit().unwrap();
+    let calls = heap_calls_during(|| {
+        buffer.set_num_frames(8);
+        engine.process_with(&mut buffer, &context);
+    });
+    assert_eq!(calls, 0, "applying an edit used the heap");
+    assert_eq!(engine.num_nodes(), 7);
+    assert_eq!(engine.lost_events(), 0);
+}
+
+#[test]
+fn an_edit_while_a_loop_plays_does_not_interrupt_it() {
+    let frames = if cfg!(miri) { 48 } else { 240 };
+    let mut input = vec![0.0f32; frames];
+    input[0] = 1.0;
+    input[30] = 0.5;
+    // A comb, and beside it a path through latency that compensation
+    // holds the comb's output back to meet.
+    let build = || {
+        let (mut graph, engine, sum) = comb_graph(11);
+        let late = graph.add(Late::new(6));
+        graph.connect(INPUT, late).unwrap();
+        graph.connect(late, OUTPUT).unwrap();
+        graph.commit().unwrap();
+        (graph, engine, sum)
+    };
+    let (_graph, mut engine, _) = build();
+    let (expected, _) = render(&mut engine, &input, &[7], &[], None);
+
+    let (mut graph, mut engine, sum) = build();
+    let half = frames / 2;
+    let (mut output, _) = render(&mut engine, &input[..half], &[7], &[], None);
+    // While it plays: a new node fed from the loop but going nowhere
+    // audible, an event connection, a change to a node that keeps its
+    // value, and the same graph committed twice over.
+    let tap = graph.add(Scale(3.0));
+    graph.connect(sum, tap).unwrap();
+    graph.connect_events(INPUT, tap).unwrap();
+    assert!(graph.update(sum, |node: &mut Scale| node.0 = 1.0));
+    graph.commit().unwrap();
+    graph.commit().unwrap();
+    let (rest, _) = render(&mut engine, &input[half..], &[7], &[], None);
+    output.extend(rest);
+    assert!(same_bits(&output, &expected), "the edit was heard");
+    assert!(expected[half..].iter().any(|&sample| sample != 0.0));
+}
+
+#[test]
+fn every_piece_of_a_split_block_knows_where_it_is() {
+    /// Writes down, for each call, where its frame 0 is on the timeline as
+    /// the transport and the offset tell it.
+    struct Clock(Arc<Mutex<Vec<i64>>>);
+    impl Processor for Clock {
+        fn prepare(&mut self, _: &ProcessSpec) {}
+        fn process(&mut self, _: &mut AudioBuffer) {}
+        fn process_with(&mut self, _: &mut AudioBuffer, context: &ProcessContext<'_>) {
+            let start = context.transport.position_samples.unwrap() + context.offset as i64;
+            self.0.lock().unwrap().push(start);
+        }
+    }
+
+    let (mut graph, mut engine) = graph();
+    let plain = Arc::new(Mutex::new(Vec::new()));
+    let keyed = Arc::new(Mutex::new(Vec::new()));
+    let a = graph.add(Clock(Arc::clone(&plain)));
+    let b = graph.add(Clock(Arc::clone(&keyed)));
+    graph.connect(a, OUTPUT).unwrap();
+    graph.connect_sidechain(a, b).unwrap();
+    graph.connect(b, OUTPUT).unwrap();
+    graph.commit().unwrap();
+
+    // 20 frames, prepared for 8: pieces at 0, 8 and 16 of a block that
+    // itself starts 3 frames into what the caller was given.
+    let events = EventBuffer::new();
+    let mut transport = Transport::playing_at(120.0);
+    transport.position_samples = Some(1_000);
+    let mut context = ProcessContext::new(&events, &transport);
+    context.offset = 3;
+    engine.process_with(&mut AudioBuffer::new(1, 20), &context);
+    // A node that reads the caller's sidechain is told the offset; one
+    // with a sidechain of its own gets a transport moved on to the piece.
+    assert_eq!(*plain.lock().unwrap(), [1_003, 1_011, 1_019]);
+    assert_eq!(*keyed.lock().unwrap(), [1_003, 1_011, 1_019]);
 }
