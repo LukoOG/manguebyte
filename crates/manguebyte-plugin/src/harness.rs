@@ -11,7 +11,9 @@ use manguebyte_params::{LoadReport, ParamSet};
 
 use crate::editor::EditorSpec;
 use crate::output::{OutputBuffer, OutputKind};
-use crate::{ParamWatcher, Plugin, StateError, apply_param_events, load_state, save_state};
+use crate::{
+    AudioLayout, ParamWatcher, Plugin, StateError, apply_param_events, load_state, save_state,
+};
 
 /// Most events the harness will deliver in a single block.
 const EVENTS_PER_BLOCK: usize = 4_096;
@@ -44,6 +46,9 @@ pub struct Harness<P: Plugin> {
     params: Arc<P::Params>,
     /// Taken from the plugin once, as a wrapper does.
     editor: Option<Box<dyn EditorSpec>>,
+    /// The layout the plugin runs with.
+    layout: AudioLayout,
+    sample_rate: f64,
     max_block_size: usize,
     /// Block lengths to cycle through.
     pattern: Vec<usize>,
@@ -95,6 +100,7 @@ impl<P: Plugin> Harness<P> {
             panic!("plugin {id} has invalid parameters: {error}");
         }
         let editor = plugin.editor();
+        plugin.set_layout(P::LAYOUT);
         plugin.prepare(&ProcessSpec {
             sample_rate,
             max_block_size,
@@ -103,6 +109,8 @@ impl<P: Plugin> Harness<P> {
 
         Self {
             plugin,
+            layout: P::LAYOUT,
+            sample_rate,
             max_block_size,
             pattern: vec![max_block_size],
             next_in_pattern: 0,
@@ -141,6 +149,49 @@ impl<P: Plugin> Harness<P> {
         self.pattern = pattern.to_vec();
         self.next_in_pattern = 0;
         self
+    }
+
+    /// Runs the plugin with `layout` instead of [`Plugin::LAYOUT`], as a
+    /// host that chose it would: [`Plugin::set_layout`] and then
+    /// [`Plugin::prepare`] again. See [`set_layout`](Self::set_layout).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the wrappers would not offer `layout`: it is not among
+    /// [`offered_layouts`](crate::offered_layouts), or has no outputs.
+    #[must_use]
+    pub fn with_layout(mut self, layout: AudioLayout) -> Self {
+        self.set_layout(layout);
+        self
+    }
+
+    /// Switches the plugin to `layout` between renders, as a host does
+    /// while audio is stopped: [`Plugin::set_layout`], then
+    /// [`Plugin::prepare`] with the layout's outputs. Renders then have its
+    /// channel counts, and a sidechain is passed on only if it has one.
+    ///
+    /// # Panics
+    ///
+    /// As for [`with_layout`](Self::with_layout).
+    pub fn set_layout(&mut self, layout: AudioLayout) {
+        assert!(
+            layout.outputs > 0 && crate::offered_layouts::<P>().contains(&layout),
+            "plugin {} does not offer the layout {layout:?}",
+            P::INFO.id
+        );
+        self.layout = layout;
+        self.sidechain = AudioBuffer::new(layout.sidechain, self.max_block_size);
+        self.plugin.set_layout(layout);
+        self.plugin.prepare(&ProcessSpec {
+            sample_rate: self.sample_rate,
+            max_block_size: self.max_block_size,
+            num_channels: layout.outputs,
+        });
+    }
+
+    /// The layout the plugin runs with.
+    pub fn layout(&self) -> AudioLayout {
+        self.layout
     }
 
     /// Plays one tempo throughout, in 4/4, in place of the tempo map.
@@ -327,7 +378,7 @@ impl<P: Plugin> Harness<P> {
     /// Renders `frames` frames with silence at the input. This is how an
     /// instrument is played.
     pub fn render(&mut self, frames: usize) -> AudioBuffer<f32> {
-        let mut output = AudioBuffer::new(P::LAYOUT.outputs, frames);
+        let mut output = AudioBuffer::new(self.layout.outputs, frames);
         self.run(&mut output, None);
         output
     }
@@ -369,10 +420,11 @@ impl<P: Plugin> Harness<P> {
         input: &AudioBuffer<f32>,
         sidechain: Option<&AudioBuffer<f32>>,
     ) -> AudioBuffer<f32> {
-        let mut output = AudioBuffer::new(P::LAYOUT.outputs, input.num_frames());
-        let shared = P::LAYOUT
+        let mut output = AudioBuffer::new(self.layout.outputs, input.num_frames());
+        let shared = self
+            .layout
             .inputs
-            .min(P::LAYOUT.outputs)
+            .min(self.layout.outputs)
             .min(input.num_channels());
         for channel in 0..shared {
             output
@@ -421,7 +473,7 @@ impl<P: Plugin> Harness<P> {
             let transport = block.transport(map);
             let mut context =
                 ProcessContext::new(&self.events, &transport).with_timeline(block.with_map(map));
-            if let Some(whole) = sidechain {
+            if let Some(whole) = sidechain.filter(|_| self.layout.sidechain > 0) {
                 // The plugin gets the stretch that goes with this block.
                 self.sidechain.set_num_frames(length);
                 self.sidechain.clear();
@@ -1172,5 +1224,94 @@ mod tests {
         assert_eq!(harness.transport().position_samples, Some(540_000));
         harness.seek_frame(0);
         assert_eq!(harness.transport().position_samples, Some(0));
+    }
+
+    // --- A plugin with more than one layout. ---
+
+    /// Writes how many channels it was prepared for, plus ten when it is
+    /// given a sidechain.
+    struct Shaped {
+        params: Arc<NoParams>,
+        layouts: Vec<AudioLayout>,
+        channels: usize,
+    }
+
+    impl Plugin for Shaped {
+        const INFO: PluginInfo = PluginInfo {
+            id: "org.manguebyte.test.shaped",
+            name: "Shaped",
+            vendor: "Manguebyte tests",
+            version: "0.1.0",
+            description: "Runs mono or stereo",
+            kind: PluginKind::Effect,
+        };
+        const LAYOUT: AudioLayout = AudioLayout::STEREO_EFFECT.with_sidechain(2);
+        const LAYOUTS: &'static [AudioLayout] = &[
+            AudioLayout::MONO_EFFECT,
+            AudioLayout::STEREO_EFFECT,
+            AudioLayout::STEREO_INSTRUMENT,
+        ];
+        type Params = NoParams;
+
+        fn new() -> Self {
+            Self {
+                params: Arc::new(NoParams {}),
+                layouts: Vec::new(),
+                channels: 0,
+            }
+        }
+        fn params(&self) -> Arc<NoParams> {
+            Arc::clone(&self.params)
+        }
+        fn set_layout(&mut self, layout: AudioLayout) {
+            self.layouts.push(layout);
+        }
+        fn prepare(&mut self, spec: &ProcessSpec) {
+            self.channels = spec.num_channels;
+        }
+        fn process(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+            let keyed = if context.sidechain.is_some() {
+                10.0
+            } else {
+                0.0
+            };
+            for channel in buffer.iter_channels_mut() {
+                channel.fill(self.channels as f32 + keyed);
+            }
+        }
+    }
+
+    #[test]
+    fn a_layout_chosen_reaches_the_plugin_before_it_is_prepared() {
+        assert_eq!(
+            crate::offered_layouts::<Shaped>(),
+            [
+                Shaped::LAYOUT,
+                AudioLayout::MONO_EFFECT,
+                AudioLayout::STEREO_EFFECT
+            ]
+        );
+        let mut harness = Harness::<Shaped>::new(48_000.0, 16);
+        let input = AudioBuffer::<f32>::new(2, 4);
+        let sidechain = AudioBuffer::<f32>::new(2, 4);
+        let output = harness.process_with_sidechain(&input, &sidechain);
+        assert_eq!(output.channel(1), &[12.0; 4]);
+
+        let mut harness = harness.with_layout(AudioLayout::MONO_EFFECT);
+        assert_eq!(harness.layout(), AudioLayout::MONO_EFFECT);
+        assert_eq!(
+            harness.plugin_mut().layouts,
+            [Shaped::LAYOUT, AudioLayout::MONO_EFFECT]
+        );
+        // One channel, and no sidechain even when one is played.
+        let output = harness.process_with_sidechain(&input, &sidechain);
+        assert_eq!(output.num_channels(), 1);
+        assert_eq!(output.channel(0), &[1.0; 4]);
+    }
+
+    #[test]
+    #[should_panic(expected = "does not offer")]
+    fn a_layout_the_wrappers_would_not_offer_is_refused() {
+        let _ = Harness::<Shaped>::new(48_000.0, 16).with_layout(AudioLayout::STEREO_INSTRUMENT);
     }
 }

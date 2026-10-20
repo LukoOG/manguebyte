@@ -130,6 +130,23 @@ pub enum EventKind {
         /// The single note the offset applies to, or `None` for all of them.
         note: Option<NoteRef>,
     },
+    /// A parameter takes a new value for one sounding note only, as from a
+    /// host's per-note automation (CLAP's `CLAP_EVENT_PARAM_VALUE` with a
+    /// note id or a key).
+    ///
+    /// The parameter's own value, which every other note follows, does not
+    /// change, and a later [`ParamValue`](Self::ParamValue) of the same
+    /// parameter applies to every note again. A processor that keeps no
+    /// per-note values can ignore this event: the note then simply follows
+    /// the parameter.
+    NoteParamValue {
+        /// The parameter.
+        param: ParamId,
+        /// The value for this note, in the parameter's own unit.
+        value: f64,
+        /// The note it applies to.
+        note: NoteRef,
+    },
     /// A MIDI message with no richer equivalent above: controllers, pitch
     /// bend, program changes, pressure.
     Midi(MidiMessage),

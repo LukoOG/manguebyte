@@ -246,7 +246,9 @@ impl ParamDescription {
     ///   choices puts value `k` at `k / steps`;
     /// - `smoothing_ms` (number), only when the parameter declares a
     ///   smoothing;
-    /// - `flags`: `{"automatable":…,"hidden":…,"bypass":…}`.
+    /// - `flags`: `{"automatable":…,"hidden":…,"bypass":…}`, with
+    ///   `"per_note":true` after them for a parameter that is
+    ///   [`per_note`](ParamFlags::per_note).
     ///
     /// Numbers are written in plain decimal notation, never with an
     /// exponent; a number that is not finite, which the parameter types of
@@ -331,11 +333,18 @@ impl ParamDescription {
             automatable,
             hidden,
             bypass,
+            per_note,
         } = self.flags;
         let _ = write!(
             out,
-            ",\"flags\":{{\"automatable\":{automatable},\"hidden\":{hidden},\"bypass\":{bypass}}}}}"
+            ",\"flags\":{{\"automatable\":{automatable},\"hidden\":{hidden},\"bypass\":{bypass}"
         );
+        // Written only when set, so that the description of a parameter
+        // that does not use it reads as it did before.
+        if per_note {
+            out.push_str(",\"per_note\":true");
+        }
+        out.push_str("}}");
     }
 
     /// A JSON array holding [`to_json`](Self::to_json)'s object for each

@@ -454,7 +454,9 @@ impl<S: Sample> Sampler<S> {
                 }
             }
             EventKind::Midi(message) => self.handle_midi(message),
-            EventKind::ParamValue { .. } | EventKind::ParamModulation { .. } => {}
+            EventKind::ParamValue { .. }
+            | EventKind::NoteParamValue { .. }
+            | EventKind::ParamModulation { .. } => {}
         }
     }
 

@@ -15,6 +15,16 @@ pub struct ParamFlags {
     pub hidden: bool,
     /// It is the processor's bypass switch.
     pub bypass: bool,
+    /// The processor can give it a value of its own for each sounding note,
+    /// and an offset of its own for each note, so a host may automate and
+    /// modulate it per note (CLAP's per-note-id and per-key automation and
+    /// modulation flags). Such values arrive as
+    /// `EventKind::NoteParamValue` and as `EventKind::ParamModulation` with
+    /// a note, which a polyphonic `Synth` hands to the voice playing that
+    /// note. Off unless asked for: a host that sees the flag offers
+    /// per-note lanes, which a processor that ignores those events would
+    /// not honour.
+    pub per_note: bool,
 }
 
 impl Default for ParamFlags {
@@ -23,6 +33,7 @@ impl Default for ParamFlags {
             automatable: true,
             hidden: false,
             bypass: false,
+            per_note: false,
         }
     }
 }
@@ -327,6 +338,14 @@ macro_rules! common_builders {
         #[must_use]
         pub fn hidden(mut self) -> Self {
             self.info.flags.hidden = true;
+            self
+        }
+
+        /// Lets hosts automate and modulate the parameter for each note on
+        /// its own. See [`ParamFlags::per_note`].
+        #[must_use]
+        pub fn per_note(mut self) -> Self {
+            self.info.flags.per_note = true;
             self
         }
     };

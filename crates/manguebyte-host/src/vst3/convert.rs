@@ -203,7 +203,8 @@ pub(crate) fn outgoing(kind: &EventKind, map: Option<&MidiMap>) -> Outgoing {
                 }
             }
         }
-        EventKind::ParamModulation { .. } => Outgoing::Nothing,
+        // VST 3 has no per-note parameter values or modulation.
+        EventKind::NoteParamValue { .. } | EventKind::ParamModulation { .. } => Outgoing::Nothing,
         EventKind::Midi(message) => match message {
             // Note messages carried as MIDI are notes all the same.
             MidiMessage::NoteOn { .. } | MidiMessage::NoteOff { .. } => {

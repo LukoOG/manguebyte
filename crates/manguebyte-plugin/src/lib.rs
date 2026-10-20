@@ -157,6 +157,128 @@ impl AudioLayout {
         outputs: 2,
         sidechain: 0,
     };
+    /// No input, mono out.
+    pub const MONO_INSTRUMENT: Self = Self {
+        inputs: 0,
+        outputs: 1,
+        sidechain: 0,
+    };
+
+    /// The same layout with a sidechain of `channels` channels, or none for
+    /// zero.
+    ///
+    /// ```
+    /// use manguebyte_plugin::AudioLayout;
+    ///
+    /// let ducker = AudioLayout::STEREO_EFFECT.with_sidechain(2);
+    /// assert_eq!((ducker.inputs, ducker.outputs, ducker.sidechain), (2, 2, 2));
+    /// ```
+    #[must_use]
+    pub const fn with_sidechain(self, channels: usize) -> Self {
+        Self {
+            sidechain: channels,
+            ..self
+        }
+    }
+
+    /// Whether this layout has the buses of `base`, with any channel
+    /// counts: a main input if and only if `base` has one, a main output
+    /// if and only if `base` has one, and a sidechain only if `base` has
+    /// one. These are the layouts a wrapper can offer in place of
+    /// [`Plugin::LAYOUT`], since the formats fix how many buses a plugin
+    /// has and let a host change only their widths, or switch a sidechain
+    /// off.
+    ///
+    /// ```
+    /// use manguebyte_plugin::AudioLayout;
+    ///
+    /// let base = AudioLayout::STEREO_EFFECT.with_sidechain(2);
+    /// assert!(AudioLayout::MONO_EFFECT.fits(&base));
+    /// assert!(AudioLayout::MONO_EFFECT.with_sidechain(1).fits(&base));
+    /// // An instrument has no main input; a stereo effect has no sidechain.
+    /// assert!(!AudioLayout::STEREO_INSTRUMENT.fits(&base));
+    /// assert!(!base.fits(&AudioLayout::STEREO_EFFECT));
+    /// ```
+    pub const fn fits(&self, base: &Self) -> bool {
+        (self.inputs > 0) == (base.inputs > 0)
+            && (self.outputs > 0) == (base.outputs > 0)
+            && (self.sidechain == 0 || base.sidechain > 0)
+    }
+}
+
+/// The layouts a wrapper offers a host for `P`: [`Plugin::LAYOUT`] first,
+/// then each other entry of [`Plugin::LAYOUTS`] that
+/// [`fits`](AudioLayout::fits) it, once each, in their order. Allocates.
+///
+/// ```
+/// use std::sync::Arc;
+/// use manguebyte_core::AudioBuffer;
+/// use manguebyte_dsp::{ProcessContext, ProcessSpec};
+/// use manguebyte_params::param_set;
+/// use manguebyte_plugin::{AudioLayout, Plugin, PluginInfo, PluginKind, offered_layouts};
+///
+/// struct NoParams {}
+/// param_set!(NoParams {});
+/// struct Thru(Arc<NoParams>);
+///
+/// impl Plugin for Thru {
+///     const INFO: PluginInfo = PluginInfo {
+///         id: "org.example.thru",
+///         name: "Thru",
+///         vendor: "Example",
+///         version: "1.0.0",
+///         description: "Passes audio through",
+///         kind: PluginKind::Effect,
+///     };
+///     const LAYOUT: AudioLayout = AudioLayout::STEREO_EFFECT;
+///     const LAYOUTS: &'static [AudioLayout] = &[
+///         AudioLayout::STEREO_EFFECT,
+///         AudioLayout::MONO_EFFECT,
+///         // Not offered: an effect without a main input.
+///         AudioLayout::STEREO_INSTRUMENT,
+///     ];
+///     type Params = NoParams;
+///     fn new() -> Self { Self(Arc::new(NoParams {})) }
+///     fn params(&self) -> Arc<NoParams> { Arc::clone(&self.0) }
+///     fn prepare(&mut self, _: &ProcessSpec) {}
+///     fn process(&mut self, _: &mut AudioBuffer<f32>, _: &ProcessContext<'_, f32>) {}
+/// }
+///
+/// assert_eq!(offered_layouts::<Thru>(), [AudioLayout::STEREO_EFFECT, AudioLayout::MONO_EFFECT]);
+/// ```
+pub fn offered_layouts<P: Plugin>() -> Vec<AudioLayout> {
+    let mut offered = vec![P::LAYOUT];
+    for layout in P::LAYOUTS {
+        if layout.fits(&P::LAYOUT) && !offered.contains(layout) {
+            offered.push(*layout);
+        }
+    }
+    offered
+}
+
+/// How many voices a polyphonic plugin plays, for a host that shows it or
+/// plans per-note modulation around it (CLAP's `voice-info`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct VoiceInfo {
+    /// How many notes sound at once at most, as the plugin is set now.
+    pub voices: u32,
+    /// The most it could be set to.
+    pub capacity: u32,
+    /// Whether two notes on the same key and channel can sound at once,
+    /// told apart by their note identifiers, so that a host can address
+    /// each on its own.
+    pub overlapping_notes: bool,
+}
+
+/// A name for a key, such as a drum's in a kit (CLAP's `note-name`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NoteName {
+    /// The name shown in the host's piano roll.
+    pub name: &'static str,
+    /// The key, `0..=127`.
+    pub key: u8,
+    /// The channel, `0..=15`, or `None` for every channel.
+    pub channel: Option<u8>,
 }
 
 /// An audio plugin, independent of any plugin format.
@@ -181,8 +303,61 @@ impl AudioLayout {
 pub trait Plugin: Send + 'static {
     /// The fixed facts about the plugin.
     const INFO: PluginInfo;
-    /// How many channels it reads and writes.
+    /// How many channels it reads and writes, unless the host chooses
+    /// another of [`LAYOUTS`](Self::LAYOUTS).
     const LAYOUT: AudioLayout;
+    /// Every layout the plugin can run with. Just [`LAYOUT`](Self::LAYOUT)
+    /// unless overridden.
+    ///
+    /// The formats fix which buses a plugin has, so a wrapper offers only
+    /// the entries that have the buses of `LAYOUT` (see
+    /// [`AudioLayout::fits`] and [`offered_layouts`]): a host can make a
+    /// bus wider or narrower, as a VST 3 host does through
+    /// `setBusArrangements`, a CLAP host through `audio-ports-config` and an
+    /// Audio Unit host through the elements' stream formats, and it can
+    /// switch a sidechain off (VST 3's `activateBus`, CLAP's
+    /// `audio-ports-activation`), which picks the same layout without the
+    /// sidechain if it is listed. Whatever is chosen reaches
+    /// [`set_layout`](Self::set_layout) before [`prepare`](Self::prepare).
+    /// LV2 describes its ports in the bundle and always runs `LAYOUT`.
+    ///
+    /// ```
+    /// use manguebyte_plugin::{AudioLayout, Plugin};
+    /// # use std::sync::Arc;
+    /// # use manguebyte_core::AudioBuffer;
+    /// # use manguebyte_dsp::{ProcessContext, ProcessSpec};
+    /// # use manguebyte_params::param_set;
+    /// # use manguebyte_plugin::{PluginInfo, PluginKind};
+    /// # struct NoParams {}
+    /// # param_set!(NoParams {});
+    /// /// A compressor that runs in mono or stereo, keyed by a sidechain
+    /// /// or by its own input.
+    /// struct Compressor { channels: usize, keyed: bool, params: Arc<NoParams> }
+    ///
+    /// impl Plugin for Compressor {
+    /// #   const INFO: PluginInfo = PluginInfo {
+    /// #       id: "org.example.compressor", name: "Compressor", vendor: "Example",
+    /// #       version: "1.0.0", description: "", kind: PluginKind::Effect,
+    /// #   };
+    ///     const LAYOUT: AudioLayout = AudioLayout::STEREO_EFFECT.with_sidechain(2);
+    ///     const LAYOUTS: &'static [AudioLayout] = &[
+    ///         AudioLayout::STEREO_EFFECT.with_sidechain(2),
+    ///         AudioLayout::STEREO_EFFECT,
+    ///         AudioLayout::MONO_EFFECT.with_sidechain(1),
+    ///         AudioLayout::MONO_EFFECT,
+    ///     ];
+    ///     # type Params = NoParams;
+    ///     # fn new() -> Self { Self { channels: 2, keyed: true, params: Arc::new(NoParams {}) } }
+    ///     # fn params(&self) -> Arc<NoParams> { Arc::clone(&self.params) }
+    ///     fn set_layout(&mut self, layout: AudioLayout) {
+    ///         self.channels = layout.outputs;
+    ///         self.keyed = layout.sidechain > 0;
+    ///     }
+    ///     fn prepare(&mut self, _: &ProcessSpec) {}
+    ///     fn process(&mut self, _: &mut AudioBuffer<f32>, _: &ProcessContext<'_, f32>) {}
+    /// }
+    /// ```
+    const LAYOUTS: &'static [AudioLayout] = &[Self::LAYOUT];
     /// Its parameters.
     type Params: ParamSet + 'static;
 
@@ -194,16 +369,29 @@ pub trait Plugin: Send + 'static {
     /// The plugin's parameters, shared with whoever else needs them.
     fn params(&self) -> Arc<Self::Params>;
 
+    /// The layout the plugin is to run with, one of
+    /// [`LAYOUTS`](Self::LAYOUTS). Called while audio is stopped, right
+    /// before every [`prepare`](Self::prepare), so `prepare` always knows
+    /// it; with [`LAYOUT`](Self::LAYOUT) unless the host chose another.
+    /// Does nothing unless overridden, which a plugin with one layout never
+    /// needs to.
+    fn set_layout(&mut self, layout: AudioLayout) {
+        let _ = layout;
+    }
+
     /// Gets ready to process under `spec`. Called before the first block and
-    /// again whenever the sample rate or block size changes.
+    /// again whenever the sample rate, the block size or the layout
+    /// changes. `spec.num_channels` is the layout's outputs.
     fn prepare(&mut self, spec: &ProcessSpec);
 
     /// Processes one block in place.
     ///
-    /// `buffer` has [`LAYOUT.outputs`](AudioLayout::outputs) channels. The
-    /// first [`LAYOUT.inputs`](AudioLayout::inputs) of them hold the input;
-    /// any others are silent. `context` carries the events of the block with
-    /// the frame each falls on, the transport, and the sidechain if there is
+    /// `buffer` has as many channels as the layout last given to
+    /// [`set_layout`](Self::set_layout) has
+    /// [outputs](AudioLayout::outputs). The first
+    /// [inputs](AudioLayout::inputs) of them hold the input; any others
+    /// are silent. `context` carries the events of the block with the frame
+    /// each falls on, the transport, and the sidechain if the layout has
     /// one.
     ///
     /// A plugin can learn about parameter changes in either of two ways,
@@ -432,6 +620,62 @@ pub trait Plugin: Send + 'static {
     fn latency_samples(&self) -> usize {
         0
     }
+
+    /// How many voices the plugin plays, for an instrument that says so.
+    /// `None` unless overridden. Read when the plugin is activated, after
+    /// [`prepare`](Self::prepare), as the latency is, and offered to CLAP
+    /// hosts as `voice-info`.
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use manguebyte_core::AudioBuffer;
+    /// # use manguebyte_dsp::{ProcessContext, ProcessSpec, Synth, Voice};
+    /// # use manguebyte_dsp::event::NoteRef;
+    /// # use manguebyte_params::param_set;
+    /// # use manguebyte_plugin::{AudioLayout, Plugin, PluginInfo, PluginKind, VoiceInfo};
+    /// # #[derive(Default)] struct Beep;
+    /// # impl Voice for Beep {
+    /// #     fn prepare(&mut self, _: &ProcessSpec) {}
+    /// #     fn note_on(&mut self, _: NoteRef, _: f32) {}
+    /// #     fn note_off(&mut self, _: f32) {}
+    /// #     fn choke(&mut self) {}
+    /// #     fn is_active(&self) -> bool { false }
+    /// #     fn render(&mut self, _: &mut AudioBuffer) {}
+    /// # }
+    /// # struct NoParams {}
+    /// # param_set!(NoParams {});
+    /// struct Organ { synth: Synth<Beep>, params: Arc<NoParams> }
+    ///
+    /// impl Plugin for Organ {
+    /// #   const INFO: PluginInfo = PluginInfo {
+    /// #       id: "org.example.organ", name: "Organ", vendor: "Example",
+    /// #       version: "1.0.0", description: "", kind: PluginKind::Instrument,
+    /// #   };
+    /// #   const LAYOUT: AudioLayout = AudioLayout::STEREO_INSTRUMENT;
+    /// #   type Params = NoParams;
+    /// #   fn new() -> Self { Self { synth: Synth::with_voices(16, Beep::default), params: Arc::new(NoParams {}) } }
+    /// #   fn params(&self) -> Arc<NoParams> { Arc::clone(&self.params) }
+    /// #   fn prepare(&mut self, _: &ProcessSpec) {}
+    /// #   fn process(&mut self, _: &mut AudioBuffer<f32>, _: &ProcessContext<'_, f32>) {}
+    ///     // ...
+    ///     fn voice_info(&self) -> Option<VoiceInfo> {
+    ///         Some(VoiceInfo {
+    ///             voices: self.synth.voice_limit() as u32,
+    ///             capacity: self.synth.polyphony() as u32,
+    ///             overlapping_notes: true,
+    ///         })
+    ///     }
+    /// }
+    /// # assert_eq!(Organ::new().voice_info().unwrap().capacity, 16);
+    /// ```
+    fn voice_info(&self) -> Option<VoiceInfo> {
+        None
+    }
+
+    /// Names for keys, such as the drums of a kit, which a host shows in
+    /// its piano roll. None unless overridden. Offered to CLAP hosts as
+    /// `note-name`.
+    const NOTE_NAMES: &'static [NoteName] = &[];
 
     /// How to open the plugin's editor, if it has one. `None` unless
     /// overridden, so a plugin without an editor writes nothing.

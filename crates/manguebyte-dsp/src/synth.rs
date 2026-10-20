@@ -92,7 +92,9 @@ pub trait Voice<S: Sample = f32> {
     }
 
     /// A parameter took a new value, in the parameter's own unit. Sent to
-    /// every voice, sounding or not.
+    /// every voice, sounding or not; and, for a value given to one note
+    /// alone ([`EventKind::NoteParamValue`]), to the voice playing that
+    /// note.
     fn set_param(&mut self, param: ParamId, value: f64) {
         let _ = (param, value);
     }
@@ -159,7 +161,9 @@ struct Slot<V> {
 /// - **Per-note expression and modulation** reach only the voice playing
 ///   that note, so one note of a chord can be bent, swelled or filtered on
 ///   its own.
-/// - **Parameter changes** reach every voice.
+/// - **Parameter changes** reach every voice, and a value given to one
+///   note alone ([`EventKind::NoteParamValue`]) only the voice playing it,
+///   until the next change of the parameter for every note.
 /// - **The sustain pedal** (controller 64) keeps released notes sounding
 ///   until it is lifted, per channel.
 /// - **Pitch bend** is converted to semitones using
@@ -456,6 +460,11 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
             }
             EventKind::ParamValue { param, value } => {
                 for slot in &mut self.slots {
+                    slot.voice.set_param(param, value);
+                }
+            }
+            EventKind::NoteParamValue { param, value, note } => {
+                for slot in self.sounding(move |slot| note.matches(&slot.note)) {
                     slot.voice.set_param(param, value);
                 }
             }
@@ -995,6 +1004,40 @@ mod tests {
         assert_eq!((voices[1].tuning, voices[1].modulation), (0.0, 0.0));
         // The parameter reaches every voice, including the idle one.
         assert!(voices.iter().all(|voice| voice.cutoff == 1_000.0));
+    }
+
+    #[test]
+    fn a_value_for_one_note_reaches_its_voice_until_the_parameter_moves() {
+        let mut synth = synth(3);
+        let low = NoteRef::new(0, 10);
+        run(
+            &mut synth,
+            3,
+            &[
+                (0, on(10)),
+                (0, on(20)),
+                (
+                    1,
+                    EventKind::NoteParamValue {
+                        param: CUTOFF,
+                        value: 250.0,
+                        note: low,
+                    },
+                ),
+            ],
+        );
+        {
+            let voices: Vec<&mut Probe> = synth.voices_mut().collect();
+            assert_eq!(voices[0].cutoff, 250.0);
+            // Neither the other note nor the idle voice.
+            assert_eq!((voices[1].cutoff, voices[2].cutoff), (0.0, 0.0));
+        }
+        let all = EventKind::ParamValue {
+            param: CUTOFF,
+            value: 900.0,
+        };
+        run(&mut synth, 1, &[(0, all)]);
+        assert!(synth.voices_mut().all(|voice| voice.cutoff == 900.0));
     }
 
     #[test]

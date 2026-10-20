@@ -340,6 +340,28 @@ pub(crate) fn to_clap(
                 value: slot.hold(value),
             }))
         }
+        EventKind::NoteParamValue {
+            param,
+            value,
+            note: which,
+        } => {
+            // Per-note automation: the same event, addressed to the note.
+            let slot = find_param(params, param.0)?;
+            if value.is_nan() {
+                return None;
+            }
+            let (note_id, channel, key) = address(which);
+            Some(InEvent::Value(clap_event_param_value {
+                header: header::<clap_event_param_value>(time, CLAP_EVENT_PARAM_VALUE),
+                param_id: slot.id,
+                cookie: slot.cookie,
+                note_id,
+                port_index: 0,
+                channel,
+                key,
+                value: slot.hold(value),
+            }))
+        }
         EventKind::ParamModulation {
             param,
             amount,
