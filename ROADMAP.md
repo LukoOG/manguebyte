@@ -55,9 +55,16 @@ Everything a standalone audio application needs, short of a user interface.
 - ✅ MIDI input and output ports, with jitter-free timing into the audio
   thread, and packets sent from the audio thread when their frame is heard
   (`midi_output_queue`, `MidiOutput`)
-- ⬜ MIDI output through the systems' own Universal MIDI Packet APIs: every
-  port speaks MIDI 1.0 bytes for now, MIDI 2.0 going out by the default
-  translation
+- 🚧 MIDI output through the systems' own Universal MIDI Packet APIs
+  (`MidiOutput::open_with_protocol`): MIDI 2.0 packets leave unchanged
+  through CoreMIDI's `MIDISendEventList` on macOS and iOS and the ALSA
+  sequencer's UMP events on Linux, to ports that speak MIDI 2.0, with
+  MIDI 1.0 bytes and the default translation everywhere else. Checked
+  in CI by a loopback to the test's own endpoints (macOS, and Linux
+  where the runner has the sequencer), not yet with a MIDI 2.0 device.
+  Windows still sends MIDI 1.0 through WinMM: Windows MIDI
+  Services' API is not reachable from the `windows` crate (TECH_DEBT
+  90)
 
 **MIDI**
 - ✅ System common, system real-time and SysEx messages

@@ -346,6 +346,56 @@ break the API.
   worked out from the frame instead of added up block by block, which can
   differ in the last bits, and it gives the three new fields.
 
+### Devices
+
+- MIDI 2.0 through the systems' own Universal MIDI Packet output (issue
+  #1). Every change is additive, and MIDI 1.0 stays the default.
+  - `MidiProtocol::Midi2`, and `MidiOutput::open_with_protocol(id,
+    MidiProtocol::Midi2)`, which opens a port through the system's UMP
+    output when the system has one and the port speaks MIDI 2.0, and
+    sends every packet unchanged: a MIDI 2.0 note with its 16-bit
+    velocity, its attribute and its per-note controllers reaches the
+    port as it left the plugin. Anywhere else the port is opened as
+    `MidiOutput::open` opens it, with MIDI 1.0 bytes and the default
+    translation, and `MidiOutput::fallback` says why
+    (`ProtocolFallback`: not asked for, the port speaks MIDI 1.0, the
+    system cannot, or the UMP connection failed).
+  - `midi_output_ports_with_protocols` lists every output port with the
+    protocol it would speak and why; `ump_output_backend` names the
+    system's UMP output or says why there is none.
+  - **macOS and iOS:** CoreMIDI's `MIDISendEventList` with event lists in
+    `kMIDIProtocol_2_0`, to destinations whose `kMIDIPropertyProtocolID`
+    is MIDI 2.0 (macOS 11, iOS 14).
+  - **Linux:** the ALSA sequencer's UMP events, from a client in the MIDI
+    2.0 protocol to a port of a MIDI 2.0 client (alsa-lib 1.2.10, Linux
+    6.5).
+  - **Windows:** MIDI 1.0 through WinMM, as before. Windows MIDI
+    Services' API is a WinRT component the `windows` crate does not
+    project (see TECH_DEBT 90); `ump_output_backend` says whether its
+    service and its App SDK runtime are installed.
+  - Both libraries are opened at run time, so a program built with this
+    runs on an older system and speaks MIDI 1.0 there, saying what is
+    missing.
+  - The output thread (`MidiOutput::spawn`) hands a MIDI 2.0 port its
+    packets unchanged, and the packets due at one wake-up go to the
+    system in one call; the audio thread's side, `midi_output_queue`,
+    is unchanged and still does not allocate (`tests/realtime.rs`). On a
+    MIDI 2.0 port, `send`, `send_system` and `send_raw` send packets on
+    group 0: MIDI-CI replies go out as 7-bit system exclusive packets.
+  - `manguebyte-ump-io`, a new crate for the foreign calls, which the
+    device crate, which forbids `unsafe`, cannot make: CoreMIDI's
+    `MIDIEventList` and the sequencer's `snd_seq_ump_event_t` laid out in
+    Rust and tested on every system, and the calls themselves, looked up
+    with `dlopen` and `dlsym`. Its only dependency is `libc`, already in
+    the tree.
+  - The example `midi2_output` lists the output ports with their protocol
+    and, only with `--send <port id>`, sends one a short, quiet note. CI
+    sends a MIDI 2.0 note with a per-note controller to a UMP endpoint of
+    its own on macOS (a CoreMIDI virtual destination) and, where the
+    runner has the sequencer, on Linux, and checks that every word
+    arrives.
+  - Limits: TECH_DEBT 82 and 90.
+
 ## [0.1.0] - 2026-10-19
 
 The first release on crates.io: 25 crates, `manguebyte-pro-io` under the
