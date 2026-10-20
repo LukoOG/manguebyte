@@ -310,3 +310,176 @@ fn a_virtual_port_is_seen_by_other_programs() {
     receiver.read(256, 48_000.0, |_, _| received += 1);
     assert_eq!(received, 1);
 }
+
+#[cfg(feature = "midi")]
+#[test]
+#[ignore = "needs the system MIDI service"]
+fn lists_output_ports_with_the_protocol_each_would_speak() {
+    use manguebyte_devices::midi::{
+        MidiOutput, MidiProtocol, ProtocolFallback, midi_output_ports_with_protocols,
+        ump_output_backend,
+    };
+
+    match ump_output_backend() {
+        Ok(backend) => println!("UMP output: {backend}"),
+        Err(why) => println!("UMP output: none ({why})"),
+    }
+    let ports = midi_output_ports_with_protocols().unwrap();
+    for info in &ports {
+        println!("{:?} {:?} {:?}", info.protocol, info.port, info.fallback);
+        assert_eq!(
+            info.protocol == MidiProtocol::Midi2,
+            info.fallback.is_none()
+        );
+    }
+    // Opening is enough to see the protocol chosen; nothing is sent, so no
+    // synthesiser makes a sound.
+    if let Some(info) = ports.first() {
+        let output = MidiOutput::open_with_protocol(&info.port.id, MidiProtocol::Midi2).unwrap();
+        assert_eq!(output.protocol(), info.protocol);
+        drop(output);
+        let default = MidiOutput::open(&info.port.id).unwrap();
+        assert_eq!(default.protocol(), MidiProtocol::Midi1);
+        assert_eq!(default.fallback(), Some(&ProtocolFallback::NotRequested));
+    }
+}
+
+/// A MIDI 2.0 note with what MIDI 1.0 cannot carry (a 16-bit velocity, a
+/// pitch attribute, registered per-note controller 74), its note-off, and
+/// a system exclusive message long enough for three packets.
+#[cfg(all(feature = "midi", any(target_os = "macos", target_os = "linux")))]
+fn midi2_packets() -> Vec<manguebyte_midi::ump::Packet> {
+    use manguebyte_midi::ump::{ChannelVoice2, Message, NoteAttribute, sysex7_packets};
+
+    let packet = |message| Message::Midi2 { group: 2, message }.to_packet();
+    let mut packets = vec![
+        packet(ChannelVoice2::NoteOn {
+            channel: 9,
+            note: 60,
+            velocity: 0x1234,
+            attribute: NoteAttribute::pitch(60.25),
+        }),
+        packet(ChannelVoice2::RegisteredPerNoteController {
+            channel: 9,
+            note: 60,
+            controller: 74,
+            value: 0x8765_4321,
+        }),
+        packet(ChannelVoice2::NoteOff {
+            channel: 9,
+            note: 60,
+            velocity: 0x0100,
+            attribute: NoteAttribute::NONE,
+        }),
+    ];
+    packets.extend(sysex7_packets(2, &[0x7D; 15]).unwrap());
+    packets
+}
+
+/// Sends `packets` to the port `id`, opened preferring MIDI 2.0, through
+/// the queue and the thread the audio thread uses, and checks that it
+/// speaks MIDI 2.0.
+#[cfg(all(feature = "midi", any(target_os = "macos", target_os = "linux")))]
+fn send_through_the_output_thread(id: &str, packets: &[manguebyte_midi::ump::Packet]) {
+    use manguebyte_devices::midi::{MidiOutput, MidiProtocol, midi_output_queue};
+
+    let output = MidiOutput::open_with_protocol(id, MidiProtocol::Midi2).unwrap();
+    assert_eq!(
+        (output.protocol(), output.fallback()),
+        (MidiProtocol::Midi2, None),
+        "the loopback endpoint should be opened for MIDI 2.0"
+    );
+    let (mut transmitter, queue) = midi_output_queue(64);
+    let thread = output.spawn(queue);
+    transmitter.begin_block(48, 48_000.0);
+    for (offset, packet) in packets.iter().enumerate() {
+        assert!(transmitter.send(offset as u32, *packet));
+    }
+    sleep(Duration::from_millis(100));
+    assert_eq!(thread.errors(), 0);
+    drop(thread);
+}
+
+/// The packets a UMP endpoint receives are the ones sent, word for word:
+/// CoreMIDI's event lists reach a virtual destination of this process in
+/// the MIDI 2.0 protocol. Nothing is sent to any other program or device.
+#[cfg(all(feature = "midi", target_os = "macos"))]
+#[test]
+#[ignore = "needs the system MIDI service"]
+fn midi_2_0_reaches_a_coremidi_ump_endpoint_unchanged() {
+    use std::sync::Mutex;
+
+    use coremidi::{Client, EventList, Properties, Protocol};
+
+    let received = Arc::new(Mutex::new(Vec::<u32>::new()));
+    let protocols = Arc::new(Mutex::new(Vec::new()));
+    let client = Client::new("Manguebyte UMP loopback").unwrap();
+    let destination = {
+        let (received, protocols) = (Arc::clone(&received), Arc::clone(&protocols));
+        client
+            .virtual_destination_with_protocol(
+                "Manguebyte UMP loopback",
+                Protocol::Midi20,
+                move |list: &EventList| {
+                    protocols.lock().unwrap().push(list.protocol());
+                    for packet in list.iter() {
+                        received.lock().unwrap().extend_from_slice(packet.data());
+                    }
+                },
+            )
+            .unwrap()
+    };
+    let protocol: Result<i32, _> = destination.get_property(&Properties::protocol_id());
+    println!("the virtual destination's kMIDIPropertyProtocolID: {protocol:?}");
+    if protocol != Ok(2) {
+        // Say what the destination speaks, as a driver says it of its own.
+        destination
+            .set_property(&Properties::protocol_id(), 2_i32)
+            .unwrap();
+    }
+    let id = destination.unique_id().unwrap().to_string();
+    sleep(Duration::from_millis(200));
+
+    let packets = midi2_packets();
+    send_through_the_output_thread(&id, &packets);
+    sleep(Duration::from_millis(200));
+
+    let expected: Vec<u32> = packets.iter().flat_map(|p| p.words().to_vec()).collect();
+    assert_eq!(*received.lock().unwrap(), expected);
+    assert!(
+        protocols
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|protocol| *protocol == Protocol::Midi20)
+    );
+}
+
+/// The packets a UMP endpoint receives are the ones sent, word for word:
+/// the ALSA sequencer carries them from this process's MIDI 2.0 client to
+/// another MIDI 2.0 client of this process. Nothing is sent to any other
+/// program or device. Needs alsa-lib 1.2.10, Linux 6.5 and the sequencer
+/// (`/dev/snd/seq`).
+#[cfg(all(feature = "midi", target_os = "linux"))]
+#[test]
+#[ignore = "needs the ALSA sequencer with UMP (Linux 6.5, alsa-lib 1.2.10)"]
+fn midi_2_0_reaches_an_alsa_ump_endpoint_unchanged() {
+    use manguebyte_ump_io::alsa::Input;
+
+    let mut input = Input::open("Manguebyte UMP loopback", "in").unwrap();
+    let (client, port) = input.address();
+    let packets = midi2_packets();
+    send_through_the_output_thread(&format!("{client}:{port}"), &packets);
+
+    let expected: Vec<u32> = packets.iter().flat_map(|p| p.words().to_vec()).collect();
+    let mut received = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while received.len() < expected.len() && std::time::Instant::now() < deadline {
+        match input.read().unwrap() {
+            Some(event) if event.is_ump() => received.extend_from_slice(event.words()),
+            Some(_) => {}
+            None => sleep(Duration::from_millis(1)),
+        }
+    }
+    assert_eq!(received, expected);
+}

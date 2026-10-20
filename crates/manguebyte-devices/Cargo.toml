@@ -14,7 +14,7 @@ homepage.workspace = true
 [features]
 default = ["midi"]
 ## MIDI input and output ports.
-midi = ["dep:midir", "dep:manguebyte-midi"]
+midi = ["dep:midir", "dep:manguebyte-midi", "dep:manguebyte-ump-io"]
 ## The JACK audio host (`cpal`'s `jack` feature), listed by `audio_hosts`
 ## while a JACK server runs. The JACK library is loaded at run time, but on
 ## Linux `jack-sys` looks for it with pkg-config while building, so the
@@ -31,6 +31,21 @@ manguebyte-midi = { workspace = true, optional = true }
 manguebyte-dsp.workspace = true
 cpal = "0.18"
 midir = { version = "0.11", optional = true }
+# The systems' own Universal MIDI Packet output (CoreMIDI's event lists,
+# the ALSA sequencer's UMP events), whose foreign calls cannot live in
+# this crate, which forbids `unsafe`. A workspace crate; it opens the
+# system libraries at run time, so it adds nothing to link.
+manguebyte-ump-io = { workspace = true, optional = true }
+
+# The UMP loopback test receives through a virtual destination of its own
+# in the MIDI 2.0 protocol. `coremidi` (MIT) is already in the tree, through
+# `midir`.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+coremidi = "0.9"
+
+[[example]]
+name = "midi2_output"
+required-features = ["midi"]
 
 [lints]
 workspace = true

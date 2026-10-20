@@ -10,7 +10,10 @@ use manguebyte_core::spsc::{self, Consumer, Producer};
 use manguebyte_midi::translate::midi2_to_midi1;
 use manguebyte_midi::ump::{Assembler, Message, Packet};
 
-use super::{MidiError, MidiOutput};
+use super::ump::ProtocolFallback;
+use super::{Connection, MidiError, MidiOutput};
+#[cfg(doc)]
+use super::{midi_output_ports_with_protocols, ump_output_backend};
 use crate::backend::MidiSender;
 
 /// The largest system exclusive message a [`PacketWriter`] puts together
@@ -24,21 +27,46 @@ const POLL: Duration = Duration::from_millis(1);
 
 /// The protocol an output port speaks.
 ///
-/// Every port this crate opens today speaks MIDI 1.0: `midir`, through
-/// which the ports are reached, sends MIDI 1.0 bytes on every system
-/// (WinMM on Windows, CoreMIDI's MIDI 1.0 calls on macOS and iOS, the ALSA
-/// sequencer's MIDI 1.0 events on Linux). The systems' own Universal MIDI
-/// Packet APIs (Windows MIDI Services, CoreMIDI's `MIDISendEventList`, the
-/// ALSA sequencer's UMP events) are not used yet, so packets are written
-/// out as MIDI 1.0 by the specification's default translation.
+/// A port speaks MIDI 1.0 unless an application asks for MIDI 2.0
+/// ([`MidiOutput::open_with_protocol`]) and both the system and the port
+/// speak it:
+///
+/// - **MIDI 1.0** goes through `midir`, as bytes: WinMM on Windows,
+///   CoreMIDI's MIDI 1.0 calls on macOS and iOS, the ALSA sequencer's MIDI
+///   1.0 events on Linux. Packets are written out by the specification's
+///   default translation ([`PacketWriter`]).
+/// - **MIDI 2.0** goes through the system's own Universal MIDI Packet
+///   output, and every packet leaves as it is, without translation:
+///   CoreMIDI's `MIDISendEventList` in `kMIDIProtocol_2_0` (macOS 11, iOS
+///   14), the ALSA sequencer's UMP events from a MIDI 2.0 client (alsa-lib
+///   1.2.10, Linux 6.5). Windows has none that this crate can reach
+///   ([`ump_output_backend`] says why).
+///
+/// [`MidiOutput::protocol`] says which one an open port speaks, and
+/// [`MidiOutput::fallback`] why it is MIDI 1.0; [`midi_output_ports_with_protocols`]
+/// says it for every port before any is opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum MidiProtocol {
     /// MIDI 1.0 bytes.
     Midi1,
+    /// Universal MIDI Packets in the MIDI 2.0 protocol, sent unchanged
+    /// through the system's own UMP output.
+    ///
+    /// Packets of every message type go out as they are: MIDI 2.0 channel
+    /// voice with its per-note controllers and attributes, system
+    /// messages, system exclusive, and MIDI 1.0 channel voice packets
+    /// (message type 2) too. A receiver in the MIDI 2.0 protocol expects
+    /// message type 4 for channel voice; turn MIDI 1.0 into it first with
+    /// [`UmpTranslator::to_midi2`](manguebyte_midi::translate::UmpTranslator::to_midi2)
+    /// where that matters.
+    Midi2,
 }
 
 /// Writes Universal MIDI Packets as the MIDI 1.0 bytes a port takes.
+///
+/// Used for ports that speak [`MidiProtocol::Midi1`]; a port that speaks
+/// [`MidiProtocol::Midi2`] takes the packets as they are.
 ///
 /// - MIDI 1.0 channel voice packets (message type 2) and system common and
 ///   real-time packets (type 1) become their bytes.
@@ -108,15 +136,23 @@ impl Default for PacketWriter {
 }
 
 impl MidiOutput {
-    /// The protocol the port speaks: MIDI 1.0, for every port today. See
-    /// [`MidiProtocol`].
+    /// The protocol the port speaks. See [`MidiProtocol`].
     pub fn protocol(&self) -> MidiProtocol {
-        MidiProtocol::Midi1
+        match self.connection {
+            Connection::Bytes(_) => MidiProtocol::Midi1,
+            Connection::Ump { .. } => MidiProtocol::Midi2,
+        }
     }
 
-    /// Sends a packet as the MIDI 1.0 bytes it stands for, through
+    /// Why the port speaks MIDI 1.0, or `None` if it speaks MIDI 2.0.
+    pub fn fallback(&self) -> Option<&ProtocolFallback> {
+        self.fallback.as_ref()
+    }
+
+    /// Sends a packet. A port that speaks MIDI 2.0 is sent it unchanged; a
+    /// port that speaks MIDI 1.0 is sent the bytes it stands for, through
     /// `writer`, which keeps what a system exclusive message needs between
-    /// packets. See [`PacketWriter`] for what becomes what.
+    /// packets (see [`PacketWriter`] for what becomes what).
     ///
     /// This talks to the operating system and may block: never call it
     /// from the audio thread. There, use [`midi_output_queue`] and
@@ -126,6 +162,10 @@ impl MidiOutput {
         writer: &mut PacketWriter,
         packet: &Packet,
     ) -> Result<(), MidiError> {
+        if let Connection::Ump { port, .. } = &mut self.connection {
+            port.send(packet.words())?;
+            return port.flush();
+        }
         let mut result = Ok(());
         writer.write(packet, |bytes| {
             if result.is_ok() {
@@ -301,8 +341,72 @@ impl MidiOutputQueue {
     }
 }
 
+/// What the sending thread does with each due packet, by the port's
+/// protocol: unchanged to a MIDI 2.0 port, gathered until
+/// [`flush`](Self::flush) so that packets due together reach the system in
+/// one call (one CoreMIDI event list); as MIDI 1.0 bytes to the others.
+struct Sending<'a> {
+    port: &'a mut dyn MidiSender,
+    ump: bool,
+    /// Whether packets were handed to a MIDI 2.0 port since the last
+    /// flush.
+    pending: bool,
+    writer: PacketWriter,
+    errors: &'a AtomicU64,
+}
+
+impl<'a> Sending<'a> {
+    fn new(port: &'a mut dyn MidiSender, errors: &'a AtomicU64) -> Self {
+        Self {
+            ump: port.protocol() == MidiProtocol::Midi2,
+            port,
+            pending: false,
+            writer: PacketWriter::new(),
+            errors,
+        }
+    }
+
+    fn count(&self, result: Result<(), MidiError>) {
+        if result.is_err() {
+            self.errors.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn packet(&mut self, packet: &Packet) {
+        if self.ump {
+            let result = self.port.send_ump(packet.words());
+            self.count(result);
+            self.pending = true;
+            return;
+        }
+        let Self {
+            port,
+            writer,
+            errors,
+            ..
+        } = self;
+        writer.write(packet, |bytes| {
+            if port.send(bytes).is_err() {
+                errors.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+    }
+
+    fn flush(&mut self) {
+        if self.pending {
+            self.pending = false;
+            let result = self.port.flush();
+            self.count(result);
+        }
+    }
+}
+
 /// A thread that sends an output port its packets on time. Dropping it
 /// sends what is still waiting, stops the thread and closes the port.
+///
+/// A port that speaks MIDI 2.0 is handed every packet unchanged, and the
+/// packets due at one wake-up go to the system together; a port that
+/// speaks MIDI 1.0 is sent the bytes of [`PacketWriter`].
 pub struct MidiOutputThread {
     stop: Arc<AtomicBool>,
     /// Send errors, counted, since a sending thread has nobody to tell.
@@ -319,23 +423,19 @@ impl MidiOutputThread {
             std::thread::Builder::new()
                 .name(String::from("manguebyte-midi-out"))
                 .spawn(move || {
-                    let mut writer = PacketWriter::new();
-                    let mut send = |packet: &Packet| {
-                        writer.write(packet, |bytes| {
-                            if port.send(bytes).is_err() {
-                                errors.fetch_add(1, Ordering::Relaxed);
-                            }
-                        });
-                    };
+                    let mut sending = Sending::new(port.as_mut(), &errors);
                     while !stop.load(Ordering::Acquire) {
                         let now = Instant::now();
-                        let wait = match queue.send_due(now, &mut send) {
+                        let next = queue.send_due(now, |packet| sending.packet(packet));
+                        sending.flush();
+                        let wait = match next {
                             Some(due) => due.saturating_duration_since(now).min(POLL),
                             None => POLL,
                         };
                         std::thread::sleep(wait);
                     }
-                    queue.send_all(&mut send);
+                    queue.send_all(|packet| sending.packet(packet));
+                    sending.flush();
                 })
                 .ok()
         };
@@ -376,6 +476,7 @@ mod tests {
     use manguebyte_midi::MidiMessage;
     use manguebyte_midi::ump::{ChannelVoice2, NoteAttribute, Part, SysEx7, sysex7_packets};
 
+    use super::super::ump::tests::{FakePort, Sent};
     use super::*;
 
     fn written(packets: &[Packet]) -> Vec<Vec<u8>> {
@@ -524,6 +625,156 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    /// A port that speaks MIDI 2.0: what it was handed, `Some` for each
+    /// packet's words and `None` for each flush.
+    struct Ump(Sent);
+
+    impl MidiSender for Ump {
+        fn send(&mut self, _: &[u8]) -> Result<(), MidiError> {
+            panic!("a MIDI 2.0 port is not sent bytes");
+        }
+
+        fn protocol(&self) -> MidiProtocol {
+            MidiProtocol::Midi2
+        }
+
+        fn send_ump(&mut self, words: &[u32]) -> Result<(), MidiError> {
+            self.0.lock().unwrap().push(Some(words.to_vec()));
+            Ok(())
+        }
+
+        fn flush(&mut self) -> Result<(), MidiError> {
+            self.0.lock().unwrap().push(None);
+            Ok(())
+        }
+    }
+
+    /// A MIDI 2.0 note with what MIDI 1.0 cannot carry: a 16-bit velocity,
+    /// a pitch attribute and a per-note controller.
+    fn midi2_note() -> [Packet; 3] {
+        let on = ChannelVoice2::NoteOn {
+            channel: 2,
+            note: 60,
+            velocity: 0x1234,
+            attribute: NoteAttribute::pitch(60.25),
+        };
+        let brightness = ChannelVoice2::RegisteredPerNoteController {
+            channel: 2,
+            note: 60,
+            controller: 74,
+            value: 0x8765_4321,
+        };
+        let off = ChannelVoice2::NoteOff {
+            channel: 2,
+            note: 60,
+            velocity: 0,
+            attribute: NoteAttribute::NONE,
+        };
+        [on, brightness, off].map(|message| Message::Midi2 { group: 5, message }.to_packet())
+    }
+
+    #[test]
+    fn a_midi_2_0_port_gets_the_packets_unchanged_and_together() {
+        let sent = Sent::default();
+        let (mut transmitter, queue) = midi_output_queue(16);
+        let thread = MidiOutputThread::start(Box::new(Ump(Arc::clone(&sent))), queue);
+        let [on, brightness, off] = midi2_note();
+        let sysex: Vec<Packet> = sysex7_packets(5, &[0x7E; 20]).unwrap().collect();
+        transmitter.begin_block(48, 48_000.0);
+        for packet in [on, brightness].iter().chain(&sysex) {
+            assert!(transmitter.send(0, *packet));
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !sent.lock().unwrap().contains(&None) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // Due on one frame, so handed over at one wake-up, then flushed
+        // once: one CoreMIDI event list.
+        let mut expected: Vec<Option<Vec<u32>>> = [on, brightness]
+            .iter()
+            .chain(&sysex)
+            .map(|packet| Some(packet.words().to_vec()))
+            .collect();
+        expected.push(None);
+        assert_eq!(*sent.lock().unwrap(), expected);
+
+        // What is still waiting goes when the thread ends, and is flushed.
+        transmitter.begin_block(48_000 * 3_600, 48_000.0);
+        assert!(transmitter.send(0, off));
+        drop(thread);
+        expected.extend([Some(off.words().to_vec()), None]);
+        assert_eq!(*sent.lock().unwrap(), expected);
+    }
+
+    #[test]
+    fn a_port_opened_for_midi_2_0_sends_packets_and_bytes_as_packets() {
+        let sent = Sent::default();
+        let mut output = MidiOutput {
+            name: String::from("fake"),
+            connection: Connection::Ump {
+                port: Box::new(FakePort(Arc::clone(&sent))),
+                parser: manguebyte_midi::StreamParser::new(SYSEX_OUT_CAPACITY),
+            },
+            fallback: None,
+        };
+        assert_eq!(output.protocol(), MidiProtocol::Midi2);
+        assert_eq!(output.fallback(), None);
+        let mut writer = PacketWriter::new();
+        let [on, ..] = midi2_note();
+        output.send_packet(&mut writer, &on).unwrap();
+        output
+            .send(MidiMessage::NoteOn {
+                channel: 1,
+                note: 64,
+                velocity: 90,
+            })
+            .unwrap();
+        output
+            .send_system(manguebyte_midi::SystemMessage::TimingClock)
+            .unwrap();
+        output
+            .send_raw(&[0xF0, 0x7E, 0x7F, 0x09, 0x03, 0xF7])
+            .unwrap();
+        // A message cut short is not carried into the next call.
+        output.send_raw(&[0x90, 60]).unwrap();
+        output.send_raw(&[100]).unwrap();
+        let words = |packet: Packet| Some(packet.words().to_vec());
+        assert_eq!(
+            *sent.lock().unwrap(),
+            [
+                words(on),
+                None,
+                Some(vec![0x2091_405A]),
+                None,
+                Some(vec![0x10F8_0000]),
+                None,
+                // "GM 2 system on" (M2-104-UM, figure 114).
+                Some(vec![0x3004_7E7F, 0x0903_0000]),
+                None,
+                None,
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_midi_1_0_port_still_gets_the_default_translation() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let (mut transmitter, queue) = midi_output_queue(16);
+        let thread = MidiOutputThread::start(Box::new(Collect(Arc::clone(&sent))), queue);
+        transmitter.begin_block(48_000 * 3_600, 48_000.0);
+        for packet in midi2_note() {
+            assert!(transmitter.send(0, packet));
+        }
+        drop(thread);
+        // The pitch attribute, the 16-bit velocity and the per-note
+        // controller have no MIDI 1.0 form (M2-104-UM, D.2).
+        assert_eq!(
+            *sent.lock().unwrap(),
+            [vec![0x92, 60, 9], vec![0x82, 60, 0]]
+        );
     }
 
     #[test]

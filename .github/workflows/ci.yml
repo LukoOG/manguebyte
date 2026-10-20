@@ -81,6 +81,58 @@ jobs:
       - run: cargo clippy -p manguebyte-formats --features platform-codecs --all-targets
       - run: cargo test -p manguebyte-formats --features platform-codecs --lib --test platform -- --nocapture
 
+  ump-output:
+    name: UMP output (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      # Both runners' systems have the UMP calls (macOS 14 or newer, and
+      # Ubuntu 24.04's alsa-lib 1.2.11), so CoreMIDI and libasound must
+      # load and every call be found; elsewhere the tests only say what is
+      # missing.
+      MANGUEBYTE_UMP_LIBRARY_REQUIRED: "1"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # The runner's kernel may not have the sequencer's modules: the
+      # loopback runs only where /dev/snd/seq appears.
+      - name: Install ALSA headers and load the sequencer
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y libasound2-dev
+          sudo modprobe snd-seq-dummy || sudo modprobe snd-seq || true
+          if [ -e /dev/snd/seq ]; then sudo chmod a+rw /dev/snd/seq; fi
+          uname -r
+          pkg-config --modversion alsa
+          ls -l /dev/snd || true
+      # The foreign calls of CoreMIDI and the ALSA sequencer are built only
+      # on their own systems; the framework is developed on Windows, so
+      # this is where they are linted.
+      - run: cargo clippy -p manguebyte-ump-io -p manguebyte-devices --all-targets
+      # The event list and sequencer event layouts, the libraries found at
+      # run time, and on Linux a packet from one client of the test to
+      # another where the sequencer is there.
+      - run: cargo test -p manguebyte-ump-io -- --nocapture
+      # A MIDI 2.0 note with a per-note controller, sent through the output
+      # queue and thread to a UMP endpoint of the test's own (a CoreMIDI
+      # virtual destination in the MIDI 2.0 protocol, an ALSA MIDI 2.0
+      # client), must arrive word for word. Nothing reaches a device.
+      - name: Loopback through the system's UMP output
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ] && [ ! -e /dev/snd/seq ]; then
+            echo "::notice::No ALSA sequencer on this runner (/dev/snd/seq): the UMP loopback did not run."
+            exit 0
+          fi
+          cargo test -p manguebyte-devices --test hardware midi_2_0_reaches -- --ignored --nocapture
+
   features:
     name: Without default features
     runs-on: ubuntu-latest

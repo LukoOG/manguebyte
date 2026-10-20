@@ -23,8 +23,9 @@
 //!   for a device at another rate ([`hotswap`]).
 //! - [`MockBackend`] stands in for the system with no hardware, for tests.
 //! - [`midi`] opens MIDI ports, real and virtual, keeps a player's timing
-//!   on the way to the audio thread, and sends packets from it on time
-//!   (feature `midi`, on by default).
+//!   on the way to the audio thread, and sends packets from it on time,
+//!   unchanged to ports that speak MIDI 2.0 on macOS, iOS and Linux, as
+//!   MIDI 1.0 bytes to the others (feature `midi`, on by default).
 //! - [`AudioBackend`] lets a crate of its own put another driver model
 //!   behind a [`DeviceManager`] ([`DeviceManager::with_audio_backend`]).
 //!
@@ -35,7 +36,8 @@
 //!
 //! # Features
 //!
-//! - `midi` (default): MIDI ports, through `midir`.
+//! - `midi` (default): MIDI ports, through `midir`, and the systems' own
+//!   Universal MIDI Packet output, through `manguebyte-ump-io`.
 //! - `jack`: the JACK audio host. On Linux, building it needs the JACK
 //!   development files (`libjack-jackd2-dev` on Debian and Ubuntu).
 //!

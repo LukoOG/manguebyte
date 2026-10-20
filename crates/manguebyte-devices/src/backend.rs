@@ -8,7 +8,7 @@ use manguebyte_core::AudioBuffer;
 use crate::device::Direction;
 use crate::hotplug::{DeviceSnapshot, DeviceSummary};
 #[cfg(feature = "midi")]
-use crate::midi::{MidiError, MidiOutput, MidiSink};
+use crate::midi::{MidiError, MidiOutput, MidiProtocol, MidiSink};
 use crate::timing::StreamHealth;
 use crate::{
     AudioHost, CallbackInfo, DeviceError, DeviceInfo, DuplexSettings, DuplexStream, HostInfo,
@@ -66,13 +66,45 @@ pub(crate) struct Started {
 /// Sends MIDI to one output port.
 #[cfg(feature = "midi")]
 pub(crate) trait MidiSender: Send {
+    /// Sends one complete MIDI 1.0 message.
     fn send(&mut self, bytes: &[u8]) -> Result<(), MidiError>;
+
+    /// The protocol the port speaks. A port that speaks MIDI 2.0 is sent
+    /// packets through [`send_ump`](Self::send_ump) and
+    /// [`flush`](Self::flush) instead of [`send`](Self::send).
+    fn protocol(&self) -> MidiProtocol {
+        MidiProtocol::Midi1
+    }
+
+    /// Takes one whole Universal MIDI Packet, unchanged, for a port that
+    /// speaks MIDI 2.0. It may wait for [`flush`](Self::flush).
+    fn send_ump(&mut self, words: &[u32]) -> Result<(), MidiError> {
+        let _ = words;
+        Err(MidiError::Send(String::from("the port speaks MIDI 1.0")))
+    }
+
+    /// Hands the system what [`send_ump`](Self::send_ump) took.
+    fn flush(&mut self) -> Result<(), MidiError> {
+        Ok(())
+    }
 }
 
 #[cfg(feature = "midi")]
 impl MidiSender for MidiOutput {
     fn send(&mut self, bytes: &[u8]) -> Result<(), MidiError> {
         self.send_raw(bytes)
+    }
+
+    fn protocol(&self) -> MidiProtocol {
+        MidiOutput::protocol(self)
+    }
+
+    fn send_ump(&mut self, words: &[u32]) -> Result<(), MidiError> {
+        self.send_ump_words(words)
+    }
+
+    fn flush(&mut self) -> Result<(), MidiError> {
+        self.flush_ump()
     }
 }
 

@@ -317,3 +317,50 @@ fn queueing_packets_for_an_output_port_does_not_use_the_heap() {
     queue.send_all(|_| sent += 1);
     assert_eq!(sent, 400);
 }
+
+/// The audio thread's side is the same whatever protocol the port speaks:
+/// a MIDI 2.0 note with a per-note controller is queued as it is, for a
+/// port opened with `MidiOutput::open_with_protocol` to send unchanged.
+#[cfg(feature = "midi")]
+#[test]
+fn queueing_midi_2_0_packets_does_not_use_the_heap() {
+    use manguebyte_devices::midi::midi_output_queue;
+    use manguebyte_midi::ump::{ChannelVoice2, Message, NoteAttribute, Packet};
+
+    let (mut transmitter, mut queue) = midi_output_queue(1_024);
+    let packet = |message| Message::Midi2 { group: 0, message }.to_packet();
+    let mut queued = Vec::with_capacity(300);
+    assert_no_heap_use("queueing MIDI 2.0 packets", || {
+        for block in 0..100_u32 {
+            transmitter.begin_block(256, 48_000.0);
+            let note = (block % 128) as u8;
+            let on: Packet = packet(ChannelVoice2::NoteOn {
+                channel: 0,
+                note,
+                velocity: 0x1000,
+                attribute: NoteAttribute::pitch(f32::from(note) + 0.5),
+            });
+            let brightness = packet(ChannelVoice2::RegisteredPerNoteController {
+                channel: 0,
+                note,
+                controller: 74,
+                value: block << 20,
+            });
+            let off = packet(ChannelVoice2::NoteOff {
+                channel: 0,
+                note,
+                velocity: 0,
+                attribute: NoteAttribute::NONE,
+            });
+            for (offset, packet) in [(0, on), (64, brightness), (192, off)] {
+                if transmitter.send(offset, packet) {
+                    queued.push(packet);
+                }
+            }
+        }
+    });
+    assert_eq!(queued.len(), 300);
+    let mut sent = Vec::new();
+    queue.send_all(|packet| sent.push(*packet));
+    assert_eq!(sent, queued);
+}

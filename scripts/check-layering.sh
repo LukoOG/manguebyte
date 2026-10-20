@@ -22,6 +22,7 @@ audio_crates=(
     manguebyte-formats
     manguebyte-osc
     manguebyte-analysis
+    manguebyte-ump-io
     manguebyte-devices
     manguebyte-graph
     manguebyte-plugin

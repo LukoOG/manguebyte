@@ -675,10 +675,12 @@ version = "0.1.0"
 name = "manguebyte-devices"
 version = "0.1.0"
 dependencies = [
+ "coremidi",
  "cpal",
  "manguebyte-core",
  "manguebyte-dsp",
  "manguebyte-midi",
+ "manguebyte-ump-io",
  "midir",
 ]
 
@@ -838,6 +840,13 @@ dependencies = [
  "manguebyte-gfx",
  "manguebyte-params",
  "manguebyte-plugin",
+]
+
+[[package]]
+name = "manguebyte-ump-io"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

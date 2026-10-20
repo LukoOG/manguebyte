@@ -1,0 +1,24 @@
+[package]
+name = "manguebyte-ump-io"
+description = "The systems' own Universal MIDI Packet output (CoreMIDI event lists, the ALSA sequencer's UMP events), reached through foreign calls, for manguebyte-devices."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+# CoreMIDI and the ALSA library are opened at run time with `dlopen`, so
+# that a system without the UMP calls (macOS before 11, alsa-lib before
+# 1.2.10) still starts the program and falls back to MIDI 1.0. `libc`
+# (MIT OR Apache-2.0) declares `dlopen` and `dlsym`; it is already in the
+# dependency tree through `midir`, `cpal` and `alsa`. Nothing is linked at
+# build time, so no headers or pkg-config are needed.
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))'.dependencies]
+libc = "0.2"
+
+[lints]
+workspace = true

@@ -38,11 +38,50 @@
 //! [`MidiOutput`] sends to a port. From the audio thread, packets go
 //! through a [`midi_output_queue`]: its [`MidiTransmitter`] stamps each
 //! with the moment its frame is heard, one block late as input is, and
-//! [`MidiOutput::spawn`] starts the thread that sends them then. Ports
-//! speak MIDI 1.0 on every system for now ([`MidiProtocol`]), so
-//! Universal MIDI Packets go out as MIDI 1.0 by the specification's
-//! default translation ([`PacketWriter`]); for what shapes single notes,
-//! write MPE first, as `manguebyte_plugin::output::OutputTranslator` does.
+//! [`MidiOutput::spawn`] starts the thread that sends them then. The audio
+//! thread's side is the same whatever the port speaks.
+//!
+//! # MIDI 1.0 and MIDI 2.0 ports
+//!
+//! A port speaks MIDI 1.0 unless the application asks for MIDI 2.0 with
+//! [`MidiOutput::open_with_protocol`] and both the system and the port
+//! speak it ([`MidiProtocol`]):
+//!
+//! | System | MIDI 2.0 port | Every other port |
+//! |---|---|---|
+//! | macOS 11, iOS 14 and newer | CoreMIDI's `MIDISendEventList`, an event list in `kMIDIProtocol_2_0`, to a destination whose `kMIDIPropertyProtocolID` is MIDI 2.0 | CoreMIDI's MIDI 1.0 calls |
+//! | Linux 6.5 with alsa-lib 1.2.10 and newer | the ALSA sequencer's UMP events, from a MIDI 2.0 client to a port of a MIDI 2.0 client | the sequencer's MIDI 1.0 events |
+//! | Windows | none: Windows MIDI Services' API is not reachable ([`ump_output_backend`]) | WinMM, which the MIDI service, where installed, translates for MIDI 2.0 devices |
+//! | Android, older systems | none | the system's MIDI 1.0 API |
+//!
+//! To a MIDI 2.0 port every packet goes unchanged, per-note controllers,
+//! attributes and 16-bit velocities included. To a MIDI 1.0 port packets
+//! go out by the specification's default translation ([`PacketWriter`]);
+//! for what shapes single notes there, write MPE first, as
+//! `manguebyte_plugin::output::OutputTranslator` does.
+//! [`MidiOutput::fallback`] says why a port speaks MIDI 1.0
+//! ([`ProtocolFallback`]), and [`midi_output_ports_with_protocols`] says it
+//! for every port before one is opened. What is missing on a system is
+//! found when the program runs, not when it is built, so a program built
+//! here speaks MIDI 1.0 on an older system and says why.
+//!
+//! The foreign calls are made by the workspace crate `manguebyte-ump-io`,
+//! since this crate forbids `unsafe` code.
+//!
+//! ## Timing per system
+//!
+//! The sending thread wakes when a packet is due, or at the latest every
+//! millisecond, and hands the system what is due then; packets due
+//! together go in one call (one CoreMIDI event list). How late a packet
+//! leaves is how late the thread wakes:
+//!
+//! - **macOS and iOS:** sleeps end within about a millisecond. Event lists
+//!   carry the time stamp zero, "now"; CoreMIDI's scheduling ahead on its
+//!   host clock is not used.
+//! - **Linux:** sleeps end within about a millisecond. Events are written
+//!   direct, not through a sequencer queue with time stamps.
+//! - **Windows:** MIDI 1.0 only, and a sleep is rounded to the system
+//!   timer, as much as 15.6 ms unless something has raised its resolution.
 //!
 //! # Virtual ports
 //!
@@ -57,17 +96,21 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 mod output;
+mod ump;
 
 pub use output::{
     MidiOutputQueue, MidiOutputThread, MidiProtocol, MidiTransmitter, PacketWriter,
     SYSEX_OUT_CAPACITY, midi_output_queue,
 };
 use std::time::{Duration, Instant};
+pub use ump::{MidiOutputPortInfo, ProtocolFallback, ump_output_backend};
 
 use manguebyte_core::spsc::{self, Consumer, Producer};
 use manguebyte_dsp::event::EventBuffer;
 use manguebyte_dsp::note_input::NoteInput;
+use manguebyte_midi::ump::{Message as UmpMessage, Packet, sysex7_packets};
 use manguebyte_midi::{MidiMessage, StreamEvent, StreamParser, SystemMessage};
+use ump::UmpPort;
 
 /// How many messages can wait for the audio thread. A dense performance
 /// with controllers produces a few hundred a second.
@@ -483,6 +526,31 @@ impl MidiReceiver {
     }
 }
 
+/// Lists the MIDI ports that can be sent to, each with the protocol it
+/// would speak if opened preferring MIDI 2.0
+/// ([`MidiOutput::open_with_protocol`]), and why not MIDI 2.0 where it is
+/// MIDI 1.0. Nothing is sent.
+///
+/// The ports are [`midi_output_ports`]'s. Asking which protocol they speak
+/// opens the system's UMP output for a moment: on Linux a sequencer client
+/// is opened and closed.
+pub fn midi_output_ports_with_protocols() -> Result<Vec<MidiOutputPortInfo>, MidiError> {
+    Ok(ump::describe(&ump::native(), midi_output_ports()?))
+}
+
+/// How an open output port is reached.
+enum Connection {
+    /// Through `midir`, as MIDI 1.0 bytes.
+    Bytes(midir::MidiOutputConnection),
+    /// Through the system's own Universal MIDI Packet output.
+    Ump {
+        port: Box<dyn UmpPort>,
+        /// Reads what [`MidiOutput::send_raw`] is given, to send it as
+        /// packets.
+        parser: StreamParser,
+    },
+}
+
 /// An open MIDI output port.
 ///
 /// Sending talks to the operating system and may block, so it does not
@@ -491,19 +559,50 @@ impl MidiReceiver {
 /// with its frame, and [`spawn`](Self::spawn) starts the thread that sends
 /// them on time.
 ///
-/// Every port speaks MIDI 1.0 for now ([`MidiProtocol`]): Universal MIDI
-/// Packets are written out by the default translation, and MIDI 2.0 that
-/// shapes a single note reaches the port only if it was written as MPE
-/// first.
+/// A port speaks MIDI 1.0 unless it was opened with
+/// [`open_with_protocol`](Self::open_with_protocol) preferring MIDI 2.0
+/// and both the system and the port speak it ([`MidiProtocol`]). At MIDI
+/// 1.0, Universal MIDI Packets are written out by the default
+/// translation, and MIDI 2.0 that shapes a single note reaches the port
+/// only if it was written as MPE first; at MIDI 2.0 they leave unchanged.
 pub struct MidiOutput {
     name: String,
-    connection: midir::MidiOutputConnection,
+    connection: Connection,
+    fallback: Option<ProtocolFallback>,
 }
 
 impl MidiOutput {
     /// Opens the output port with this identifier, as found in
-    /// [`MidiPortInfo::id`].
+    /// [`MidiPortInfo::id`]. The port speaks MIDI 1.0, the default; see
+    /// [`open_with_protocol`](Self::open_with_protocol) for MIDI 2.0.
     pub fn open(id: &str) -> Result<Self, MidiError> {
+        Self::open_with_protocol(id, MidiProtocol::Midi1)
+    }
+
+    /// Opens the output port with this identifier, speaking `preferred`
+    /// where the system and the port can, and MIDI 1.0 otherwise.
+    ///
+    /// Asked for [`MidiProtocol::Midi2`], the port is opened through the
+    /// system's own Universal MIDI Packet output when the system has one
+    /// ([`ump_output_backend`]) and the port says it speaks MIDI 2.0; if
+    /// either is missing, or that output fails to open, the port is opened
+    /// as [`open`](Self::open) opens it, and [`fallback`](Self::fallback)
+    /// says why. [`protocol`](Self::protocol) says which it is.
+    ///
+    /// ```no_run
+    /// use manguebyte_devices::midi::{MidiOutput, MidiProtocol, midi_output_ports};
+    ///
+    /// let Some(port) = midi_output_ports()?.into_iter().next() else {
+    ///     return Ok(());
+    /// };
+    /// let output = MidiOutput::open_with_protocol(&port.id, MidiProtocol::Midi2)?;
+    /// match output.fallback() {
+    ///     None => println!("{}: MIDI 2.0", output.name()),
+    ///     Some(why) => println!("{}: MIDI 1.0, because {why}", output.name()),
+    /// }
+    /// # Ok::<(), manguebyte_devices::midi::MidiError>(())
+    /// ```
+    pub fn open_with_protocol(id: &str, preferred: MidiProtocol) -> Result<Self, MidiError> {
         let output = midir::MidiOutput::new(CLIENT_NAME).map_err(|_| MidiError::Unavailable)?;
         let (port, name) = output
             .ports()
@@ -514,14 +613,31 @@ impl MidiOutput {
             })
             .find(|(port, name)| port_id(&port.id(), name) == id)
             .ok_or_else(|| MidiError::PortNotFound(id.to_owned()))?;
+        let fallback = match ump::select(&ump::native(), preferred, id) {
+            Ok(port) => {
+                return Ok(Self {
+                    name,
+                    connection: Connection::Ump {
+                        port,
+                        parser: StreamParser::new(SYSEX_OUT_CAPACITY),
+                    },
+                    fallback: None,
+                });
+            }
+            Err(fallback) => fallback,
+        };
         let connection = output
             .connect(&port, "manguebyte-out")
             .map_err(|error| MidiError::Connect(error.to_string()))?;
-        Ok(Self { name, connection })
+        Ok(Self {
+            name,
+            connection: Connection::Bytes(connection),
+            fallback: Some(fallback),
+        })
     }
 
     /// Creates a virtual output port called `name`, which other programs
-    /// see as a MIDI input they can receive from.
+    /// see as a MIDI input they can receive from. It speaks MIDI 1.0.
     ///
     /// Fails with [`MidiError::VirtualPortsUnsupported`] on Windows and
     /// Android; see the [module documentation](self#virtual-ports).
@@ -536,7 +652,8 @@ impl MidiOutput {
                 .map_err(|error| MidiError::Connect(error.to_string()))?;
             Ok(Self {
                 name: name.to_owned(),
-                connection,
+                connection: Connection::Bytes(connection),
+                fallback: Some(ProtocolFallback::NotRequested),
             })
         }
         #[cfg(not(all(unix, not(target_os = "android"))))]
@@ -551,12 +668,14 @@ impl MidiOutput {
         &self.name
     }
 
-    /// Sends a channel message.
+    /// Sends a channel message. A port that speaks MIDI 2.0 is sent it as
+    /// a MIDI 1.0 channel voice packet on group 0.
     pub fn send(&mut self, message: MidiMessage) -> Result<(), MidiError> {
         self.send_raw(message.to_bytes().as_slice())
     }
 
-    /// Sends a system message.
+    /// Sends a system message. A port that speaks MIDI 2.0 is sent it as
+    /// a system packet on group 0.
     pub fn send_system(&mut self, message: SystemMessage) -> Result<(), MidiError> {
         let mut bytes = [0; 3];
         let len = message.write(&mut bytes);
@@ -565,10 +684,60 @@ impl MidiOutput {
 
     /// Sends raw bytes: one complete message, which may be system
     /// exclusive.
+    ///
+    /// A port that speaks MIDI 2.0 is sent the packets the bytes stand
+    /// for, on group 0: a channel or system message as one packet, system
+    /// exclusive as 7-bit system exclusive packets, as the MIDI-CI replies
+    /// of [`MidiInput::open_with_sysex`] need. System exclusive longer
+    /// than [`SYSEX_OUT_CAPACITY`] is dropped there.
     pub fn send_raw(&mut self, bytes: &[u8]) -> Result<(), MidiError> {
-        self.connection
-            .send(bytes)
-            .map_err(|error| MidiError::Send(error.to_string()))
+        let (port, parser) = match &mut self.connection {
+            Connection::Bytes(connection) => {
+                return connection
+                    .send(bytes)
+                    .map_err(|error| MidiError::Send(error.to_string()));
+            }
+            Connection::Ump { port, parser } => (port, parser),
+        };
+        let mut result = Ok(());
+        let mut send = |packet: Packet| {
+            if result.is_ok() {
+                result = port.send(packet.words());
+            }
+        };
+        parser.feed_slice(bytes, |event| match event {
+            StreamEvent::Channel(message) => send(Packet::from_midi1(0, message)),
+            StreamEvent::System(message) => {
+                send(UmpMessage::System { group: 0, message }.to_packet())
+            }
+            StreamEvent::SysEx(payload) => {
+                // The parser puts only data bytes, below 0x80, in a
+                // payload, so cutting it into packets cannot fail.
+                if let Ok(packets) = sysex7_packets(0, payload) {
+                    packets.for_each(&mut send);
+                }
+            }
+        });
+        // A message cut short is not carried over to the next call.
+        parser.reset();
+        result?;
+        port.flush()
+    }
+
+    /// [`MidiSender::send_ump`](crate::backend::MidiSender::send_ump).
+    pub(crate) fn send_ump_words(&mut self, words: &[u32]) -> Result<(), MidiError> {
+        match &mut self.connection {
+            Connection::Ump { port, .. } => port.send(words),
+            Connection::Bytes(_) => Err(MidiError::Send(String::from("the port speaks MIDI 1.0"))),
+        }
+    }
+
+    /// [`MidiSender::flush`](crate::backend::MidiSender::flush).
+    pub(crate) fn flush_ump(&mut self) -> Result<(), MidiError> {
+        match &mut self.connection {
+            Connection::Ump { port, .. } => port.flush(),
+            Connection::Bytes(_) => Ok(()),
+        }
     }
 }
 
