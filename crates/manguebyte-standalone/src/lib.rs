@@ -7,6 +7,14 @@
 //! send them to a MIDI output port, as MIDI 1.0 or MPE, with
 //! [`Standalone::start_with_midi_output`].
 //!
+//! The plugin plays with a real transport: a [`TransportClock`] that
+//! starts playing at [`StandaloneOptions::tempo_bpm`], and that the program
+//! works through [`Standalone::transport`]: play, stop, seek, loop, and a
+//! new tempo map with tempo changes, ramps and time signatures while it
+//! plays.
+//! The plugin sees it as a host's transport, and the map in
+//! `ProcessContext::timeline`.
+//!
 //! ```no_run
 //! # use std::sync::Arc;
 //! # use manguebyte_core::AudioBuffer;
@@ -54,6 +62,7 @@ use manguebyte_devices::{
     DeviceError, DuplexSettings, DuplexStream, InputDevice, OutputDevice, OutputStream,
     StreamSettings,
 };
+use manguebyte_dsp::timeline::{ClockControl, TempoMap, TimeSignature, TransportClock};
 use manguebyte_midi::MidiMessage;
 use manguebyte_midi::mpe::Zone;
 use manguebyte_params::LoadReport;
@@ -74,7 +83,9 @@ pub struct StandaloneOptions {
     /// What to ask the output device for. The default takes the device's
     /// own preferences.
     pub output: StreamSettings,
-    /// Tempo the plugin is told, in beats per minute.
+    /// Tempo the transport starts at, in beats per minute, in 4/4; 120 if
+    /// it is not a positive, finite number. [`Standalone::transport`] can
+    /// hand it a whole tempo map later.
     pub tempo_bpm: f64,
     /// Whether to listen to every MIDI input port that is connected.
     pub open_midi_inputs: bool,
@@ -141,6 +152,7 @@ pub struct Standalone<P: Plugin> {
     sample_rate: f64,
     midi_inputs: Vec<MidiInput>,
     midi_problems: Vec<MidiError>,
+    transport: ClockControl,
     _stream: Stream,
     /// The thread that sends the plugin's notes to the MIDI output port,
     /// and the port's name. After the stream, which feeds it, so that it
@@ -236,7 +248,7 @@ impl<P: Plugin> Standalone<P> {
         }
 
         let (notes, note_receiver) = spsc::channel(1_024);
-        let mut engine = Engine::<P>::new(
+        let engine = Engine::<P>::new(
             sample_rate,
             options.block_size,
             options.tempo_bpm,
@@ -244,6 +256,10 @@ impl<P: Plugin> Standalone<P> {
             note_receiver,
         )
         .map_err(StandaloneError::InvalidPlugin)?;
+        let map = TempoMap::new(options.tempo_bpm, TimeSignature::FOUR_FOUR).unwrap_or_default();
+        let (mut clock, transport) = TransportClock::with_control(map, sample_rate);
+        clock.play();
+        let mut engine = engine.with_transport_clock(clock);
         let params = engine.params();
 
         let mut sender = None;
@@ -306,6 +322,7 @@ impl<P: Plugin> Standalone<P> {
             sample_rate,
             midi_inputs,
             midi_problems,
+            transport,
             midi_output: sender,
             _stream: stream,
         })
@@ -325,6 +342,12 @@ impl<P: Plugin> Standalone<P> {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         notes.push(message).is_ok()
+    }
+
+    /// The transport: play, stop, seek, loop, a new tempo map, and where
+    /// it is. Commands take effect at the start of the next block.
+    pub fn transport(&self) -> &ClockControl {
+        &self.transport
     }
 
     /// Name of the output device.

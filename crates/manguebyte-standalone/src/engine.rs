@@ -3,9 +3,11 @@ use std::sync::Arc;
 use manguebyte_core::spsc::Consumer;
 use manguebyte_core::{AudioBuffer, NoDenormals};
 use manguebyte_devices::midi::{MidiReceiver, MidiTransmitter};
+use manguebyte_dsp::ProcessContext;
+use manguebyte_dsp::ProcessSpec;
 use manguebyte_dsp::event::EventBuffer;
 use manguebyte_dsp::note_input::NoteInput;
-use manguebyte_dsp::{ProcessContext, ProcessSpec, Transport};
+use manguebyte_dsp::timeline::{TempoMap, TimeSignature, TransportClock};
 use manguebyte_midi::MidiMessage;
 use manguebyte_params::ParamSet;
 use manguebyte_plugin::output::{OutputBuffer, OutputProtocol, OutputTranslator};
@@ -17,7 +19,7 @@ const EVENTS_PER_BLOCK: usize = 2_048;
 /// The part of a standalone application that runs on the audio thread.
 ///
 /// It does for a plugin what a host does: gathers MIDI into events with
-/// their frames, turns parameter changes into events, keeps a transport
+/// their frames, turns parameter changes into events, plays a transport
 /// moving and maps the plugin's channels onto the device's.
 /// [`Standalone`](crate::Standalone) owns one and gives it to the device
 /// callback; it is public so that the same logic can be driven by something
@@ -27,7 +29,9 @@ pub struct Engine<P: Plugin> {
     params: Arc<P::Params>,
     watcher: ParamWatcher,
     events: EventBuffer,
-    transport: Transport,
+    /// The transport, which the plugin also finds as a tempo map in
+    /// [`ProcessContext::timeline`].
+    clock: TransportClock,
     sample_rate: f64,
     midi: Vec<MidiReceiver>,
     notes: Consumer<MidiMessage>,
@@ -47,7 +51,11 @@ impl<P: Plugin> Engine<P> {
     /// Creates the plugin and prepares it.
     ///
     /// `midi` are the ports to read; `notes` carries messages sent by the
-    /// program itself. Returns a description of the problem if the plugin's
+    /// program itself. The transport plays from the start at `tempo_bpm` in
+    /// 4/4 (120 bpm if `tempo_bpm` is not a positive, finite number);
+    /// [`with_transport_clock`](Self::with_transport_clock) puts another
+    /// clock in its place. Returns a description of the problem if the
+    /// sample rate is not a positive, finite number, or if the plugin's
     /// parameters do not pass validation.
     pub fn new(
         sample_rate: f64,
@@ -56,9 +64,15 @@ impl<P: Plugin> Engine<P> {
         midi: Vec<MidiReceiver>,
         notes: Consumer<MidiMessage>,
     ) -> Result<Self, String> {
+        if !(sample_rate.is_finite() && sample_rate > 0.0) {
+            return Err(format!("{sample_rate} Hz is not a sample rate"));
+        }
         let mut plugin = P::new();
         let params = plugin.params();
         params.validate().map_err(|error| error.to_string())?;
+        let map = TempoMap::new(tempo_bpm, TimeSignature::FOUR_FOUR).unwrap_or_default();
+        let mut clock = TransportClock::new(map, sample_rate);
+        clock.play();
         plugin.prepare(&ProcessSpec {
             sample_rate,
             max_block_size,
@@ -69,7 +83,7 @@ impl<P: Plugin> Engine<P> {
             plugin,
             params,
             events: EventBuffer::with_capacity(EVENTS_PER_BLOCK),
-            transport: Transport::playing_at(tempo_bpm),
+            clock,
             sample_rate,
             midi,
             notes,
@@ -102,6 +116,24 @@ impl<P: Plugin> Engine<P> {
     ) -> Self {
         self.midi_out = Some((OutputTranslator::new(protocol), transmitter));
         self
+    }
+
+    /// Plays `clock` in place of the engine's own transport, for example
+    /// one made by [`TransportClock::with_control`], whose
+    /// [`ClockControl`](manguebyte_dsp::timeline::ClockControl) then works
+    /// the transport from another thread. The clock's sample rate is set
+    /// to the engine's. Frees the engine's own clock, so call it before the
+    /// engine goes to the audio thread.
+    #[must_use]
+    pub fn with_transport_clock(mut self, mut clock: TransportClock) -> Self {
+        clock.set_sample_rate(self.sample_rate);
+        self.clock = clock;
+        self
+    }
+
+    /// The transport the plugin is played with.
+    pub fn transport_clock(&self) -> &TransportClock {
+        &self.clock
     }
 
     /// The plugin's parameters.
@@ -165,11 +197,14 @@ impl<P: Plugin> Engine<P> {
             }
         }
 
-        let context = ProcessContext::new(&self.events, &self.transport);
+        let block = self.clock.next_block(frames);
+        let map = self.clock.map();
+        let transport = block.transport(map);
+        let context =
+            ProcessContext::new(&self.events, &transport).with_timeline(block.with_map(map));
         self.output.clear();
         self.plugin
             .process_with_output(&mut self.work, &context, &mut self.output);
-        self.transport.advance(frames, self.sample_rate);
         if let Some((translator, transmitter)) = &mut self.midi_out {
             let last = frames.saturating_sub(1) as u32;
             // What does not fit in the queue is dropped, and counted by
@@ -638,5 +673,94 @@ mod tests {
         // What fits is rendered; the rest is silence rather than garbage.
         assert_eq!(&device.channel(0)[..16], &[10.0; 16]);
         assert_eq!(&device.channel(0)[16..], &[0.0; 24]);
+    }
+
+    /// Writes the beat of every frame on the left, and the tempo on the
+    /// right, from the timeline in its context.
+    struct Beats(Arc<LevelParams>);
+    impl Plugin for Beats {
+        const INFO: PluginInfo = PluginInfo {
+            id: "org.manguebyte.test.standalone-beats",
+            name: "Beats",
+            vendor: "Manguebyte tests",
+            version: "0.1.0",
+            description: "Writes where the music is",
+            kind: PluginKind::Instrument,
+        };
+        const LAYOUT: AudioLayout = AudioLayout::STEREO_INSTRUMENT;
+        type Params = LevelParams;
+
+        fn new() -> Self {
+            Self(Arc::new(LevelParams {
+                level: FloatParam::new("level", "Level", FloatRange::linear(0.0, 2.0), 1.0),
+            }))
+        }
+        fn params(&self) -> Arc<LevelParams> {
+            Arc::clone(&self.0)
+        }
+        fn prepare(&mut self, _: &ProcessSpec) {}
+        fn process(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+            let timeline = context.timeline.expect("the engine gives a timeline");
+            assert_eq!(*context.transport, timeline.transport());
+            for frame in 0..buffer.num_frames() {
+                buffer.channel_mut(0)[frame] = timeline.beat_at(frame) as f32;
+                buffer.channel_mut(1)[frame] = timeline.tempo_at(frame) as f32;
+            }
+        }
+    }
+
+    #[test]
+    fn the_plugin_plays_with_a_transport_the_program_works() {
+        use manguebyte_dsp::timeline::{TempoCurve, TempoMap, TimeSignature, TransportClock};
+
+        let (engine, _notes) = engine::<Beats>();
+        // At the tempo it was made with, from the start.
+        assert!(engine.transport_clock().is_playing());
+        assert_eq!(engine.transport_clock().map().tempo_at_beat(0.0), 120.0);
+
+        // A clock worked from elsewhere, made at another rate: the engine
+        // puts it at its own.
+        let (clock, control) = TransportClock::with_control(TempoMap::default(), 96_000.0);
+        let mut engine = engine.with_transport_clock(clock);
+        assert_eq!(engine.transport_clock().sample_rate(), 48_000.0);
+        let mut device = AudioBuffer::<f32>::new(2, 16);
+
+        // Stopped until told to play.
+        engine.render(None, &mut device);
+        assert_eq!(device.channel(0), &[0.0; 16]);
+        assert!(control.play());
+        assert!(control.seek_beat(2.0));
+        assert!(control.set_loop_frames(Some((48_000, 48_008))));
+        engine.render(None, &mut device);
+        // Frame 48 000 is beat 2; the loop goes round after 8 frames.
+        let step = 2.0 / 48_000.0;
+        for frame in 0..16 {
+            let expected = 2.0 + (frame % 8) as f64 * step;
+            assert_eq!(device.channel(0)[frame], expected as f32);
+        }
+        assert_eq!(control.position_frames(), 48_000);
+        assert_eq!(control.position_beats(), 2.0);
+
+        // A tempo map handed over while it plays: a ramp from 120 to 240.
+        let mut map = TempoMap::new(120.0, TimeSignature::FOUR_FOUR).unwrap();
+        map.set_tempo(2.0, 120.0, TempoCurve::Linear).unwrap();
+        map.set_tempo(3.0, 240.0, TempoCurve::Step).unwrap();
+        control.set_tempo_map(map).unwrap();
+        assert!(control.set_loop_frames(None));
+        engine.render(None, &mut device);
+        assert_eq!(device.channel(1)[0], 120.0);
+        assert!(device.channel(1)[15] > 120.0);
+        assert_eq!(
+            control.tempo_bpm(),
+            engine
+                .transport_clock()
+                .map()
+                .tempo_at_frame(48_016, 48_000.0)
+        );
+        // The map it replaced came back to be freed off the audio thread.
+        assert_eq!(control.collect(), 1);
+        assert!(control.stop());
+        engine.render(None, &mut device);
+        assert!(!control.is_playing());
     }
 }

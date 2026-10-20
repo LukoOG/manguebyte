@@ -3,6 +3,7 @@ use std::sync::Arc;
 use manguebyte_core::{AudioBuffer, NoDenormals};
 use manguebyte_dsp::event::{Event, EventBuffer, EventKind, NoteRef};
 use manguebyte_dsp::note_input::NoteInput;
+use manguebyte_dsp::timeline::{TempoMap, TimeSignature, TransportClock};
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Transport};
 use manguebyte_midi::MidiMessage;
 use manguebyte_midi::ump::Packet;
@@ -26,13 +27,23 @@ const EVENTS_PER_BLOCK: usize = 4_096;
 /// Events are scheduled by their position on the timeline, in frames from
 /// the start, and are delivered when rendering reaches them.
 ///
+/// The transport comes from a [`TransportClock`] playing a [`TempoMap`]:
+/// 120 bpm in 4/4 unless [`with_tempo`](Self::with_tempo) or
+/// [`with_tempo_map`](Self::with_tempo_map) says otherwise, playing from
+/// the start. A map with tempo changes, ramps and time signatures is how a
+/// test automates the tempo: the plugin sees the transport at the start of
+/// each block and, in [`ProcessContext::timeline`], the map and where each
+/// of its changes falls in the block. [`play`](Self::play),
+/// [`stop`](Self::stop), [`seek_beat`](Self::seek_beat) and
+/// [`set_loop_beats`](Self::set_loop_beats) work the clock between renders;
+/// scheduled events stay on the frames rendered, whatever the clock does.
+///
 /// See the [crate documentation](crate) for an example.
 pub struct Harness<P: Plugin> {
     plugin: P,
     params: Arc<P::Params>,
     /// Taken from the plugin once, as a wrapper does.
     editor: Option<Box<dyn EditorSpec>>,
-    sample_rate: f64,
     max_block_size: usize,
     /// Block lengths to cycle through.
     pattern: Vec<usize>,
@@ -46,6 +57,8 @@ pub struct Harness<P: Plugin> {
     /// The stretch of the sidechain that goes with the block being rendered.
     sidechain: AudioBuffer<f32>,
     watcher: ParamWatcher,
+    clock: TransportClock,
+    /// The transport the next block will start with.
     transport: Transport,
     position: u64,
     /// What the plugin sends during a block, with room for a block's worth
@@ -60,12 +73,15 @@ impl<P: Plugin> Harness<P> {
     ///
     /// # Panics
     ///
-    /// Panics if `max_block_size` is zero, or if the plugin is not well
-    /// formed: its id is empty or contains spaces, it has no outputs, or its
-    /// parameters fail [`ParamSet::validate`]. A plugin that cannot pass
-    /// these checks would misbehave in a real host too.
+    /// Panics if `max_block_size` is zero, if `sample_rate` is not a
+    /// positive, finite number, or if the plugin is not well formed: its id
+    /// is empty or contains spaces, it has no outputs, or its parameters
+    /// fail [`ParamSet::validate`]. A plugin that cannot pass these checks
+    /// would misbehave in a real host too.
     pub fn new(sample_rate: f64, max_block_size: usize) -> Self {
         assert!(max_block_size > 0, "max_block_size must be non-zero");
+        let mut clock = TransportClock::new(TempoMap::default(), sample_rate);
+        clock.play();
         let id = P::INFO.id;
         assert!(
             !id.is_empty() && !id.contains(char::is_whitespace),
@@ -87,7 +103,6 @@ impl<P: Plugin> Harness<P> {
 
         Self {
             plugin,
-            sample_rate,
             max_block_size,
             pattern: vec![max_block_size],
             next_in_pattern: 0,
@@ -98,7 +113,8 @@ impl<P: Plugin> Harness<P> {
             watcher: ParamWatcher::new(&*params),
             params,
             editor,
-            transport: Transport::playing_at(120.0),
+            transport: clock.transport(),
+            clock,
             position: 0,
             output: if P::NOTE_OUTPUT {
                 OutputBuffer::with_capacity(EVENTS_PER_BLOCK)
@@ -127,11 +143,82 @@ impl<P: Plugin> Harness<P> {
         self
     }
 
-    /// Sets the tempo the transport reports.
+    /// Plays one tempo throughout, in 4/4, in place of the tempo map.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `bpm` is not a positive, finite number.
     #[must_use]
-    pub fn with_tempo(mut self, bpm: f64) -> Self {
-        self.transport.tempo_bpm = Some(bpm);
+    pub fn with_tempo(self, bpm: f64) -> Self {
+        let map = TempoMap::new(bpm, TimeSignature::FOUR_FOUR)
+            .unwrap_or_else(|error| panic!("tempo {bpm}: {error}"));
+        self.with_tempo_map(map)
+    }
+
+    /// Plays `map`: its tempo changes, ramps and time signatures reach the
+    /// plugin on their frames.
+    #[must_use]
+    pub fn with_tempo_map(mut self, map: TempoMap) -> Self {
+        self.set_tempo_map(map);
         self
+    }
+
+    /// Plays `map` from the next block, keeping the musical position as
+    /// [`TransportClock::replace_map`] does, and returns the map it
+    /// replaces.
+    pub fn set_tempo_map(&mut self, map: TempoMap) -> TempoMap {
+        let old = self.clock.replace_map(Box::new(map));
+        self.transport = self.clock.transport();
+        *old
+    }
+
+    /// The tempo map being played.
+    pub fn tempo_map(&self) -> &TempoMap {
+        self.clock.map()
+    }
+
+    /// The clock behind the transport, to read where it is.
+    pub fn transport_clock(&self) -> &TransportClock {
+        &self.clock
+    }
+
+    /// Starts the transport from where it is. It plays from the start
+    /// unless stopped.
+    pub fn play(&mut self) {
+        self.clock.play();
+        self.transport = self.clock.transport();
+    }
+
+    /// Stops the transport where it is. Rendering goes on, and the plugin
+    /// sees a stopped transport.
+    pub fn stop(&mut self) {
+        self.clock.stop();
+        self.transport = self.clock.transport();
+    }
+
+    /// Sets whether the transport says it records.
+    pub fn set_recording(&mut self, recording: bool) {
+        self.clock.set_recording(recording);
+        self.transport = self.clock.transport();
+    }
+
+    /// Moves the transport to the frame `beat` lands on.
+    pub fn seek_beat(&mut self, beat: f64) {
+        self.clock.seek_beat(beat);
+        self.transport = self.clock.transport();
+    }
+
+    /// Moves the transport to `frame` of the musical timeline.
+    pub fn seek_frame(&mut self, frame: i64) {
+        self.clock.seek_frame(frame);
+        self.transport = self.clock.transport();
+    }
+
+    /// Loops the transport between two positions in quarter notes, or
+    /// stops looping with `None`.
+    pub fn set_loop_beats(&mut self, range: Option<(f64, f64)>) {
+        self.clock.set_loop_beats(range);
+        self.transport = self.clock.transport();
     }
 
     /// The plugin's parameters.
@@ -159,7 +246,9 @@ impl<P: Plugin> Harness<P> {
         &self.transport
     }
 
-    /// How many frames have been rendered so far.
+    /// How many frames have been rendered so far. Events are scheduled on
+    /// this count; the transport's position moves with it while it plays,
+    /// and can be seeked and looped apart from it.
     pub fn position(&self) -> u64 {
         self.position
     }
@@ -327,7 +416,11 @@ impl<P: Plugin> Harness<P> {
             self.gather_events(length);
             apply_param_events(&*self.params, &self.events);
             self.watcher.remember(&*self.params);
-            let mut context = ProcessContext::new(&self.events, &self.transport);
+            let block = self.clock.next_block(length);
+            let map = self.clock.map();
+            let transport = block.transport(map);
+            let mut context =
+                ProcessContext::new(&self.events, &transport).with_timeline(block.with_map(map));
             if let Some(whole) = sidechain {
                 // The plugin gets the stretch that goes with this block.
                 self.sidechain.set_num_frames(length);
@@ -352,7 +445,7 @@ impl<P: Plugin> Harness<P> {
                 self.sent.push((frame, event.kind));
             }
 
-            self.transport.advance(length, self.sample_rate);
+            self.transport = self.clock.transport();
             self.position += length as u64;
             done += length;
         }
@@ -611,6 +704,19 @@ mod tests {
         let beats = harness.transport().position_beats.unwrap();
         assert!((beats - 1.0).abs() < 1e-9);
         assert_eq!(harness.transport().position_samples, Some(48_000));
+        assert_eq!(harness.transport().tempo_bpm, Some(60.0));
+        assert_eq!(harness.transport().position_seconds, Some(1.0));
+        assert_eq!(harness.transport().bar_number, Some(0));
+        assert_eq!(
+            harness.tempo_map().signature_at_beat(0.0),
+            TimeSignature::FOUR_FOUR
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "tempo 0")]
+    fn a_tempo_of_zero_is_a_mistake() {
+        let _ = Harness::<Level>::new(48_000.0, 16).with_tempo(0.0);
     }
 
     // --- An instrument. ---
@@ -904,5 +1010,167 @@ mod tests {
     fn a_sidechain_of_another_length_is_a_mistake() {
         let mut harness = Harness::<Listener>::new(48_000.0, 16);
         harness.process_with_sidechain(&AudioBuffer::new(1, 8), &AudioBuffer::new(2, 9));
+    }
+
+    // --- A plugin that follows the tempo map. ---
+
+    /// Clicks on channel 0 on every frame a quarter note lands on, and
+    /// writes the tempo on channel 1 and the bar on channel 2, all read
+    /// from the timeline in its context.
+    struct Metronome(Arc<NoParams>);
+
+    impl Plugin for Metronome {
+        const INFO: PluginInfo = PluginInfo {
+            id: "org.manguebyte.test.metronome",
+            name: "Metronome",
+            vendor: "Manguebyte tests",
+            version: "0.1.0",
+            description: "Clicks on the beat",
+            kind: PluginKind::Instrument,
+        };
+        const LAYOUT: AudioLayout = AudioLayout {
+            inputs: 0,
+            outputs: 3,
+            sidechain: 0,
+        };
+        type Params = NoParams;
+
+        fn new() -> Self {
+            Self(Arc::new(NoParams {}))
+        }
+        fn params(&self) -> Arc<NoParams> {
+            Arc::clone(&self.0)
+        }
+        fn prepare(&mut self, _: &ProcessSpec) {}
+        fn process(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+            let timeline = context.timeline.expect("the harness gives a timeline");
+            assert_eq!(*context.transport, timeline.transport());
+            for frame in 0..buffer.num_frames() {
+                let at = context.offset + frame;
+                let position = timeline.position_at(at);
+                let beat = position.beat.round();
+                let click = timeline.block.playing
+                    && timeline.map.frame_at_beat(beat, timeline.block.sample_rate)
+                        == timeline.block.frame_at(at);
+                buffer.channel_mut(0)[frame] = if click { 1.0 } else { 0.0 };
+                buffer.channel_mut(1)[frame] = position.tempo_bpm as f32;
+                buffer.channel_mut(2)[frame] = position.bar as f32;
+            }
+        }
+    }
+
+    fn clicks(output: &AudioBuffer<f32>) -> Vec<usize> {
+        let channel = output.channel(0);
+        (0..channel.len())
+            .filter(|&frame| channel[frame] == 1.0)
+            .collect()
+    }
+
+    /// 120 bpm, a ramp down to 60 over beats 4 to 8, then 60; 4/4, then
+    /// 3/4 from bar 1 (beat 4) and 7/8 from bar 3 (beat 10).
+    fn song() -> TempoMap {
+        use manguebyte_dsp::timeline::TempoCurve;
+        let mut map = TempoMap::new(120.0, TimeSignature::FOUR_FOUR).unwrap();
+        map.set_tempo(4.0, 120.0, TempoCurve::Linear).unwrap();
+        map.set_tempo(8.0, 60.0, TempoCurve::Step).unwrap();
+        map.set_signature(1, TimeSignature::new(3, 4)).unwrap();
+        map.set_signature(3, TimeSignature::new(7, 8)).unwrap();
+        map
+    }
+
+    #[test]
+    fn a_plugin_follows_the_tempo_map_on_its_frames() {
+        const RATE: f64 = 44_100.0;
+        let map = song();
+        let render = |pattern: &[usize]| {
+            let mut harness = Harness::<Metronome>::new(RATE, 512)
+                .with_tempo_map(song())
+                .with_block_pattern(pattern);
+            harness.render(8 * RATE as usize)
+        };
+        let reference = render(&[512]);
+        for pattern in [&[1usize][..], &[64, 7, 300], &[511, 2]] {
+            let output = render(pattern);
+            for channel in 0..3 {
+                assert_eq!(
+                    output.channel(channel),
+                    reference.channel(channel),
+                    "pattern {pattern:?}, channel {channel}"
+                );
+            }
+        }
+
+        // A click on every quarter note, before, through and after the
+        // ramp.
+        let expected: Vec<usize> = (0..14)
+            .map(|beat| map.frame_at_beat(f64::from(beat), RATE) as usize)
+            .filter(|&frame| frame < reference.num_frames())
+            .collect();
+        assert!(expected.len() > 10, "the slow part was heard");
+        assert_eq!(clicks(&reference), expected);
+        // The tempo slows down through the ramp, frame by frame.
+        let ramp_start = map.frame_at_beat(4.0, RATE) as usize;
+        let ramp_end = map.frame_at_beat(8.0, RATE) as usize;
+        let tempo = reference.channel(1);
+        assert_eq!(tempo[ramp_start - 1], 120.0);
+        assert!(tempo[ramp_start + 1] < 120.0);
+        assert!(
+            tempo[ramp_start..ramp_end]
+                .windows(2)
+                .all(|pair| pair[1] <= pair[0])
+        );
+        assert_eq!(tempo[ramp_end], 60.0);
+        // Each bar starts on the frame its line lands on.
+        let bar = reference.channel(2);
+        for (number, beat) in [(1.0, 4.0), (2.0, 7.0), (3.0, 10.0)] {
+            let line = map.frame_at_beat(beat, RATE) as usize;
+            assert_eq!((bar[line - 1], bar[line]), (number - 1.0, number));
+        }
+    }
+
+    #[test]
+    fn the_transport_can_loop_seek_and_stop_between_renders() {
+        const RATE: f64 = 48_000.0;
+        let mut harness = Harness::<Metronome>::new(RATE, 256).with_block_pattern(&[100]);
+        // Beats 1 to 3 at 120 bpm: frames 24 000 to 72 000.
+        harness.set_loop_beats(Some((1.0, 3.0)));
+        assert_eq!(harness.transport().loop_beats, Some((1.0, 3.0)));
+        let output = harness.render(150_000);
+        assert_eq!(
+            clicks(&output),
+            [0, 24_000, 48_000, 72_000, 96_000, 120_000, 144_000]
+        );
+        assert_eq!(harness.transport_clock().position(), 54_000);
+        assert_eq!(harness.position(), 150_000);
+
+        harness.seek_beat(10.0);
+        harness.set_loop_beats(None);
+        let transport = *harness.transport();
+        assert_eq!(transport.position_beats, Some(10.0));
+        assert_eq!(transport.bar_number, Some(2));
+        assert_eq!(transport.bar_start_beats, Some(8.0));
+        let output = harness.render(30_000);
+        assert_eq!(clicks(&output), [0, 24_000]);
+
+        // Stopped, nothing moves and nothing clicks.
+        harness.stop();
+        assert!(!harness.transport().playing);
+        let at = harness.transport_clock().position();
+        assert!(clicks(&harness.render(30_000)).is_empty());
+        assert_eq!(harness.transport_clock().position(), at);
+        harness.set_recording(true);
+        harness.play();
+        assert!(harness.transport().playing && harness.transport().recording);
+
+        // A new map keeps the beat, 11.25, and moves the frame.
+        let beat = harness.transport().position_beats.unwrap();
+        assert_eq!(beat, 11.25);
+        let old = harness.set_tempo_map(TempoMap::new(60.0, TimeSignature::FOUR_FOUR).unwrap());
+        assert_eq!(old, TempoMap::default());
+        assert_eq!(harness.tempo_map().tempo_at_beat(0.0), 60.0);
+        assert_eq!(harness.transport().position_beats, Some(11.25));
+        assert_eq!(harness.transport().position_samples, Some(540_000));
+        harness.seek_frame(0);
+        assert_eq!(harness.transport().position_samples, Some(0));
     }
 }
