@@ -66,7 +66,7 @@ use std::fmt::Write as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 
 use manguebyte_core::{AtomicF64, AudioBuffer, NoDenormals, ParamId};
 use manguebyte_dsp::event::{Event, EventBuffer, EventKind, Expression, NoteRef};
@@ -75,8 +75,8 @@ use manguebyte_dsp::{ProcessContext, ProcessSpec, Transport};
 use manguebyte_midi::MidiMessage;
 use manguebyte_params::{Param, ParamSet};
 use manguebyte_plugin::{
-    MidiController, MidiControllers, ParamWatcher, Plugin, PluginKind, apply_param_events,
-    load_state, save_state,
+    AudioLayout, MidiController, MidiControllers, ParamWatcher, Plugin, PluginKind,
+    apply_param_events, load_state, offered_layouts, save_state,
 };
 use vst3::Steinberg::Vst::{self as vst, BusDirections_, BusTypes_, MediaTypes_};
 use vst3::Steinberg::{
@@ -211,23 +211,37 @@ fn arrangement(channels: usize) -> vst::SpeakerArrangement {
     }
 }
 
-/// The channel counts of the audio buses in one direction, main bus first.
-fn audio_buses<P: Plugin>(is_input: bool) -> ([usize; 2], usize) {
-    let layout = P::LAYOUT;
+/// The channel counts of the audio buses in one direction under `layout`,
+/// main bus first, and how many buses there are.
+///
+/// Which buses there are is fixed by the plugin's own layout, since VST 3
+/// fixes the bus count; `layout`, one of those it offers, gives their
+/// widths, and a sidechain it leaves out is a bus with no channels.
+fn audio_buses<P: Plugin>(layout: AudioLayout, is_input: bool) -> ([usize; 2], usize) {
+    let base = P::LAYOUT;
     let candidates = if is_input {
-        [layout.inputs, layout.sidechain]
+        [
+            (base.inputs, layout.inputs),
+            (base.sidechain, layout.sidechain),
+        ]
     } else {
-        [layout.outputs, 0]
+        [(base.outputs, layout.outputs), (0, 0)]
     };
-    let mut present = [0; 2];
+    let mut widths = [0; 2];
     let mut count = 0;
-    for channels in candidates {
-        if channels > 0 {
-            present[count] = channels;
+    for (present, width) in candidates {
+        if present > 0 {
+            widths[count] = width;
             count += 1;
         }
     }
-    (present, count)
+    (widths, count)
+}
+
+/// The index of the sidechain among the audio input buses, for a plugin
+/// that has one.
+fn sidechain_bus<P: Plugin>() -> Option<usize> {
+    (P::LAYOUT.sidechain > 0).then_some(usize::from(P::LAYOUT.inputs > 0))
 }
 
 /// The state used while processing.
@@ -237,6 +251,8 @@ struct Audio<P> {
     max_block: usize,
     /// Whether the plugin has been prepared for the current setup.
     prepared: bool,
+    /// The layout the plugin was prepared for.
+    layout: AudioLayout,
     buffer: AudioBuffer<f32>,
     sidechain: AudioBuffer<f32>,
     events: EventBuffer,
@@ -334,6 +350,17 @@ pub(crate) struct Component<P: Plugin> {
     controls: Arc<Controls>,
     /// Latency reported by the plugin when it was last activated.
     latency: AtomicU32,
+    /// The layouts a host may arrange the buses in, the plugin's own first.
+    layouts: Vec<AudioLayout>,
+    /// The one `setBusArrangements` chose, by index into `layouts`. Only
+    /// changed while the component is inactive.
+    config: AtomicUsize,
+    /// Whether the host has switched the sidechain bus on (`activateBus`).
+    /// It starts off, as its bus info says.
+    sidechain_active: AtomicBool,
+    /// Whether the component is active, so that buses are not rearranged
+    /// under it.
+    active: AtomicBool,
     /// The unit the host last selected. Nothing here depends on it; it is
     /// kept so that the host is told the same thing back.
     selected_unit: AtomicI32,
@@ -398,6 +425,10 @@ impl<P: Plugin> Component<P> {
         Some(Self {
             controls,
             latency: AtomicU32::new(0),
+            layouts: offered_layouts::<P>(),
+            config: AtomicUsize::new(0),
+            sidechain_active: AtomicBool::new(false),
+            active: AtomicBool::new(false),
             selected_unit: AtomicI32::new(vst::kRootUnitId),
             audio: UnsafeCell::new(Audio {
                 watcher: ParamWatcher::new(&*params),
@@ -405,6 +436,7 @@ impl<P: Plugin> Component<P> {
                 sample_rate: 44_100.0,
                 max_block: 0,
                 prepared: false,
+                layout: P::LAYOUT,
                 buffer: AudioBuffer::new(P::LAYOUT.outputs, 0),
                 sidechain: AudioBuffer::new(P::LAYOUT.sidechain, 0),
                 events: EventBuffer::new(),
@@ -423,6 +455,28 @@ impl<P: Plugin> Component<P> {
     /// Where the plugin parameter with this VST 3 id is in the host's list.
     fn index_of(&self, id: u32) -> Option<usize> {
         self.controls.index_of(id)
+    }
+
+    /// The layout `setBusArrangements` chose, which the buses report.
+    fn selected(&self) -> AudioLayout {
+        let index = self.config.load(Ordering::Relaxed);
+        self.layouts.get(index).copied().unwrap_or(P::LAYOUT)
+    }
+
+    /// The layout the plugin runs with: the selected one, or, while the
+    /// sidechain bus is off, the same without a sidechain if the plugin
+    /// offers that. Otherwise the sidechain stays, silent.
+    fn running_layout(&self) -> AudioLayout {
+        let selected = self.selected();
+        let without = selected.with_sidechain(0);
+        if selected.sidechain > 0
+            && !self.sidechain_active.load(Ordering::Relaxed)
+            && self.layouts.contains(&without)
+        {
+            without
+        } else {
+            selected
+        }
     }
 
     /// The plugin parameter with this VST 3 id.
@@ -840,21 +894,52 @@ unsafe fn buses<'a>(
 
 /// Copies up to `channels` channels of a host bus into `buffer`.
 ///
+/// With `wide`, the host processes in 64 bits (`kSample64`) and the bus
+/// holds `channelBuffers64`, whose samples are rounded to the nearest
+/// `f32`: the plugin hears exactly what it would have been given in 32
+/// bits.
+///
 /// # Safety
 ///
-/// `bus` must hold valid 32-bit channel pointers, each with at least
-/// `buffer.num_frames()` frames, or a null channel array.
-unsafe fn read_bus(bus: &vst::AudioBusBuffers, buffer: &mut AudioBuffer<f32>, channels: usize) {
-    // SAFETY: the plugin only accepts 32-bit processing, so this is the
-    // member of the union the host filled in.
-    let pointers = unsafe { bus.__field0.channelBuffers32 };
-    if pointers.is_null() {
-        return;
-    }
+/// `bus` must hold valid channel pointers of the size `wide` says, each
+/// with at least `buffer.num_frames()` frames, or a null channel array.
+unsafe fn read_bus(
+    bus: &vst::AudioBusBuffers,
+    buffer: &mut AudioBuffer<f32>,
+    channels: usize,
+    wide: bool,
+) {
     let frames = buffer.num_frames();
     let count = channels
         .min(bus.numChannels.max(0) as usize)
         .min(buffer.num_channels());
+    if wide {
+        // SAFETY: the host processes in 64 bits, so this is the member of
+        // the union it filled in.
+        let pointers = unsafe { bus.__field0.channelBuffers64 };
+        if pointers.is_null() {
+            return;
+        }
+        for index in 0..count {
+            // SAFETY: `index` is below the bus's channel count.
+            let channel = unsafe { *pointers.add(index) };
+            if channel.is_null() {
+                continue;
+            }
+            // SAFETY: the host guarantees `frames` readable samples.
+            let samples = unsafe { std::slice::from_raw_parts(channel, frames) };
+            for (out, &sample) in buffer.channel_mut(index).iter_mut().zip(samples) {
+                *out = sample as f32;
+            }
+        }
+        return;
+    }
+    // SAFETY: the host processes in 32 bits, so this is the member of the
+    // union it filled in.
+    let pointers = unsafe { bus.__field0.channelBuffers32 };
+    if pointers.is_null() {
+        return;
+    }
     for index in 0..count {
         // SAFETY: `index` is below the bus's channel count.
         let channel = unsafe { *pointers.add(index) };
@@ -868,23 +953,34 @@ unsafe fn read_bus(bus: &vst::AudioBusBuffers, buffer: &mut AudioBuffer<f32>, ch
 }
 
 /// Fills a host bus from `source`, or with silence where `source` has no
-/// channel for it.
+/// channel for it. With `wide`, in 64 bits, the plugin's samples widened,
+/// which is exact.
 ///
 /// # Safety
 ///
-/// `bus` must hold valid 32-bit channel pointers, each with at least
-/// `frames` writable frames, or a null channel array.
+/// `bus` must hold valid channel pointers of the size `wide` says, each
+/// with at least `frames` writable frames, or a null channel array.
 unsafe fn write_bus(
     bus: &mut vst::AudioBusBuffers,
     source: Option<&AudioBuffer<f32>>,
     frames: usize,
+    wide: bool,
 ) {
-    // SAFETY: as in `read_bus`.
-    let pointers = unsafe { bus.__field0.channelBuffers32 };
     let channels = bus.numChannels.max(0) as usize;
     let mut silent = 0u64;
-    if !pointers.is_null() {
-        for index in 0..channels {
+    for index in 0..channels {
+        let from = source
+            .filter(|buffer| index < buffer.num_channels())
+            .map(|buffer| buffer.channel(index));
+        if from.is_none() {
+            silent |= 1 << index.min(63);
+        }
+        if wide {
+            // SAFETY: as in `read_bus`.
+            let pointers = unsafe { bus.__field0.channelBuffers64 };
+            if pointers.is_null() {
+                break;
+            }
             // SAFETY: `index` is below the bus's channel count.
             let channel = unsafe { *pointers.add(index) };
             if channel.is_null() {
@@ -893,12 +989,30 @@ unsafe fn write_bus(
             // SAFETY: the host guarantees `frames` writable samples per
             // channel, and no reference to the host's input is alive here.
             let samples = unsafe { std::slice::from_raw_parts_mut(channel, frames) };
-            match source.filter(|buffer| index < buffer.num_channels()) {
-                Some(buffer) => samples.copy_from_slice(buffer.channel(index)),
-                None => {
-                    samples.fill(0.0);
-                    silent |= 1 << index.min(63);
+            match from {
+                Some(from) => {
+                    for (out, &sample) in samples.iter_mut().zip(from) {
+                        *out = f64::from(sample);
+                    }
                 }
+                None => samples.fill(0.0),
+            }
+        } else {
+            // SAFETY: as in `read_bus`.
+            let pointers = unsafe { bus.__field0.channelBuffers32 };
+            if pointers.is_null() {
+                break;
+            }
+            // SAFETY: `index` is below the bus's channel count.
+            let channel = unsafe { *pointers.add(index) };
+            if channel.is_null() {
+                continue;
+            }
+            // SAFETY: as above.
+            let samples = unsafe { std::slice::from_raw_parts_mut(channel, frames) };
+            match from {
+                Some(from) => samples.copy_from_slice(from),
+                None => samples.fill(0.0),
             }
         }
     }
@@ -935,7 +1049,7 @@ impl<P: Plugin> vst::IComponentTrait for Component<P> {
     unsafe fn getBusCount(&self, media: vst::MediaType, direction: vst::BusDirection) -> i32 {
         let is_input = direction == BusDirections_::kInput as vst::BusDirection;
         if media == MediaTypes_::kAudio as vst::MediaType {
-            audio_buses::<P>(is_input).1 as i32
+            audio_buses::<P>(P::LAYOUT, is_input).1 as i32
         } else if media == MediaTypes_::kEvent as vst::MediaType {
             i32::from(if is_input {
                 takes_notes::<P>()
@@ -982,7 +1096,7 @@ impl<P: Plugin> vst::IComponentTrait for Component<P> {
             return kInvalidArgument;
         }
 
-        let (channels, count) = audio_buses::<P>(is_input);
+        let (channels, count) = audio_buses::<P>(self.selected(), is_input);
         if index < 0 || index as usize >= count {
             return kInvalidArgument;
         }
@@ -1022,15 +1136,23 @@ impl<P: Plugin> vst::IComponentTrait for Component<P> {
         media: vst::MediaType,
         direction: vst::BusDirection,
         index: i32,
-        _state: TBool,
+        state: TBool,
     ) -> tresult {
         // SAFETY: only reads constants of the plugin type.
         let count = unsafe { self.getBusCount(media, direction) };
-        if (0..count).contains(&index) {
-            kResultOk
-        } else {
-            kInvalidArgument
+        if !(0..count).contains(&index) {
+            return kInvalidArgument;
         }
+        // The sidechain's switch decides, at the next activation, whether
+        // the plugin runs with it (see `running_layout`). It is called
+        // while the component is inactive.
+        let is_sidechain = media == MediaTypes_::kAudio as vst::MediaType
+            && direction == BusDirections_::kInput as vst::BusDirection
+            && sidechain_bus::<P>() == Some(index as usize);
+        if is_sidechain && !self.active.load(Ordering::Relaxed) {
+            self.sidechain_active.store(state != 0, Ordering::Relaxed);
+        }
+        kResultOk
     }
 
     unsafe fn setActive(&self, state: TBool) -> tresult {
@@ -1041,20 +1163,25 @@ impl<P: Plugin> vst::IComponentTrait for Component<P> {
             let audio = unsafe { &mut *self.audio.get() };
             if state != 0 {
                 let max_block = audio.max_block.max(1);
-                audio.buffer = AudioBuffer::new(P::LAYOUT.outputs, max_block);
-                audio.sidechain = AudioBuffer::new(P::LAYOUT.sidechain, max_block);
+                let layout = self.running_layout();
+                audio.layout = layout;
+                audio.buffer = AudioBuffer::new(layout.outputs, max_block);
+                audio.sidechain = AudioBuffer::new(layout.sidechain, max_block);
                 audio.events = EventBuffer::with_capacity(EVENTS_PER_BLOCK);
                 audio.held = EventBuffer::with_capacity(HELD_EVENTS);
                 audio.raw = EventBuffer::with_capacity(EVENTS_PER_BLOCK);
+                audio.plugin.set_layout(layout);
                 audio.plugin.prepare(&ProcessSpec {
                     sample_rate: audio.sample_rate,
                     max_block_size: max_block,
-                    num_channels: P::LAYOUT.outputs,
+                    num_channels: layout.outputs,
                 });
                 audio.prepared = true;
+                self.active.store(true, Ordering::Relaxed);
                 let latency = u32::try_from(audio.plugin.latency_samples()).unwrap_or(u32::MAX);
                 self.latency.store(latency, Ordering::Relaxed);
             } else {
+                self.active.store(false, Ordering::Relaxed);
                 self.controls.running.store(false, Ordering::Relaxed);
                 if audio.prepared {
                     audio.plugin.reset();
@@ -1144,23 +1271,41 @@ impl<P: Plugin> vst::IAudioProcessorTrait for Component<P> {
         outputs: *mut vst::SpeakerArrangement,
         num_outputs: i32,
     ) -> tresult {
-        // The layout is fixed by the plugin. A host may ask for another;
-        // the answer is that only this one is available.
-        let matches = |wanted: *mut vst::SpeakerArrangement, count: i32, is_input: bool| {
-            let (channels, ours) = audio_buses::<P>(is_input);
-            if count < 0 || count as usize != ours || (ours > 0 && wanted.is_null()) {
-                return false;
-            }
-            (0..ours).all(|index| {
-                // SAFETY: the host passes `count` arrangements, and `index`
-                // is below `count`.
-                unsafe { *wanted.add(index) == arrangement(channels[index]) }
-            })
+        // Accepted when it is the arrangement of a layout the plugin
+        // offers, bus for bus, which the plugin then runs with from the
+        // next activation; a sidechain left out is an empty arrangement.
+        // A host that asks for anything else is told no, and reads back
+        // with `getBusArrangement` what is kept.
+        let matches = |layout: AudioLayout| {
+            [(inputs, num_inputs, true), (outputs, num_outputs, false)]
+                .into_iter()
+                .all(|(wanted, count, is_input)| {
+                    let (channels, ours) = audio_buses::<P>(layout, is_input);
+                    if count < 0 || count as usize != ours || (ours > 0 && wanted.is_null()) {
+                        return false;
+                    }
+                    (0..ours).all(|index| {
+                        // SAFETY: the host passes `count` arrangements, and
+                        // `index` is below `count`.
+                        unsafe { *wanted.add(index) == arrangement(channels[index]) }
+                    })
+                })
         };
-        if matches(inputs, num_inputs, true) && matches(outputs, num_outputs, false) {
-            kResultOk
-        } else {
-            kResultFalse
+        if self.active.load(Ordering::Relaxed) {
+            // Called while active, which the specification does not
+            // allow: nothing changes, and only what is in use is accepted.
+            return if matches(self.selected()) {
+                kResultOk
+            } else {
+                kResultFalse
+            };
+        }
+        match self.layouts.iter().position(|&layout| matches(layout)) {
+            Some(index) => {
+                self.config.store(index, Ordering::Relaxed);
+                kResultOk
+            }
+            None => kResultFalse,
         }
     }
 
@@ -1171,7 +1316,7 @@ impl<P: Plugin> vst::IAudioProcessorTrait for Component<P> {
         arr: *mut vst::SpeakerArrangement,
     ) -> tresult {
         let is_input = direction == BusDirections_::kInput as vst::BusDirection;
-        let (channels, count) = audio_buses::<P>(is_input);
+        let (channels, count) = audio_buses::<P>(self.selected(), is_input);
         if arr.is_null() || index < 0 || index as usize >= count {
             return kInvalidArgument;
         }
@@ -1181,7 +1326,11 @@ impl<P: Plugin> vst::IAudioProcessorTrait for Component<P> {
     }
 
     unsafe fn canProcessSampleSize(&self, size: i32) -> tresult {
-        if size == vst::SymbolicSampleSizes_::kSample32 as i32 {
+        // 64-bit buffers are read rounded to 32 bits and written widened
+        // (see `read_bus`), so the plugin's one 32-bit path serves both.
+        if size == vst::SymbolicSampleSizes_::kSample32 as i32
+            || size == vst::SymbolicSampleSizes_::kSample64 as i32
+        {
             kResultOk
         } else {
             kResultFalse
@@ -1197,7 +1346,8 @@ impl<P: Plugin> vst::IAudioProcessorTrait for Component<P> {
         let Some(setup) = (unsafe { setup.as_ref() }) else {
             return kInvalidArgument;
         };
-        if setup.symbolicSampleSize != vst::SymbolicSampleSizes_::kSample32 as i32 {
+        // SAFETY: only compares the size with the two this answers for.
+        if unsafe { self.canProcessSampleSize(setup.symbolicSampleSize) } != kResultOk {
             return kResultFalse;
         }
         // SAFETY: `setupProcessing` runs on the main thread while the
@@ -1247,20 +1397,22 @@ impl<P: Plugin> vst::IAudioProcessorTrait for Component<P> {
 
             audio.buffer.set_num_frames(frames);
             audio.buffer.clear();
-            // SAFETY: the bus pointers in `data` are valid for this call.
+            let layout = audio.layout;
+            let wide = data.symbolicSampleSize == vst::SymbolicSampleSizes_::kSample64 as i32;
+            // SAFETY: the bus pointers in `data` are valid for this call,
+            // in the sample size it gives.
             unsafe {
                 let inputs = buses(data.inputs, data.numInputs);
-                if P::LAYOUT.inputs > 0 {
+                if layout.inputs > 0 {
                     if let Some(main) = inputs.first() {
-                        read_bus(main, &mut audio.buffer, P::LAYOUT.inputs);
+                        read_bus(main, &mut audio.buffer, layout.inputs, wide);
                     }
                 }
-                if P::LAYOUT.sidechain > 0 {
+                if let (true, Some(index)) = (layout.sidechain > 0, sidechain_bus::<P>()) {
                     audio.sidechain.set_num_frames(frames);
                     audio.sidechain.clear();
-                    let index = usize::from(P::LAYOUT.inputs > 0);
                     if let Some(bus) = inputs.get(index) {
-                        read_bus(bus, &mut audio.sidechain, P::LAYOUT.sidechain);
+                        read_bus(bus, &mut audio.sidechain, layout.sidechain, wide);
                     }
                 }
             }
@@ -1269,7 +1421,7 @@ impl<P: Plugin> vst::IAudioProcessorTrait for Component<P> {
             let transport = unsafe { data.processContext.as_ref() }
                 .map_or(Transport::STOPPED, convert_transport);
             let mut context = ProcessContext::new(&audio.events, &transport);
-            if P::LAYOUT.sidechain > 0 {
+            if layout.sidechain > 0 {
                 context = context.with_sidechain(&audio.sidechain);
             }
             let (plugin, buffer, output) = (
@@ -1296,7 +1448,7 @@ impl<P: Plugin> vst::IAudioProcessorTrait for Component<P> {
             // writing is sound even when the host processes in place.
             unsafe {
                 for (index, bus) in buses(data.outputs, data.numOutputs).iter_mut().enumerate() {
-                    write_bus(bus, (index == 0).then_some(&audio.buffer), frames);
+                    write_bus(bus, (index == 0).then_some(&audio.buffer), frames, wide);
                 }
                 audio.notes.send(frames, data.outputEvents);
             }

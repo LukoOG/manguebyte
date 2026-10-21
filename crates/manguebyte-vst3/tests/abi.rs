@@ -800,7 +800,7 @@ fn buses_and_sample_formats_follow_the_layout() {
         );
         assert_eq!(arrangement, vst::SpeakerArr::kStereo);
 
-        // The layout is fixed: the plugin's own is accepted, others are not.
+        // Level offers one layout: its own is accepted, others are not.
         let (mut stereo, mut mono) = (vst::SpeakerArr::kStereo, vst::SpeakerArr::kMono);
         let mut output = vst::SpeakerArr::kStereo;
         assert_eq!(
@@ -822,7 +822,9 @@ fn buses_and_sample_formats_follow_the_layout() {
         let single = vst::SymbolicSampleSizes_::kSample32 as i32;
         let double = vst::SymbolicSampleSizes_::kSample64 as i32;
         assert_eq!(host.processor.canProcessSampleSize(single), kResultOk);
-        assert_eq!(host.processor.canProcessSampleSize(double), kResultFalse);
+        // 64-bit buffers go through the same 32-bit path.
+        assert_eq!(host.processor.canProcessSampleSize(double), kResultOk);
+        assert_eq!(host.processor.canProcessSampleSize(7), kResultFalse);
         assert_eq!(host.processor.getLatencySamples(), 7);
 
         // One object is both processor and controller.
@@ -2641,4 +2643,350 @@ fn an_mpe_instrument_bends_one_note_by_its_member_channel() {
     // The note-off on channel 3 ends that note only.
     let out = play(&host, vec![], vec![note_with_id(2, false, 2, 64, 11)]);
     assert_eq!(out, [172.0, 172.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0]);
+}
+
+// --- 64-bit processing ---------------------------------------------------------
+
+/// Samples that a 32-bit float does not hold exactly.
+fn signal(frames: usize) -> Vec<f64> {
+    (0..frames)
+        .map(|frame| (frame as f64 * 0.017).sin() * 0.9 + 1e-9)
+        .collect()
+}
+
+impl Host {
+    /// Sets the component up for `size` samples and activates it.
+    fn activate_with(&self, size: vst::SymbolicSampleSizes, max_block: i32) {
+        let mut setup = vst::ProcessSetup {
+            processMode: vst::ProcessModes_::kRealtime as i32,
+            symbolicSampleSize: size as i32,
+            maxSamplesPerBlock: max_block,
+            sampleRate: 48_000.0,
+        };
+        unsafe {
+            assert_eq!(self.processor.setupProcessing(&mut setup), kResultOk);
+            assert_eq!(self.component.setActive(1), kResultOk);
+            assert_eq!(self.processor.setProcessing(1), kResultOk);
+        }
+    }
+
+    /// Processes one 64-bit block in place on a main bus of `main`, with
+    /// `changes` as automation points per parameter id. Returns the status
+    /// and the heap calls made.
+    fn process_wide(
+        &self,
+        main: &mut [Vec<f64>],
+        changes: Vec<(u32, Vec<(i32, f64)>)>,
+    ) -> (tresult, usize) {
+        let frames = main[0].len();
+        let mut channels: Vec<*mut f64> = main.iter_mut().map(|c| c.as_mut_ptr()).collect();
+        let bus = vst::AudioBusBuffers {
+            numChannels: channels.len() as i32,
+            silenceFlags: 0,
+            __field0: vst::AudioBusBuffers__type0 {
+                channelBuffers64: channels.as_mut_ptr(),
+            },
+        };
+        let mut inputs = [bus];
+        let mut outputs = [bus];
+        let changes = ComWrapper::new(Changes {
+            queues: changes
+                .into_iter()
+                .map(|(id, points)| ComWrapper::new(Queue { id, points }))
+                .collect(),
+        });
+        let mut data = vst::ProcessData {
+            processMode: vst::ProcessModes_::kRealtime as i32,
+            symbolicSampleSize: vst::SymbolicSampleSizes_::kSample64 as i32,
+            numSamples: frames as i32,
+            numInputs: 1,
+            numOutputs: 1,
+            inputs: inputs.as_mut_ptr(),
+            outputs: outputs.as_mut_ptr(),
+            inputParameterChanges: changes.as_com_ref::<IParameterChanges>().unwrap().as_ptr(),
+            outputParameterChanges: ptr::null_mut(),
+            inputEvents: ptr::null_mut(),
+            outputEvents: ptr::null_mut(),
+            processContext: ptr::null_mut(),
+        };
+        HEAP_CALLS.with(|calls| calls.set(0));
+        IN_PROCESS.with(|watching| watching.set(true));
+        let status = unsafe { self.processor.process(&mut data) };
+        IN_PROCESS.with(|watching| watching.set(false));
+        (status, HEAP_CALLS.with(Cell::get))
+    }
+}
+
+/// Plays `signal` through `Level` with its level automated, in blocks cut
+/// as `pattern` says, in 64 bits or in 32, and returns the left channel
+/// widened to 64 bits.
+fn level_through(frames: usize, pattern: &[usize], wide: bool) -> Vec<f64> {
+    let input = signal(frames);
+    // The level goes to 2 on frame 10 and to 0.5 on frame 50.
+    let points = [(10usize, 0.5), (50, 0.125)];
+    let host = Host::new::<Level>(plugin_factory::<Level>());
+    let size = if wide {
+        vst::SymbolicSampleSizes_::kSample64
+    } else {
+        vst::SymbolicSampleSizes_::kSample32
+    };
+    host.activate_with(size, 128);
+    let mut played = Vec::with_capacity(frames);
+    let (mut start, mut next) = (0, 0);
+    while start < frames {
+        let length = pattern[next % pattern.len()].min(frames - start);
+        next += 1;
+        let end = start + length;
+        let block: Vec<(i32, f64)> = points
+            .iter()
+            .filter(|(at, _)| (start..end).contains(at))
+            .map(|&(at, value)| ((at - start) as i32, value))
+            .collect();
+        let changes = vec![(param_id(LEVEL), block)];
+        let piece = &input[start..end];
+        if wide {
+            let mut main = vec![piece.to_vec(); 2];
+            let (status, heap) = host.process_wide(&mut main, changes);
+            assert_eq!((status, heap), (kResultOk, 0));
+            played.extend_from_slice(&main[0]);
+        } else {
+            let mut main = vec![piece.iter().map(|&s| s as f32).collect::<Vec<f32>>(); 2];
+            let processed = host.process(&mut main, length, None, changes, vec![], None);
+            assert_eq!((processed.status, processed.heap_calls), (kResultOk, 0));
+            played.extend(processed.output[0].iter().map(|&s| f64::from(s)));
+        }
+        start = end;
+    }
+    played
+}
+
+#[test]
+fn sixty_four_bit_processing_is_the_32_bit_result_widened() {
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let narrow = level_through(96, &[96], false);
+    let wide = level_through(96, &[96], true);
+    // The plugin hears the input rounded to 32 bits, and its output is
+    // widened exactly: the two are the same numbers.
+    assert_eq!(wide, narrow);
+    assert!(
+        wide.iter()
+            .all(|&sample| f64::from(sample as f32) == sample)
+    );
+    assert_eq!(wide[20], f64::from(signal(96)[20] as f32 * 2.0));
+    // Whatever the blocks.
+    for pattern in [&[7, 25, 64][..], &[1], &[50, 46], &[13]] {
+        assert_eq!(
+            level_through(96, pattern, true),
+            narrow,
+            "cut as {pattern:?}"
+        );
+    }
+    // A size that is neither is refused.
+    let host = Host::new::<Level>(plugin_factory::<Level>());
+    let mut setup = vst::ProcessSetup {
+        processMode: vst::ProcessModes_::kRealtime as i32,
+        symbolicSampleSize: 3,
+        maxSamplesPerBlock: 64,
+        sampleRate: 48_000.0,
+    };
+    unsafe { assert_eq!(host.processor.setupProcessing(&mut setup), kResultFalse) };
+}
+
+// --- Bus arrangements ----------------------------------------------------------
+
+/// The layouts `Shape` has been given, in order.
+static SHAPE_LAYOUTS: Mutex<Vec<AudioLayout>> = Mutex::new(Vec::new());
+
+struct ShapeParams {
+    level: FloatParam,
+}
+param_set!(ShapeParams { level });
+
+/// Scales its input by 1.5, and adds 1000 when it has a sidechain.
+struct Shape {
+    params: Arc<ShapeParams>,
+}
+
+impl Plugin for Shape {
+    const INFO: PluginInfo = PluginInfo {
+        id: "org.manguebyte.test.shape",
+        name: "Shape",
+        vendor: "Manguebyte",
+        version: "0.1.0",
+        description: "Runs in several shapes",
+        kind: PluginKind::Effect,
+    };
+    const LAYOUT: AudioLayout = AudioLayout::STEREO_EFFECT.with_sidechain(2);
+    const LAYOUTS: &'static [AudioLayout] = &[
+        AudioLayout::STEREO_EFFECT.with_sidechain(2),
+        AudioLayout::STEREO_EFFECT,
+        AudioLayout::MONO_EFFECT.with_sidechain(1),
+        AudioLayout::MONO_EFFECT,
+    ];
+    type Params = ShapeParams;
+
+    fn new() -> Self {
+        Self {
+            params: Arc::new(ShapeParams {
+                level: FloatParam::new("level", "Level", FloatRange::linear(0.0, 2.0), 1.5),
+            }),
+        }
+    }
+    fn params(&self) -> Arc<ShapeParams> {
+        Arc::clone(&self.params)
+    }
+    fn set_layout(&mut self, layout: AudioLayout) {
+        SHAPE_LAYOUTS.lock().unwrap().push(layout);
+    }
+    fn prepare(&mut self, _: &ProcessSpec) {}
+    fn process(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+        let keyed = if context.sidechain.is_some() {
+            1_000.0
+        } else {
+            0.0
+        };
+        let level = self.params.level.value();
+        for channel in buffer.iter_channels_mut() {
+            channel
+                .iter_mut()
+                .for_each(|sample| *sample = *sample * level + keyed);
+        }
+    }
+}
+
+static SHAPES: Mutex<()> = Mutex::new(());
+
+impl Host {
+    fn arrange(&self, inputs: &[u64], outputs: &[u64]) -> tresult {
+        let (mut inputs, mut outputs) = (inputs.to_vec(), outputs.to_vec());
+        unsafe {
+            self.processor.setBusArrangements(
+                inputs.as_mut_ptr(),
+                inputs.len() as i32,
+                outputs.as_mut_ptr(),
+                outputs.len() as i32,
+            )
+        }
+    }
+
+    fn arrangement(&self, direction: u32, index: i32) -> Option<u64> {
+        let mut arrangement = 0u64;
+        unsafe {
+            (self
+                .processor
+                .getBusArrangement(direction as _, index, &mut arrangement)
+                == kResultOk)
+                .then_some(arrangement)
+        }
+    }
+
+    fn activate_bus(&self, index: i32, state: bool) -> tresult {
+        unsafe {
+            self.component
+                .activateBus(AUDIO as _, INPUT as _, index, u8::from(state))
+        }
+    }
+}
+
+#[test]
+fn bus_arrangements_follow_the_layouts_offered() {
+    let _guard = SHAPES.lock().unwrap_or_else(|poison| poison.into_inner());
+    SHAPE_LAYOUTS.lock().unwrap().clear();
+    let host = Host::new::<Shape>(plugin_factory::<Shape>());
+    let (mono, stereo_arr, empty) = (
+        vst::SpeakerArr::kMono,
+        vst::SpeakerArr::kStereo,
+        vst::SpeakerArr::kEmpty,
+    );
+    assert_eq!(host.bus_count(AUDIO, INPUT), 2);
+    assert_eq!(host.arrangement(INPUT, 1), Some(stereo_arr));
+
+    // Mono with a mono sidechain is offered.
+    assert_eq!(host.arrange(&[mono, mono], &[mono]), kResultOk);
+    assert_eq!(host.arrangement(INPUT, 0), Some(mono));
+    assert_eq!(host.arrangement(INPUT, 1), Some(mono));
+    assert_eq!(host.arrangement(OUTPUT, 0), Some(mono));
+    assert_eq!(host.bus_info(AUDIO, INPUT, 0).unwrap().channelCount, 1);
+    // Mono with a stereo sidechain is not; nothing changes.
+    assert_eq!(host.arrange(&[mono, stereo_arr], &[mono]), kResultFalse);
+    assert_eq!(host.arrangement(INPUT, 1), Some(mono));
+    // The bus count is fixed.
+    assert_eq!(host.arrange(&[stereo_arr], &[stereo_arr]), kResultFalse);
+    assert_eq!(
+        host.arrange(&[stereo_arr, stereo_arr], &[stereo_arr, stereo_arr]),
+        kResultFalse
+    );
+    // Stereo with no sidechain is an empty arrangement on its bus.
+    assert_eq!(host.arrange(&[stereo_arr, empty], &[stereo_arr]), kResultOk);
+    assert_eq!(host.arrangement(INPUT, 1), Some(empty));
+    assert_eq!(host.bus_info(AUDIO, INPUT, 1).unwrap().channelCount, 0);
+
+    host.activate(48_000.0, 64);
+    assert_eq!(
+        SHAPE_LAYOUTS.lock().unwrap().last(),
+        Some(&AudioLayout::STEREO_EFFECT)
+    );
+    // While active only the arrangement in use is accepted.
+    assert_eq!(host.arrange(&[mono, mono], &[mono]), kResultFalse);
+    assert_eq!(host.arrange(&[stereo_arr, empty], &[stereo_arr]), kResultOk);
+    let mut audio = stereo(1.0, 16);
+    let mut side = stereo(1.0, 16);
+    let processed = host.process(&mut audio, 16, Some(&mut side), vec![], vec![], None);
+    assert_eq!((processed.status, processed.heap_calls), (kResultOk, 0));
+    assert_eq!(processed.output, stereo(1.5, 16));
+    unsafe {
+        host.processor.setProcessing(0);
+        host.component.setActive(0);
+    }
+
+    // Mono, from the next activation.
+    assert_eq!(host.arrange(&[mono, empty], &[mono]), kResultOk);
+    host.activate(48_000.0, 64);
+    assert_eq!(
+        SHAPE_LAYOUTS.lock().unwrap().last(),
+        Some(&AudioLayout::MONO_EFFECT)
+    );
+    let mut audio = vec![vec![2.0; 16]];
+    let processed = host.process(&mut audio, 16, None, vec![], vec![], None);
+    assert_eq!((processed.status, processed.heap_calls), (kResultOk, 0));
+    assert_eq!(processed.output, [vec![3.0; 16]]);
+}
+
+#[test]
+fn switching_the_sidechain_bus_picks_the_layout_without_it() {
+    let _guard = SHAPES.lock().unwrap_or_else(|poison| poison.into_inner());
+    SHAPE_LAYOUTS.lock().unwrap().clear();
+    let host = Host::new::<Shape>(plugin_factory::<Shape>());
+    // The sidechain starts off, so the plugin runs without one, which it
+    // offers.
+    host.activate(48_000.0, 64);
+    assert_eq!(
+        SHAPE_LAYOUTS.lock().unwrap().last(),
+        Some(&AudioLayout::STEREO_EFFECT)
+    );
+    let mut audio = stereo(1.0, 8);
+    let mut side = stereo(1.0, 8);
+    let processed = host.process(&mut audio, 8, Some(&mut side), vec![], vec![], None);
+    assert_eq!(processed.output, stereo(1.5, 8));
+    unsafe {
+        host.processor.setProcessing(0);
+        host.component.setActive(0);
+    }
+
+    // Switched on, it runs with it.
+    assert_eq!(host.activate_bus(1, true), kResultOk);
+    assert_eq!(host.activate_bus(2, true), kInvalidArgument);
+    host.activate(48_000.0, 64);
+    assert_eq!(SHAPE_LAYOUTS.lock().unwrap().last(), Some(&Shape::LAYOUT));
+    let mut audio = stereo(1.0, 8);
+    let processed = host.process(&mut audio, 8, Some(&mut side), vec![], vec![], None);
+    assert_eq!((processed.status, processed.heap_calls), (kResultOk, 0));
+    assert_eq!(processed.output, stereo(1_001.5, 8));
+    // Not switched while active.
+    assert_eq!(host.activate_bus(1, false), kResultOk);
+    let mut audio = stereo(1.0, 8);
+    let processed = host.process(&mut audio, 8, Some(&mut side), vec![], vec![], None);
+    assert_eq!(processed.output, stereo(1_001.5, 8));
 }
