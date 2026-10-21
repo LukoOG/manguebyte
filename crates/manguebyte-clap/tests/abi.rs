@@ -842,7 +842,10 @@ fn ports_follow_the_layout() {
         let port = host.audio_port(0, is_input).unwrap();
         assert_eq!(name(&port.name), "Main");
         assert_eq!(port.channel_count, 2);
-        assert_eq!(port.flags, CLAP_AUDIO_PORT_IS_MAIN);
+        assert_eq!(
+            port.flags,
+            CLAP_AUDIO_PORT_IS_MAIN | CLAP_AUDIO_PORT_SUPPORTS_64BITS
+        );
         assert_eq!(text(port.port_type), "stereo");
         assert_eq!(port.in_place_pair, 0, "in-place processing is allowed");
         assert!(host.audio_port(1, is_input).is_none());
@@ -1185,12 +1188,15 @@ fn an_instrument_takes_notes_expression_modulation_and_a_sidechain() {
     assert_eq!(host.input_ports(), 1);
     let sidechain = host.audio_port(0, true).unwrap();
     assert_eq!(name(&sidechain.name), "Sidechain");
-    assert_eq!((sidechain.channel_count, sidechain.flags), (2, 0));
+    assert_eq!(
+        (sidechain.channel_count, sidechain.flags),
+        (2, CLAP_AUDIO_PORT_SUPPORTS_64BITS)
+    );
     assert_eq!(sidechain.in_place_pair, CLAP_INVALID_ID);
     let output = host.audio_port(0, false).unwrap();
     assert_eq!(
         (output.channel_count, output.flags),
-        (1, CLAP_AUDIO_PORT_IS_MAIN)
+        (1, CLAP_AUDIO_PORT_IS_MAIN | CLAP_AUDIO_PORT_SUPPORTS_64BITS)
     );
     assert_eq!(text(output.port_type), "mono");
 

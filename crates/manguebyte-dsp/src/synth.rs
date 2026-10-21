@@ -92,10 +92,21 @@ pub trait Voice<S: Sample = f32> {
     }
 
     /// A parameter took a new value, in the parameter's own unit. Sent to
-    /// every voice, sounding or not; and, for a value given to one note
-    /// alone ([`EventKind::NoteParamValue`]), to the voice playing that
-    /// note.
+    /// every voice, sounding or not.
     fn set_param(&mut self, param: ParamId, value: f64) {
+        let _ = (param, value);
+    }
+
+    /// This voice's note alone takes `value` for a parameter, in the
+    /// parameter's own unit ([`EventKind::NoteParamValue`], from a host's
+    /// per-note automation). Ignored unless overridden.
+    ///
+    /// The value belongs to the note: a voice keeps it apart from what
+    /// [`set_param`](Self::set_param) gives every voice, uses it in its
+    /// place until the next `set_param` of the same parameter, and forgets
+    /// it in [`choke`](Self::choke), which every fresh note starts with, so
+    /// that the next note on the voice follows the parameter again.
+    fn set_note_param(&mut self, param: ParamId, value: f64) {
         let _ = (param, value);
     }
 
@@ -465,7 +476,7 @@ impl<S: Sample, V: Voice<S>> Synth<V, S> {
             }
             EventKind::NoteParamValue { param, value, note } => {
                 for slot in self.sounding(move |slot| note.matches(&slot.note)) {
-                    slot.voice.set_param(param, value);
+                    slot.voice.set_note_param(param, value);
                 }
             }
             EventKind::ParamModulation {
@@ -770,6 +781,11 @@ mod tests {
             if param == CUTOFF {
                 self.cutoff = value;
             }
+        }
+        fn set_note_param(&mut self, param: ParamId, value: f64) {
+            // Kept in the same place: a later value for every voice
+            // replaces it.
+            self.set_param(param, value);
         }
         fn modulate(&mut self, param: ParamId, amount: f64) {
             if param == CUTOFF {

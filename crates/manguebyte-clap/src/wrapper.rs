@@ -50,20 +50,32 @@ use std::ffi::{CStr, CString, c_char, c_void};
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use clap_sys::audio_buffer::clap_audio_buffer;
 use clap_sys::entry::clap_plugin_entry;
 use clap_sys::events::*;
 use clap_sys::ext::audio_ports::*;
+use clap_sys::ext::audio_ports_activation::{
+    CLAP_EXT_AUDIO_PORTS_ACTIVATION, CLAP_EXT_AUDIO_PORTS_ACTIVATION_COMPAT,
+    clap_plugin_audio_ports_activation,
+};
+use clap_sys::ext::audio_ports_config::{
+    CLAP_EXT_AUDIO_PORTS_CONFIG, clap_audio_ports_config, clap_plugin_audio_ports_config,
+};
 use clap_sys::ext::gui::CLAP_EXT_GUI;
 use clap_sys::ext::latency::{CLAP_EXT_LATENCY, clap_plugin_latency};
+use clap_sys::ext::note_name::{CLAP_EXT_NOTE_NAME, clap_note_name, clap_plugin_note_name};
 use clap_sys::ext::note_ports::*;
 use clap_sys::ext::params::*;
 use clap_sys::ext::posix_fd_support::CLAP_EXT_POSIX_FD_SUPPORT;
 use clap_sys::ext::state::{CLAP_EXT_STATE, clap_plugin_state};
 use clap_sys::ext::timer_support::CLAP_EXT_TIMER_SUPPORT;
+use clap_sys::ext::voice_info::{
+    CLAP_EXT_VOICE_INFO, CLAP_VOICE_INFO_SUPPORTS_OVERLAPPING_NOTES, clap_host_voice_info,
+    clap_plugin_voice_info, clap_voice_info,
+};
 use clap_sys::factory::plugin_factory::{CLAP_PLUGIN_FACTORY_ID, clap_plugin_factory};
 use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
 use clap_sys::host::clap_host;
@@ -81,7 +93,11 @@ use manguebyte_midi::MidiMessage;
 use manguebyte_midi::ump::Packet;
 use manguebyte_params::{Param, ParamSet};
 use manguebyte_plugin::editor::{GestureCounters, GestureReader};
-use manguebyte_plugin::{ParamWatcher, Plugin, PluginKind, load_state, save_state};
+use manguebyte_plugin::output::{OutputBuffer, OutputEvent};
+use manguebyte_plugin::{
+    AudioLayout, ParamWatcher, Plugin, PluginKind, VoiceInfo, load_state, offered_layouts,
+    save_state,
+};
 
 use crate::gui::{self, Gui, GuiVtables, HostRef, SharedFlags};
 use crate::output::NoteSender;
@@ -89,6 +105,10 @@ use crate::output::NoteSender;
 /// Most events delivered to the plugin in one block. Extra events are
 /// dropped rather than allocated for.
 const EVENTS_PER_BLOCK: usize = 4_096;
+
+/// Most transport events a block is cut at. Later ones in the same block
+/// are ignored rather than allocated for.
+const TRANSPORT_CHANGES: usize = 64;
 
 /// Largest state a host may hand back, so a corrupt stream cannot make the
 /// plugin allocate without bound.
@@ -265,6 +285,23 @@ impl<P: Plugin> Vtables<P> {
     const LATENCY: &'static clap_plugin_latency = &clap_plugin_latency {
         get: Some(latency_get::<P>),
     };
+    const PORTS_CONFIG: &'static clap_plugin_audio_ports_config = &clap_plugin_audio_ports_config {
+        count: Some(ports_config_count::<P>),
+        get: Some(ports_config_get::<P>),
+        select: Some(ports_config_select::<P>),
+    };
+    const PORTS_ACTIVATION: &'static clap_plugin_audio_ports_activation =
+        &clap_plugin_audio_ports_activation {
+            can_activate_while_processing: Some(ports_can_activate_while_processing),
+            set_active: Some(ports_set_active::<P>),
+        };
+    const VOICE_INFO: &'static clap_plugin_voice_info = &clap_plugin_voice_info {
+        get: Some(voice_info_get::<P>),
+    };
+    const NOTE_NAME: &'static clap_plugin_note_name = &clap_plugin_note_name {
+        count: Some(note_name_count::<P>),
+        get: Some(note_name_get::<P>),
+    };
 }
 
 unsafe extern "C" fn factory_count(_factory: *const clap_plugin_factory) -> u32 {
@@ -305,6 +342,9 @@ unsafe extern "C" fn factory_create<P: Plugin>(
         let editor = plugin.editor();
         let mut ids = Vec::with_capacity(params.len());
         params.visit(&mut |param| ids.push(param.param_id()));
+        // Asked now so that `get_extension` knows whether to offer
+        // `voice-info`, and again on each activation.
+        let voices = plugin.voice_info();
 
         // Gestures are counted only for a plugin with an editor; without
         // one, nothing here differs from a plugin that never had one.
@@ -336,24 +376,39 @@ unsafe extern "C" fn factory_create<P: Plugin>(
             // until the plugin is destroyed, and `plugin_destroy` closes the
             // editor, which drops every copy, before that.
             host: unsafe { HostRef::new(host) },
-            ids,
             latency: AtomicU32::new(0),
+            layouts: offered_layouts::<P>(),
+            config: AtomicUsize::new(0),
+            sidechain_on: AtomicBool::new(true),
+            active: AtomicBool::new(false),
+            has_voice_info: voices.is_some(),
+            voices: Mutex::new(voices),
             flags: Arc::new(SharedFlags::new(&*params)),
             has_editor: gui.is_some(),
             gui,
             audio: UnsafeCell::new(Audio {
                 watcher: ParamWatcher::new(&*params),
                 known_to_host: current_values(&*params),
+                current: vec![0.0; ids.len()],
                 gestures,
                 plugin,
                 sample_rate: 0.0,
+                layout: P::LAYOUT,
                 buffer: AudioBuffer::new(P::LAYOUT.outputs, 0),
                 sidechain: AudioBuffer::new(P::LAYOUT.sidechain, 0),
                 events: EventBuffer::new(),
+                piece: EventBuffer::new(),
+                changes: Vec::with_capacity(TRANSPORT_CHANGES),
                 input: NoteInput::new(P::MPE),
                 notes: NoteSender::new(if P::NOTE_OUTPUT { EVENTS_PER_BLOCK } else { 0 }),
+                piece_output: if P::NOTE_OUTPUT {
+                    OutputBuffer::with_capacity(EVENTS_PER_BLOCK)
+                } else {
+                    OutputBuffer::new()
+                },
                 resend_values: false,
             }),
+            ids,
             params,
         }));
         // SAFETY: `instance` was just produced by `Box::into_raw`, so it is
@@ -379,6 +434,24 @@ pub(crate) struct Instance<P: Plugin> {
     ids: Vec<ParamId>,
     /// Latency reported by the plugin when it was last activated.
     latency: AtomicU32,
+    /// The layouts offered as `audio-ports-config` configurations, the
+    /// plugin's own first; a configuration's id is its index.
+    layouts: Vec<AudioLayout>,
+    /// The configuration the host selected, by index into `layouts`. Only
+    /// changed while the plugin is not active.
+    config: AtomicUsize,
+    /// Whether the sidechain port is active (`audio-ports-activation`).
+    /// Only changed while the plugin is not active.
+    sidechain_on: AtomicBool,
+    /// Whether the plugin is active, so that ports are not changed under
+    /// it.
+    active: AtomicBool,
+    /// Whether the plugin said anything of its voices when it was created,
+    /// which decides whether `voice-info` is offered. Never changes.
+    has_voice_info: bool,
+    /// What the plugin said of its voices when it was last activated.
+    /// Taken on the main thread only.
+    voices: Mutex<Option<VoiceInfo>>,
     /// What the main and audio threads share besides parameters.
     flags: Arc<SharedFlags>,
     /// Whether `gui` is there. Set once, when the plugin is created, so that
@@ -394,9 +467,24 @@ pub(crate) struct Instance<P: Plugin> {
 struct Audio<P> {
     plugin: P,
     sample_rate: f64,
+    /// The layout the plugin was prepared for.
+    layout: AudioLayout,
     buffer: AudioBuffer<f32>,
     sidechain: AudioBuffer<f32>,
     events: EventBuffer,
+    /// The events of one piece of a block cut at a transport event,
+    /// counted from the piece's start.
+    piece: EventBuffer,
+    /// The transport events inside the block, with their frames, in time
+    /// order.
+    changes: Vec<(u32, Transport)>,
+    /// What the plugin sends during one piece of a cut block, before it
+    /// joins the block's output on the piece's frames.
+    piece_output: OutputBuffer,
+    /// Each parameter's value as of the event being read, in index order:
+    /// what a modulation amount is converted around, so that automation
+    /// earlier in the same block counts, wherever the host cut its blocks.
+    current: Vec<f64>,
     /// Reads the host's MIDI 1.0, MPE and MIDI 2.0 events as per-note
     /// events, as every wrapper does. Notes in CLAP's own dialect, and
     /// its note expressions, need no reading and do not go through it.
@@ -471,6 +559,28 @@ impl<P: Plugin> Instance<P> {
     fn param(&self, id: clap_id) -> Option<&dyn Param> {
         self.index_of(id)?;
         self.params.find_param(ParamId(id))
+    }
+
+    /// The layout of the selected configuration, which the ports describe.
+    fn selected(&self) -> AudioLayout {
+        let index = self.config.load(Ordering::Relaxed);
+        self.layouts.get(index).copied().unwrap_or(P::LAYOUT)
+    }
+
+    /// The layout the plugin runs with: the selected one, or, with its
+    /// sidechain port switched off, the same without a sidechain if the
+    /// plugin offers that. Otherwise the sidechain stays, silent.
+    fn running_layout(&self) -> AudioLayout {
+        let selected = self.selected();
+        let without = selected.with_sidechain(0);
+        if selected.sidechain > 0
+            && !self.sidechain_on.load(Ordering::Relaxed)
+            && self.layouts.contains(&without)
+        {
+            without
+        } else {
+            selected
+        }
     }
 }
 
@@ -561,20 +671,66 @@ unsafe extern "C" fn plugin_activate<P: Plugin>(
         // processing, so no other thread is using the audio state.
         let audio = unsafe { &mut *instance.audio.get() };
         let max_frames = max_frames.max(1) as usize;
+        let layout = instance.running_layout();
 
         audio.sample_rate = sample_rate;
-        audio.buffer = AudioBuffer::new(P::LAYOUT.outputs, max_frames);
-        audio.sidechain = AudioBuffer::new(P::LAYOUT.sidechain, max_frames);
+        audio.layout = layout;
+        audio.buffer = AudioBuffer::new(layout.outputs, max_frames);
+        audio.sidechain = AudioBuffer::new(layout.sidechain, max_frames);
         audio.events = EventBuffer::with_capacity(EVENTS_PER_BLOCK);
+        audio.piece = EventBuffer::with_capacity(EVENTS_PER_BLOCK);
+        audio.plugin.set_layout(layout);
         audio.plugin.prepare(&ProcessSpec {
             sample_rate,
             max_block_size: max_frames,
-            num_channels: P::LAYOUT.outputs,
+            num_channels: layout.outputs,
         });
         let latency = u32::try_from(audio.plugin.latency_samples()).unwrap_or(u32::MAX);
         instance.latency.store(latency, Ordering::Relaxed);
+        if instance.has_voice_info {
+            let voices = audio.plugin.voice_info();
+            let changed = {
+                let mut known = instance
+                    .voices
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                std::mem::replace(&mut *known, voices) != voices
+            };
+            if changed {
+                // SAFETY: `activate` runs on the main thread, where the
+                // host's `voice-info` may be called, and the host outlives
+                // the plugin.
+                unsafe { voices_changed(instance.host.as_ptr()) };
+            }
+        }
+        instance.active.store(true, Ordering::Relaxed);
         true
     })
+}
+
+/// Tells the host that what the plugin says of its voices changed.
+///
+/// # Safety
+///
+/// `host` must be the live host that created the plugin, or null, and this
+/// must be called on the main thread.
+unsafe fn voices_changed(host: *const clap_host) {
+    // SAFETY: guaranteed by this function's contract.
+    let Some(get_extension) = (unsafe { host.as_ref() }).and_then(|host| host.get_extension) else {
+        return;
+    };
+    // SAFETY: the host's own function with the host's own pointer. A
+    // non-null result is the host's `clap_host_voice_info`, valid while the
+    // host is.
+    let voice_info = unsafe {
+        get_extension(host, CLAP_EXT_VOICE_INFO.as_ptr())
+            .cast::<clap_host_voice_info>()
+            .as_ref()
+    };
+    if let Some(changed) = voice_info.and_then(|voice_info| voice_info.changed) {
+        // SAFETY: as above, and we are on the main thread.
+        unsafe { changed(host) };
+    }
 }
 
 unsafe extern "C" fn plugin_deactivate<P: Plugin>(plugin: *const clap_plugin) {
@@ -589,6 +745,7 @@ unsafe extern "C" fn plugin_deactivate<P: Plugin>(plugin: *const clap_plugin) {
         audio.plugin.reset();
         audio.input.reset();
         audio.notes.reset();
+        instance.active.store(false, Ordering::Relaxed);
     });
 }
 
@@ -655,8 +812,27 @@ unsafe extern "C" fn plugin_get_extension<P: Plugin>(
     // The editor's extensions are offered only by a plugin that has one.
     // SAFETY: the host passes a plugin it created through our factory.
     // `has_editor` never changes, so reading it from any thread is sound.
-    let has_editor = unsafe { instance::<P>(plugin) }.is_some_and(|instance| instance.has_editor);
-    if has_editor && id == CLAP_EXT_GUI {
+    // SAFETY: as above; `layouts` and `has_voice_info` never change either.
+    let (has_editor, configs, has_voice_info) = match unsafe { instance::<P>(plugin) } {
+        Some(instance) => (
+            instance.has_editor,
+            instance.layouts.len(),
+            instance.has_voice_info,
+        ),
+        None => (false, 1, false),
+    };
+    if id == CLAP_EXT_AUDIO_PORTS_CONFIG && configs > 1 {
+        ptr::from_ref(Vtables::<P>::PORTS_CONFIG).cast()
+    } else if (id == CLAP_EXT_AUDIO_PORTS_ACTIVATION
+        || id == CLAP_EXT_AUDIO_PORTS_ACTIVATION_COMPAT)
+        && P::LAYOUT.sidechain > 0
+    {
+        ptr::from_ref(Vtables::<P>::PORTS_ACTIVATION).cast()
+    } else if id == CLAP_EXT_VOICE_INFO && has_voice_info {
+        ptr::from_ref(Vtables::<P>::VOICE_INFO).cast()
+    } else if id == CLAP_EXT_NOTE_NAME && takes_notes::<P>() && !P::NOTE_NAMES.is_empty() {
+        ptr::from_ref(Vtables::<P>::NOTE_NAME).cast()
+    } else if has_editor && id == CLAP_EXT_GUI {
         ptr::from_ref(GuiVtables::<P>::GUI).cast()
     } else if has_editor && id == CLAP_EXT_TIMER_SUPPORT {
         ptr::from_ref(GuiVtables::<P>::TIMER).cast()
@@ -707,22 +883,23 @@ unsafe extern "C" fn plugin_process<P: Plugin>(
         }
         audio.buffer.set_num_frames(frames);
         audio.buffer.clear();
+        let layout = audio.layout;
 
         // SAFETY: the pointers in `process` are valid for this call.
         unsafe {
             instance.gather_events(audio, process.in_events, process.out_events);
             let inputs = ports(process.audio_inputs, process.audio_inputs_count);
-            if P::LAYOUT.inputs > 0 {
+            if layout.inputs > 0 {
                 if let Some(main) = inputs.first() {
-                    read_port(main, &mut audio.buffer, P::LAYOUT.inputs);
+                    read_port(main, &mut audio.buffer, layout.inputs);
                 }
             }
-            if P::LAYOUT.sidechain > 0 {
+            if layout.sidechain > 0 {
                 audio.sidechain.set_num_frames(frames);
                 audio.sidechain.clear();
-                let index = usize::from(P::LAYOUT.inputs > 0);
+                let index = usize::from(layout.inputs > 0);
                 if let Some(port) = inputs.get(index) {
-                    read_port(port, &mut audio.sidechain, P::LAYOUT.sidechain);
+                    read_port(port, &mut audio.sidechain, layout.sidechain);
                 }
             }
         }
@@ -730,21 +907,8 @@ unsafe extern "C" fn plugin_process<P: Plugin>(
         // SAFETY: the transport pointer is valid for this call, or null.
         let transport =
             unsafe { process.transport.as_ref() }.map_or(Transport::STOPPED, convert_transport);
-        let mut context = ProcessContext::new(&audio.events, &transport);
-        if P::LAYOUT.sidechain > 0 {
-            context = context.with_sidechain(&audio.sidechain);
-        }
-        let (plugin, buffer, output) = (
-            &mut audio.plugin,
-            &mut audio.buffer,
-            &mut audio.notes.output,
-        );
-        output.clear();
-        let finished = catch_unwind(AssertUnwindSafe(|| {
-            plugin.process_with_output(buffer, &context, output);
-        }))
-        .is_ok();
-        if !finished {
+        audio.notes.output.clear();
+        if !audio.render(frames, transport) {
             // The plugin panicked. The host is told the block failed, and
             // the next block starts with every parameter's value, since the
             // changes of this one may not have reached the plugin.
@@ -768,6 +932,114 @@ unsafe extern "C" fn plugin_process<P: Plugin>(
     })
 }
 
+impl<P: Plugin> Audio<P> {
+    /// Runs the plugin over the block of `frames` frames gathered in
+    /// `events`, `buffer` and `sidechain`, starting with `transport`, and
+    /// collects what it sends in `notes.output`. Returns whether it
+    /// finished, rather than panicking. Real-time safe.
+    ///
+    /// A block with transport events inside it (`changes`) is cut at each,
+    /// so that the plugin sees the transport the host gave from the frame
+    /// it gave it on, as the LV2 wrapper does with `time:Position`. Each
+    /// piece is a block of its own to the plugin: its events, its output
+    /// and its sidechain counted from the piece's start, its transport the
+    /// one in force there. A transport event on frame 0 replaces the
+    /// block's own.
+    fn render(&mut self, frames: usize, mut transport: Transport) -> bool {
+        let Self {
+            plugin,
+            layout,
+            buffer,
+            sidechain,
+            events,
+            piece,
+            changes,
+            notes,
+            piece_output,
+            ..
+        } = self;
+        let keyed = layout.sidechain > 0;
+
+        // Nearly every block: no transport event inside it.
+        if changes.iter().all(|&(at, _)| at == 0) {
+            if let Some(&(_, change)) = changes.last() {
+                transport = change;
+            }
+            let mut context = ProcessContext::new(events, &transport);
+            if keyed {
+                context = context.with_sidechain(sidechain);
+            }
+            let output = &mut notes.output;
+            return catch_unwind(AssertUnwindSafe(|| {
+                plugin.process_with_output(buffer, &context, output);
+            }))
+            .is_ok();
+        }
+
+        let mut start = 0;
+        let mut next_change = 0;
+        let mut delivered = 0;
+        loop {
+            // The transport in force from here on.
+            while let Some(&(at, change)) = changes.get(next_change) {
+                if at as usize > start {
+                    break;
+                }
+                transport = change;
+                next_change += 1;
+            }
+            if start >= frames {
+                return true;
+            }
+            let end = changes
+                .get(next_change)
+                .map_or(frames, |&(at, _)| (at as usize).min(frames));
+
+            // The events of this piece, counted from its start. The last
+            // piece also takes any past the end of the block.
+            piece.clear();
+            while let Some(&event) = events.as_slice().get(delivered) {
+                if end < frames && event.offset as usize >= end {
+                    break;
+                }
+                let offset = event.offset.saturating_sub(start as u32);
+                let _ = piece.push(Event { offset, ..event });
+                delivered += 1;
+            }
+
+            piece_output.clear();
+            let piece_events: &EventBuffer = piece;
+            let output: &mut OutputBuffer = piece_output;
+            let finished = buffer.windowed(start..end, |window| {
+                let mut run = |context: &ProcessContext<'_, f32>| {
+                    catch_unwind(AssertUnwindSafe(|| {
+                        plugin.process_with_output(window, context, output);
+                    }))
+                    .is_ok()
+                };
+                if keyed {
+                    sidechain.windowed(start..end, |side| {
+                        run(&ProcessContext::new(piece_events, &transport).with_sidechain(side))
+                    })
+                } else {
+                    run(&ProcessContext::new(piece_events, &transport))
+                }
+            });
+            if !finished {
+                return false;
+            }
+            // What the piece sent, on the block's frames; past the piece's
+            // end is its last frame, as past a block's end is the block's.
+            let last = (end - start - 1) as u32;
+            for event in piece_output.iter() {
+                let offset = start as u32 + event.offset.min(last);
+                let _ = notes.output.push(OutputEvent { offset, ..*event });
+            }
+            start = end;
+        }
+    }
+}
+
 /// The host's audio ports as a slice.
 ///
 /// # Safety
@@ -783,53 +1055,87 @@ unsafe fn ports<'a>(first: *const clap_audio_buffer, count: u32) -> &'a [clap_au
 
 /// Copies up to `channels` channels of a host port into `buffer`.
 ///
+/// The host gives each port in 32 bits (`data32`) or, since every port
+/// declares `CLAP_AUDIO_PORT_SUPPORTS_64BITS`, in 64 bits (`data64`). The
+/// plugin processes in 32 bits, so 64-bit samples are rounded to the
+/// nearest `f32`: the plugin hears exactly what it would have been given in
+/// 32 bits.
+///
 /// # Safety
 ///
-/// `port` must describe valid 32-bit channel pointers, each with at least
-/// `buffer.num_frames()` frames, or have a null `data32`.
+/// `port` must describe valid channel pointers of the sample size it sets,
+/// each with at least `buffer.num_frames()` frames, or have both null.
 unsafe fn read_port(port: &clap_audio_buffer, buffer: &mut AudioBuffer<f32>, channels: usize) {
-    if port.data32.is_null() {
-        return;
-    }
     let frames = buffer.num_frames();
     let count = channels
         .min(port.channel_count as usize)
         .min(buffer.num_channels());
     for index in 0..count {
-        // SAFETY: `index` is below the port's channel count.
-        let channel = unsafe { *port.data32.add(index) };
-        if channel.is_null() {
-            continue;
+        let target = buffer.channel_mut(index);
+        if !port.data32.is_null() {
+            // SAFETY: `index` is below the port's channel count.
+            let channel = unsafe { *port.data32.add(index) };
+            if !channel.is_null() {
+                // SAFETY: the host guarantees `frames` readable samples.
+                target.copy_from_slice(unsafe { std::slice::from_raw_parts(channel, frames) });
+            }
+        } else if !port.data64.is_null() {
+            // SAFETY: as above, for the 64-bit channels.
+            let channel = unsafe { *port.data64.add(index) };
+            if !channel.is_null() {
+                // SAFETY: as above.
+                let samples = unsafe { std::slice::from_raw_parts(channel, frames) };
+                for (out, &sample) in target.iter_mut().zip(samples) {
+                    *out = sample as f32;
+                }
+            }
         }
-        // SAFETY: the host guarantees `frames` readable samples per channel.
-        let samples = unsafe { std::slice::from_raw_parts(channel, frames) };
-        buffer.channel_mut(index).copy_from_slice(samples);
     }
 }
 
 /// Fills a host port from `source`, or with silence where `source` has no
-/// channel for it.
+/// channel for it, in whichever sample size the host gave it in. A 64-bit
+/// port gets the plugin's 32-bit samples widened, which is exact.
 ///
 /// # Safety
 ///
-/// `port` must describe valid 32-bit channel pointers, each with at least
-/// `frames` writable frames, or have a null `data32`.
+/// `port` must describe valid channel pointers of the sample size it sets,
+/// each with at least `frames` writable frames, or have both null.
 unsafe fn write_port(port: &clap_audio_buffer, source: Option<&AudioBuffer<f32>>, frames: usize) {
-    if port.data32.is_null() {
-        return;
-    }
     for index in 0..port.channel_count as usize {
-        // SAFETY: `index` is below the port's channel count.
-        let channel = unsafe { *port.data32.add(index) };
-        if channel.is_null() {
-            continue;
-        }
-        // SAFETY: the host guarantees `frames` writable samples per channel,
-        // and no reference to the host's input memory is alive here.
-        let samples = unsafe { std::slice::from_raw_parts_mut(channel, frames) };
-        match source.filter(|buffer| index < buffer.num_channels()) {
-            Some(buffer) => samples.copy_from_slice(buffer.channel(index)),
-            None => samples.fill(0.0),
+        let from = source
+            .filter(|buffer| index < buffer.num_channels())
+            .map(|buffer| buffer.channel(index));
+        if !port.data32.is_null() {
+            // SAFETY: `index` is below the port's channel count.
+            let channel = unsafe { *port.data32.add(index) };
+            if channel.is_null() {
+                continue;
+            }
+            // SAFETY: the host guarantees `frames` writable samples per
+            // channel, and no reference to the host's input memory is alive
+            // here.
+            let samples = unsafe { std::slice::from_raw_parts_mut(channel, frames) };
+            match from {
+                Some(from) => samples.copy_from_slice(from),
+                None => samples.fill(0.0),
+            }
+        } else if !port.data64.is_null() {
+            // SAFETY: as above, for the 64-bit channels.
+            let channel = unsafe { *port.data64.add(index) };
+            if channel.is_null() {
+                continue;
+            }
+            // SAFETY: as above.
+            let samples = unsafe { std::slice::from_raw_parts_mut(channel, frames) };
+            match from {
+                Some(from) => {
+                    for (out, &sample) in samples.iter_mut().zip(from) {
+                        *out = f64::from(sample);
+                    }
+                }
+                None => samples.fill(0.0),
+            }
         }
     }
 }
@@ -898,6 +1204,7 @@ impl<P: Plugin> Instance<P> {
     ) {
         let params: &dyn ParamSet = &*self.params;
         audio.events.clear();
+        audio.changes.clear();
 
         // Changes the plugin has not seen yet go first, on frame 0. They
         // stay first: later events on frame 0 go after them. After a block
@@ -922,7 +1229,14 @@ impl<P: Plugin> Instance<P> {
         // SAFETY: `output` is valid for this call, per our contract.
         unsafe { self.report_to_host(audio, output) };
 
-        // Then what the host sends.
+        // Then what the host sends, read in time order from each
+        // parameter's value as it stands now.
+        let mut values = audio.current.iter_mut();
+        params.visit(&mut |param| {
+            if let Some(value) = values.next() {
+                *value = param.plain();
+            }
+        });
         // SAFETY: `input` is valid for this call, per our contract.
         unsafe { for_each_event(input, |header| self.convert(audio, header)) };
 
@@ -1059,18 +1373,38 @@ impl<P: Plugin> Instance<P> {
                 let Some(event) = (unsafe { read::<clap_event_param_value>(header) }) else {
                     return;
                 };
-                // Per-note automation is not supported yet.
-                if event.note_id >= 0 || event.key >= 0 {
-                    return;
-                }
-                let Some(param) = self.param(event.param_id) else {
+                let (Some(index), Some(param)) =
+                    (self.index_of(event.param_id), self.param(event.param_id))
+                else {
                     return;
                 };
-                // The host knows this value; `gather_events` records it as
-                // known once it is stored.
-                EventKind::ParamValue {
-                    param: ParamId(event.param_id),
-                    value: from_clap(param, event.value),
+                let value = from_clap(param, event.value);
+                if event.note_id >= 0 || event.key >= 0 {
+                    // Per-note automation, for a parameter that offers it.
+                    // The parameter itself keeps its value.
+                    let note = note_ref(event.note_id, event.channel, event.key);
+                    let (true, Some(note)) = (param.info().flags().per_note, note) else {
+                        return;
+                    };
+                    EventKind::NoteParamValue {
+                        param: ParamId(event.param_id),
+                        value,
+                        note,
+                    }
+                } else {
+                    // What modulation later in the block is converted
+                    // around.
+                    if let (Some(current), Some(stored)) =
+                        (audio.current.get_mut(index), param.stored_plain(value))
+                    {
+                        *current = stored;
+                    }
+                    // The host knows this value; `gather_events` records it
+                    // as known once it is stored.
+                    EventKind::ParamValue {
+                        param: ParamId(event.param_id),
+                        value,
+                    }
                 }
             }
             CLAP_EVENT_PARAM_MOD => {
@@ -1078,18 +1412,40 @@ impl<P: Plugin> Instance<P> {
                 let Some(event) = (unsafe { read::<clap_event_param_mod>(header) }) else {
                     return;
                 };
-                let Some(param) = self.param(event.param_id) else {
+                let (Some(index), Some(param)) =
+                    (self.index_of(event.param_id), self.param(event.param_id))
+                else {
                     return;
                 };
                 // The host gives the offset in its own scale. Convert it to
-                // the parameter's unit around where the parameter is now.
-                let plain = param.plain();
+                // the parameter's unit around the value the parameter has on
+                // the event's frame: automation earlier in the block counts,
+                // so the amount does not depend on where blocks are cut.
+                let plain = audio.current.get(index).copied().unwrap_or(param.plain());
                 let moved = from_clap(param, to_clap(param, plain) + event.amount);
                 EventKind::ParamModulation {
                     param: ParamId(event.param_id),
                     amount: moved - plain,
                     note: note_ref(event.note_id, event.channel, event.key),
                 }
+            }
+            CLAP_EVENT_TRANSPORT => {
+                // SAFETY: this type carries a `clap_event_transport`.
+                let Some(event) = (unsafe { read::<clap_event_transport>(header) }) else {
+                    return;
+                };
+                // The block is cut here (see `Audio::render`). Past the
+                // room set aside, a change is ignored.
+                // A host must send events in time order; one that does not
+                // has a change taken as no earlier than the one before.
+                let time = audio
+                    .changes
+                    .last()
+                    .map_or(head.time, |&(last, _)| head.time.max(last));
+                if audio.changes.len() < audio.changes.capacity() {
+                    audio.changes.push((time, convert_transport(event)));
+                }
+                return;
             }
             CLAP_EVENT_MIDI => {
                 // SAFETY: this type carries a `clap_event_midi`.
@@ -1347,6 +1703,19 @@ unsafe extern "C" fn params_get_info<P: Plugin>(
             Some(_) => clap_flags |= CLAP_PARAM_IS_STEPPED,
             None => clap_flags |= CLAP_PARAM_IS_MODULATABLE,
         }
+        // Per note: by note id and by key. Not per channel or per port
+        // alone, which address every note of a channel or port and have no
+        // form in the framework's events.
+        if flags.per_note {
+            if flags.automatable {
+                clap_flags |=
+                    CLAP_PARAM_IS_AUTOMATABLE_PER_NOTE_ID | CLAP_PARAM_IS_AUTOMATABLE_PER_KEY;
+            }
+            if stepped.is_none() {
+                clap_flags |=
+                    CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID | CLAP_PARAM_IS_MODULATABLE_PER_KEY;
+            }
+        }
 
         info.id = param.param_id().0;
         info.flags = clap_flags;
@@ -1471,6 +1840,11 @@ unsafe extern "C" fn params_flush<P: Plugin>(
                     return;
                 }
                 let event = &*header.cast::<clap_event_param_value>();
+                // A value for one note is not the parameter's value, and
+                // with no block there is no note for it to reach.
+                if event.note_id >= 0 || event.key >= 0 {
+                    return;
+                }
                 let (Some(index), Some(param)) = (
                     instance.index_of(event.param_id),
                     instance.param(event.param_id),
@@ -1602,9 +1976,9 @@ fn takes_notes<P: Plugin>() -> bool {
     )
 }
 
-/// The channel counts of the ports in one direction, main port first.
-fn port_channels<P: Plugin>(is_input: bool) -> ([usize; 2], usize) {
-    let layout = P::LAYOUT;
+/// The channel counts of the ports of `layout` in one direction, main port
+/// first.
+fn port_channels(layout: AudioLayout, is_input: bool) -> ([usize; 2], usize) {
     let candidates = if is_input {
         [layout.inputs, layout.sidechain]
     } else {
@@ -1621,21 +1995,46 @@ fn port_channels<P: Plugin>(is_input: bool) -> ([usize; 2], usize) {
     (present, count)
 }
 
+/// The port type of a port of `channels` channels.
+fn port_type(channels: usize) -> *const c_char {
+    match channels {
+        1 => CLAP_PORT_MONO.as_ptr(),
+        2 => CLAP_PORT_STEREO.as_ptr(),
+        _ => ptr::null(),
+    }
+}
+
+/// The selected configuration's layout, or the plugin's own for a pointer
+/// that is not a plugin.
+///
+/// # Safety
+///
+/// As for [`instance`].
+unsafe fn selected<P: Plugin>(plugin: *const clap_plugin) -> AudioLayout {
+    // SAFETY: per this function's contract.
+    unsafe { instance::<P>(plugin) }.map_or(P::LAYOUT, Instance::selected)
+}
+
 unsafe extern "C" fn audio_ports_count<P: Plugin>(
-    _plugin: *const clap_plugin,
+    plugin: *const clap_plugin,
     is_input: bool,
 ) -> u32 {
-    port_channels::<P>(is_input).1 as u32
+    guard(0, || {
+        // SAFETY: the host passes a plugin it created through our factory.
+        port_channels(unsafe { selected::<P>(plugin) }, is_input).1 as u32
+    })
 }
 
 unsafe extern "C" fn audio_ports_get<P: Plugin>(
-    _plugin: *const clap_plugin,
+    plugin: *const clap_plugin,
     index: u32,
     is_input: bool,
     info: *mut clap_audio_port_info,
 ) -> bool {
     guard(false, || {
-        let (channels, count) = port_channels::<P>(is_input);
+        // SAFETY: the host passes a plugin it created through our factory.
+        let layout = unsafe { selected::<P>(plugin) };
+        let (channels, count) = port_channels(layout, is_input);
         let index = index as usize;
         // SAFETY: `info` is a struct the host owns, or null.
         let Some(info) = (unsafe { info.as_mut() }).filter(|_| index < count) else {
@@ -1644,24 +2043,201 @@ unsafe extern "C" fn audio_ports_get<P: Plugin>(
         let channels = channels[index];
         // The main port is the first one, except that an instrument's only
         // input port is its sidechain.
-        let is_main = index == 0 && !(is_input && P::LAYOUT.inputs == 0);
+        let is_main = index == 0 && !(is_input && layout.inputs == 0);
 
         info.id = index as clap_id;
         copy_text(if is_main { "Main" } else { "Sidechain" }, &mut info.name);
-        info.flags = if is_main { CLAP_AUDIO_PORT_IS_MAIN } else { 0 };
+        // Every port takes 64-bit samples as well, which the plugin hears
+        // rounded to 32 bits (see `read_port`).
+        info.flags = CLAP_AUDIO_PORT_SUPPORTS_64BITS;
+        if is_main {
+            info.flags |= CLAP_AUDIO_PORT_IS_MAIN;
+        }
         info.channel_count = channels as u32;
-        info.port_type = match channels {
-            1 => CLAP_PORT_MONO.as_ptr(),
-            2 => CLAP_PORT_STEREO.as_ptr(),
-            _ => ptr::null(),
-        };
+        info.port_type = port_type(channels);
         // The main input and output can share memory when they are the
         // same shape.
-        info.in_place_pair = if is_main && P::LAYOUT.inputs == P::LAYOUT.outputs {
+        info.in_place_pair = if is_main && layout.inputs == layout.outputs {
             0
         } else {
             CLAP_INVALID_ID
         };
+        true
+    })
+}
+
+// --- Port configurations and activation ----------------------------------
+//
+// `audio-ports-config` offers each of the layouts `offered_layouts` lists,
+// with its index as its id; `audio-ports-activation` lets the host switch
+// the sidechain off. Both are main-thread calls made while the plugin is
+// not active, and what they choose is read when it is next activated.
+
+/// A name for a configuration: its main buses, then its sidechain.
+fn config_name(layout: AudioLayout) -> String {
+    let width = |channels: usize| match channels {
+        1 => "Mono".to_owned(),
+        2 => "Stereo".to_owned(),
+        more => format!("{more} channels"),
+    };
+    let main = match (layout.inputs, layout.outputs) {
+        (0, outputs) => width(outputs),
+        (inputs, outputs) if inputs == outputs => width(inputs),
+        (inputs, outputs) => format!("{} to {}", width(inputs), width(outputs).to_lowercase()),
+    };
+    match layout.sidechain {
+        0 => main,
+        channels => format!("{main}, {} sidechain", width(channels).to_lowercase()),
+    }
+}
+
+unsafe extern "C" fn ports_config_count<P: Plugin>(plugin: *const clap_plugin) -> u32 {
+    guard(0, || {
+        // SAFETY: the host passes a plugin it created through our factory.
+        unsafe { instance::<P>(plugin) }.map_or(0, |instance| instance.layouts.len() as u32)
+    })
+}
+
+unsafe extern "C" fn ports_config_get<P: Plugin>(
+    plugin: *const clap_plugin,
+    index: u32,
+    config: *mut clap_audio_ports_config,
+) -> bool {
+    guard(false, || {
+        // SAFETY: the host passes a plugin it created through our factory,
+        // and a struct it owns, or null.
+        let (Some(instance), Some(config)) =
+            (unsafe { instance::<P>(plugin) }, unsafe { config.as_mut() })
+        else {
+            return false;
+        };
+        let Some(&layout) = instance.layouts.get(index as usize) else {
+            return false;
+        };
+        config.id = index;
+        copy_text(&config_name(layout), &mut config.name);
+        config.input_port_count = port_channels(layout, true).1 as u32;
+        config.output_port_count = port_channels(layout, false).1 as u32;
+        config.has_main_input = layout.inputs > 0;
+        config.main_input_channel_count = layout.inputs as u32;
+        config.main_input_port_type = port_type(layout.inputs);
+        config.has_main_output = layout.outputs > 0;
+        config.main_output_channel_count = layout.outputs as u32;
+        config.main_output_port_type = port_type(layout.outputs);
+        true
+    })
+}
+
+unsafe extern "C" fn ports_config_select<P: Plugin>(
+    plugin: *const clap_plugin,
+    config_id: clap_id,
+) -> bool {
+    guard(false, || {
+        // SAFETY: the host passes a plugin it created through our factory.
+        let Some(instance) = (unsafe { instance::<P>(plugin) }) else {
+            return false;
+        };
+        let index = config_id as usize;
+        if instance.active.load(Ordering::Relaxed) || index >= instance.layouts.len() {
+            return false;
+        }
+        instance.config.store(index, Ordering::Relaxed);
+        // A new configuration has its ports active again, as
+        // `audio-ports-activation` says of a selection.
+        instance.sidechain_on.store(true, Ordering::Relaxed);
+        true
+    })
+}
+
+unsafe extern "C" fn ports_can_activate_while_processing(_plugin: *const clap_plugin) -> bool {
+    false
+}
+
+unsafe extern "C" fn ports_set_active<P: Plugin>(
+    plugin: *const clap_plugin,
+    is_input: bool,
+    port_index: u32,
+    is_active: bool,
+    _sample_size: u32,
+) -> bool {
+    guard(false, || {
+        // SAFETY: the host passes a plugin it created through our factory.
+        let Some(instance) = (unsafe { instance::<P>(plugin) }) else {
+            return false;
+        };
+        if instance.active.load(Ordering::Relaxed) {
+            return false;
+        }
+        let layout = instance.selected();
+        let index = port_index as usize;
+        if index >= port_channels(layout, is_input).1 {
+            return false;
+        }
+        let is_sidechain =
+            is_input && layout.sidechain > 0 && index == usize::from(layout.inputs > 0);
+        if is_sidechain {
+            instance.sidechain_on.store(is_active, Ordering::Relaxed);
+            return true;
+        }
+        // The main ports carry what the plugin is; they stay on.
+        is_active
+    })
+}
+
+// --- Voices and note names --------------------------------------------------
+
+unsafe extern "C" fn voice_info_get<P: Plugin>(
+    plugin: *const clap_plugin,
+    info: *mut clap_voice_info,
+) -> bool {
+    guard(false, || {
+        // SAFETY: the host passes a plugin it created through our factory,
+        // and a struct it owns, or null.
+        let (Some(instance), Some(info)) =
+            (unsafe { instance::<P>(plugin) }, unsafe { info.as_mut() })
+        else {
+            return false;
+        };
+        let voices = *instance
+            .voices
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let Some(voices) = voices else {
+            return false;
+        };
+        info.voice_count = voices.voices;
+        info.voice_capacity = voices.capacity.max(voices.voices);
+        info.flags = if voices.overlapping_notes {
+            CLAP_VOICE_INFO_SUPPORTS_OVERLAPPING_NOTES
+        } else {
+            0
+        };
+        true
+    })
+}
+
+unsafe extern "C" fn note_name_count<P: Plugin>(_plugin: *const clap_plugin) -> u32 {
+    P::NOTE_NAMES.len() as u32
+}
+
+unsafe extern "C" fn note_name_get<P: Plugin>(
+    _plugin: *const clap_plugin,
+    index: u32,
+    note_name: *mut clap_note_name,
+) -> bool {
+    guard(false, || {
+        // SAFETY: a struct the host owns, or null.
+        let (Some(out), Some(name)) = (
+            unsafe { note_name.as_mut() },
+            P::NOTE_NAMES.get(index as usize),
+        ) else {
+            return false;
+        };
+        copy_text(name.name, &mut out.name);
+        // The plugin's one note port.
+        out.port = 0;
+        out.key = i16::from(name.key & 0x7F);
+        out.channel = name.channel.map_or(-1, |channel| i16::from(channel & 0x0F));
         true
     })
 }
