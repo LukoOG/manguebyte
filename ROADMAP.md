@@ -74,10 +74,11 @@ Everything a standalone audio application needs, short of a user interface.
   and a device agent an application drives
 - ✅ MIDI 2.0 out of plugins: notes, per-note expressions and any MIDI 2.0
   channel voice message, written as MIDI 2.0 packets, as MIDI 1.0 by the
-  default translation or as MPE, and sent through CLAP, VST 3 and the
-  standalone runner. LV2 and AU send none yet, a `manguebyte-dsp`
-  `Processor` cannot send events by itself, and `manguebyte-host` does not
-  read what the plugins it hosts send
+  default translation or as MPE, and sent through CLAP, VST 3, AU (its
+  MIDI output callback, MIDI 1.0), LV2 (the notify port, MIDI 1.0) and the
+  standalone runner. A `manguebyte-dsp` `Processor` cannot send events by
+  itself, and `manguebyte-host` does not read what a hosted LV2 plugin
+  sends
 
 **DSP**
 - ✅ FFT of any length, real FFT and window functions
@@ -204,8 +205,15 @@ Write a processor once and ship it in every format.
   including `manguebyte-gui` editors in a headless window. Mangue Pluck's
   CLAP editor has been opened by hand in REAPER on Windows; no other host
   has opened one
-- ⬜ CLAP extensions still to come: per-note automation, note-end and voice
-  info, 64-bit audio, tail, presets, remote controls
+- ✅ CLAP extensions (issue #14): per-note automation and modulation with
+  the per-note-id and per-key flags of `ParamFlags::per_note`, modulation
+  converted around the value on its frame, `voice-info`, `note-name`,
+  `audio-ports-config` and `audio-ports-activation` from
+  `Plugin::LAYOUTS`, 64-bit ports through the 32-bit path, and transport
+  events inside a block, which cut it there
+- ⬜ CLAP extensions still to come: note-end events, tail (issue #25),
+  presets (`preset-load` and the preset-discovery factory), remote
+  controls, `render`, `thread-pool`, a native 64-bit path (TECH_DEBT 91)
 - ✅ VST 3: audio and event buses, every automation point on its frame,
   notes with ids, tuning and note expression, the MIDI controllers a
   plugin declares through hidden parameters, parameters, units, state,
@@ -216,21 +224,27 @@ Write a processor once and ship it in every format.
   `IPlugFrame` and `IRunLoop`, tested against fake host objects, including
   `manguebyte-gui` editors in a headless window; not yet opened in a real
   host
-- ⬜ VST 3 still to come: 64-bit audio, changing the bus layout, program
-  lists
+- ✅ VST 3 64-bit audio and bus layouts (issue #15): `kSample64` through
+  the plugin's 32-bit path, `setBusArrangements` accepting the layouts in
+  `Plugin::LAYOUTS` and `activateBus` switching the sidechain off
+- ⬜ VST 3 still to come: program lists, note names, a native 64-bit path
+  (TECH_DEBT 91)
 - 🚧 Audio Unit, version 2: `export_au!` through the plain C interface,
   with formats, parameters, scheduled parameters and MIDI on their
   frames, the host's transport and state; `.component` bundles written and
   installed by `cargo mangue`; tested through its C interface on every
   system, and both example plugins pass Apple's `auval` in a macOS CI job.
-  Not yet loaded in a DAW. No editor, MIDI output or factory presets
+  MIDI output through `kAudioUnitProperty_MIDIOutputCallback`, and the
+  elements' channel counts from `Plugin::LAYOUTS`. Not yet loaded in a
+  DAW. No editor, MIDI 2.0 output or factory presets
 - ⬜ Audio Unit, version 3 (app extension)
 - 🚧 LV2: audio and sidechain ports, parameters as control ports, MIDI and
   transport on their frames, state, latency and generated Turtle files,
   tested in process through the C interface; `.lv2` bundles written by
   `cargo mangue bundle --format lv2`, and the examples' found and read by
   lilv in CI. Not yet checked by `lv2lint` or run in any host but the
-  framework's own (`manguebyte-host`); no editor, no MIDI output
+  framework's own (`manguebyte-host`); MIDI output on the notify port; no
+  editor, one fixed layout
 - ✅ Standalone application wrapper: sound card, MIDI ports in and out,
   input for effects
 - 🚧 Aratu Bridge (`plugins/aratu-bridge`): an example CLAP, VST 3 and AU

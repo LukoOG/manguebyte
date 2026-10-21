@@ -261,6 +261,60 @@ break the API.
   them on when the transport knows them.
 - Limits: TECH_DEBT 86.
 
+### Plugins
+
+- **Layouts** (issue #15). `Plugin::LAYOUTS` lists every layout a plugin
+  can run with, and `Plugin::set_layout` tells it the one the host chose,
+  right before every `prepare`. A wrapper offers the entries with the
+  buses of `Plugin::LAYOUT`, any width, the sidechain optional
+  (`AudioLayout::fits`, `offered_layouts`); `AudioLayout::with_sidechain`
+  and `AudioLayout::MONO_INSTRUMENT` help write the list, and
+  `Harness::with_layout` runs one in a test.
+  - VST 3: `setBusArrangements` accepts the arrangements of the layouts
+    offered and refuses others, `getBusArrangement` and `getBusInfo`
+    report the choice, and `activateBus` switching the sidechain off runs
+    the same layout without it when the plugin lists one.
+  - CLAP: `audio-ports-config` offers each layout as a configuration, and
+    `audio-ports-activation` switches the sidechain off.
+  - AU: `SupportedNumChannels` lists the layouts, each element's stream
+    format takes any width they give it, and `Initialize` refuses widths
+    that add up to none of them.
+  - LV2 describes its ports in the bundle and runs `LAYOUT`.
+- **64-bit audio.** VST 3 accepts `kSample64` and every CLAP port declares
+  `CLAP_AUDIO_PORT_SUPPORTS_64BITS`. Both run the plugin's 32-bit path:
+  64-bit input is rounded to `f32` and the output widened, so the result
+  is the 32-bit one exactly, whatever the block sizes, as the tests check
+  through each format's interface. Steinberg's validator now runs its
+  double-precision suite on both example plugins, and passes it.
+- **More CLAP extensions** (issue #14).
+  - Per-note automation: `CLAP_EVENT_PARAM_VALUE` with a note id or a key
+    becomes `EventKind::NoteParamValue` for a parameter marked
+    `per_note()` (`ParamFlags::per_note`), which also declares the
+    per-note-id and per-key automation and modulation flags. `Synth`
+    hands it to the voice of that note through `Voice::set_note_param`;
+    the parameter keeps its value, and `flush` never stores such a value.
+  - A modulation amount is converted around the parameter's value on the
+    modulation's frame, as automation earlier in the block left it, so
+    per-note modulation no longer depends on where the host cuts blocks
+    (TECH_DEBT 26).
+  - `voice-info` from `Plugin::voice_info` (`VoiceInfo`), read on each
+    activation, with the host told when it changed; `note-name` from
+    `Plugin::NOTE_NAMES` (`NoteName`).
+  - `CLAP_EVENT_TRANSPORT` inside a block cuts it there: each piece
+    reaches the plugin with its own events, sidechain, output frames and
+    transport, as LV2 does with `time:Position` (TECH_DEBT 86).
+  - The CLAP host (`manguebyte-host`) sends `NoteParamValue` to a hosted
+    plugin as a per-note parameter value.
+- **Notes out of AU and LV2** (TECH_DEBT 82). An Audio Unit that sends
+  notes has one MIDI output (`kAudioUnitProperty_MIDIOutputCallbackInfo`)
+  and hands the host's `kAudioUnitProperty_MIDIOutputCallback` a
+  `MIDIPacketList` after each render, each message stamped with its
+  frame. An LV2 plugin that sends notes writes them on its notify port,
+  whose Turtle then says `atom:supports midi:MidiEvent`. Both send MIDI
+  1.0 by the default translation, through `OutputTranslator`, from memory
+  set aside before audio runs.
+- Limits: TECH_DEBT 91.
+
 ### Breaking
 
 - `AudioBuffer::apply_gain_ramp` works the gain of frame `i` out as
@@ -272,6 +326,16 @@ break the API.
   head adds its taps in another order (see DSP above), which also changes
   the last bits.
 
+- `EventKind` has a new variant, `NoteParamValue`, and `ParamFlags` a new
+  field, `per_note`: a `match` on `EventKind` without a wildcard arm needs
+  an arm for it, and a `ParamFlags` struct literal must name it or end
+  with `..ParamFlags::default()`. `ParamDescription::to_json` writes
+  `"per_note":true` in the flags of a parameter that has it.
+- Every CLAP audio port now has the `CLAP_AUDIO_PORT_SUPPORTS_64BITS` flag,
+  and a VST 3 plugin whose `LAYOUTS` include its layout without the
+  sidechain runs without one until the host switches the sidechain bus on
+  with `activateBus`, which is when VST 3 hosts route something to it. A
+  plugin that lists only `LAYOUT`, the default, behaves as before.
 - `Transport` has three new public fields, `position_seconds`,
   `bar_number` and `tempo_increment`. A struct literal that names every
   field must name them too, or end with `..Transport::STOPPED`.

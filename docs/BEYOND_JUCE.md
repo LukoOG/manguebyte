@@ -244,12 +244,15 @@ on the way in.
 
 **Check it.** CI builds both example plugins and runs the CLAP project's own
 [`clap-validator`](https://github.com/free-audio/clap-validator) on them,
-failing the job on any failed test. On Linux, where CI runs it, the
-instrument passes 35 of 44 tests and the effect 33 of 44, with none failed.
-The rest are skipped because they test what the plugins do not offer yet:
-preset discovery, 64-bit audio and configurable audio ports for both, plus
-the denormal timing for the instrument (it has no audio input) and the note
-tests for the effect (it takes no notes).
+failing the job on any failed test. Run by hand on Windows on 20 October
+2026, the two pass 71 of their 88 tests, with none failed. The rest are
+skipped because they test what the plugins do not offer: preset discovery,
+and `audio-ports-config` and `configurable-audio-ports`, since each offers
+one layout (the wrapper offers `audio-ports-config` to a plugin that lists
+more in `Plugin::LAYOUTS`); the effect's `audio-ports-activation` is
+tested and passes. Also skipped: the denormal timing for the instrument (it
+has no audio input), the note tests for the effect (it takes no notes) and
+a test for Unix-like systems only.
 
 `cargo mangue bundle` writes the `.clap` beside the `.vst3` in each
 system's layout, and `cargo mangue validate` runs the CLAP project's
@@ -262,7 +265,8 @@ accepts no CLAP format.
 and Linux windows are not there yet. By hand, one editor has been opened
 inside a DAW: Mangue Pluck's, as a CLAP in REAPER on Windows, where it
 showed its title and knobs; working its knobs there has not been tested.
-No 64-bit audio, no presets. VST 3, LV2 and AU (version 2, whose example
+64-bit audio runs through the plugin's 32-bit path, in CLAP as in VST 3;
+there are no presets. VST 3, LV2 and AU (version 2, whose example
 plugins pass Apple's `auval` in a macOS CI job) are the other formats on
 `main`: JUCE's AUv3 and AAX support has no counterpart here yet. Both
 example plugins were also loaded and tested by hand in REAPER before they

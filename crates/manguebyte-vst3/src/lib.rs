@@ -17,7 +17,8 @@
 //!
 //! | VST 3 feature | Behaviour |
 //! |---|---|
-//! | Audio buses | Main input and output from the plugin's layout, plus a sidechain input if it has one. The layout is fixed |
+//! | Audio buses | Main input and output from the plugin's layout, plus a sidechain input if it has one. Which buses there are is fixed; `setBusArrangements` accepts the widths of any layout in [`Plugin::LAYOUTS`](manguebyte_plugin::Plugin::LAYOUTS) that has those buses (an empty arrangement for a sidechain left out), refuses the rest, and is reported back by `getBusArrangement`. While `activateBus` has the sidechain off, a plugin that offers the same layout without it runs that one. The chosen layout reaches [`Plugin::set_layout`](manguebyte_plugin::Plugin::set_layout) and `prepare` on activation |
+//! | Sample sizes | `kSample32` and `kSample64`. 64-bit buffers are read rounded to `f32` and written widened, so the plugin runs its 32-bit path and the host gets that path's result exactly |
 //! | Event buses | An input for instruments and note effects. An output for a plugin of any kind that sets [`Plugin::NOTE_OUTPUT`](manguebyte_plugin::Plugin::NOTE_OUTPUT) |
 //! | Notes out | What the plugin sends from [`process_with_output`](manguebyte_plugin::Plugin::process_with_output), on its frame (one past the block on its last): note on and off with the plugin's note ids, a choke as a note-off at velocity zero, pressure as polyphonic pressure, and volume, pan, tuning, vibrato and brightness as note expression values. MIDI 2.0 and MIDI 1.0 from the plugin are read into notes and expressions as the framework's input reads them, and controllers, channel pressure, pitch bend and program change go out as `LegacyMIDICCOutEvent`. A note with no id, or one read from MIDI, gets an id made from its channel and key, from `0x7FFF_F800` up, so that its expressions find it |
 //! | Automation | Every point of a parameter's queue is delivered on its frame, so automation is sample-accurate |
@@ -35,9 +36,9 @@
 //! parameter ids by [`param_id`]. Both are the same on every platform, so a
 //! session moves between them.
 //!
-//! Not there yet: a window for the editor, 64-bit processing, changing the
-//! bus layout, program lists, and telling the host about a change the
-//! plugin made to its own parameter outside an editor's gesture.
+//! Not there yet: a window for the editor, program lists, a 64-bit path of
+//! the plugin's own, and telling the host about a change the plugin made to
+//! its own parameter outside an editor's gesture.
 //!
 //! # MIDI controllers
 //!

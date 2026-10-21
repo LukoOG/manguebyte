@@ -6,6 +6,14 @@ Part of the [Manguebyte Audio Framework](https://github.com/alessonqueirozdev-hu
 [`manguebyte`](https://crates.io/crates/manguebyte), which gathers every part
 under one name; depend on this crate directly to use only this part.
 
+`export_lv2!(MyPlugin)` exports a `Plugin` as an LV2 plugin, and
+`bundle_files` writes its Turtle files: audio and sidechain ports, one
+control port per parameter, MIDI and `time:Position` in through an atom
+sequence, state and latency. A plugin that sends notes sends them as
+MIDI 1.0 on the `notify` sequence, which then supports `midi:MidiEvent`.
+The ports are fixed in the bundle, so a plugin runs its own layout. No
+editor.
+
 Documentation: <https://docs.rs/manguebyte-lv2>
 
 ## Licence

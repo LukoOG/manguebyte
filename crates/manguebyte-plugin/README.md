@@ -6,6 +6,14 @@ Part of the [Manguebyte Audio Framework](https://github.com/alessonqueirozdev-hu
 [`manguebyte`](https://crates.io/crates/manguebyte), which gathers every part
 under one name; depend on this crate directly to use only this part.
 
+A `Plugin` declares its parameters, its layout and the other layouts it
+can run with (`LAYOUTS`, chosen by the host and given to `set_layout`
+before `prepare`), the MIDI controllers it listens to, whether it sends
+notes, its voices (`voice_info`) and its key names (`NOTE_NAMES`); the
+CLAP, VST 3, AU and LV2 wrappers and the standalone runner offer what
+their formats can of it. `Harness` runs it in a test, in any of its
+layouts, with no host.
+
 Documentation: <https://docs.rs/manguebyte-plugin>
 
 ## Licence
