@@ -14,6 +14,9 @@
 //! - [`ParamId`]: a compact, stable number standing for a parameter.
 //! - [`source`]: sources of audio that are pulled a block at a time, and
 //!   audio in memory as one.
+//! - [`vector`]: operations on slices of samples (gain, mixing, ramps,
+//!   peaks, sums, dot products, interleaving, integer conversions) that use
+//!   the processor's vector instructions, chosen at run time.
 
 mod atomic;
 mod buffer;
@@ -25,6 +28,7 @@ mod sample;
 mod smoothing;
 pub mod source;
 pub mod spsc;
+pub mod vector;
 
 pub use atomic::{AtomicF32, AtomicF64};
 pub use buffer::AudioBuffer;

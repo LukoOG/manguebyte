@@ -1,4 +1,5 @@
 use crate::Sample;
+use crate::vector;
 
 /// A planar, multi-channel block of audio samples.
 ///
@@ -7,6 +8,12 @@ use crate::Sample;
 /// capacity and [`set_num_frames`](Self::set_num_frames) changes the active
 /// length without allocating, which makes it safe to reuse on the audio thread
 /// for blocks of varying size.
+///
+/// The helpers that touch every sample ([`apply_gain`](Self::apply_gain),
+/// [`apply_gain_ramp`](Self::apply_gain_ramp), [`mix_from`](Self::mix_from),
+/// [`peak`](Self::peak), [`rms`](Self::rms) and the stereo case of the
+/// interleaving copies) run on the processor's vector instructions through
+/// [`vector`](crate::vector), with the same results on every processor.
 #[derive(Debug, Clone)]
 pub struct AudioBuffer<S: Sample = f32> {
     data: Vec<S>,
@@ -217,9 +224,7 @@ impl<S: Sample> AudioBuffer<S> {
     /// Multiplies every sample by `gain`.
     pub fn apply_gain(&mut self, gain: S) {
         for channel in self.iter_channels_mut() {
-            for sample in channel {
-                *sample *= gain;
-            }
+            vector::scale(channel, gain);
         }
     }
 
@@ -227,17 +232,18 @@ impl<S: Sample> AudioBuffer<S> {
     ///
     /// The first frame is scaled by `start`; the ramp would reach `end` on the
     /// frame after the last one, so consecutive blocks join seamlessly.
+    ///
+    /// Frame `i` is scaled by `start + step * i`, with
+    /// `step = (end - start) / num_frames()`: each gain is worked out from
+    /// its frame, so the ramp does not drift on long blocks (see
+    /// [`vector::scale_ramp`]).
     pub fn apply_gain_ramp(&mut self, start: S, end: S) {
         if self.frames == 0 {
             return;
         }
         let step = (end - start) / S::from_f64(self.frames as f64);
         for channel in self.iter_channels_mut() {
-            let mut gain = start;
-            for sample in channel {
-                *sample *= gain;
-                gain += step;
-            }
+            vector::scale_ramp(channel, start, step);
         }
     }
 
@@ -261,9 +267,7 @@ impl<S: Sample> AudioBuffer<S> {
     pub fn mix_from(&mut self, source: &Self, gain: S) {
         self.assert_same_shape(source);
         for (dst, src) in self.iter_channels_mut().zip(source.iter_channels()) {
-            for (d, &s) in dst.iter_mut().zip(src) {
-                *d += s * gain;
-            }
+            vector::add_scaled(dst, src, gain);
         }
     }
 
@@ -274,20 +278,21 @@ impl<S: Sample> AudioBuffer<S> {
     pub fn peak(&self) -> S {
         let mut peak = S::ZERO;
         for channel in self.iter_channels() {
-            for &sample in channel {
-                let magnitude = sample.abs();
-                if magnitude.to_f64().is_nan() {
-                    return magnitude;
-                }
-                if magnitude > peak {
-                    peak = magnitude;
-                }
+            let magnitude = vector::peak(channel);
+            if magnitude.to_f64().is_nan() {
+                return magnitude;
+            }
+            if magnitude > peak {
+                peak = magnitude;
             }
         }
         peak
     }
 
     /// Root-mean-square level of one channel.
+    ///
+    /// The squares are summed in `f64`, in the fixed order of
+    /// [`vector::sum_of_squares`].
     ///
     /// # Panics
     ///
@@ -297,7 +302,7 @@ impl<S: Sample> AudioBuffer<S> {
         if samples.is_empty() {
             return S::ZERO;
         }
-        let sum: f64 = samples.iter().map(|s| s.to_f64() * s.to_f64()).sum();
+        let sum = vector::sum_of_squares(samples);
         S::from_f64((sum / samples.len() as f64).sqrt())
     }
 
@@ -313,9 +318,21 @@ impl<S: Sample> AudioBuffer<S> {
             "interleaved length does not match the buffer shape"
         );
         let channels = self.channels;
-        for (index, channel) in self.iter_channels_mut().enumerate() {
-            for (frame, sample) in channel.iter_mut().enumerate() {
-                *sample = interleaved[frame * channels + index];
+        match channels {
+            1 => self.channel_mut(0).copy_from_slice(interleaved),
+            2 => {
+                let (left, right) = self.channel_pair_mut(0, 1);
+                vector::deinterleave_stereo(left, right, interleaved);
+            }
+            _ => {
+                for (index, channel) in self.iter_channels_mut().enumerate() {
+                    for (sample, &value) in channel
+                        .iter_mut()
+                        .zip(interleaved.iter().skip(index).step_by(channels))
+                    {
+                        *sample = value;
+                    }
+                }
             }
         }
     }
@@ -332,9 +349,20 @@ impl<S: Sample> AudioBuffer<S> {
             "interleaved length does not match the buffer shape"
         );
         let channels = self.channels;
-        for (index, channel) in self.iter_channels().enumerate() {
-            for (frame, &sample) in channel.iter().enumerate() {
-                interleaved[frame * channels + index] = sample;
+        match channels {
+            1 => interleaved.copy_from_slice(self.channel(0)),
+            2 => vector::interleave_stereo(interleaved, self.channel(0), self.channel(1)),
+            _ => {
+                for (index, channel) in self.iter_channels().enumerate() {
+                    for (slot, &sample) in interleaved
+                        .iter_mut()
+                        .skip(index)
+                        .step_by(channels)
+                        .zip(channel)
+                    {
+                        *slot = sample;
+                    }
+                }
             }
         }
     }
@@ -404,6 +432,37 @@ mod tests {
         let mut out = [0.0f32; 6];
         buffer.copy_to_interleaved(&mut out);
         assert_eq!(out, interleaved);
+    }
+
+    #[test]
+    fn interleaving_works_for_every_channel_count() {
+        for channels in 1..=5 {
+            for frames in [0, 1, 7, 33] {
+                let interleaved: Vec<f64> = (0..channels * frames).map(|i| i as f64).collect();
+                let buffer = AudioBuffer::from_interleaved(&interleaved, channels);
+                for (index, channel) in buffer.iter_channels().enumerate() {
+                    for (frame, &sample) in channel.iter().enumerate() {
+                        assert_eq!(sample, (frame * channels + index) as f64);
+                    }
+                }
+                let mut out = vec![-1.0; channels * frames];
+                buffer.copy_to_interleaved(&mut out);
+                assert_eq!(out, interleaved);
+            }
+        }
+    }
+
+    #[test]
+    fn a_long_gain_ramp_does_not_drift() {
+        // Adding the step 48 000 times in `f32` would drift; working each
+        // gain out from its frame does not.
+        let mut buffer = AudioBuffer::<f32>::new(1, 48_000);
+        buffer.channel_mut(0).fill(1.0);
+        buffer.apply_gain_ramp(1.0, 0.0);
+        for (frame, &gain) in buffer.channel(0).iter().enumerate() {
+            let exact = 1.0 - frame as f64 / 48_000.0;
+            assert!((f64::from(gain) - exact).abs() < 1e-6, "frame {frame}");
+        }
     }
 
     #[test]

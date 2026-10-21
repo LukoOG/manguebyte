@@ -118,3 +118,52 @@ fn pulling_audio_from_memory_never_allocates() {
     });
     assert_eq!(calls, 0, "pulling from memory used the heap");
 }
+
+#[test]
+fn vector_operations_never_allocate() {
+    use manguebyte_core::AudioBuffer;
+    use manguebyte_core::vector::{self, Backend};
+
+    let mut a = vec![0.25f32; 1_027];
+    let b = vec![-0.5f32; 1_027];
+    let mut wide = vec![0.125f64; 515];
+    let other = vec![2.0f64; 515];
+    let mut interleaved = vec![0.0f32; 2 * 1_027];
+    let mut bytes = vec![0u8; 4 * 1_027];
+    let mut buffer = AudioBuffer::<f32>::new(2, 1_027);
+    let source = AudioBuffer::<f32>::new(2, 1_027);
+    let mut frames = vec![0.0f32; 2 * 1_027];
+    let calls = heap_calls(|| {
+        // The first use asks the processor what it has.
+        let _ = Backend::detect();
+        for backend in Backend::ALL {
+            backend.scale(&mut a, 0.5);
+            backend.copy_scaled(&mut a, &b, 0.5);
+            backend.add(&mut a, &b);
+            backend.add_scaled(&mut a, &b, 0.5);
+            backend.multiply(&mut a, &b);
+            backend.scale_ramp(&mut a, 0.0, 0.001);
+            backend.scale_ramp(&mut wide, 1.0, -0.001);
+            backend.add_scaled(&mut wide, &other, 0.5);
+            let _ = backend.peak(&a) + backend.dot(&a, &b) + backend.dot(&wide, &other) as f32;
+            let _ = backend.sum_of_squares(&a) + backend.sum_of_squares(&wide);
+            backend.complex_multiply_add(&mut a[..1_026], &b[..1_026], &b[..1_026]);
+            backend.interleave_stereo(&mut interleaved, &a, &b);
+            let (left, right) = interleaved.split_at_mut(1_027);
+            backend.deinterleave_stereo(left, right, &frames);
+            backend.f32_to_i16_le(&mut bytes[..2 * 1_027], &a);
+            backend.i16_le_to_f32(&mut a, &bytes[..2 * 1_027]);
+            backend.f32_to_i24_le(&mut bytes[..3 * 1_027], &a);
+            backend.i24_le_to_f32(&mut a, &bytes[..3 * 1_027]);
+            backend.i32_le_to_f32(&mut a, &bytes);
+        }
+        vector::add(&mut a, &b);
+        buffer.apply_gain(0.5);
+        buffer.apply_gain_ramp(0.0, 1.0);
+        buffer.mix_from(&source, 0.25);
+        let _ = buffer.peak() + buffer.rms(1);
+        buffer.copy_to_interleaved(&mut frames);
+        buffer.copy_from_interleaved(&frames);
+    });
+    assert_eq!(calls, 0, "a vector operation used the heap");
+}
