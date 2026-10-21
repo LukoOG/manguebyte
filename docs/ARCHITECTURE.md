@@ -47,7 +47,7 @@ nothing beside or above it.
 | `manguebyte-midi` | MIDI 1.0 and 2.0 messages, translation, MPE, MIDI files, MIDI-CI (messages, property chunks, a device agent with no I/O), sample-accurate event buffers | nothing |
 | `manguebyte-params` | Parameters, ranges, smoothing, saved state, descriptions as data and JSON | core |
 | `manguebyte-state` | Application state ([ADR 0008](adr/0008-application-state.md)): a document tree with stable ids, undoable transactions, gestures and merging, change journals instead of listeners, a mirror of a plugin's parameters, text and binary forms with migrations, a settings file, snapshots handed to the audio thread | core, params |
-| `manguebyte-dsp` | `Processor`, events, MIDI 1.0, MPE and MIDI 2.0 read into per-note events (`NoteInput`), sources built from sources (mixer, resampler, channel router) and sources as processors, transport, synth, filters, effects, dynamics with sidechain keying, convolution, FIR filtering, wavetable oscillator, FFT, instrument voices | core, midi |
+| `manguebyte-dsp` | `Processor`, events, MIDI 1.0, MPE and MIDI 2.0 read into per-note events (`NoteInput`), sources built from sources (mixer, resampler, channel router) and sources as processors, transport, synth, filters, effects, dynamics with sidechain keying, convolution, FIR filtering, wavetable oscillator, FFT, spectral processing (STFT and overlap-add), instrument voices | core, midi |
 | `manguebyte-formats` | Audio files: whole or streamed, read and written, with play and record bridges, and a transport source over a streamed file | core |
 | `manguebyte-osc` | Open Sound Control, with a real-time bridge | core |
 | `manguebyte-analysis` | Loudness, true peak, level meters, spectrum, pitch | core, dsp |

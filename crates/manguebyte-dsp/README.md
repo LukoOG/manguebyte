@@ -1,6 +1,6 @@
 # manguebyte-dsp
 
-Signal processing for the Manguebyte Audio Framework: oscillators, wavetables, filters, EQ, dynamics with sidechain, delay, modulation, reverb, convolution, FIR, oversampling, a polyphonic synth with instrument voices (plucked strings, FM, tonewheel organ, acid bass, mallets by modal synthesis, bowed strings and winds by digital waveguide, choirs by formant synthesis, drum kits: acoustic by modal synthesis, Brazilian percussion by physical modelling, and drum machines, a deep polyphonic synthesiser with 68 presets) and zero-cost processor chains.
+Signal processing for the Manguebyte Audio Framework: oscillators, wavetables, filters, EQ, dynamics with sidechain, delay, modulation, reverb, convolution, FIR, spectral processing by STFT and overlap-add, oversampling, a polyphonic synth with instrument voices (plucked strings, FM, tonewheel organ, acid bass, mallets by modal synthesis, bowed strings and winds by digital waveguide, choirs by formant synthesis, drum kits: acoustic by modal synthesis, Brazilian percussion by physical modelling, and drum machines, a deep polyphonic synthesiser with 68 presets) and zero-cost processor chains.
 
 Part of the [Manguebyte Audio Framework](https://github.com/alessonqueirozdev-hub/manguebyte). Most projects depend on
 [`manguebyte`](https://crates.io/crates/manguebyte), which gathers every part
@@ -46,6 +46,48 @@ let transport = block.transport(clock.map());
 
 The plugin `Harness` and the standalone runner drive their plugins with a
 `TransportClock`, and hand the plugin the map in `ProcessContext::timeline`.
+
+## Spectral processing
+
+The `stft` module changes sound in the frequency domain. `Stft` takes a
+frame every hop, windows it, runs the real FFT, hands the spectrum to a
+`SpectralProcessor` (or a closure), transforms back, windows again and
+overlap-adds:
+
+- Any transform size up to 65 536 and any hop, with any window or its
+  square root on either side, as long as the two windows overlap-add to a
+  constant at that hop. `Stft::new` checks the sum and refuses the rest
+  with `StftError::NotOverlapAdd`: Hann on both sides needs a hop of a
+  third of the frame or less, Hann with a rectangular synthesis window
+  half or less.
+- An unchanged spectrum gives back the input exactly, delayed by the
+  reported latency: `fft_size - 1`, less the synthesis window's leading
+  zeros (`fft_size - 2` for Hann).
+- Frames fall at fixed points of the stream, so the output is the same bit
+  for bit however the host cuts its blocks. Mono or any number of
+  channels; nothing is allocated after `prepare`.
+
+Built on it: `SpectralGate` (a threshold per bin, and a learned noise
+profile that makes it a simple denoiser), `SpectralFreeze` and a basic
+phase-vocoder `PitchShift`.
+
+```rust
+use manguebyte_dsp::fft::Complex;
+use manguebyte_dsp::stft::{SpectralFrame, SpectralGate, Stft, StftSettings};
+
+// A brick-wall low-pass, as a closure on each spectrum.
+let lowpass = Stft::from_fn(StftSettings::new(1_024), |frame: SpectralFrame<'_, f32>| {
+    frame.bins[64..].fill(Complex::ZERO);
+})
+.unwrap();
+assert_eq!(lowpass.latency(), 1_022);
+
+// A denoiser: learn the noise, then keep what rises 10 dB above it.
+let mut denoiser = Stft::<_, f32>::new(StftSettings::new(2_048), SpectralGate::new(-90.0)).unwrap();
+denoiser.processor_mut().set_learning(true);
+// ... process a stretch of noise, then:
+denoiser.processor_mut().set_learning(false);
+```
 
 ## Licence
 

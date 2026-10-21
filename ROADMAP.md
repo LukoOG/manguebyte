@@ -84,7 +84,12 @@ Everything a standalone audio application needs, short of a user interface.
 - ✅ Spectrum analysis: short-time Fourier transform with any size, hop and
   window, ballistics, peak hold, fractional-octave bands, A and C weighting
   (`manguebyte-analysis`)
-- ⬜ Overlap-add resynthesis for spectral processing
+- ✅ Overlap-add resynthesis for spectral processing: an STFT processor
+  with any transform size and hop whose windows overlap-add to a constant
+  (others are refused), exact reconstruction, a reported latency and
+  output independent of the host's blocks, with a spectral gate and
+  denoiser, a spectral freeze and a basic phase-vocoder pitch shifter
+  built on it (`manguebyte_dsp::stft`)
 - ✅ Resampling at any ratio, and oversampling by 2, 4, 8 or 16
 - ✅ State-variable filter, stable under audio-rate modulation
 - ✅ FIR low-pass design (Kaiser-windowed sinc)

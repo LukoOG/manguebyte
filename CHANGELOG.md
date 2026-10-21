@@ -33,6 +33,35 @@ break the API.
 - The Ogg page writer of the Vorbis encoder moved to the `ogg` module,
   shared with the Opus encoder; Vorbis files are unchanged.
 
+### Signal processing
+
+- Overlap-add resynthesis for spectral processing, in
+  `manguebyte_dsp::stft` (issue #13). `Stft` takes a frame of
+  `fft_size` samples every `hop`, applies the analysis window, runs the
+  real FFT, hands the spectrum to a `SpectralProcessor` (a trait, or a
+  closure through `Stft::from_fn`), transforms back, applies the
+  synthesis window and overlap-adds. Any transform size from 1 to 65 536
+  and any hop up to it are accepted, with any `Window` or its square root
+  (`StftWindow::SquareRoot`) on either side, as long as the two windows
+  overlap-add to a constant at that hop: `Stft::new` computes the sum
+  and refuses the rest with `StftError::NotOverlapAdd`, which says by how
+  much the sum strays. The synthesis window is divided by the sum, so an
+  unchanged spectrum gives back the input exactly (within 1e-13 in double
+  precision) after the latency, which is `fft_size - 1` less the
+  synthesis window's leading zeros and reported by `latency_samples`.
+  Frames fall at fixed points of the stream, so the output is the same bit
+  for bit however the host cuts its blocks. Mono and any number of
+  channels; nothing is allocated after `prepare`.
+- Three effects built on it: `SpectralGate`, a gate per bin with a
+  common threshold, thresholds of each bin's own, a floor and a learned
+  noise profile, which makes it a simple denoiser (22 dB less white noise
+  in the tests, a tone about 30 dB above it kept within 0.02 %);
+  `SpectralFreeze`, which holds the magnitudes of a frame and keeps each
+  bin's phase turning at its measured rate; and `PitchShift`, a basic
+  phase-vocoder pitch shifter that moves each spectral peak with its
+  region, after Laroche and Dolson (1999). See TECH_DEBT item 94 for what
+  they leave over.
+
 ### Graph
 
 - Sidechains, events and feedback are routed through `manguebyte-graph`
