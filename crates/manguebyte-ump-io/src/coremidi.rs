@@ -19,6 +19,7 @@
 //! (`mach_absolute_time`), which this module does not use yet.
 
 use std::ffi::{CStr, c_ulong, c_void};
+use std::ptr::NonNull;
 use std::sync::OnceLock;
 
 use crate::dl::Library;
@@ -73,35 +74,38 @@ struct Api {
         external: u8,
     ) -> CfStringRef,
     release: unsafe extern "C" fn(object: *const c_void),
-    /// The value of `kMIDIPropertyUniqueID`.
-    unique_id: CfStringRef,
-    /// The value of `kMIDIPropertyProtocolID` (macOS 11, iOS 14).
-    protocol_id: CfStringRef,
+    /// Where `kMIDIPropertyUniqueID` lives. Its value is read when it is
+    /// used: CoreMIDI fills its property names in once it is in use, so
+    /// they can still be null just after the library is opened.
+    unique_id: Constant,
+    /// Where `kMIDIPropertyProtocolID` (macOS 11, iOS 14) lives.
+    protocol_id: Constant,
+}
+
+/// The address of a `const CFStringRef` a library exports, and its name.
+struct Constant {
+    address: NonNull<CfStringRef>,
+    name: &'static CStr,
 }
 
 // SAFETY: the function pointers are plain code addresses, and the two
-// strings are CoreMIDI's constant property names, immutable and alive for
-// the life of the process; CoreMIDI's calls may be made from any thread.
+// addresses are those of CoreMIDI's property names, which CoreMIDI writes
+// once and which live as long as the process; CoreMIDI's calls may be made
+// from any thread.
 unsafe impl Send for Api {}
 // SAFETY: as above; nothing in `Api` is ever written after it is loaded.
 unsafe impl Sync for Api {}
 
-/// Reads the value of a `const CFStringRef` that a library exports,
-/// looking it up in the library and then among every loaded image, or says
-/// which of the two steps failed.
-fn constant(library: &Library, name: &CStr) -> Result<CfStringRef, &'static str> {
+/// Finds a `const CFStringRef` that a library exports, in the library and
+/// then among every loaded image.
+fn constant(library: &Library, name: &'static CStr) -> Option<Constant> {
     let address = library
         .address(name)
-        .or_else(|| Library::global_address(name))
-        .ok_or("the symbol is not exported")?;
-    // SAFETY: `name` is declared `extern const CFStringRef` in
-    // `MIDIServices.h`, so its address points at one initialised pointer.
-    let value = unsafe { address.cast::<CfStringRef>().as_ptr().read() };
-    if value.is_null() {
-        Err("the symbol holds a null string")
-    } else {
-        Ok(value)
-    }
+        .or_else(|| Library::global_address(name))?;
+    Some(Constant {
+        address: address.cast::<CfStringRef>(),
+        name,
+    })
 }
 
 impl Api {
@@ -137,10 +141,34 @@ impl Api {
             string_create: function!(foundation, c"CFStringCreateWithBytes", missing),
             release: function!(foundation, c"CFRelease", missing),
             unique_id: constant(&coremidi, c"kMIDIPropertyUniqueID")
-                .map_err(|why| format!("{} ({why})", missing(c"kMIDIPropertyUniqueID")))?,
+                .ok_or_else(|| missing(c"kMIDIPropertyUniqueID"))?,
             protocol_id: constant(&coremidi, c"kMIDIPropertyProtocolID")
-                .map_err(|why| format!("{} ({why})", too_old(c"kMIDIPropertyProtocolID")))?,
+                .ok_or_else(|| too_old(c"kMIDIPropertyProtocolID"))?,
         })
+    }
+
+    /// The value of a property name, read now. If CoreMIDI has not filled
+    /// it in yet, a call that puts CoreMIDI in use is made first.
+    fn key(&self, constant: &Constant) -> Result<CfStringRef, String> {
+        let read = || {
+            // SAFETY: the address is that of an exported `const
+            // CFStringRef`, so it points at one pointer-sized value.
+            unsafe { constant.address.as_ptr().read_volatile() }
+        };
+        let mut value = read();
+        if value.is_null() {
+            // SAFETY: no arguments; it makes CoreMIDI set itself up.
+            unsafe { (self.destination_count)() };
+            value = read();
+        }
+        if value.is_null() {
+            Err(format!(
+                "CoreMIDI left {} null",
+                constant.name.to_string_lossy()
+            ))
+        } else {
+            Ok(value)
+        }
     }
 
     /// An integer property of `object`, or `None` if it does not have it.
@@ -169,7 +197,7 @@ impl Api {
             if destination == 0 {
                 continue;
             }
-            if self.integer(destination, self.unique_id)? == Some(unique_id as i32) {
+            if self.integer(destination, self.key(&self.unique_id)?)? == Some(unique_id as i32) {
                 return Ok(Some(destination));
             }
         }
@@ -231,7 +259,7 @@ pub fn destination_protocol(unique_id: u32) -> Result<Option<i32>, String> {
         return Ok(None);
     };
     Ok(Some(
-        api.integer(destination, api.protocol_id)?
+        api.integer(destination, api.key(&api.protocol_id)?)?
             .unwrap_or(PROTOCOL_1_0),
     ))
 }
