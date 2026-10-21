@@ -139,7 +139,11 @@ Everything a standalone audio application needs, short of a user interface.
   EBU's test signals), true peak, peak, RMS, VU, PPM, stereo correlation
 - ✅ Pitch detection (YIN and the McLeod method) with note naming
 - ✅ Sample-accurate events, transport and sidechain in the process call
-- ⬜ SIMD-accelerated buffer operations
+- ✅ SIMD-accelerated buffer operations: `manguebyte_core::vector`, with
+  SSE2, AVX, AVX2, NEON and WebAssembly SIMD chosen at run time and the same
+  results on every processor; used by `AudioBuffer`, the WAV reader and
+  writer, convolution and the graph's and browser engine's mixing. The FFT,
+  resampler, oversampler and filters are still scalar (TECH_DEBT 92)
 
 **Formats**
 - ✅ Streaming readers and writers that do not load whole files, with

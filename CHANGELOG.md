@@ -7,6 +7,49 @@ break the API.
 
 ## Unreleased
 
+### Core
+
+- `vector`: SIMD-accelerated operations on slices of samples (issue #10).
+  `scale`, `copy_scaled`, `add`, `add_scaled`, `multiply`, `scale_ramp`,
+  `peak`, `dot`, `sum_of_squares`, `complex_multiply_add`,
+  `interleave_stereo`, `deinterleave_stereo`, and the conversions
+  `i16_le_to_f32`, `i24_le_to_f32`, `i32_le_to_f32`, `f32_to_i16_le` and
+  `f32_to_i24_le`, for any `Sample` (`f32` and `f64` on the vector units).
+  `Backend` names the instruction sets (`Scalar`, `Sse2`, `Avx`, `Avx2`,
+  `Neon`, `Simd128`), runs any one of them, and `Backend::detect` picks
+  the fastest the processor has: asked once with `cpuid`, no system call,
+  and kept in an atomic. WebAssembly uses SIMD when built with `simd128`.
+  Nothing allocates, the crate still has no dependencies, and Miri runs the
+  scalar code. The element-wise operations and the conversions give the
+  scalar loop's results bit for bit on every backend (a product then a sum,
+  no fused multiply-add); the tests compare every backend with the scalar
+  definitions over lengths from 0 to 4 099 and every alignment, all 65 536
+  16-bit values and the 24-bit ones. Sums add in one fixed order, the same
+  on every processor: 16 running sums for `f32` (8 for `f64`) added in
+  pairs, then what is left over. `examples/vector_speed.rs` times them. On
+  an Intel Core i3-1215U, against the loops they replace, in blocks of 512
+  (AVX2): `peak` 11 to 13 times faster, `sum_of_squares` 6.5 to 7.2,
+  `scale_ramp` 3.3 (`f64`) to 6.6 (`f32`), stereo interleaving 3.5 to 6,
+  `f32_to_i16_le` 4.6, `i24_le_to_f32` 4.9, `i32_le_to_f32` 5.5,
+  `complex_multiply_add` 1.7 to 2.4, `dot` 1.5 to 2.2 and gain and mixing
+  1.4 to 2.3 (the compiler already vectorised those with SSE2); dot
+  products shorter than about a hundred elements are slower than the old
+  four-sum loop (TECH_DEBT item 92).
+- `AudioBuffer`'s `apply_gain`, `apply_gain_ramp`, `mix_from`, `peak`,
+  `rms` and its interleaving copies of one and two channels run on them.
+
+### DSP
+
+- `ConvolutionEngine` and `FirFilter` run on `manguebyte_core::vector`.
+  The direct head works across the frames of a piece of the block, a
+  scaled copy of the input per tap, in groups of 32 taps; the products of
+  spectra are `complex_multiply_add`, and spectra are kept as interleaved
+  real and imaginary parts for it. Ten seconds of stereo through a
+  two-second response at partition 256 (`examples/convolution_speed.rs`):
+  1.25 times faster in `f32` and 1.5 in `f64`; a 63-tap direct FIR is as
+  fast as before in `f32` and 1.1 times faster in `f64`. The output is
+  still the same however the audio is cut into blocks.
+
 ### Formats
 
 - `opus`: an Ogg Opus encoder of the CELT layer, written from RFC 6716 and
@@ -26,6 +69,14 @@ break the API.
   signal the noise lies 1.4, 8.7 and 15.7 dB under the masking threshold
   of the tests' model at 64, 128 and 256 kbit/s. SILK and hybrid frames
   are not written; see TECH_DEBT item 89.
+- WAV reading and writing convert samples with `manguebyte_core::vector`,
+  a run of samples at a time instead of one call per sample, and stereo is
+  split from and into interleaved frames with it; the bytes and samples are
+  the same as before. Ten seconds at 48 kHz in memory
+  (`examples/pcm_speed.rs`), mono and stereo: 16-bit written 3.2 to 7 times
+  faster, 24-bit and float 1.7 to 2.7; read in blocks of 512 frames 6 to
+  16 times faster, whole 1.1 to 1.8; six channels 1.2 to 2.5 times
+  faster, except whole float files, about as fast as before (0.9).
 - The CELT bit allocation, band shapes and pulse coding of the Opus
   decoder are shared with the encoder, through a range encoder (RFC 6716,
   section 5.1) in place of the decoder: the decoder decodes as before, bit
@@ -64,6 +115,10 @@ break the API.
 
 ### Graph
 
+- The engine mixes the inputs of a bus and its delay lines with
+  `manguebyte_core::vector::add`, a run of frames at a time; the sums are
+  the same, bit for bit. The browser engine of `manguebyte-web` adds its
+  parts and a steady reverb send the same way.
 - Sidechains, events and feedback are routed through `manguebyte-graph`
   (issue #9). Every change is additive; nothing in 0.1.0 was removed or
   changed its signature.
@@ -207,6 +262,15 @@ break the API.
 - Limits: TECH_DEBT 86.
 
 ### Breaking
+
+- `AudioBuffer::apply_gain_ramp` works the gain of frame `i` out as
+  `start + step * i` instead of adding `step` frame after frame, so a ramp
+  no longer drifts on a long block, and its samples can differ in the last
+  bits. `AudioBuffer::rms` sums the squares in the fixed order of
+  `vector::sum_of_squares` and can differ in the last bits; the peak of a
+  buffer holding a NaN is the canonical NaN. `ConvolutionEngine`'s direct
+  head adds its taps in another order (see DSP above), which also changes
+  the last bits.
 
 - `Transport` has three new public fields, `position_seconds`,
   `bar_number` and `tempo_increment`. A struct literal that names every
