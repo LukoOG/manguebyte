@@ -109,9 +109,11 @@
 //! average over the bands; a steady chord comes back 46.7 dB above its
 //! noise from 64 kbit/s up, the most the caps on each band's bits allow. A
 //! variable bitrate asked for 128 kbit/s spends 91 on it, the narrow tones
-//! and the silence taking less, for 9.4 dB under the threshold. The
-//! encoder runs some 25 times faster than real time in stereo in an
-//! unoptimised build, on one core. Its memory does not grow with the
+//! and the silence taking less, for 9.4 dB under the threshold. On one
+//! core, an optimised build encodes stereo at 48 kHz some 115 times faster
+//! than real time, 5.1 some 60 times, and stereo at 44.1 kHz some 33
+//! times, most of it spent taking the audio to 48 kHz; an unoptimised
+//! build about a quarter as fast. Its memory does not grow with the
 //! length of the stream; it allocates and does I/O, so it belongs off the
 //! audio thread.
 //!
