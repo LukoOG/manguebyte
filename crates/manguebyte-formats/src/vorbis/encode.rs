@@ -24,7 +24,7 @@
 mod books;
 mod trained;
 
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io::{self, Seek, Write};
 
 use manguebyte_core::AudioBuffer;
 
@@ -35,14 +35,11 @@ use super::mdct::Mdct;
 use super::reader::channel_order;
 use super::setup::{self, Floor1, Identification};
 use crate::metadata::{Metadata, picture_comment};
-use crate::ogg;
+use crate::ogg::Pager;
 use crate::psy::{HOP, Model, Transients};
 
 /// The vendor string written into every file, naming the encoder.
 const VENDOR: &str = concat!("manguebyte-formats ", env!("CARGO_PKG_VERSION"));
-
-/// Bytes of page body the pager aims for before it starts a new page.
-const PAGE_TARGET: usize = 4_096;
 
 /// Values in a partition of the residue.
 const PARTITION: usize = 16;
@@ -439,94 +436,6 @@ fn design_books() -> Vec<Book> {
     ]
 }
 
-/// Writes Ogg pages: packets in, pages out, never more than [`PAGE_TARGET`]
-/// bytes of body to a page unless one packet is more.
-struct Pager {
-    serial: u32,
-    sequence: u32,
-    lacing: Vec<u8>,
-    body: Vec<u8>,
-    /// The granule position of the last packet that ends on the page.
-    granule: Option<u64>,
-    /// Whether the page continues a packet of the page before.
-    continued: bool,
-    /// Pages finished and not yet written.
-    out: Vec<u8>,
-}
-
-impl Pager {
-    fn new(serial: u32) -> Self {
-        Self {
-            serial,
-            sequence: 0,
-            lacing: Vec::new(),
-            body: Vec::new(),
-            granule: None,
-            continued: false,
-            out: Vec::new(),
-        }
-    }
-
-    /// Adds a packet that ends at granule position `granule`.
-    fn packet(&mut self, packet: &[u8], granule: u64) {
-        let segments = packet.len() / 255 + 1;
-        if !self.lacing.is_empty()
-            && (self.lacing.len() + segments > 255 || self.body.len() + packet.len() > PAGE_TARGET)
-        {
-            self.page(false);
-        }
-        let mut left = packet;
-        loop {
-            let take = left.len().min(255);
-            self.lacing.push(take as u8);
-            self.body.extend_from_slice(&left[..take]);
-            left = &left[take..];
-            if take < 255 {
-                break;
-            }
-            if self.lacing.len() == 255 {
-                // The packet goes on, on the next page.
-                self.page(false);
-                self.continued = true;
-            }
-        }
-        self.granule = Some(granule);
-    }
-
-    /// Finishes the page, as the last of the stream if `last`.
-    fn page(&mut self, last: bool) {
-        let mut flags = 0u8;
-        if self.continued {
-            flags |= ogg::CONTINUED;
-        }
-        if self.sequence == 0 {
-            flags |= ogg::FIRST;
-        }
-        if last {
-            flags |= ogg::LAST;
-        }
-        let start = self.out.len();
-        self.out.extend_from_slice(ogg::CAPTURE);
-        self.out.push(0);
-        self.out.push(flags);
-        let granule = self.granule.unwrap_or(u64::MAX);
-        self.out.extend_from_slice(&granule.to_le_bytes());
-        self.out.extend_from_slice(&self.serial.to_le_bytes());
-        self.out.extend_from_slice(&self.sequence.to_le_bytes());
-        self.out.extend_from_slice(&[0; 4]);
-        self.out.push(self.lacing.len() as u8);
-        self.out.extend_from_slice(&self.lacing);
-        self.out.extend_from_slice(&self.body);
-        let crc = ogg::crc32(0, &self.out[start..]);
-        self.out[start + 22..start + 26].copy_from_slice(&crc.to_le_bytes());
-        self.sequence += 1;
-        self.lacing.clear();
-        self.body.clear();
-        self.granule = None;
-        self.continued = false;
-    }
-}
-
 /// Encodes an Ogg Vorbis stream as samples arrive.
 pub(crate) struct VorbisStream {
     channels: usize,
@@ -558,9 +467,6 @@ pub(crate) struct VorbisStream {
     packets: u64,
     ended: bool,
     pager: Pager,
-    /// The position in the destination where the bytes not yet written
-    /// start, once a write has failed.
-    retry_at: Option<u64>,
     // Work space.
     windowed: Vec<f32>,
     window: Vec<f32>,
@@ -786,7 +692,6 @@ impl VorbisStream {
             packets: 0,
             ended: false,
             pager,
-            retry_at: None,
             windowed: vec![0.0; sizes[1]],
             window: vec![0.0; sizes[1]],
             spectra: vec![vec![0.0; long_half]; channels],
@@ -1148,27 +1053,7 @@ impl VorbisStream {
     /// Writes the pages finished, or what is left of them after a write
     /// that failed, which is written again from where it began.
     fn flush<W: Write + Seek>(&mut self, writer: &mut W) -> io::Result<()> {
-        if self.pager.out.is_empty() {
-            return Ok(());
-        }
-        let start = match self.retry_at {
-            Some(at) => {
-                writer.seek(SeekFrom::Start(at))?;
-                at
-            }
-            None => writer.stream_position()?,
-        };
-        match writer.write_all(&self.pager.out) {
-            Ok(()) => {
-                self.pager.out.clear();
-                self.retry_at = None;
-                Ok(())
-            }
-            Err(error) => {
-                self.retry_at = Some(start);
-                Err(error)
-            }
-        }
+        self.pager.flush(writer)
     }
 }
 

@@ -1,4 +1,4 @@
-//! Ogg, the container Vorbis travels in, as RFC 3533 defines it.
+//! Ogg, the container Vorbis and Opus travel in, as RFC 3533 defines it.
 //!
 //! An Ogg stream is a run of pages. Each page starts with the capture
 //! pattern `OggS` and a header that carries a checksum over the whole page,
@@ -9,11 +9,133 @@
 //! shorter than 255 bytes ends a packet, so a packet may run across pages.
 //!
 //! This module reads pages out of a [`Window`] of the file and puts the
-//! packets of one logical stream back together.
+//! packets of one logical stream back together, and, for the encoders,
+//! puts packets into pages ([`Pager`]).
 
-use std::io::{self, Read, Seek};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 
 use crate::window::Window;
+
+/// Bytes of page body the pager aims for before it starts a new page.
+const PAGE_TARGET: usize = 4_096;
+
+/// Writes Ogg pages: packets in, pages out, never more than [`PAGE_TARGET`]
+/// bytes of body to a page unless one packet is more.
+pub(crate) struct Pager {
+    serial: u32,
+    sequence: u32,
+    lacing: Vec<u8>,
+    body: Vec<u8>,
+    /// The granule position of the last packet that ends on the page.
+    granule: Option<u64>,
+    /// Whether the page continues a packet of the page before.
+    continued: bool,
+    /// Pages finished and not yet written.
+    out: Vec<u8>,
+    /// The position in the destination where the bytes not yet written
+    /// start, once a write has failed.
+    retry_at: Option<u64>,
+}
+
+impl Pager {
+    pub(crate) fn new(serial: u32) -> Self {
+        Self {
+            serial,
+            sequence: 0,
+            lacing: Vec::new(),
+            body: Vec::new(),
+            granule: None,
+            continued: false,
+            out: Vec::new(),
+            retry_at: None,
+        }
+    }
+
+    /// Adds a packet that ends at granule position `granule`.
+    pub(crate) fn packet(&mut self, packet: &[u8], granule: u64) {
+        let segments = packet.len() / 255 + 1;
+        if !self.lacing.is_empty()
+            && (self.lacing.len() + segments > 255 || self.body.len() + packet.len() > PAGE_TARGET)
+        {
+            self.page(false);
+        }
+        let mut left = packet;
+        loop {
+            let take = left.len().min(255);
+            self.lacing.push(take as u8);
+            self.body.extend_from_slice(&left[..take]);
+            left = &left[take..];
+            if take < 255 {
+                break;
+            }
+            if self.lacing.len() == 255 {
+                // The packet goes on, on the next page.
+                self.page(false);
+                self.continued = true;
+            }
+        }
+        self.granule = Some(granule);
+    }
+
+    /// Finishes the page, as the last of the stream if `last`.
+    pub(crate) fn page(&mut self, last: bool) {
+        let mut flags = 0u8;
+        if self.continued {
+            flags |= CONTINUED;
+        }
+        if self.sequence == 0 {
+            flags |= FIRST;
+        }
+        if last {
+            flags |= LAST;
+        }
+        let start = self.out.len();
+        self.out.extend_from_slice(CAPTURE);
+        self.out.push(0);
+        self.out.push(flags);
+        let granule = self.granule.unwrap_or(u64::MAX);
+        self.out.extend_from_slice(&granule.to_le_bytes());
+        self.out.extend_from_slice(&self.serial.to_le_bytes());
+        self.out.extend_from_slice(&self.sequence.to_le_bytes());
+        self.out.extend_from_slice(&[0; 4]);
+        self.out.push(self.lacing.len() as u8);
+        self.out.extend_from_slice(&self.lacing);
+        self.out.extend_from_slice(&self.body);
+        let crc = crc32(0, &self.out[start..]);
+        self.out[start + 22..start + 26].copy_from_slice(&crc.to_le_bytes());
+        self.sequence += 1;
+        self.lacing.clear();
+        self.body.clear();
+        self.granule = None;
+        self.continued = false;
+    }
+
+    /// Writes the pages finished, or what is left of them after a write
+    /// that failed, which is written again from where it began.
+    pub(crate) fn flush<W: Write + Seek>(&mut self, writer: &mut W) -> io::Result<()> {
+        if self.out.is_empty() {
+            return Ok(());
+        }
+        let start = match self.retry_at {
+            Some(at) => {
+                writer.seek(SeekFrom::Start(at))?;
+                at
+            }
+            None => writer.stream_position()?,
+        };
+        match writer.write_all(&self.out) {
+            Ok(()) => {
+                self.out.clear();
+                self.retry_at = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.retry_at = Some(start);
+                Err(error)
+            }
+        }
+    }
+}
 
 /// The four bytes every page starts with.
 pub(crate) const CAPTURE: &[u8; 4] = b"OggS";
