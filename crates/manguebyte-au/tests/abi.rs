@@ -19,10 +19,12 @@ use manguebyte_au::sys::AudioBuffer as AuBuffer;
 use manguebyte_au::sys::*;
 use manguebyte_au::{__private::factory, as_os_type, manufacturer_code, subtype_code};
 use manguebyte_core::{AudioBuffer, ParamId};
-use manguebyte_dsp::event::{Event, EventKind};
+use manguebyte_dsp::event::{Event, EventKind, Expression, NoteRef};
+use manguebyte_dsp::note_input::{Mpe, NoteInput};
 use manguebyte_dsp::{ProcessContext, ProcessSpec};
 use manguebyte_midi::MidiMessage;
 use manguebyte_params::{BoolParam, ChoiceParam, FloatParam, FloatRange, Param, param_set};
+use manguebyte_plugin::output::OutputBuffer;
 use manguebyte_plugin::{AudioLayout, Harness, Plugin, PluginInfo, PluginKind};
 
 // --- Watching the heap ---------------------------------------------------------
@@ -1650,4 +1652,377 @@ fn the_present_preset_is_kept_and_travels_with_the_state() {
         CFRelease(preset.presetName);
         CFRelease(saved);
     }
+}
+
+// --- MIDI output ---------------------------------------------------------------
+
+/// Plays the same phrase every render, and sends it out: a note on frame
+/// 2, its pressure on 5, its end on 7, a controller on 9, and a note sent
+/// past the end of the render.
+struct Phrase {
+    params: Arc<KeysParams>,
+}
+
+impl Plugin for Phrase {
+    const INFO: PluginInfo = PluginInfo {
+        id: "org.manguebyte.test.phrase",
+        name: "Phrase",
+        vendor: "Manguebyte",
+        version: "0.1.0",
+        description: "Plays a phrase",
+        kind: PluginKind::Instrument,
+    };
+    const LAYOUT: AudioLayout = AudioLayout::STEREO_INSTRUMENT;
+    const NOTE_OUTPUT: bool = true;
+    type Params = KeysParams;
+
+    fn new() -> Self {
+        Self {
+            params: Keys::new().params(),
+        }
+    }
+    fn params(&self) -> Arc<KeysParams> {
+        Arc::clone(&self.params)
+    }
+    fn prepare(&mut self, _: &ProcessSpec) {}
+    fn process(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+        self.process_with_output(buffer, context, &mut OutputBuffer::new());
+    }
+    fn process_with_output(
+        &mut self,
+        _: &mut AudioBuffer<f32>,
+        _: &ProcessContext<'_, f32>,
+        output: &mut OutputBuffer,
+    ) {
+        let note = NoteRef::new(3, 60);
+        output.note_on(2, note, 100.0 / 127.0);
+        output.expression(5, note, Expression::Pressure, 32.0 / 127.0);
+        output.note_off(7, note, 0.0);
+        output.midi1(
+            9,
+            MidiMessage::ControlChange {
+                channel: 3,
+                controller: 1,
+                value: 64,
+            },
+        );
+        output.note_on(40, NoteRef::new(0, 72), 1.0);
+    }
+}
+
+/// One MIDI message the host was handed, with its time stamp.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Received {
+    time: u64,
+    length: usize,
+    bytes: [u8; 3],
+}
+
+/// What the MIDI output callback was handed, with room set aside so that
+/// keeping it does not use the heap inside the render.
+static RECEIVED: Mutex<Vec<Received>> = Mutex::new(Vec::new());
+/// How many lists the callback was handed.
+static LISTS: Mutex<usize> = Mutex::new(0);
+
+/// Reads a `MIDIPacketList` as CoreMIDI lays it out.
+unsafe extern "C" fn midi_out(
+    user: *mut c_void,
+    _timestamp: *const AudioTimeStamp,
+    output: u32,
+    list: *const c_void,
+) -> OSStatus {
+    assert_eq!((user as usize, output), (9, 0));
+    let mut received = RECEIVED.lock().unwrap();
+    *LISTS.lock().unwrap() += 1;
+    // SAFETY: the unit hands a list of as many packets as its count says,
+    // valid for the call.
+    unsafe {
+        let bytes = list.cast::<u8>();
+        let count = bytes.cast::<u32>().read_unaligned();
+        let mut at = MIDI_PACKET_LIST_PACKETS;
+        for _ in 0..count {
+            let time = bytes.add(at).cast::<u64>().read_unaligned();
+            let length = bytes
+                .add(at + MIDI_PACKET_LENGTH)
+                .cast::<u16>()
+                .read_unaligned() as usize;
+            assert!(length <= 3, "one message to a packet");
+            let mut message = [0u8; 3];
+            ptr::copy_nonoverlapping(
+                bytes.add(at + MIDI_PACKET_DATA),
+                message.as_mut_ptr(),
+                length,
+            );
+            received.push(Received {
+                time,
+                length,
+                bytes: message,
+            });
+            at = (at + MIDI_PACKET_DATA + length).next_multiple_of(MIDI_PACKET_ALIGN);
+        }
+    }
+    noErr
+}
+
+#[test]
+fn midi_the_plugin_sends_reaches_the_host_and_reads_back_as_it_was_sent() {
+    let _serial = serial();
+    let global = kAudioUnitScope_Global;
+    let phrase = Host::new::<Phrase>();
+    // One MIDI output, named.
+    let names = phrase
+        .get::<CFArrayRef>(kAudioUnitProperty_MIDIOutputCallbackInfo, global, 0)
+        .unwrap();
+    assert!(!names.is_null());
+    #[cfg(not(target_os = "macos"))]
+    {
+        // SAFETY: an array the unit made.
+        let values = unsafe { manguebyte_au::fake_cf::array_values(names) };
+        assert_eq!(values.len(), 1);
+        assert_eq!(text_of(values[0]), "MIDI Out");
+    }
+    // SAFETY: the host releases what it was given.
+    unsafe { CFRelease(names) };
+    assert_eq!(
+        phrase.info(kAudioUnitProperty_MIDIOutputCallback, global, 0),
+        Ok((size_of::<AUMIDIOutputCallbackStruct>() as u32, true))
+    );
+    let callback = AUMIDIOutputCallbackStruct {
+        midiOutputCallback: Some(midi_out),
+        userData: 9 as *mut c_void,
+    };
+    assert_eq!(
+        phrase.set(kAudioUnitProperty_MIDIOutputCallback, global, 0, &callback),
+        noErr
+    );
+    assert_eq!(phrase.simple(kAudioUnitInitializeSelect), noErr);
+
+    RECEIVED.lock().unwrap().clear();
+    RECEIVED.lock().unwrap().reserve(64);
+    *LISTS.lock().unwrap() = 0;
+    let mut output = AudioBuffer::<f32>::new(2, 16);
+    assert_eq!(phrase.render(16, &mut output, 0, false), noErr);
+    let received = RECEIVED.lock().unwrap().clone();
+    assert_eq!(*LISTS.lock().unwrap(), 1);
+    let times: Vec<u64> = received.iter().map(|message| message.time).collect();
+    // The note sent past the end of the render is on its last frame.
+    assert_eq!(times, [2, 5, 7, 9, 15]);
+
+    // Read back as any wrapper reads MIDI, it is what the plugin sent.
+    let mut input = NoteInput::new(Mpe::Off);
+    let mut events = Vec::new();
+    for message in &received {
+        let message = MidiMessage::from_bytes(&message.bytes[..message.length]).unwrap();
+        input.midi1(0, message, |event: Event| events.push(event.kind));
+    }
+    let note = NoteRef::new(3, 60);
+    assert_eq!(
+        events,
+        [
+            EventKind::NoteOn {
+                note,
+                velocity: 100.0 / 127.0
+            },
+            EventKind::NoteExpression {
+                note,
+                expression: Expression::Pressure,
+                value: 32.0 / 127.0
+            },
+            EventKind::NoteOff {
+                note,
+                velocity: 0.0
+            },
+            EventKind::Midi(MidiMessage::ControlChange {
+                channel: 3,
+                controller: 1,
+                value: 64
+            }),
+            EventKind::NoteOn {
+                note: NoteRef::new(0, 72),
+                velocity: 1.0
+            },
+        ]
+    );
+
+    // With the callback taken away, nothing is handed over.
+    let none = AUMIDIOutputCallbackStruct {
+        midiOutputCallback: None,
+        userData: ptr::null_mut(),
+    };
+    assert_eq!(
+        phrase.set(kAudioUnitProperty_MIDIOutputCallback, global, 0, &none),
+        noErr
+    );
+    RECEIVED.lock().unwrap().clear();
+    assert_eq!(phrase.render(16, &mut output, 0, false), noErr);
+    assert!(RECEIVED.lock().unwrap().is_empty());
+
+    // A unit that sends nothing has no MIDI output.
+    let keys = Host::new::<Keys>();
+    assert_eq!(
+        keys.info(kAudioUnitProperty_MIDIOutputCallbackInfo, global, 0),
+        Err(kAudioUnitErr_InvalidProperty)
+    );
+}
+
+// --- Channel counts ---------------------------------------------------------------
+
+/// The layouts `Shape` was given, in order.
+static SHAPE_LAYOUTS: Mutex<Vec<AudioLayout>> = Mutex::new(Vec::new());
+
+/// Halves its input, and runs in stereo or in mono, keyed either way.
+struct Shape {
+    params: Arc<KeysParams>,
+}
+
+impl Plugin for Shape {
+    const INFO: PluginInfo = PluginInfo {
+        id: "org.manguebyte.test.shape",
+        name: "Shape",
+        vendor: "Manguebyte",
+        version: "0.1.0",
+        description: "Runs in several shapes",
+        kind: PluginKind::Effect,
+    };
+    const LAYOUT: AudioLayout = AudioLayout::STEREO_EFFECT.with_sidechain(2);
+    const LAYOUTS: &'static [AudioLayout] = &[
+        AudioLayout::STEREO_EFFECT.with_sidechain(2),
+        AudioLayout::MONO_EFFECT.with_sidechain(1),
+    ];
+    type Params = KeysParams;
+
+    fn new() -> Self {
+        Self {
+            params: Keys::new().params(),
+        }
+    }
+    fn params(&self) -> Arc<KeysParams> {
+        Arc::clone(&self.params)
+    }
+    fn set_layout(&mut self, layout: AudioLayout) {
+        SHAPE_LAYOUTS.lock().unwrap().push(layout);
+    }
+    fn prepare(&mut self, _: &ProcessSpec) {}
+    fn process(&mut self, buffer: &mut AudioBuffer<f32>, _: &ProcessContext<'_, f32>) {
+        buffer.apply_gain(0.5);
+    }
+}
+
+#[test]
+fn channel_counts_follow_the_layouts_offered() {
+    let _serial = serial();
+    SHAPE_LAYOUTS.lock().unwrap().clear();
+    let (global, input, output) = (
+        kAudioUnitScope_Global,
+        kAudioUnitScope_Input,
+        kAudioUnitScope_Output,
+    );
+    let shape = Host::new::<Shape>();
+    assert_eq!(
+        shape.info(kAudioUnitProperty_SupportedNumChannels, global, 0),
+        Ok((8, false))
+    );
+    let mut infos = [AUChannelInfo {
+        inChannels: 0,
+        outChannels: 0,
+    }; 2];
+    let mut size = 8u32;
+    assert_eq!(
+        shape.get_raw(
+            kAudioUnitProperty_SupportedNumChannels,
+            global,
+            0,
+            infos.as_mut_ptr().cast(),
+            &mut size
+        ),
+        noErr
+    );
+    assert_eq!(
+        infos,
+        [
+            AUChannelInfo {
+                inChannels: 2,
+                outChannels: 2
+            },
+            AUChannelInfo {
+                inChannels: 1,
+                outChannels: 1
+            }
+        ]
+    );
+    // Each element offers its widths' layouts.
+    let mut tags = [0u32; 2];
+    let mut size = 8u32;
+    assert_eq!(
+        shape.get_raw(
+            kAudioUnitProperty_SupportedChannelLayoutTags,
+            input,
+            1,
+            tags.as_mut_ptr().cast(),
+            &mut size
+        ),
+        noErr
+    );
+    assert_eq!(
+        tags,
+        [kAudioChannelLayoutTag_Stereo, kAudioChannelLayoutTag_Mono]
+    );
+
+    let stereo = shape
+        .get::<AudioStreamBasicDescription>(kAudioUnitProperty_StreamFormat, output, 0)
+        .unwrap();
+    let mono = AudioStreamBasicDescription {
+        mChannelsPerFrame: 1,
+        ..stereo
+    };
+    let three = AudioStreamBasicDescription {
+        mChannelsPerFrame: 3,
+        ..stereo
+    };
+    assert_eq!(
+        shape.set(kAudioUnitProperty_StreamFormat, input, 0, &three),
+        kAudioUnitErr_FormatNotSupported
+    );
+    // Mono in and out with a stereo sidechain is no layout of the plugin's.
+    assert_eq!(
+        shape.set(kAudioUnitProperty_StreamFormat, input, 0, &mono),
+        noErr
+    );
+    assert_eq!(
+        shape.set(kAudioUnitProperty_StreamFormat, output, 0, &mono),
+        noErr
+    );
+    assert_eq!(
+        shape.simple(kAudioUnitInitializeSelect),
+        kAudioUnitErr_FormatNotSupported
+    );
+    assert_eq!(
+        shape.set(kAudioUnitProperty_StreamFormat, input, 1, &mono),
+        noErr
+    );
+    assert_eq!(
+        shape.get::<AudioStreamBasicDescription>(kAudioUnitProperty_StreamFormat, input, 1),
+        Ok(mono)
+    );
+    assert_eq!(shape.simple(kAudioUnitInitializeSelect), noErr);
+    assert_eq!(
+        SHAPE_LAYOUTS.lock().unwrap().last(),
+        Some(&AudioLayout::MONO_EFFECT.with_sidechain(1))
+    );
+    // Not while initialised.
+    assert_eq!(
+        shape.set(kAudioUnitProperty_StreamFormat, output, 0, &stereo),
+        kAudioUnitErr_Initialized
+    );
+
+    let mut feed = Feed {
+        audio: signal(1, 64, 0.1),
+        position: 0,
+    };
+    assert_eq!(shape.feed(0, &mut feed), noErr);
+    let mut out = AudioBuffer::<f32>::new(1, 32);
+    assert_eq!(shape.render(32, &mut out, 0, false), noErr);
+    let mut expected = signal(1, 32, 0.1);
+    expected.apply_gain(0.5);
+    assert_same_bits(&out, &expected, "mono");
 }

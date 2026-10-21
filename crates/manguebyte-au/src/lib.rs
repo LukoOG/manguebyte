@@ -28,12 +28,13 @@
 //! |---|---|
 //! | Type | `aumu` for an instrument, `aufx` for an effect or analyzer, `aumf` for a note effect ([`component_type`]) |
 //! | Codes | Subtype and manufacturer worked out from the plugin's id ([`subtype_code`], [`manufacturer_code`]), the same on every machine |
-//! | Elements | Input 0 is the main input and input 1 the sidechain, each if the plugin has one; output 0. Their channel counts are fixed by the plugin's layout, as `SupportedNumChannels` says |
+//! | Elements | Input 0 is the main input and input 1 the sidechain, each if the plugin has one; output 0. `SupportedNumChannels` lists the main input and output of each layout the plugin offers ([`Plugin::LAYOUTS`](manguebyte_plugin::Plugin::LAYOUTS)), and each element takes any width it has in one of them; `Initialize` refuses widths that add up to no offered layout, and gives the plugin the one they make |
 //! | Stream format | 32-bit float, one buffer per channel, at any sample rate; changed only while uninitialised |
 //! | Input | Pulled from the render callback or the connection the host set; the main input must have one, the sidechain is silent without |
 //! | Output | Into the host's buffers, or the unit's own when the host gives none |
 //! | Parameters | Listed in their own unit and range, with their names and value text both ways; stepped ones with names are indexed, with their names listed; switches are booleans. `SetParameter` reaches the plugin on the first frame of the next render, and `ScheduleParameters` on its frame, a ramp as points 32 frames apart |
 //! | MIDI | For instruments and note effects, `MusicDeviceMIDIEvent`, and `MusicDeviceStartNote` and `StopNote` as MIDI notes, on their frames |
+//! | MIDI out | For a plugin that sends notes ([`Plugin::NOTE_OUTPUT`](manguebyte_plugin::Plugin::NOTE_OUTPUT)), one MIDI output named in `MIDIOutputCallbackInfo`; after each render the host's `MIDIOutputCallback` is handed what the plugin sent, as MIDI 1.0 by the default translation, in a `MIDIPacketList` with one message to a packet, each stamped with its frame in the render |
 //! | Transport | From the host's callbacks: tempo and beat, the bar's start and the time signature, playing, recording, the position in frames and the cycle |
 //! | State | `ClassInfo`: a dictionary with the unit's codes, the present preset's name and the text of [`save_state`](manguebyte_plugin::save_state); another unit's state is refused and changes nothing |
 //! | Presets | `PresentPreset` (and the deprecated `CurrentPreset`): the number and name the host sets, -1 and "Untitled" until then; restoring a state makes its name the present preset's. No factory presets |
@@ -49,9 +50,10 @@
 //! source). A panic inside the plugin is caught at the boundary, and the
 //! slice is silent.
 //!
-//! Not there yet: an editor (`kAudioUnitProperty_CocoaUI`), MIDI output,
-//! factory presets, elements whose channels can change, and telling the
-//! host's parameter listeners about a change the plugin made itself.
+//! Not there yet: an editor (`kAudioUnitProperty_CocoaUI`), MIDI 2.0
+//! output (`kAudioUnitProperty_MIDIOutputEventListCallback`), factory
+//! presets, switching a sidechain off, and telling the host's parameter
+//! listeners about a change the plugin made itself.
 //!
 //! # How it is checked
 //!

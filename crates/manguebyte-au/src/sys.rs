@@ -197,7 +197,46 @@ pub const kAudioUnitProperty_SupportedChannelLayoutTags: AudioUnitPropertyID = 3
 pub const kAudioUnitProperty_ParameterStringFromValue: AudioUnitPropertyID = 33;
 pub const kAudioUnitProperty_PresentPreset: AudioUnitPropertyID = 36;
 pub const kAudioUnitProperty_ParameterValueFromString: AudioUnitPropertyID = 38;
+pub const kAudioUnitProperty_MIDIOutputCallbackInfo: AudioUnitPropertyID = 47;
+pub const kAudioUnitProperty_MIDIOutputCallback: AudioUnitPropertyID = 48;
 pub const kAudioUnitProperty_ShouldAllocateBuffer: AudioUnitPropertyID = 51;
+
+/// `AUMIDIOutputCallback`: the host's function that takes the MIDI a unit
+/// produced in a render, on output `midiOutNum`, as a `MIDIPacketList`.
+pub type AUMIDIOutputCallback = Option<
+    unsafe extern "C" fn(
+        userData: *mut c_void,
+        timeStamp: *const AudioTimeStamp,
+        midiOutNum: u32,
+        pktlist: *const c_void,
+    ) -> OSStatus,
+>;
+
+/// `AUMIDIOutputCallbackStruct`, the value of
+/// `kAudioUnitProperty_MIDIOutputCallback`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AUMIDIOutputCallbackStruct {
+    pub midiOutputCallback: AUMIDIOutputCallback,
+    pub userData: *mut c_void,
+}
+
+/// The layout of CoreMIDI's `MIDIPacketList`, which the headers declare
+/// under `#pragma pack(push, 4)`: a `UInt32` count, then packets of a
+/// `UInt64` time stamp, a `UInt16` length and the bytes. The first packet
+/// starts right after the count.
+pub const MIDI_PACKET_LIST_PACKETS: usize = 4;
+/// Where a packet's length is, from the packet's start.
+pub const MIDI_PACKET_LENGTH: usize = 8;
+/// Where a packet's bytes are, from the packet's start.
+pub const MIDI_PACKET_DATA: usize = 10;
+/// How the next packet's start is rounded up after a packet's bytes, as
+/// `MIDIPacketNext` does: to four bytes on ARM, not at all on Intel.
+pub const MIDI_PACKET_ALIGN: usize = if cfg!(any(target_arch = "aarch64", target_arch = "arm")) {
+    4
+} else {
+    1
+};
 
 /// `AUPreset`: a preset's number, negative for a user's preset, and its
 /// name.
@@ -623,6 +662,7 @@ mod tests {
         assert_eq!(size_of::<AudioUnitParameterEvent>(), 32);
         assert_eq!(size_of::<HostCallbackInfo>(), 40);
         assert_eq!(size_of::<AUPreset>(), 16);
+        assert_eq!(size_of::<AUMIDIOutputCallbackStruct>(), 16);
         assert_eq!(size_of::<AudioComponentPlugInInterface>(), 32);
         assert_eq!(kAudioFormatLinearPCM, 0x6C70_636D);
     }

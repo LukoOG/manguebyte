@@ -47,7 +47,10 @@ use manguebyte_dsp::event::{Event, EventBuffer, EventKind};
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Transport};
 use manguebyte_midi::MidiMessage;
 use manguebyte_params::{Param, ParamSet};
-use manguebyte_plugin::{ParamWatcher, Plugin, PluginKind, load_state, save_state};
+use manguebyte_plugin::output::{OutputBuffer, OutputProtocol, OutputTranslator};
+use manguebyte_plugin::{
+    AudioLayout, ParamWatcher, Plugin, PluginKind, load_state, offered_layouts, save_state,
+};
 
 use crate::cf::{self, Owned};
 use crate::codes::{as_os_type, codes};
@@ -80,6 +83,10 @@ const MAX_RENDER_NOTIFICATIONS: usize = 64;
 /// How far apart the points are that stand for a scheduled ramp.
 const RAMP_STEP: i64 = 32;
 
+/// The room for one `MIDIPacketList` of the plugin's output, in 4-byte
+/// words. A render that sends more hands the host several lists.
+const MIDI_LIST_WORDS: usize = 16_384;
+
 /// Runs `work`, turning a panic into `fallback`: a panic must not unwind
 /// into the host.
 fn guard<R>(fallback: R, work: impl FnOnce() -> R) -> R {
@@ -109,6 +116,11 @@ struct Config {
     host: Option<HostCallbackInfo>,
     in_place: u32,
     bypass: bool,
+    /// The elements' widths as the host set their stream formats, which
+    /// must be one of the layouts the plugin offers when it initialises.
+    layout: AudioLayout,
+    /// Where MIDI the plugin sends goes (`kAudioUnitProperty_MIDIOutputCallback`).
+    midi_out: Option<AUMIDIOutputCallbackStruct>,
 }
 
 /// What a render reads of the [`Config`], copied so that the configuration
@@ -117,6 +129,7 @@ struct Rendering {
     sources: [Source; 2],
     host: Option<HostCallbackInfo>,
     bypass: bool,
+    midi_out: Option<AUMIDIOutputCallbackStruct>,
 }
 
 /// One input element's memory, which its source renders into.
@@ -129,6 +142,8 @@ struct Pull {
 /// What `Initialize` allocates.
 struct Prepared {
     max_frames: u32,
+    /// The layout the plugin was prepared for.
+    layout: AudioLayout,
     buffer: AudioBuffer<f32>,
     sidechain: AudioBuffer<f32>,
     pulls: Vec<Pull>,
@@ -143,6 +158,13 @@ struct Audio<P> {
     /// The events of the render in progress.
     events: EventBuffer,
     watcher: ParamWatcher,
+    /// What the plugin sends during a render.
+    output: OutputBuffer,
+    /// Turns it into MIDI 1.0 for the host.
+    translator: OutputTranslator,
+    /// One `MIDIPacketList` being written, in words so that it is aligned
+    /// as CoreMIDI's structures are.
+    packets: Box<[u32]>,
 }
 
 /// The preset a host says is the present one: Apple's base classes start
@@ -233,9 +255,12 @@ pub(crate) struct Instance<P: Plugin> {
     ids: Box<[u32]>,
     /// Type, subtype and manufacturer.
     codes: [u32; 3],
-    /// The channels of each input element: the main input, then the
-    /// sidechain, each if the plugin has it.
+    /// The channels of each input element in the plugin's own layout: the
+    /// main input, then the sidechain, each if the plugin has it.
     inputs: Box<[usize]>,
+    /// The layouts the elements' formats may add up to, the plugin's own
+    /// first.
+    layouts: Vec<AudioLayout>,
     initialized: AtomicBool,
     latency: AtomicU32,
     last_error: AtomicI32,
@@ -284,6 +309,7 @@ pub(crate) fn factory<P: Plugin>() -> *mut c_void {
             ids: ids.into_boxed_slice(),
             codes: codes(&P::INFO).map(as_os_type),
             inputs: inputs.into_boxed_slice(),
+            layouts: offered_layouts::<P>(),
             initialized: AtomicBool::new(false),
             latency: AtomicU32::new(0),
             last_error: AtomicI32::new(noErr),
@@ -295,6 +321,8 @@ pub(crate) fn factory<P: Plugin>() -> *mut c_void {
                 host: None,
                 in_place: 0,
                 bypass: false,
+                layout,
+                midi_out: None,
             }),
             audio: Exclusive::new(Audio {
                 watcher: ParamWatcher::new(&*params),
@@ -302,6 +330,14 @@ pub(crate) fn factory<P: Plugin>() -> *mut c_void {
                 prepared: None,
                 pending: EventBuffer::with_capacity(EVENTS_PER_BLOCK),
                 events: EventBuffer::with_capacity(EVENTS_PER_BLOCK),
+                output: if P::NOTE_OUTPUT {
+                    OutputBuffer::with_capacity(EVENTS_PER_BLOCK)
+                } else {
+                    OutputBuffer::new()
+                },
+                translator: OutputTranslator::new(OutputProtocol::Midi1),
+                packets: vec![0; if P::NOTE_OUTPUT { MIDI_LIST_WORDS } else { 0 }]
+                    .into_boxed_slice(),
             }),
             listeners: Mutex::new(Vec::new()),
             preset: Mutex::new(Preset::untitled()),
@@ -467,32 +503,56 @@ impl<P: Plugin> Instance<P> {
         }
     }
 
-    fn outputs(&self) -> usize {
-        P::LAYOUT.outputs
-    }
-
-    /// The channels of an element of a scope, or the error for one that
-    /// does not exist.
+    /// The channels of an element of a scope as the host has set them, or
+    /// the error for one that does not exist.
     fn channels(
         &self,
         scope: AudioUnitScope,
         element: AudioUnitElement,
     ) -> Result<usize, OSStatus> {
-        match scope {
-            kAudioUnitScope_Input => self
-                .inputs
-                .get(element as usize)
-                .copied()
-                .ok_or(kAudioUnitErr_InvalidElement),
-            kAudioUnitScope_Output if element == 0 => Ok(self.outputs()),
-            kAudioUnitScope_Output => Err(kAudioUnitErr_InvalidElement),
-            _ => Err(kAudioUnitErr_InvalidScope),
+        let layout = self.config.take().layout;
+        width::<P>(layout, scope, element)
+    }
+
+    /// Every width an element can be given: what it has in the layouts
+    /// the plugin offers, once each, in their order.
+    fn widths(&self, scope: AudioUnitScope, element: AudioUnitElement) -> Vec<usize> {
+        let mut widths = Vec::new();
+        for &layout in &self.layouts {
+            if let Ok(channels) = width::<P>(layout, scope, element) {
+                if channels > 0 && !widths.contains(&channels) {
+                    widths.push(channels);
+                }
+            }
         }
+        widths
+    }
+
+    /// The main input and output widths of the layouts offered, once each,
+    /// for `kAudioUnitProperty_SupportedNumChannels`.
+    fn channel_infos(&self) -> Vec<AUChannelInfo> {
+        let mut infos = Vec::new();
+        for layout in &self.layouts {
+            let info = AUChannelInfo {
+                inChannels: layout.inputs as i16,
+                outChannels: layout.outputs as i16,
+            };
+            if !infos.contains(&info) {
+                infos.push(info);
+            }
+        }
+        infos
     }
 
     fn initialize(&self) -> OSStatus {
         if self.initialized.load(Ordering::Acquire) {
             return noErr;
+        }
+        // The elements' formats, each set on its own, must add up to a
+        // layout the plugin offers.
+        let layout = self.config.take().layout;
+        if !self.layouts.contains(&layout) {
+            return kAudioUnitErr_FormatNotSupported;
         }
         self.prepare();
         self.initialized.store(true, Ordering::Release);
@@ -503,30 +563,35 @@ impl<P: Plugin> Instance<P> {
     /// what rendering needs, then tells the listeners if the latency
     /// changed.
     fn prepare(&self) {
-        let (sample_rate, max_frames) = {
+        let (sample_rate, max_frames, layout) = {
             let config = self.config.take();
-            (config.sample_rate, config.max_frames)
+            (config.sample_rate, config.max_frames, config.layout)
         };
         let frames = max_frames as usize;
         let latency = {
             let mut audio = self.audio.take();
+            audio.plugin.set_layout(layout);
             audio.plugin.prepare(&ProcessSpec {
                 sample_rate,
                 max_block_size: frames,
-                num_channels: self.outputs(),
+                num_channels: layout.outputs,
             });
-            let pulls = self
-                .inputs
-                .iter()
-                .map(|&channels| pull(channels, frames))
+            let pulls = (0..self.inputs.len())
+                .map(|element| {
+                    let channels =
+                        width::<P>(layout, kAudioUnitScope_Input, element as u32).unwrap_or(0);
+                    pull(channels, frames)
+                })
                 .collect();
             audio.prepared = Some(Prepared {
                 max_frames,
-                buffer: AudioBuffer::new(self.outputs(), frames),
-                sidechain: AudioBuffer::new(P::LAYOUT.sidechain, frames),
+                layout,
+                buffer: AudioBuffer::new(layout.outputs, frames),
+                sidechain: AudioBuffer::new(layout.sidechain, frames),
                 pulls,
             });
             audio.pending.clear();
+            audio.translator.reset();
             audio.plugin.latency_samples()
         };
         let latency = u32::try_from(latency).unwrap_or(u32::MAX);
@@ -540,6 +605,44 @@ impl<P: Plugin> Instance<P> {
         audio.prepared = None;
         self.initialized.store(false, Ordering::Release);
         noErr
+    }
+}
+
+/// The channels an element of a scope has under `layout`, or the error for
+/// an element the plugin does not have. Which elements there are is fixed
+/// by the plugin's own layout: input 0 is the main input, or the sidechain
+/// of an instrument; input 1 the sidechain of an effect.
+fn width<P: Plugin>(
+    layout: AudioLayout,
+    scope: AudioUnitScope,
+    element: AudioUnitElement,
+) -> Result<usize, OSStatus> {
+    let (main, keyed) = (P::LAYOUT.inputs > 0, P::LAYOUT.sidechain > 0);
+    match scope {
+        kAudioUnitScope_Input => match element {
+            0 if main => Ok(layout.inputs),
+            0 if keyed => Ok(layout.sidechain),
+            1 if main && keyed => Ok(layout.sidechain),
+            _ => Err(kAudioUnitErr_InvalidElement),
+        },
+        kAudioUnitScope_Output if element == 0 => Ok(layout.outputs),
+        kAudioUnitScope_Output => Err(kAudioUnitErr_InvalidElement),
+        _ => Err(kAudioUnitErr_InvalidScope),
+    }
+}
+
+/// Sets the width of an element in `layout`, as [`width`] reads it.
+fn set_width<P: Plugin>(
+    layout: &mut AudioLayout,
+    scope: AudioUnitScope,
+    element: u32,
+    channels: usize,
+) {
+    let main = P::LAYOUT.inputs > 0;
+    match (scope, element) {
+        (kAudioUnitScope_Input, 0) if main => layout.inputs = channels,
+        (kAudioUnitScope_Input, _) => layout.sidechain = channels,
+        _ => layout.outputs = channels,
     }
 }
 
@@ -579,6 +682,7 @@ unsafe extern "C" fn reset<P: Plugin>(
         let mut audio = this.audio.take();
         audio.plugin.reset();
         audio.pending.clear();
+        audio.translator.reset();
         noErr
     })
 }
@@ -1267,6 +1371,7 @@ impl<P: Plugin> Instance<P> {
                 sources: config.sources,
                 host: config.host,
                 bypass: config.bypass,
+                midi_out: config.midi_out,
             }
         };
         let Audio {
@@ -1275,6 +1380,9 @@ impl<P: Plugin> Instance<P> {
             pending,
             events,
             watcher,
+            output,
+            translator,
+            packets,
         } = &mut *audio;
         let Some(prepared) = prepared.as_mut() else {
             return kAudioUnitErr_Uninitialized;
@@ -1308,9 +1416,10 @@ impl<P: Plugin> Instance<P> {
             prepared.buffer.clear();
         }
         // Channels beyond the plugin's inputs are silent.
-        for channel in P::LAYOUT.inputs..prepared.buffer.num_channels() {
+        for channel in prepared.layout.inputs..prepared.buffer.num_channels() {
             prepared.buffer.channel_mut(channel).fill(0.0);
         }
+        output.clear();
 
         if !config.bypass {
             let params: &dyn ParamSet = &*self.params;
@@ -1332,10 +1441,10 @@ impl<P: Plugin> Instance<P> {
             // SAFETY: the host's callbacks, on its render thread.
             let transport = unsafe { transport(config.host.as_ref()) };
             let mut context = ProcessContext::new(events, &transport);
-            if P::LAYOUT.sidechain > 0 {
+            if prepared.layout.sidechain > 0 {
                 context = context.with_sidechain(&prepared.sidechain);
             }
-            plugin.process(&mut prepared.buffer, &context);
+            plugin.process_with_output(&mut prepared.buffer, &context, output);
         } else {
             pending.clear();
         }
@@ -1372,6 +1481,11 @@ impl<P: Plugin> Instance<P> {
             }
             buffer.mDataByteSize = (room * 4) as u32;
         }
+        if let Some(midi_out) = config.midi_out.filter(|_| !output.is_empty()) {
+            // SAFETY: the host's callback and data, on its render thread,
+            // with its own time stamp.
+            unsafe { send_midi(output, translator, packets, midi_out, timestamp, frames) };
+        }
         drop(audio);
         // SAFETY: the host's arguments.
         unsafe {
@@ -1385,6 +1499,103 @@ impl<P: Plugin> Instance<P> {
         };
         noErr
     }
+}
+
+/// Writes MIDI into a `MIDIPacketList`, one message to a packet, laid out
+/// as CoreMIDI's headers declare it (see [`MIDI_PACKET_LIST_PACKETS`]).
+struct PacketList<'a> {
+    bytes: &'a mut [u8],
+    count: u32,
+    /// Where the next packet starts.
+    end: usize,
+}
+
+impl<'a> PacketList<'a> {
+    fn new(words: &'a mut [u32]) -> Self {
+        let len = words.len() * 4;
+        // SAFETY: the words are `len` bytes of plain memory, borrowed
+        // mutably for as long as the bytes are.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), len) };
+        Self {
+            bytes,
+            count: 0,
+            end: MIDI_PACKET_LIST_PACKETS,
+        }
+    }
+
+    /// Adds a packet of `data` at `time`. Returns whether it fitted.
+    fn push(&mut self, time: u64, data: &[u8]) -> bool {
+        let start = self.end;
+        let end = start + MIDI_PACKET_DATA + data.len();
+        if end > self.bytes.len() {
+            return false;
+        }
+        self.bytes[start..start + 8].copy_from_slice(&time.to_ne_bytes());
+        self.bytes[start + MIDI_PACKET_LENGTH..start + MIDI_PACKET_DATA]
+            .copy_from_slice(&(data.len() as u16).to_ne_bytes());
+        self.bytes[start + MIDI_PACKET_DATA..end].copy_from_slice(data);
+        self.end = end.next_multiple_of(MIDI_PACKET_ALIGN);
+        self.count += 1;
+        true
+    }
+
+    /// The list, its count written, for the host.
+    fn finish(&mut self) -> *const c_void {
+        self.bytes[..4].copy_from_slice(&self.count.to_ne_bytes());
+        self.bytes.as_ptr().cast()
+    }
+
+    fn clear(&mut self) {
+        self.count = 0;
+        self.end = MIDI_PACKET_LIST_PACKETS;
+    }
+}
+
+/// Hands what the plugin sent in a render of `frames` frames to the host's
+/// MIDI output callback, as MIDI 1.0 by the default translation, each
+/// packet stamped with the frame of the render its message falls on, as
+/// the time stamps of `kAudioUnitProperty_MIDIOutputCallback` are counted.
+/// A render that sends more than one list holds is handed over in several,
+/// in order. Real-time safe.
+///
+/// # Safety
+///
+/// `callback` and `timestamp` must be the host's, valid on this thread.
+unsafe fn send_midi(
+    output: &OutputBuffer,
+    translator: &mut OutputTranslator,
+    words: &mut [u32],
+    callback: AUMIDIOutputCallbackStruct,
+    timestamp: *const AudioTimeStamp,
+    frames: usize,
+) {
+    let Some(call) = callback.midiOutputCallback else {
+        return;
+    };
+    let mut list = PacketList::new(words);
+    let hand_over = |list: &mut PacketList<'_>| {
+        if list.count > 0 {
+            // SAFETY: the host's callback and data, with a list it reads
+            // during the call, per this function's contract.
+            unsafe { call(callback.userData, timestamp, 0, list.finish()) };
+            list.clear();
+        }
+    };
+    let last = frames.saturating_sub(1) as u32;
+    for event in output {
+        let time = u64::from(event.offset.min(last));
+        translator.translate(&event.kind, |packet| {
+            let Some(message) = packet.to_midi1() else {
+                return;
+            };
+            let bytes = message.to_bytes();
+            if !list.push(time, bytes.as_slice()) {
+                hand_over(&mut list);
+                let _ = list.push(time, bytes.as_slice());
+            }
+        });
+    }
+    hand_over(&mut list);
 }
 
 unsafe extern "C" fn render<P: Plugin>(
@@ -1646,7 +1857,14 @@ impl<P: Plugin> Instance<P> {
                 _ => Err(kAudioUnitErr_InvalidScope),
             },
             kAudioUnitProperty_Latency | kAudioUnitProperty_TailTime => global(8, false),
-            kAudioUnitProperty_SupportedNumChannels => global(size_of::<AUChannelInfo>(), false),
+            kAudioUnitProperty_SupportedNumChannels => global(
+                self.channel_infos().len() * size_of::<AUChannelInfo>(),
+                false,
+            ),
+            kAudioUnitProperty_MIDIOutputCallbackInfo if P::NOTE_OUTPUT => global(pointer, false),
+            kAudioUnitProperty_MIDIOutputCallback if P::NOTE_OUTPUT => {
+                global(size_of::<AUMIDIOutputCallbackStruct>(), true)
+            }
             // Writable at any time, as in Apple's base classes: an
             // initialised unit is prepared again for the new length.
             kAudioUnitProperty_MaximumFramesPerSlice => global(4, true),
@@ -1674,7 +1892,8 @@ impl<P: Plugin> Instance<P> {
             }
             kAudioUnitProperty_SupportedChannelLayoutTags => {
                 self.channels(scope, element)?;
-                Ok((size_of::<AudioChannelLayoutTag>(), false))
+                let count = self.widths(scope, element).len();
+                Ok((count * size_of::<AudioChannelLayoutTag>(), false))
             }
             kAudioUnitProperty_AudioChannelLayout => {
                 self.channels(scope, element)?;
@@ -1937,14 +2156,23 @@ impl<P: Plugin> Instance<P> {
                     put(out, size, frames / config().sample_rate)
                 }
                 kAudioUnitProperty_TailTime => put(out, size, 0.0f64),
-                kAudioUnitProperty_SupportedNumChannels => put(
-                    out,
-                    size,
-                    AUChannelInfo {
-                        inChannels: P::LAYOUT.inputs as i16,
-                        outChannels: P::LAYOUT.outputs as i16,
-                    },
-                ),
+                kAudioUnitProperty_SupportedNumChannels => {
+                    put_all(out, size, &self.channel_infos())
+                }
+                kAudioUnitProperty_MIDIOutputCallbackInfo => {
+                    // One MIDI output, named; the caller releases the list.
+                    let Some(name) = cf::string("MIDI Out") else {
+                        return kAudioUnitErr_CannotDoInCurrentContext;
+                    };
+                    put_object(out, size, cf::array(&[name]))
+                }
+                kAudioUnitProperty_MIDIOutputCallback => {
+                    let callback = config().midi_out.unwrap_or(AUMIDIOutputCallbackStruct {
+                        midiOutputCallback: None,
+                        userData: ptr::null_mut(),
+                    });
+                    put(out, size, callback)
+                }
                 kAudioUnitProperty_MaximumFramesPerSlice => put(out, size, config().max_frames),
                 kAudioUnitProperty_LastRenderError => {
                     put(out, size, self.last_error.swap(noErr, Ordering::Relaxed))
@@ -1974,8 +2202,12 @@ impl<P: Plugin> Instance<P> {
                     put_object(out, size, cf::string(name))
                 }
                 kAudioUnitProperty_SupportedChannelLayoutTags => {
-                    let channels = self.channels(scope, element).unwrap_or(0);
-                    put(out, size, layout_tag(channels))
+                    let tags: Vec<AudioChannelLayoutTag> = self
+                        .widths(scope, element)
+                        .into_iter()
+                        .map(layout_tag)
+                        .collect();
+                    put_all(out, size, &tags)
                 }
                 kAudioUnitProperty_AudioChannelLayout => {
                     let channels = self.channels(scope, element).unwrap_or(0);
@@ -2024,11 +2256,35 @@ impl<P: Plugin> Instance<P> {
                     let Some(format) = take::<AudioStreamBasicDescription>(data, size) else {
                         return kAudioUnitErr_InvalidPropertyValue;
                     };
-                    let channels = self.channels(scope, element).unwrap_or(0);
-                    if !acceptable(&format, channels) {
+                    // Any width the element has in a layout the plugin
+                    // offers; whether the elements' widths add up to one is
+                    // checked when the unit initialises.
+                    let Some(channels) = self
+                        .widths(scope, element)
+                        .into_iter()
+                        .find(|&channels| acceptable(&format, channels))
+                    else {
                         return kAudioUnitErr_FormatNotSupported;
+                    };
+                    {
+                        let mut config = self.config.take();
+                        if width::<P>(config.layout, scope, element) != Ok(channels) {
+                            if initialized {
+                                return kAudioUnitErr_Initialized;
+                            }
+                            set_width::<P>(&mut config.layout, scope, element, channels);
+                        }
                     }
                     self.set_sample_rate(format.mSampleRate, initialized)
+                }
+                kAudioUnitProperty_MIDIOutputCallback => {
+                    let callback = take::<AUMIDIOutputCallbackStruct>(data, size);
+                    if callback.is_none() && !data.is_null() {
+                        return kAudioUnitErr_InvalidPropertyValue;
+                    }
+                    self.config.take().midi_out =
+                        callback.filter(|callback| callback.midiOutputCallback.is_some());
+                    noErr
                 }
                 kAudioUnitProperty_SampleRate => {
                     let Some(rate) = take::<f64>(data, size) else {
@@ -2313,6 +2569,28 @@ mod tests {
         assert_eq!(layout_tag(1), kAudioChannelLayoutTag_Mono);
         assert_eq!(layout_tag(2), kAudioChannelLayoutTag_Stereo);
         assert_eq!(layout_tag(6), (147 << 16) | 6);
+    }
+
+    #[test]
+    fn a_packet_list_is_laid_out_as_coremidi_reads_it_and_refuses_what_does_not_fit() {
+        let mut words = [0u32; 6];
+        let mut list = PacketList::new(&mut words);
+        assert!(list.push(5, &[0x90, 60, 100]));
+        let second =
+            (MIDI_PACKET_LIST_PACKETS + MIDI_PACKET_DATA + 3).next_multiple_of(MIDI_PACKET_ALIGN);
+        assert_eq!(list.end, second);
+        // 24 bytes hold the count and one packet of three, not two.
+        assert!(!list.push(6, &[0x80, 60, 0]));
+        let bytes = list.finish().cast::<u8>();
+        // SAFETY: the list's own 24 bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(bytes, 24) };
+        assert_eq!(bytes[..4], 1u32.to_ne_bytes());
+        assert_eq!(bytes[4..12], 5u64.to_ne_bytes());
+        assert_eq!(bytes[12..14], 3u16.to_ne_bytes());
+        assert_eq!(bytes[14..17], [0x90, 60, 100]);
+        list.clear();
+        assert!(list.push(6, &[0x80, 60, 0]));
+        assert_eq!(list.count, 1);
     }
 
     #[test]
