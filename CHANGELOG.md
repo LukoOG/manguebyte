@@ -7,6 +7,32 @@ break the API.
 
 ## Unreleased
 
+### Formats
+
+- `opus`: an Ogg Opus encoder of the CELT layer, written from RFC 6716 and
+  RFC 7845 (issue #2). `opus::write`, `opus::write_file`,
+  `AudioWriter::opus` and `AudioWriter::create_opus` write a constant
+  (`OpusOptions::constant`) or variable (`OpusOptions::variable`) bitrate
+  of 6 to 510 kbit/s a channel, in frames of 2.5 to 20 ms
+  (`FrameDuration`), with the comments and pictures of a `Metadata`
+  (`OpusOptions::with_metadata`) in `OpusTags`. One or two channels go
+  into one stream, three to eight into the coupled pairs of the Vorbis
+  layouts (mapping family 1), more into a stream each (family 255). Audio
+  at another rate is taken to 48 kHz with a copy of `manguebyte-dsp`'s
+  resampler, and the identification header records its rate. The
+  pre-skip and the granule position of the last page make every stream
+  decode to exactly the frames written (at 48 kHz), and the bytes are the
+  same however the audio is cut into calls. On the crate's stereo test
+  signal the noise lies 1.4, 8.7 and 15.7 dB under the masking threshold
+  of the tests' model at 64, 128 and 256 kbit/s. SILK and hybrid frames
+  are not written; see TECH_DEBT item 89.
+- The CELT bit allocation, band shapes and pulse coding of the Opus
+  decoder are shared with the encoder, through a range encoder (RFC 6716,
+  section 5.1) in place of the decoder: the decoder decodes as before, bit
+  for bit.
+- The Ogg page writer of the Vorbis encoder moved to the `ogg` module,
+  shared with the Opus encoder; Vorbis files are unchanged.
+
 ### Graph
 
 - Sidechains, events and feedback are routed through `manguebyte-graph`

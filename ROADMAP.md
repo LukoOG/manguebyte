@@ -153,7 +153,9 @@ Everything a standalone audio application needs, short of a user interface.
 - ✅ Ogg Vorbis encoding, at qualities 0 to 10
 - ✅ MP3 encoding: MPEG-1 layer III, constant and variable bitrate,
   gapless
-- ⬜ Opus encoding
+- 🚧 Opus encoding: CELT (music), constant and variable bitrate, frames of
+  2.5 to 20 ms, up to 255 channels, any input rate, gapless, with
+  metadata; SILK and hybrid frames (speech) are still to come
 - ✅ Metadata, cue points and loop markers: one model for every format,
   read and written where the format allows, unknown chunks kept
 - ✅ MPEG audio layers I and II
