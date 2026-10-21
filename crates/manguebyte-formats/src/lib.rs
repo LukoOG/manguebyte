@@ -6,7 +6,7 @@
 //! | [`aiff`] | 1 to 32-bit PCM, either byte order, 32 and 64-bit float | 16 and 24-bit PCM, 32-bit float |
 //! | [`flac`] | everything the format defines | 4 to 32 bits, 1 to 8 channels, levels 0 to 8 |
 //! | [`vorbis`] | Ogg Vorbis: every stream but those with floors of type 0, 1 to 255 channels | variable bitrate, qualities 0 to 10, 1 to 255 channels |
-//! | [`opus`] | Ogg Opus: SILK, CELT and hybrid, every frame size and bandwidth, up to 255 channels | no |
+//! | [`opus`] | Ogg Opus: SILK, CELT and hybrid, every frame size and bandwidth, up to 255 channels | CELT only, constant and variable bitrate, frames of 2.5 to 20 ms, 1 to 255 channels, any input rate, gapless |
 //! | [`mp3`] | MPEG-1, 2 and 2.5 layer III, every rate and stereo coding, gapless with a LAME tag; layers I and II | MPEG-1 layer III at 32 to 48 kHz, constant and variable bitrate, gapless |
 //!
 //! [`read_file`] and [`decode`] work out which format they have been given,

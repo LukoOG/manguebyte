@@ -6,7 +6,7 @@
 use std::sync::OnceLock;
 
 use super::tables::{BANDS, EBANDS, MAX_LM};
-use crate::opus::range::{BITRES, RangeDecoder, ilog};
+use crate::opus::range::{BITRES, Coder, ilog};
 
 /// The widest band any frame splits into: 22 bins at 20 ms, eight short
 /// blocks of them, with the band of a 40 ms frame the cache also covers.
@@ -222,10 +222,106 @@ pub(crate) fn pulses_to_bits(band: usize, lm: i32, pseudo: usize) -> i32 {
 /// Reads the vector of `n` integers with `k` pulses whose index the frame
 /// codes into `out`, and returns the sum of their squares (`decode_pulses`
 /// and `cwrsi`).
-pub(crate) fn decode_pulses(out: &mut [i32], n: usize, k: usize, ec: &mut RangeDecoder<'_>) -> f32 {
+pub(crate) fn decode_pulses<C: Coder>(out: &mut [i32], n: usize, k: usize, ec: &mut C) -> f32 {
     let total = pvq_v(n, k);
-    let index = ec.uint(total.max(2));
+    let index = ec.code_uint(0, total.max(2));
     unrank(out, n, k, index)
+}
+
+/// Codes the index of `pulses`, `n` integers whose magnitudes sum to `k`
+/// (`encode_pulses` and `icwrs`): the inverse of [`unrank`].
+pub(crate) fn encode_pulses<C: Coder>(pulses: &[i32], n: usize, k: usize, ec: &mut C) {
+    let total = pvq_v(n, k);
+    ec.code_uint(rank(pulses, k), total.max(2));
+}
+
+/// The index of a vector of pulses (section 4.3.4.2): position by
+/// position, the vectors whose next value is of a smaller magnitude come
+/// first, then those of the same magnitude and positive, then negative.
+/// With `k` pulses left in `n` places, a value `v` of magnitude `m` starts
+/// at `U(n, k - m)`, and a negative one `U(n, k + 1)` further on.
+fn rank(pulses: &[i32], k: usize) -> u32 {
+    let u = u_table();
+    let mut k = k;
+    let mut index = 0u32;
+    let n = pulses.len();
+    for (at, &value) in pulses.iter().enumerate() {
+        let left = n - at;
+        let magnitude = value.unsigned_abs() as usize;
+        if left == 1 {
+            if value < 0 {
+                index += 1;
+            }
+            break;
+        }
+        index += u.get(left, k - magnitude);
+        if value < 0 {
+            index += u.get(left, k + 1);
+        }
+        k -= magnitude;
+    }
+    index
+}
+
+/// The vector of `k` pulses nearest in direction to `x` (the search of
+/// `alg_quant`), into `out`; returns the sum of the squares of its values.
+///
+/// The pulses go where `x` is largest: a share of them in proportion to
+/// each magnitude first, when there are many, then one at a time to the
+/// place that most raises the correlation with `x` over the length of the
+/// vector, `(x . y)^2 / (y . y)`.
+pub(crate) fn search_pulses(x: &[f32], k: usize, out: &mut [i32]) -> f32 {
+    let n = x.len();
+    out.fill(0);
+    let sum: f32 = x.iter().map(|value| value.abs()).sum();
+    if sum.is_nan() || sum <= 1e-15 || sum.is_infinite() {
+        out[0] = k as i32;
+        return (k * k) as f32;
+    }
+    let mut placed = 0usize;
+    let mut xy = 0.0f32;
+    let mut yy = 0.0f32;
+    if k > n / 2 {
+        // Below the share, never above it: what is left is placed one by
+        // one.
+        let scale = (k as f32 - 1.0) / sum;
+        for (slot, &value) in out.iter_mut().zip(x) {
+            let pulses = (value.abs() * scale).floor() as i32;
+            *slot = pulses;
+            placed += pulses as usize;
+            xy += value.abs() * pulses as f32;
+            yy += (pulses * pulses) as f32;
+        }
+    }
+    while placed < k {
+        // `(xy + |x_i|)^2 / (yy + 2 y_i + 1)`, the best compared by cross
+        // products.
+        let mut best = 0;
+        let mut best_num = -1.0f32;
+        let mut best_den = 1.0f32;
+        for (i, (&value, &pulses)) in x.iter().zip(out.iter()).enumerate() {
+            let rxy = xy + value.abs();
+            let num = rxy * rxy;
+            let den = yy + (2 * pulses + 1) as f32;
+            if num * best_den > best_num * den {
+                best = i;
+                best_num = num;
+                best_den = den;
+            }
+        }
+        xy += x[best].abs();
+        yy += (2 * out[best] + 1) as f32;
+        out[best] += 1;
+        placed += 1;
+    }
+    let mut energy = 0i64;
+    for (slot, &value) in out.iter_mut().zip(x) {
+        energy += i64::from(*slot) * i64::from(*slot);
+        if value < 0.0 {
+            *slot = -*slot;
+        }
+    }
+    energy as f32
 }
 
 fn unrank(out: &mut [i32], mut n: usize, mut k: usize, mut i: u32) -> f32 {
@@ -342,6 +438,75 @@ mod tests {
                 let squares: i32 = out.iter().map(|value| value * value).sum();
                 assert_eq!(energy, squares as f32);
                 assert!(seen.insert(out.clone()), "n {n} k {k}: {out:?} twice");
+            }
+        }
+    }
+
+    #[test]
+    fn the_rank_of_a_vector_is_the_index_it_was_read_from() {
+        for (n, k) in [
+            (2, 1),
+            (2, 5),
+            (3, 2),
+            (4, 4),
+            (5, 7),
+            (8, 3),
+            (3, 9),
+            (16, 2),
+        ] {
+            let mut out = vec![0i32; n];
+            for index in 0..pvq_v(n, k) {
+                unrank(&mut out, n, k, index);
+                assert_eq!(rank(&out, k), index, "n {n} k {k}: {out:?}");
+            }
+        }
+        // Wide bands and many pulses, sampled.
+        for (n, k) in [(176, 3), (40, 30), (12, 128), (96, 5)] {
+            let total = pvq_v(n, k);
+            let mut out = vec![0i32; n];
+            for step in 0..500u64 {
+                let index = ((u64::from(total) * step) / 500) as u32;
+                unrank(&mut out, n, k, index);
+                assert_eq!(rank(&out, k), index, "n {n} k {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_search_puts_k_pulses_where_the_vector_points() {
+        let x = [0.1f32, -0.7, 0.0, 0.3, -0.05, 0.6];
+        for k in [1, 2, 3, 5, 9, 40] {
+            let mut out = [0i32; 6];
+            let energy = search_pulses(&x, k, &mut out);
+            let sum: i32 = out.iter().map(|value| value.abs()).sum();
+            assert_eq!(sum as usize, k, "{out:?}");
+            assert_eq!(energy, out.iter().map(|v| (v * v) as f32).sum::<f32>());
+            // Never a sign against the vector's.
+            assert!(
+                out.iter()
+                    .zip(&x)
+                    .all(|(&p, &v)| p == 0 || (p > 0) == (v > 0.0))
+            );
+            // About as near as any vector with one pulse moved: a search
+            // one pulse at a time is not always the best, but close.
+            let score = |y: &[i32]| {
+                let xy: f32 = y.iter().zip(&x).map(|(&p, &v)| p as f32 * v).sum();
+                let yy: f32 = y.iter().map(|&p| (p * p) as f32).sum();
+                xy * xy / yy
+            };
+            let best = score(&out);
+            for from in 0..6 {
+                for to in 0..6 {
+                    if out[from] == 0 || from == to {
+                        continue;
+                    }
+                    let mut other = out;
+                    other[from] -= other[from].signum();
+                    other[to] += if x[to] < 0.0 { -1 } else { 1 };
+                    if other.iter().map(|v| v.abs()).sum::<i32>() as usize == k {
+                        assert!(score(&other) <= best * 1.02, "{k}: {out:?} {other:?}");
+                    }
+                }
             }
         }
     }

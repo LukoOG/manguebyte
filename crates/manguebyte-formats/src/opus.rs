@@ -8,7 +8,8 @@
 //! and dual stereo, the post-filter; hybrid frames of both; the redundant
 //! frames that smooth a change of mode; packets of up to 120 ms, of every
 //! framing; and multistream packets of up to 255 channels with the channel
-//! mappings of RFC 7845.
+//! mappings of RFC 7845. An encoder of the CELT layer alone, written from
+//! the same RFCs, writes Ogg Opus too: see [Writing](#writing).
 //!
 //! ```no_run
 //! let file = manguebyte_formats::opus::read_file("voice.opus")?;
@@ -66,10 +67,63 @@
 //!   a decoder started elsewhere takes to become the same as one started
 //!   at the beginning. See [`AudioReader::seek`](crate::AudioReader::seek).
 //! - Only the first Opus stream of a file is read; chained streams are not.
+//!
+//! # Writing
+//!
+//! [`write`](fn@write) and [`AudioWriter::opus`](crate::AudioWriter::opus)
+//! encode Ogg Opus at a constant or variable bitrate from 6 to 510 kbit/s
+//! a channel, in frames of 2.5, 5, 10 or 20 ms ([`OpusOptions`]), with the
+//! comments and pictures of a [`Metadata`]. The encoder codes the CELT
+//! layer alone, in full band, the layer Opus has for music; SILK and
+//! hybrid frames, which code speech in fewer bits, are not written.
+//!
+//! - Audio at any rate but 48 kHz is taken there first, with the
+//!   windowed-sinc converter of `manguebyte-dsp` (kept in this crate,
+//!   which depends on `manguebyte-core` alone); the identification header
+//!   records the rate it came at.
+//! - Each frame goes through the forward MDCT of the decoder's window, one
+//!   long block or, where the energy of the input jumps or falls steeply,
+//!   short blocks, recombined into the frequency resolution of a long one
+//!   in the bands where that is sparser. The band energies are coded
+//!   coarse, intra or predicted from the frame before, whichever is
+//!   cheaper, and fine; the shapes with the pyramid vector quantiser,
+//!   split and spread as RFC 6716 has it; peaks that stand out of the
+//!   spectrum get more bits (dynalloc), and bands above the audio's own
+//!   bandwidth or too poor to be worth coding are skipped.
+//! - Two channels are coded as mid and side with the angle of each band,
+//!   apart (dual stereo) when they are sparser so, and as one (intensity
+//!   stereo) from a band the bitrate sets: none at 128 kbit/s and up. Up
+//!   to eight channels go into the coupled pairs and single channels of
+//!   the Vorbis layouts (mapping family 1), more into a stream each
+//!   (family 255).
+//! - The coding goes through the decoder's own allocation and band code,
+//!   with an encoding range coder in place of the decoding one, so that
+//!   the encoder holds the state the decoder will.
+//! - The pre-skip is 120 samples, the overlap of the first block, and the
+//!   granule position of the last page ends the stream where the audio
+//!   did: it decodes to exactly the frames written, at 48 kHz.
+//!
+//! On the stereo test signal of this crate at 48 kHz, a constant
+//! 64 kbit/s puts the noise 1.4 dB under the masking threshold of a model
+//! apart from the encoder's, 128 kbit/s 8.7 dB and 256 kbit/s 15.7 dB, on
+//! average over the bands; a steady chord comes back 46.7 dB above its
+//! noise from 64 kbit/s up, the most the caps on each band's bits allow. A
+//! variable bitrate asked for 128 kbit/s spends 91 on it, the narrow tones
+//! and the silence taking less, for 9.4 dB under the threshold. The
+//! encoder runs some 25 times faster than real time in stereo in an
+//! unoptimised build, on one core. Its memory does not grow with the
+//! length of the stream; it allocates and does I/O, so it belongs off the
+//! audio thread.
+//!
+//! It is a simple encoder next to libopus: no pitch pre-filter, no
+//! spreading or allocation trim chosen from the signal, no analysis of
+//! tonality or of the stereo image across frames, and the variable bitrate
+//! follows simple rules rather than a model of the audio. The files it
+//! writes have been decoded by this crate's decoder only.
 
 use std::fmt;
 use std::fs::File;
-use std::io::{self, BufReader, Cursor, Read};
+use std::io::{self, BufReader, BufWriter, Cursor, Read, Seek, Write};
 use std::path::Path;
 
 use manguebyte_core::AudioBuffer;
@@ -78,11 +132,15 @@ use crate::metadata::Metadata;
 
 mod celt;
 mod decoder;
+mod encode;
 mod packet;
 mod range;
 mod reader;
+mod resample;
 mod silk;
 
+pub(crate) use encode::OpusStream;
+pub use encode::{FrameDuration, OpusOptions};
 pub(crate) use reader::OpusReader;
 
 /// The rate every Opus stream decodes at.
@@ -172,6 +230,43 @@ pub fn read<R: Read>(mut reader: R) -> Result<OpusFile, OpusError> {
 /// Reads the Ogg Opus file at `path`.
 pub fn read_file<P: AsRef<Path>>(path: P) -> Result<OpusFile, OpusError> {
     read(BufReader::new(File::open(path)?))
+}
+
+/// Writes `buffer` to `writer` as Ogg Opus, from audio at `sample_rate`
+/// hertz, which is taken to 48 kHz if it is at another rate.
+///
+/// Samples are taken with full scale at `±1.0`; NaN becomes zero. The
+/// encoder and what it makes are described in the
+/// [module documentation](self#writing). To write block by block, use
+/// [`AudioWriter::opus`](crate::AudioWriter::opus).
+///
+/// # Errors
+///
+/// [`OpusError::Unsupported`] for options that [`OpusOptions::validate`]
+/// refuses, before anything is written, and [`OpusError::Io`] if `writer`
+/// fails.
+pub fn write<W: Write + Seek>(
+    mut writer: W,
+    buffer: &AudioBuffer<f32>,
+    sample_rate: u32,
+    options: &OpusOptions,
+) -> Result<(), OpusError> {
+    encode::write_buffer(&mut writer, buffer, sample_rate, options)
+}
+
+/// Writes `buffer` to a new Ogg Opus file at `path`, replacing any file
+/// there. The options are checked before the file is created.
+pub fn write_file<P: AsRef<Path>>(
+    path: P,
+    buffer: &AudioBuffer<f32>,
+    sample_rate: u32,
+    options: &OpusOptions,
+) -> Result<(), OpusError> {
+    options.validate(buffer.num_channels(), sample_rate)?;
+    let mut file = BufWriter::new(File::create(path)?);
+    encode::write_buffer(&mut file, buffer, sample_rate, options)?;
+    file.flush()?;
+    Ok(())
 }
 
 fn decode(bytes: &[u8]) -> Result<OpusFile, OpusError> {

@@ -313,9 +313,149 @@ impl Imdct {
     }
 }
 
+/// The forward MDCT of the encoder: what [`Imdct::backward`] takes back to
+/// the samples it was given, block after block.
+///
+/// The inverse writes, for `N` coefficients, `N` samples that are minus the
+/// type IV discrete cosine transform of the coefficients, backwards
+/// (`the_flat_part_is_a_reversed_dct_iv`), and joins the ends of
+/// consecutive blocks with a 2 by 2 rotation by the window. So the forward
+/// transform folds its `N + OVERLAP` samples with the transpose of that
+/// rotation at each end (the time-domain aliasing cancellation of Princen
+/// and Bradley, 1986), reverses and negates them, and takes their type IV
+/// DCT, scaled by `2 / N`, the DCT being its own inverse up to `N / 2`. The
+/// DCT of `N` points is worked out with the FFT of `N / 2` points the
+/// inverse uses, between two rotations: the even and the odd samples, the
+/// odd ones backwards, are the real and the imaginary parts of the
+/// complex input.
+pub(crate) struct Mdct {
+    /// For each `shift`, `exp(-i pi j / N)` for `j < N / 2`, and
+    /// `exp(-i pi (j + 1/4) / N)`.
+    pre: Vec<Vec<Complex>>,
+    post: Vec<Vec<Complex>>,
+    folded: Vec<f32>,
+    input: Vec<Complex>,
+    work: Vec<Complex>,
+}
+
+impl Mdct {
+    pub(crate) fn new() -> Self {
+        let longest = SHORT_MDCT << MAX_LM;
+        let mut pre = Vec::new();
+        let mut post = Vec::new();
+        for shift in 0..=MAX_LM {
+            let n = longest >> shift;
+            let turn = |offset: f64| {
+                (0..n / 2)
+                    .map(|j| {
+                        let angle = -PI * (j as f64 + offset) / n as f64;
+                        Complex {
+                            re: angle.cos() as f32,
+                            im: angle.sin() as f32,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            };
+            pre.push(turn(0.0));
+            post.push(turn(0.25));
+        }
+        Self {
+            pre,
+            post,
+            folded: vec![0.0; longest],
+            input: vec![Complex::default(); longest / 2],
+            work: vec![Complex::default(); longest / 2],
+        }
+    }
+
+    /// Transforms the `N + OVERLAP` samples of `input`, where
+    /// `N = 960 >> shift`, into `N` coefficients, written to `out[0]`,
+    /// `out[stride]`, and so on: the first `OVERLAP` samples are those the
+    /// block shares with the one before, the last `OVERLAP` those it shares
+    /// with the next.
+    pub(crate) fn forward(&mut self, input: &[f32], out: &mut [f32], stride: usize, shift: usize) {
+        let n = (SHORT_MDCT << MAX_LM) >> shift;
+        let half = OVERLAP / 2;
+        let window = &tables().window;
+        // Folded, then reversed and negated in the same step: `u[k]` is
+        // minus the folded sample `n - 1 - k`.
+        let u = &mut self.folded[..n];
+        for i in 0..half {
+            let head = -window[i] * input[i] + window[OVERLAP - 1 - i] * input[OVERLAP - 1 - i];
+            u[n - 1 - (half - 1 - i)] = -head;
+            let tail =
+                window[OVERLAP - 1 - i] * input[n + i] + window[i] * input[n + OVERLAP - 1 - i];
+            u[n - 1 - (n - half + i)] = -tail;
+        }
+        for j in half..n - half {
+            u[n - 1 - j] = -input[j + half];
+        }
+
+        // The DCT-IV of `u`.
+        let m = n / 2;
+        let pre = &self.pre[shift];
+        let post = &self.post[shift];
+        for (j, value) in self.input[..m].iter_mut().enumerate() {
+            *value = Complex {
+                re: u[2 * j],
+                im: u[n - 1 - 2 * j],
+            }
+            .mul(pre[j]);
+        }
+        tables().ffts[shift].run(&self.input[..m], &mut self.work[..m]);
+        let scale = 2.0 / n as f32;
+        for (k, &value) in self.work[..m].iter().enumerate() {
+            let z = value.mul(post[k]);
+            out[2 * k * stride] = scale * z.re;
+            out[(n - 1 - 2 * k) * stride] = -scale * z.im;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Blocks transformed forward and back, overlapped as the decoder
+    /// overlaps them, give the samples back, for every block size and for
+    /// short blocks interleaved.
+    #[test]
+    fn the_forward_transform_is_undone_by_the_inverse() {
+        let mut mdct = Mdct::new();
+        let mut imdct = Imdct::new();
+        for (shift, blocks) in [(0, 1), (1, 1), (3, 1), (3, 8), (3, 2)] {
+            let n = (SHORT_MDCT << MAX_LM) >> shift;
+            let frame = n * blocks;
+            let frames = 6;
+            let signal: Vec<f32> = (0..frame * frames + OVERLAP)
+                .map(|i| {
+                    if i < OVERLAP {
+                        0.0
+                    } else {
+                        ((i * 7_919 % 1_013) as f32 - 506.0) / 506.0
+                    }
+                })
+                .collect();
+            let mut mem = vec![0.0f32; frame * frames + 2 * OVERLAP];
+            let mut coefficients = vec![0.0f32; frame];
+            for f in 0..frames {
+                for b in 0..blocks {
+                    let at = f * frame + b * n;
+                    mdct.forward(&signal[at..], &mut coefficients[b..], blocks, shift);
+                }
+                for b in 0..blocks {
+                    let at = f * frame + b * n;
+                    imdct.backward(&coefficients[b..], blocks, &mut mem[at..], shift);
+                }
+            }
+            for (i, (&got, &want)) in mem.iter().zip(&signal).enumerate().take(frame * frames) {
+                assert!(
+                    (got - want).abs() < 1e-4,
+                    "shift {shift}, {blocks} blocks, sample {i}: {got} against {want}"
+                );
+            }
+        }
+    }
 
     #[test]
     #[allow(clippy::needless_range_loop)]

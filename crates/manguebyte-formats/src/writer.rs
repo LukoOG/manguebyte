@@ -10,6 +10,7 @@ use crate::aiff::{self, AiffError, AiffFormat};
 use crate::flac::{FlacOptions, FlacStream};
 use crate::metadata::Metadata;
 use crate::mp3::{Mp3Options, Mp3Stream};
+use crate::opus::{OpusOptions, OpusStream};
 use crate::pcm;
 use crate::vorbis::{VorbisOptions, VorbisStream};
 use crate::wav::{self, WavError, WavFormat};
@@ -135,6 +136,7 @@ enum Kind {
     Flac(Box<FlacStream>),
     Vorbis(Box<VorbisStream>),
     Mp3(Box<Mp3Stream>),
+    Opus(Box<OpusStream>),
 }
 
 impl Kind {
@@ -144,7 +146,7 @@ impl Kind {
         match self {
             Self::Wav { format, .. } => format.bytes_per_sample(),
             Self::Aiff { format } => format.bytes_per_sample(),
-            Self::Flac(_) | Self::Vorbis(_) | Self::Mp3(_) => 0,
+            Self::Flac(_) | Self::Vorbis(_) | Self::Mp3(_) | Self::Opus(_) => 0,
         }
     }
 }
@@ -228,6 +230,23 @@ impl AudioWriter<File> {
             .validate(channels, sample_rate)
             .map_err(FormatError::Vorbis)?;
         Self::vorbis(File::create(path)?, channels, sample_rate, options)
+    }
+
+    /// Creates an Ogg Opus file at `path`, replacing any existing file.
+    ///
+    /// Like [`create_flac`](Self::create_flac), this writes to the file
+    /// directly, a page of about 4 KiB at a time, and checks the options
+    /// before the file is created.
+    pub fn create_opus<P: AsRef<Path>>(
+        path: P,
+        channels: usize,
+        sample_rate: u32,
+        options: &OpusOptions,
+    ) -> Result<Self, FormatError> {
+        options
+            .validate(channels, sample_rate)
+            .map_err(FormatError::Opus)?;
+        Self::opus(File::create(path)?, channels, sample_rate, options)
     }
 }
 
@@ -541,6 +560,88 @@ impl<W: Write + Seek> AudioWriter<W> {
         })
     }
 
+    /// Starts an Ogg Opus stream in `writer`, at its current position.
+    ///
+    /// The two headers are written here. Samples are taken with full scale
+    /// at `±1.0`, NaN as silence, taken to 48 kHz if `sample_rate` is
+    /// another rate, and encoded a frame at a time as soon as a frame of
+    /// 2.5 to 20 ms ([`OpusOptions::with_frame_duration`]) has arrived;
+    /// pages of about 4 KiB are written as they fill, and
+    /// [`finish`](Self::finish) encodes the rest and writes the last page,
+    /// whose granule position gives the stream exactly the length written,
+    /// at 48 kHz. The bytes are those [`opus::write`](crate::opus::write)
+    /// produces for the same audio and options, however the audio is cut
+    /// into calls.
+    ///
+    /// ```
+    /// use std::io::Cursor;
+    ///
+    /// use manguebyte_core::AudioBuffer;
+    /// use manguebyte_formats::opus::{self, OpusOptions};
+    /// use manguebyte_formats::AudioWriter;
+    ///
+    /// let options = OpusOptions::variable(96).with_tag("TITLE", "Maracatu");
+    /// let mut writer = AudioWriter::opus(Cursor::new(Vec::new()), 2, 48_000, &options)?;
+    /// let mut block = AudioBuffer::<f32>::new(2, 480);
+    /// for round in 0..10 {
+    ///     for (i, sample) in block.channel_mut(0).iter_mut().enumerate() {
+    ///         *sample = 0.25 * ((round * 480 + i) as f32 * 0.0627).sin();
+    ///     }
+    ///     writer.write(&block)?;
+    /// }
+    /// let bytes = writer.finish()?.into_inner();
+    ///
+    /// let file = opus::read(bytes.as_slice())?;
+    /// assert_eq!(file.buffer.num_frames(), 4_800);
+    /// assert_eq!(file.comments, [("TITLE".to_owned(), "Maracatu".to_owned())]);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// Memory, for a frame of each stream and the encoders' state, does not
+    /// grow with the length of the stream. Encoding allocates and the
+    /// writer does I/O: it does not belong on the audio thread; to record
+    /// from an audio callback, hand it to a
+    /// [`RecordingWriter`](crate::RecordingWriter).
+    ///
+    /// If writing a page fails, it stays in memory and the rest of the
+    /// samples of that call are not taken:
+    /// [`frames_written`](Self::frames_written) says how many were. The
+    /// next write, or `finish`, writes the pages again where they began.
+    ///
+    /// # Errors
+    ///
+    /// [`FormatError::Opus`] holding
+    /// [`OpusError::Unsupported`](crate::opus::OpusError::Unsupported),
+    /// with nothing written, if [`OpusOptions::validate`] refuses
+    /// `channels`, `sample_rate` and `options`, and [`FormatError::Io`] if
+    /// `writer` fails.
+    pub fn opus(
+        mut writer: W,
+        channels: usize,
+        sample_rate: u32,
+        options: &OpusOptions,
+    ) -> Result<Self, FormatError> {
+        let stream =
+            OpusStream::start(&mut writer, channels, sample_rate, options).map_err(|error| {
+                match error {
+                    crate::opus::OpusError::Io(error) => FormatError::Io(error),
+                    error => FormatError::Opus(error),
+                }
+            })?;
+        Ok(Self {
+            writer,
+            kind: Kind::Opus(Box::new(stream)),
+            channels: channels as u16,
+            sample_rate,
+            origin: 0,
+            data_start: 0,
+            frames: 0,
+            torn: false,
+            scratch: Vec::new(),
+            metadata: Vec::new(),
+        })
+    }
+
     fn start(
         mut writer: W,
         kind: Kind,
@@ -606,6 +707,11 @@ impl<W: Write + Seek> AudioWriter<W> {
                     "MP3 metadata goes in the options, with Mp3Options::with_metadata",
                 ));
             }
+            Kind::Opus(_) => {
+                return Err(FormatError::Unsupported(
+                    "Ogg Opus metadata goes in the options, with OpusOptions::with_metadata",
+                ));
+            }
         };
         Ok(())
     }
@@ -618,6 +724,7 @@ impl<W: Write + Seek> AudioWriter<W> {
             Kind::Flac(_) => FileFormat::Flac,
             Kind::Vorbis(_) => FileFormat::OggVorbis,
             Kind::Mp3(_) => FileFormat::Mp3,
+            Kind::Opus(_) => FileFormat::OggOpus,
         }
     }
 
@@ -659,7 +766,12 @@ impl<W: Write + Seek> AudioWriter<W> {
     /// belongs.
     fn mend(&mut self) -> Result<(), FormatError> {
         // FLAC keeps its own account; `torn` is never set for it.
-        if self.torn && !matches!(self.kind, Kind::Flac(_) | Kind::Vorbis(_) | Kind::Mp3(_)) {
+        if self.torn
+            && !matches!(
+                self.kind,
+                Kind::Flac(_) | Kind::Vorbis(_) | Kind::Mp3(_) | Kind::Opus(_)
+            )
+        {
             let reached = self.writer.stream_position()?;
             let frames = reached.saturating_sub(self.data_start) / self.frame_bytes();
             self.writer.seek(SeekFrom::Start(
@@ -690,7 +802,7 @@ impl<W: Write + Seek> AudioWriter<W> {
             (Kind::Aiff { .. }, _) => Err(FormatError::Aiff(AiffError::TooLarge)),
             // FLAC and Vorbis are written by their own streams and never
             // come here.
-            (Kind::Flac(_) | Kind::Vorbis(_) | Kind::Mp3(_), _) => Ok(self.frames),
+            (Kind::Flac(_) | Kind::Vorbis(_) | Kind::Mp3(_) | Kind::Opus(_), _) => Ok(self.frames),
         }
     }
 
@@ -728,6 +840,11 @@ impl<W: Write + Seek> AudioWriter<W> {
             self.frames = stream.frames();
             return Ok(written?);
         }
+        if let Kind::Opus(stream) = &mut self.kind {
+            let written = stream.write_planar(&mut self.writer, buffer);
+            self.frames = stream.frames();
+            return Ok(written?);
+        }
         let frames = self.make_room(buffer.num_frames() as u64)?;
         let (writer, scratch) = (&mut self.writer, self.scratch.as_mut_slice());
         let written = match self.kind {
@@ -737,7 +854,7 @@ impl<W: Write + Seek> AudioWriter<W> {
             Kind::Aiff { format } => {
                 pcm::write_planar(writer, format, format.bytes_per_sample(), buffer, scratch)
             }
-            Kind::Flac(_) | Kind::Vorbis(_) | Kind::Mp3(_) => Ok(()),
+            Kind::Flac(_) | Kind::Vorbis(_) | Kind::Mp3(_) | Kind::Opus(_) => Ok(()),
         };
         self.wrote(written, frames)
     }
@@ -783,6 +900,11 @@ impl<W: Write + Seek> AudioWriter<W> {
             self.frames = stream.frames();
             return Ok(written?);
         }
+        if let Kind::Opus(stream) = &mut self.kind {
+            let written = stream.write_interleaved(&mut self.writer, samples);
+            self.frames = stream.frames();
+            return Ok(written?);
+        }
         let frames = self.make_room((samples.len() / self.num_channels()) as u64)?;
         let (writer, scratch) = (&mut self.writer, self.scratch.as_mut_slice());
         let written = match self.kind {
@@ -792,7 +914,7 @@ impl<W: Write + Seek> AudioWriter<W> {
             Kind::Aiff { format } => {
                 pcm::write_interleaved(writer, format, format.bytes_per_sample(), samples, scratch)
             }
-            Kind::Flac(_) | Kind::Vorbis(_) | Kind::Mp3(_) => Ok(()),
+            Kind::Flac(_) | Kind::Vorbis(_) | Kind::Mp3(_) | Kind::Opus(_) => Ok(()),
         };
         self.wrote(written, frames)
     }
@@ -811,6 +933,11 @@ impl<W: Write + Seek> AudioWriter<W> {
             return Ok(written?);
         }
         if let Kind::Mp3(stream) = &mut self.kind {
+            let written = stream.write_silence(&mut self.writer, frames);
+            self.frames = stream.frames();
+            return Ok(written?);
+        }
+        if let Kind::Opus(stream) = &mut self.kind {
             let written = stream.write_silence(&mut self.writer, frames);
             self.frames = stream.frames();
             return Ok(written?);
@@ -861,6 +988,10 @@ impl<W: Write + Seek> AudioWriter<W> {
             stream.finish(&mut self.writer)?;
             return Ok(self.writer);
         }
+        if let Kind::Opus(stream) = &mut self.kind {
+            stream.finish(&mut self.writer)?;
+            return Ok(self.writer);
+        }
         self.mend()?;
         let data_len = self.frames * self.frame_bytes();
         // Where the samples end, which is where the writer stands.
@@ -882,7 +1013,7 @@ impl<W: Write + Seek> AudioWriter<W> {
                 );
                 self.writer.write_all(&header)?;
             }
-            Kind::Flac(_) | Kind::Vorbis(_) | Kind::Mp3(_) => {}
+            Kind::Flac(_) | Kind::Vorbis(_) | Kind::Mp3(_) | Kind::Opus(_) => {}
             Kind::Aiff { format } => {
                 if !aiff::fits(self.frames, data_len + self.metadata.len() as u64) {
                     self.metadata.clear();

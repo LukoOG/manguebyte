@@ -8,16 +8,19 @@
 //! are not offered here, as the Ogg Opus reader always decodes at 48 kHz.
 
 mod bands;
+mod encode;
 mod mdct;
 mod pvq;
 mod rate;
 pub(crate) mod tables;
 
+pub(crate) use encode::{Budget, CeltEncoder, FrameChoices};
+
 #[cfg(test)]
 pub(crate) use bands::APPROXIMATE_EXP2;
 use bands::{BandScratch, FrameBands, anti_collapse, exp2, quant_all_bands};
 use mdct::Imdct;
-use rate::{MAX_FINE_BITS, caps, compute_allocation};
+use rate::{AllocChoices, MAX_FINE_BITS, caps, compute_allocation};
 use tables::{
     BANDS, BETA_COEF, BETA_INTRA, E_MEANS, E_PROB_MODEL, EBANDS, MAX_LM, OVERLAP, POSTFILTER_TAPS,
     PRED_COEF, PREEMPHASIS, SHORT_MDCT, SMALL_ENERGY_ICDF, SPREAD_ICDF, TAPSET_ICDF, TF_SELECT,
@@ -296,8 +299,18 @@ impl CeltDecoder {
         };
         bits -= anti_collapse_rsv;
 
-        let allocation =
-            compute_allocation(start, end, &offsets, &cap, alloc_trim, bits, c, lm, ec);
+        let allocation = compute_allocation(
+            start,
+            end,
+            &offsets,
+            &cap,
+            alloc_trim,
+            bits,
+            c,
+            lm,
+            ec,
+            &AllocChoices::default(),
+        );
 
         self.unquant_fine_energy(start, end, &allocation.fine_quant, ec, c);
 
@@ -335,6 +348,7 @@ impl CeltDecoder {
             ec,
             &mut self.rng,
             &mut scratch.bands,
+            &[0.0; 2 * BANDS],
         );
 
         let anti_collapse_on = anti_collapse_rsv > 0 && ec.bits(1) != 0;

@@ -4,11 +4,26 @@
 //! rotation, folding from lower bands where no pulse was coded, and the
 //! changes of time and frequency resolution. This follows the reference
 //! implementation, with the updates of RFC 8251, in floating point.
+//!
+//! The same code encodes. Every decision the decoder reads, the encoder
+//! makes from the signal and writes through the same [`Coder`] call, and
+//! then works out what the decoder will: what it codes later depends on
+//! the spectrum decoded so far, which bands fold from. Where the two
+//! differ, it says `C::ENCODING`: the angle of each split from the energy
+//! on either side (section 4.3.4.4), the merge of the two channels of an
+//! intensity-coded band, the rotation that spreads the pulses run forward
+//! and the search for the pulses (section 4.3.4.2's codebook, searched by
+//! adding one pulse at a time where it brings the vector nearest the
+//! band's shape), and the changes of resolution applied to the signal as
+//! they are to the band folded from.
 
-use super::pvq::{bits_to_pulses, decode_pulses, get_pulses, pulse_cache, pulses_to_bits};
+use super::pvq::{
+    bits_to_pulses, decode_pulses, encode_pulses, get_pulses, pulse_cache, pulses_to_bits,
+    search_pulses,
+};
 use super::rate::log_n;
 use super::tables::{BANDS, EBANDS};
-use crate::opus::range::{BITRES, RangeDecoder, ilog};
+use crate::opus::range::{BITRES, Coder, ilog};
 
 /// How the spreading rotation is set (Table 56: the `spread` symbol).
 pub(crate) const SPREAD_NONE: usize = 0;
@@ -104,12 +119,34 @@ fn exp_rotation1(x: &mut [f32], stride: usize, c: f32, s: f32) {
     }
 }
 
-/// Undoes the rotation that spreads the energy of few pulses over more
-/// bins (`exp_rotation` with `dir = -1`, section 4.3.4.3).
-fn exp_rotation(x: &mut [f32], len: usize, stride: usize, k: usize, spread: usize) {
+/// Takes back one [`exp_rotation1`]: each of its rotations in the opposite
+/// order, by the opposite angle.
+fn exp_rotation1_back(x: &mut [f32], stride: usize, c: f32, s: f32) {
+    let len = x.len();
+    if len <= stride {
+        return;
+    }
+    if len > 2 * stride {
+        for i in 0..len - 2 * stride {
+            let x1 = x[i];
+            let x2 = x[i + stride];
+            x[i] = c * x1 + s * x2;
+            x[i + stride] = c * x2 - s * x1;
+        }
+    }
+    for i in (0..len - stride).rev() {
+        let x1 = x[i];
+        let x2 = x[i + stride];
+        x[i] = c * x1 + s * x2;
+        x[i + stride] = c * x2 - s * x1;
+    }
+}
+
+/// The angle of the spreading rotation and the stride of its second step.
+fn rotation(len: usize, stride: usize, k: usize, spread: usize) -> Option<(f32, f32, usize)> {
     const SPREAD_FACTOR: [usize; 3] = [15, 10, 5];
     if 2 * k >= len || spread == SPREAD_NONE {
-        return;
+        return None;
     }
     let factor = SPREAD_FACTOR[spread - 1];
     let gain = len as f32 / (len + factor * k) as f32;
@@ -124,6 +161,15 @@ fn exp_rotation(x: &mut [f32], len: usize, stride: usize, k: usize, spread: usiz
             stride2 += 1;
         }
     }
+    Some((c, s, stride2))
+}
+
+/// Undoes the rotation that spreads the energy of few pulses over more
+/// bins (`exp_rotation` with `dir = -1`, section 4.3.4.3).
+fn exp_rotation(x: &mut [f32], len: usize, stride: usize, k: usize, spread: usize) {
+    let Some((c, s, stride2)) = rotation(len, stride, k, spread) else {
+        return;
+    };
     let part = len / stride;
     for i in 0..stride {
         let block = &mut x[i * part..(i + 1) * part];
@@ -131,6 +177,62 @@ fn exp_rotation(x: &mut [f32], len: usize, stride: usize, k: usize, spread: usiz
             exp_rotation1(block, stride2, s, c);
         }
         exp_rotation1(block, 1, c, s);
+    }
+}
+
+/// The rotation [`exp_rotation`] undoes, which the encoder applies before
+/// it looks for the pulses (`exp_rotation` with `dir = 1`).
+fn exp_rotation_forward(x: &mut [f32], len: usize, stride: usize, k: usize, spread: usize) {
+    let Some((c, s, stride2)) = rotation(len, stride, k, spread) else {
+        return;
+    };
+    let part = len / stride;
+    for i in 0..stride {
+        let block = &mut x[i * part..(i + 1) * part];
+        exp_rotation1_back(block, 1, c, s);
+        if stride2 > 0 {
+            exp_rotation1_back(block, stride2, s, c);
+        }
+    }
+}
+
+/// The angle between two vectors in Q14 of a right angle: of the halves of
+/// a band, or, for `stereo`, of the mid `x + y` and the side `x - y` of two
+/// channels (`stereo_itheta`).
+fn stereo_itheta(x: &[f32], y: &[f32], stereo: bool) -> i32 {
+    let (mut mid, mut side) = (1e-15f32, 1e-15f32);
+    if stereo {
+        for (&a, &b) in x.iter().zip(y) {
+            mid += (a + b) * (a + b);
+            side += (a - b) * (a - b);
+        }
+    } else {
+        mid += x.iter().map(|&v| v * v).sum::<f32>();
+        side += y.iter().map(|&v| v * v).sum::<f32>();
+    }
+    let angle = side.sqrt().atan2(mid.sqrt());
+    (0.5 + 16_384.0 * std::f32::consts::FRAC_2_PI * angle).floor() as i32
+}
+
+/// The two channels of a band as its mid and side, `(x + y) / sqrt(2)` and
+/// `(y - x) / sqrt(2)`, which the decoder's [`stereo_merge`] takes back.
+fn stereo_split(x: &mut [f32], y: &mut [f32]) {
+    let scale = std::f32::consts::FRAC_1_SQRT_2;
+    for (a, b) in x.iter_mut().zip(y.iter_mut()) {
+        let l = scale * *a;
+        let r = scale * *b;
+        *a = l + r;
+        *b = r - l;
+    }
+}
+
+/// The two channels of a band as one, weighted by their energies, for a
+/// band coded as intensity stereo.
+fn intensity_stereo(x: &mut [f32], y: &[f32], left: f32, right: f32) {
+    let norm = 1e-15 + (left * left + right * right).sqrt();
+    let (a1, a2) = (left / norm, right / norm);
+    for (a, &b) in x.iter_mut().zip(y) {
+        *a = a1 * *a + a2 * b;
     }
 }
 
@@ -151,7 +253,7 @@ fn collapse_mask(pulses: &[i32], n: usize, blocks: usize) -> u32 {
 }
 
 /// The Haar transform of pairs `stride` apart (`haar1`).
-fn haar1(x: &mut [f32], n0: usize, stride: usize) {
+pub(crate) fn haar1(x: &mut [f32], n0: usize, stride: usize) {
     let half = n0 >> 1;
     let scale = std::f32::consts::FRAC_1_SQRT_2;
     for i in 0..stride {
@@ -244,24 +346,32 @@ struct Split {
 }
 
 /// The state that runs through the bands of a frame (`band_ctx`).
-pub(crate) struct Bands<'e, 'd> {
-    pub(crate) ec: &'e mut RangeDecoder<'d>,
+pub(crate) struct Bands<'e, C> {
+    pub(crate) ec: &'e mut C,
     pub(crate) band: usize,
     pub(crate) intensity: usize,
     pub(crate) spread: usize,
     pub(crate) tf_change: i32,
     pub(crate) remaining_bits: i32,
     pub(crate) seed: u32,
+    /// The energy of each band of each channel, which the encoder weights
+    /// the channels of an intensity-coded band by.
+    pub(crate) band_e: &'e [f32; 2 * BANDS],
     /// Scratch for the reorderings and the pulses.
     pub(crate) tmp: Vec<f32>,
     pub(crate) pulses: Vec<i32>,
 }
 
-impl Bands<'_, '_> {
-    /// Reads the angle of a split (`compute_theta`).
+impl<C: Coder> Bands<'_, C> {
+    /// Codes the angle of a split (`compute_theta`): between the halves
+    /// `x` and `y` of a band, or, for `stereo`, between the mid and the
+    /// side of its two channels. The encoder turns the two channels into
+    /// mid and side here, or into one for intensity stereo.
     #[allow(clippy::too_many_arguments)]
     fn compute_theta(
         &mut self,
+        x: &mut [f32],
+        y: &mut [f32],
         n: usize,
         b: &mut i32,
         blocks: usize,
@@ -271,6 +381,11 @@ impl Bands<'_, '_> {
         fill: &mut u32,
     ) -> Split {
         let ni = n as i32;
+        let wanted = if C::ENCODING {
+            stereo_itheta(&x[..n], &y[..n], stereo)
+        } else {
+            0
+        };
         let pulse_cap = log_n(self.band) + lm * (1 << BITRES);
         let offset = (pulse_cap >> 1)
             - if stereo && n == 2 {
@@ -286,16 +401,24 @@ impl Bands<'_, '_> {
         let mut itheta = 0;
         let mut inv = false;
         if qn != 1 {
+            if C::ENCODING {
+                // The nearest of the qn + 1 steps.
+                itheta = (wanted * qn + 8_192) >> 14;
+            }
             if stereo && n > 2 {
                 // A step: probability 3 up to the middle, 1 after.
                 let p0 = 3;
                 let x0 = qn / 2;
                 let ft = (p0 * (x0 + 1) + x0) as u32;
-                let fs = self.ec.decode(ft) as i32;
-                let x = if fs < (x0 + 1) * p0 {
-                    fs / p0
+                let x = if C::ENCODING {
+                    itheta
                 } else {
-                    x0 + 1 + (fs - (x0 + 1) * p0)
+                    let fs = self.ec.freq(ft) as i32;
+                    if fs < (x0 + 1) * p0 {
+                        fs / p0
+                    } else {
+                        x0 + 1 + (fs - (x0 + 1) * p0)
+                    }
                 };
                 let (low, high) = if x <= x0 {
                     (p0 * x, p0 * (x + 1))
@@ -305,28 +428,52 @@ impl Bands<'_, '_> {
                 self.ec.update(low as u32, high as u32, ft);
                 itheta = x;
             } else if blocks0 > 1 || stereo {
-                itheta = self.ec.uint((qn + 1) as u32) as i32;
+                itheta = self.ec.code_uint(itheta as u32, (qn + 1) as u32) as i32;
             } else {
                 // A triangle.
                 let half = qn >> 1;
                 let ft = ((half + 1) * (half + 1)) as u32;
-                let fm = self.ec.decode(ft);
                 let (fl, fs);
-                if fm < ((half * (half + 1)) >> 1) as u32 {
-                    itheta = ((isqrt(8 * fm + 1) - 1) >> 1) as i32;
-                    fs = itheta + 1;
-                    fl = (itheta * (itheta + 1)) >> 1;
+                if C::ENCODING {
+                    if itheta <= half {
+                        fs = itheta + 1;
+                        fl = (itheta * (itheta + 1)) >> 1;
+                    } else {
+                        fs = qn + 1 - itheta;
+                        fl = ft as i32 - (((qn + 1 - itheta) * (qn + 2 - itheta)) >> 1);
+                    }
                 } else {
-                    itheta = ((2 * (qn as u32 + 1) - isqrt(8 * (ft - fm - 1) + 1)) >> 1) as i32;
-                    fs = qn + 1 - itheta;
-                    fl = ft as i32 - (((qn + 1 - itheta) * (qn + 2 - itheta)) >> 1);
+                    let fm = self.ec.freq(ft);
+                    if fm < ((half * (half + 1)) >> 1) as u32 {
+                        itheta = ((isqrt(8 * fm + 1) - 1) >> 1) as i32;
+                        fs = itheta + 1;
+                        fl = (itheta * (itheta + 1)) >> 1;
+                    } else {
+                        itheta = ((2 * (qn as u32 + 1) - isqrt(8 * (ft - fm - 1) + 1)) >> 1) as i32;
+                        fs = qn + 1 - itheta;
+                        fl = ft as i32 - (((qn + 1 - itheta) * (qn + 2 - itheta)) >> 1);
+                    }
                 }
                 self.ec.update(fl as u32, (fl + fs) as u32, ft);
             }
             itheta = ((itheta as u32 * 16_384) / qn as u32) as i32;
+            if C::ENCODING && stereo {
+                stereo_split(&mut x[..n], &mut y[..n]);
+            }
         } else if stereo {
             if *b > 2 << BITRES && self.remaining_bits > 2 << BITRES {
-                inv = self.ec.bit_logp(2);
+                // The right channel against the left: the side outweighs
+                // the mid.
+                inv = self.ec.code_bit_logp(wanted > 8_192, 2);
+            }
+            if C::ENCODING {
+                if inv {
+                    for value in &mut y[..n] {
+                        *value = -*value;
+                    }
+                }
+                let (left, right) = (self.band_e[self.band], self.band_e[BANDS + self.band]);
+                intensity_stereo(&mut x[..n], &y[..n], left, right);
             }
             itheta = 0;
         }
@@ -368,17 +515,17 @@ impl Bands<'_, '_> {
         y: Option<&mut [f32]>,
         lowband_out: Option<&mut [f32]>,
     ) -> u32 {
-        let read_sign = |this: &mut Self| -> f32 {
+        let code_sign = |this: &mut Self, value: f32| -> f32 {
             let mut sign = false;
             if this.remaining_bits >= 1 << BITRES {
-                sign = this.ec.bits(1) != 0;
+                sign = this.ec.code_bits(u32::from(value < 0.0), 1) != 0;
                 this.remaining_bits -= 1 << BITRES;
             }
             if sign { -1.0 } else { 1.0 }
         };
-        x[0] = read_sign(self);
+        x[0] = code_sign(self, x[0]);
         if let Some(y) = y {
-            y[0] = read_sign(self);
+            y[0] = code_sign(self, y[0]);
         }
         if let Some(out) = lowband_out {
             out[0] = x[0];
@@ -411,7 +558,10 @@ impl Bands<'_, '_> {
                 fill = (fill & 1) | (fill << 1);
             }
             let blocks = (blocks + 1) >> 1;
-            let split = self.compute_theta(half, &mut b, blocks, blocks0, lm, false, &mut fill);
+            let (first, second) = x.split_at_mut(half);
+            let split = self.compute_theta(
+                first, second, half, &mut b, blocks, blocks0, lm, false, &mut fill,
+            );
             let mut delta = split.delta;
             let mid = (1.0 / 32_768.0) * split.imid as f32;
             let side = (1.0 / 32_768.0) * split.iside as f32;
@@ -429,7 +579,6 @@ impl Bands<'_, '_> {
             let mut mbits = b.min((b - delta) / 2).max(0);
             let mut sbits = b - mbits;
             self.remaining_bits -= split.qalloc;
-            let (first, second) = x.split_at_mut(half);
             let next_lowband2 = lowband.map(|low| &low[half..]);
             let mut rebalance = self.remaining_bits;
             let mask = if mbits >= sbits {
@@ -485,7 +634,14 @@ impl Bands<'_, '_> {
         if q != 0 {
             let k = get_pulses(q);
             let mut pulses = std::mem::take(&mut self.pulses);
-            let energy = decode_pulses(&mut pulses[..n], n, k, self.ec);
+            let energy = if C::ENCODING {
+                exp_rotation_forward(&mut x[..n], n, blocks, k, self.spread);
+                let energy = search_pulses(&x[..n], k, &mut pulses[..n]);
+                encode_pulses(&pulses[..n], n, k, self.ec);
+                energy
+            } else {
+                decode_pulses(&mut pulses[..n], n, k, self.ec)
+            };
             let g = (1.0 / energy.sqrt()) * gain;
             for (value, &pulse) in x[..n].iter_mut().zip(&pulses[..n]) {
                 *value = g * pulse as f32;
@@ -559,6 +715,9 @@ impl Bands<'_, '_> {
         // A finer frequency resolution: the short blocks recombined.
         for k in 0..recombine {
             const BIT_INTERLEAVE: [u32; 16] = [0, 1, 1, 1, 2, 3, 3, 3, 2, 3, 3, 3, 2, 3, 3, 3];
+            if C::ENCODING {
+                haar1(x, n >> k, 1 << k);
+            }
             if let Some(low) = lowband.as_deref_mut() {
                 haar1(low, n >> k, 1 << k);
             }
@@ -570,6 +729,9 @@ impl Bands<'_, '_> {
 
         // A finer time resolution.
         while (n_b & 1) == 0 && tf_change < 0 {
+            if C::ENCODING {
+                haar1(x, n_b, blocks);
+            }
             if let Some(low) = lowband.as_deref_mut() {
                 haar1(low, n_b, blocks);
             }
@@ -585,6 +747,15 @@ impl Bands<'_, '_> {
         // Samples in time order rather than frequency order.
         let mut tmp = std::mem::take(&mut self.tmp);
         if blocks0 > 1 {
+            if C::ENCODING {
+                deinterleave_hadamard(
+                    x,
+                    &mut tmp,
+                    n_b >> recombine,
+                    blocks0 << recombine,
+                    long_blocks,
+                );
+            }
             if let Some(low) = lowband.as_deref_mut() {
                 deinterleave_hadamard(
                     low,
@@ -658,7 +829,7 @@ impl Bands<'_, '_> {
         let orig_fill = fill;
         let mut fill = fill;
         let mut b = b;
-        let split = self.compute_theta(n, &mut b, blocks, blocks, lm, true, &mut fill);
+        let split = self.compute_theta(x, y, n, &mut b, blocks, blocks, lm, true, &mut fill);
         let mid = (1.0 / 32_768.0) * split.imid as f32;
         let side = (1.0 / 32_768.0) * split.iside as f32;
         let cm;
@@ -672,17 +843,19 @@ impl Bands<'_, '_> {
             mbits -= sbits;
             let swap = split.itheta > 8_192;
             self.remaining_bits -= split.qalloc + sbits;
-            let mut sign = 0;
-            if sbits != 0 {
-                sign = self.ec.bits(1) as i32;
-            }
-            let sign = (1 - 2 * sign) as f32;
             {
                 let (x2, y2) = if swap {
                     (&mut *y, &mut *x)
                 } else {
                     (&mut *x, &mut *y)
                 };
+                let mut sign = 0;
+                if sbits != 0 {
+                    // Which way round the smaller is from the larger.
+                    let negative = x2[0] * y2[1] - x2[1] * y2[0] < 0.0;
+                    sign = self.ec.code_bits(u32::from(negative), 1) as i32;
+                }
+                let sign = (1 - 2 * sign) as f32;
                 cm = self.band(
                     x2,
                     n,
@@ -782,16 +955,20 @@ impl BandScratch {
     }
 }
 
-/// Decodes the shape of every band (`quant_all_bands`) into `x`, which
-/// holds the bins of one channel and then of the other, and the collapse
-/// masks of the bands, a byte for each band and channel.
-pub(crate) fn quant_all_bands(
+/// Codes the shape of every band (`quant_all_bands`) of `x`, which holds
+/// the bins of one channel and then of the other, and gives the collapse
+/// masks of the bands, a byte for each band and channel. The decoder
+/// decodes into `x`; the encoder codes the normalised spectrum `x` holds,
+/// and leaves in it what the decoder will decode. `band_e` is the energy of
+/// each band, which only the encoder reads.
+pub(crate) fn quant_all_bands<C: Coder>(
     frame: &FrameBands<'_>,
     x: &mut [f32],
     collapse_masks: &mut [u8; 2 * BANDS],
-    ec: &mut RangeDecoder<'_>,
+    ec: &mut C,
     seed: &mut u32,
     scratch: &mut BandScratch,
+    band_e: &[f32; 2 * BANDS],
 ) {
     let m = 1usize << frame.lm;
     let n_total = m * super::tables::SHORT_MDCT;
@@ -818,6 +995,7 @@ pub(crate) fn quant_all_bands(
         tf_change: 0,
         remaining_bits: 0,
         seed: *seed,
+        band_e,
         tmp: std::mem::take(tmp),
         pulses: std::mem::take(pulses),
     };

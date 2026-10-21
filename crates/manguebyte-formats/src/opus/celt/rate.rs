@@ -7,9 +7,24 @@
 
 use super::pvq::pulse_cache;
 use super::tables::{ALLOCATION, BANDS, CAPS, EBANDS, LOG2_FRAC};
-use crate::opus::range::{BITRES, RangeDecoder};
+use crate::opus::range::{BITRES, Coder};
 
 const ALLOC_STEPS: u32 = 6;
+
+/// What the encoder chooses as the allocation goes, and the decoder reads:
+/// where intensity stereo starts, whether the bands below it are coded as
+/// two channels apart, and which bands it lets go when their bits are few.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct AllocChoices {
+    /// The first band coded as intensity stereo, held to the bands coded.
+    pub(crate) intensity: usize,
+    pub(crate) dual_stereo: bool,
+    /// Bands from this one up are skipped whenever the frame lets them be.
+    pub(crate) bandwidth: usize,
+    /// Below `bandwidth`, a band is skipped if it would get fewer than this
+    /// many sixteenths of a bit per bin and channel.
+    pub(crate) depth: i32,
+}
 const FINE_OFFSET: i32 = 21;
 pub(crate) const MAX_FINE_BITS: i32 = 8;
 
@@ -46,10 +61,11 @@ pub(crate) struct Allocation {
 }
 
 /// Shares out `total` eighths of a bit between bands `start..end`
-/// (`clt_compute_allocation`), reading the skip, intensity and dual stereo
-/// decisions from the frame as it goes.
+/// (`clt_compute_allocation`), coding the skip, intensity and dual stereo
+/// decisions as it goes: the decoder reads them, the encoder writes those
+/// of `choices`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn compute_allocation(
+pub(crate) fn compute_allocation<C: Coder>(
     start: usize,
     end: usize,
     offsets: &[i32; BANDS],
@@ -58,7 +74,8 @@ pub(crate) fn compute_allocation(
     total: i32,
     channels: usize,
     lm: usize,
-    ec: &mut RangeDecoder<'_>,
+    ec: &mut C,
+    choices: &AllocChoices,
 ) -> Allocation {
     let c = channels as i32;
     let mut total = total.max(0);
@@ -180,6 +197,7 @@ pub(crate) fn compute_allocation(
         channels,
         lm,
         ec,
+        choices,
     )
 }
 
@@ -188,7 +206,7 @@ pub(crate) fn compute_allocation(
 /// parameters, and the split of each band's bits between fine energy and
 /// shape.
 #[allow(clippy::too_many_arguments)]
-fn interpolate(
+fn interpolate<C: Coder>(
     start: usize,
     end: usize,
     skip_start: usize,
@@ -202,7 +220,8 @@ fn interpolate(
     mut dual_stereo_rsv: i32,
     channels: usize,
     lm: usize,
-    ec: &mut RangeDecoder<'_>,
+    ec: &mut C,
+    choices: &AllocChoices,
 ) -> Allocation {
     let c = channels as i32;
     let alloc_floor = c << BITRES;
@@ -267,7 +286,13 @@ fn interpolate(
         // A skip decision is coded only for a band above its threshold;
         // one below it is skipped without a word.
         if band_bits >= thresh[band].max(alloc_floor + (1 << BITRES)) {
-            if ec.bit_logp(1) {
+            // The encoder keeps the lowest bands, and those of the audio
+            // that would get bits enough to be worth coding.
+            let keep = C::ENCODING
+                && (band <= start + 2
+                    || (band < choices.bandwidth
+                        && band_bits >= ((choices.depth * c * band_width) << lm << BITRES) >> 4));
+            if ec.code_bit_logp(keep, 1) {
                 break;
             }
             sum += 1 << BITRES;
@@ -291,13 +316,14 @@ fn interpolate(
 
     let mut intensity = 0;
     if intensity_rsv > 0 {
-        intensity = start + ec.uint((coded_bands + 1 - start) as u32) as usize;
+        let chosen = choices.intensity.clamp(start, coded_bands) - start;
+        intensity = start + ec.code_uint(chosen as u32, (coded_bands + 1 - start) as u32) as usize;
     }
     if intensity <= start {
         total += dual_stereo_rsv;
         dual_stereo_rsv = 0;
     }
-    let dual_stereo = dual_stereo_rsv > 0 && ec.bit_logp(1);
+    let dual_stereo = dual_stereo_rsv > 0 && ec.code_bit_logp(choices.dual_stereo, 1);
 
     // What is left goes to the coded bands, evenly per bin, and the rest
     // from the bottom up.
