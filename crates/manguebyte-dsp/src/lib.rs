@@ -59,6 +59,7 @@ mod resample;
 mod reverb;
 mod shaper;
 pub mod sources;
+pub mod stft;
 mod svf;
 mod synth;
 #[cfg(test)]
@@ -94,6 +95,7 @@ pub use phaser::Phaser;
 pub use resample::{Resampler, resample};
 pub use reverb::Reverb;
 pub use shaper::{DcBlocker, ShaperCurve, Waveshaper};
+pub use stft::{SpectralProcessor, Stft, StftError, StftSettings};
 pub use svf::{StateVariableFilter, SvfMode};
 pub use synth::{Synth, Voice};
 pub use wavetable::{Wavetable, WavetableError, WavetableOscillator};

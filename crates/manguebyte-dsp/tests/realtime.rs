@@ -17,6 +17,10 @@ use manguebyte_dsp::event::{Event, EventBuffer, EventKind, Expression, NoteRef};
 use manguebyte_dsp::fft::{Complex, Fft, RealFft};
 use manguebyte_dsp::fir;
 use manguebyte_dsp::iir::{Band, Design};
+use manguebyte_dsp::stft::{
+    PitchShift, SpectralFrame, SpectralFreeze, SpectralGate, Stft, StftSettings, StftWindow,
+};
+use manguebyte_dsp::window::Window;
 use manguebyte_dsp::{
     Adsr, AdsrParams, Biquad, BiquadCoefficients, Compressor, DcBlocker, Delay, Filter,
     FilterShape, Gain, Limiter, Noise, NoiseColor, NoiseGate, Oscillator, Oversampled,
@@ -331,6 +335,74 @@ fn transforms_do_not_use_the_heap() {
             real.inverse(&spectrum, &mut restored);
         });
     }
+}
+
+#[test]
+fn spectral_processing_does_not_use_the_heap() {
+    check(
+        "Stft with a closure",
+        Stft::from_fn(StftSettings::new(512), |frame: SpectralFrame<'_, f32>| {
+            frame.bins[40..].fill(Complex::ZERO);
+        })
+        .unwrap(),
+    );
+    let root_hann = StftWindow::SquareRoot(Window::Hann);
+    check(
+        "Stft, root-Hann at 50 % on 480 samples",
+        Stft::from_fn(
+            StftSettings::new(480)
+                .with_hop(240)
+                .with_windows(root_hann, root_hann),
+            |_: SpectralFrame<'_, f32>| {},
+        )
+        .unwrap(),
+    );
+    check(
+        "SpectralGate",
+        Stft::<_, f32>::new(StftSettings::new(1_024), SpectralGate::new(-30.0)).unwrap(),
+    );
+    check("SpectralFreeze", {
+        let mut stft = Stft::<_, f32>::new(StftSettings::new(256), SpectralFreeze::new()).unwrap();
+        stft.processor_mut().set_frozen(true);
+        stft
+    });
+    check(
+        "PitchShift",
+        Stft::<_, f32>::new(StftSettings::new(512), PitchShift::new(1.5)).unwrap(),
+    );
+}
+
+#[test]
+fn spectral_effects_can_change_settings_while_running_without_using_the_heap() {
+    let mut gate = Stft::<_, f32>::new(StftSettings::new(256), SpectralGate::new(-40.0)).unwrap();
+    let mut freeze = Stft::<_, f32>::new(StftSettings::new(128), SpectralFreeze::new()).unwrap();
+    let mut shift = Stft::<_, f32>::new(StftSettings::new(256), PitchShift::new(1.0)).unwrap();
+    gate.prepare(&SPEC);
+    freeze.prepare(&SPEC);
+    shift.prepare(&SPEC);
+    let mut buffer = AudioBuffer::<f32>::new(SPEC.num_channels, SPEC.max_block_size);
+    assert_no_heap_use("spectral effects", || {
+        for round in 0..24usize {
+            buffer.set_num_frames([256, 1, 77, 200][round % 4]);
+            for (index, channel) in buffer.iter_channels_mut().enumerate() {
+                for (n, sample) in channel.iter_mut().enumerate() {
+                    *sample = 0.5 * ((n * (round + 3 + index)) as f32 * 0.05).sin();
+                }
+            }
+            gate.processor_mut().set_learning(round % 6 < 2);
+            gate.processor_mut().set_bin_threshold_db(round, -20.0);
+            gate.processor_mut().set_floor_db(-30.0);
+            gate.process(&mut buffer);
+            freeze.processor_mut().set_frozen(round % 4 >= 2);
+            freeze.process(&mut buffer);
+            shift.processor_mut().set_semitones(round as f64 - 12.0);
+            shift.process(&mut buffer);
+        }
+        gate.reset();
+        freeze.reset();
+        shift.reset();
+    });
+    assert!(all_finite(&buffer));
 }
 
 const INTERPOLATIONS: [DelayInterpolation; 4] = [
