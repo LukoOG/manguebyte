@@ -3,7 +3,7 @@
 
 use std::any::Any;
 
-use manguebyte_core::{AudioBuffer, Sample};
+use manguebyte_core::{AudioBuffer, Sample, vector};
 use manguebyte_dsp::ProcessContext;
 use manguebyte_dsp::event::{Event, EventBuffer};
 
@@ -18,6 +18,29 @@ pub(crate) type Update = Box<dyn FnMut(&mut dyn Any) + Send>;
 /// Collects the events a node sent while it processed a block. It receives
 /// the node as `Any`, and casts it back to the type it was added as.
 pub(crate) type Emitter = Box<dyn FnMut(&mut dyn Any, &mut EventBuffer) + Send>;
+
+/// Writes `from` into `into` if `first`, or adds it: what one input does to
+/// a bus.
+fn combine<S: Sample>(into: &mut [S], from: &[S], first: bool) {
+    if first {
+        into.copy_from_slice(from);
+    } else {
+        vector::add(into, from);
+    }
+}
+
+/// What `combine` does with silence: adding a zero leaves every sample as
+/// it is, except that `-0.0 + 0.0` is `0.0`, which is kept so that the bits
+/// are those of adding sample by sample.
+fn combine_silence<S: Sample>(into: &mut [S], first: bool) {
+    if first {
+        into.fill(S::ZERO);
+    } else {
+        for out in into {
+            *out += S::ZERO;
+        }
+    }
+}
 
 /// An instruction for the engine.
 pub(crate) enum Command<S: Sample> {
@@ -154,14 +177,17 @@ impl<S: Sample> Input<S> {
             for (index, line) in self.lines.iter().enumerate().take(room) {
                 let into = &mut target.channel_mut(self.target_channel + index)[..frames];
                 let length = line.memory.len();
-                let mut at = line.position;
-                for out in into {
-                    let sample = line.memory[at];
-                    *out = if first { sample } else { *out + sample };
-                    at += 1;
+                let (mut at, mut frame) = (line.position, 0);
+                // The memory in the runs it holds before wrapping round.
+                while frame < frames {
+                    let run = (length - at).min(frames - frame);
+                    let memory = &line.memory[at..at + run];
+                    combine(&mut into[frame..frame + run], memory, first);
+                    at += run;
                     if at == length {
                         at = 0;
                     }
+                    frame += run;
                 }
             }
             return;
@@ -183,10 +209,11 @@ impl<S: Sample> Input<S> {
             for channel in 0..self.channel_count.min(room).min(available) {
                 let from = from_channel(channel);
                 let into = target.channel_mut(self.target_channel + channel);
-                for (frame, out) in into.iter_mut().enumerate() {
-                    let sample = from.get(frame).copied().unwrap_or(S::ZERO);
-                    *out = if first { sample } else { *out + sample };
-                }
+                let present = from.len().min(into.len());
+                let (heard, missing) = into.split_at_mut(present);
+                combine(heard, &from[..present], first);
+                // Missing source frames are silence.
+                combine_silence(missing, first);
             }
             return;
         }
@@ -197,14 +224,24 @@ impl<S: Sample> Input<S> {
             let from: &[S] = from_channel(channel);
             let line = &mut self.lines[channel];
             let into = target.channel_mut(self.target_channel + channel);
-            for (frame, out) in into.iter_mut().enumerate() {
-                let sample = line.memory[line.position];
-                *out = if first { sample } else { *out + sample };
-                line.memory[line.position] = from.get(frame).copied().unwrap_or(S::ZERO);
-                line.position += 1;
-                if line.position == line.memory.len() {
+            let (frames, length) = (into.len(), line.memory.len());
+            let mut frame = 0;
+            // The memory in the runs it holds before wrapping round: each
+            // run is read whole, then overwritten whole.
+            while frame < frames {
+                let run = (length - line.position).min(frames - frame);
+                let memory = &mut line.memory[line.position..line.position + run];
+                combine(&mut into[frame..frame + run], memory, first);
+                let present = from.len().saturating_sub(frame).min(run);
+                if present > 0 {
+                    memory[..present].copy_from_slice(&from[frame..frame + present]);
+                }
+                memory[present..].fill(S::ZERO);
+                line.position += run;
+                if line.position == length {
                     line.position = 0;
                 }
+                frame += run;
             }
         }
     }
@@ -225,12 +262,20 @@ impl<S: Sample> Input<S> {
                 })
                 .unwrap_or(&[]);
             let length = line.memory.len();
-            for frame in 0..frames {
-                line.memory[line.position] = from.get(frame).copied().unwrap_or(S::ZERO);
-                line.position += 1;
+            let mut frame = 0;
+            while frame < frames {
+                let run = (length - line.position).min(frames - frame);
+                let memory = &mut line.memory[line.position..line.position + run];
+                let present = from.len().saturating_sub(frame).min(run);
+                if present > 0 {
+                    memory[..present].copy_from_slice(&from[frame..frame + present]);
+                }
+                memory[present..].fill(S::ZERO);
+                line.position += run;
                 if line.position == length {
                     line.position = 0;
                 }
+                frame += run;
             }
         }
     }

@@ -16,6 +16,18 @@
 //! The engine buffers internally one sample at a time, so the output is the
 //! same, bit for bit, however the host slices the audio into blocks.
 //!
+//! Both inner loops run on the processor's vector instructions through
+//! [`manguebyte_core::vector`], with the same results on every processor.
+//! The direct head works on all the frames of a piece of the block at once:
+//! for each tap, the input under it, scaled, is added to every frame's sum
+//! ([`add_scaled`](manguebyte_core::vector::add_scaled)). Each frame's sum
+//! adds its taps in groups of 32, in order, last tap first, and
+//! then the groups' sums in order, whatever the piece. The
+//! frequency-domain sums are
+//! [`complex_multiply_add`](manguebyte_core::vector::complex_multiply_add),
+//! which gives exactly what the plain loop gives; the spectra are kept as
+//! interleaved real and imaginary parts for it.
+//!
 //! The frequency-domain sums are spread over the samples of each partition:
 //! while one partition of input fills, the contributions of the older ones
 //! to the next output are added a few at a time, so when the partition is
@@ -63,10 +75,16 @@
 use core::fmt;
 
 use manguebyte_core::spsc::{self, Consumer, Producer};
-use manguebyte_core::{AudioBuffer, Sample};
+use manguebyte_core::{AudioBuffer, Sample, vector};
 
 use crate::fft::{Complex, RealFft};
 use crate::{ProcessSpec, Processor};
+
+/// How many taps of the direct head are summed before their sum is added to
+/// the others. Summing every tap in one run would let the rounding error
+/// grow with the length of the head; in groups it grows with this plus the
+/// number of groups.
+const HEAD_GROUP: usize = 32;
 
 /// Largest partition a [`ConvolutionEngine`] accepts.
 pub const MAX_PARTITION_SIZE: usize = 1 << 16;
@@ -196,8 +214,9 @@ impl std::error::Error for ConvolutionError {}
 struct Kernel<S> {
     /// The first `head_len` taps, last tap first, for the direct part.
     head: Vec<S>,
-    /// Spectra of the remaining taps, one partition after another.
-    partitions: Vec<Complex<S>>,
+    /// Spectra of the remaining taps, one partition after another, as
+    /// interleaved real and imaginary parts.
+    partitions: Vec<S>,
 }
 
 /// Which input reaches which output through which kernel.
@@ -248,15 +267,21 @@ pub struct ConvolutionEngine<S: Sample = f32> {
     /// input, then the current one as it fills.
     frames: Vec<S>,
     /// Per input channel, the spectra of the last `num_partitions` input
-    /// frames, as a ring.
-    spectra: Vec<Complex<S>>,
+    /// frames, as a ring, as interleaved real and imaginary parts.
+    spectra: Vec<S>,
     /// Per output channel, the partition of output computed last, played out
     /// while the next one fills.
     pending: Vec<S>,
     /// Per output channel, the spectrum of the next partition of output, as
-    /// far as it has been summed.
-    accumulators: Vec<Complex<S>>,
+    /// far as it has been summed, as interleaved real and imaginary parts.
+    accumulators: Vec<S>,
+    /// One spectrum, for the transforms.
+    spectrum: Vec<Complex<S>>,
     time: Vec<S>,
+    /// The direct head's sums for the frames of one piece of a block, and
+    /// the sums of one group of taps.
+    head_sums: Vec<S>,
+    head_group: Vec<S>,
     /// How much of the current partition has been filled.
     fill: usize,
     /// Where in the ring of spectra the newest one goes.
@@ -363,20 +388,22 @@ impl<S: Sample> ConvolutionEngine<S> {
         let mut fft = RealFft::<S>::new(2 * block);
 
         let mut frame = vec![S::ZERO; 2 * block];
+        let mut spectrum = vec![Complex::ZERO; bins];
         let kernels = responses
             .iter()
             .map(|response| {
                 let response = response.as_ref();
                 let tap = |index: usize| response.get(index).copied().unwrap_or(S::ZERO);
                 let head = (0..head_len).rev().map(tap).collect();
-                let mut partitions = vec![Complex::ZERO; num_partitions * bins];
-                for (index, spectrum) in partitions.chunks_exact_mut(bins).enumerate() {
+                let mut partitions = vec![S::ZERO; num_partitions * 2 * bins];
+                for (index, parts) in partitions.chunks_exact_mut(2 * bins).enumerate() {
                     let start = head_len + index * block;
                     for (offset, slot) in frame[..block].iter_mut().enumerate() {
                         *slot = tap(start + offset);
                     }
                     frame[block..].fill(S::ZERO);
-                    fft.forward(&frame, spectrum);
+                    fft.forward(&frame, &mut spectrum);
+                    split_parts(&spectrum, parts);
                 }
                 Kernel { head, partitions }
             })
@@ -394,10 +421,13 @@ impl<S: Sample> ConvolutionEngine<S> {
             paths,
             fft,
             frames: vec![S::ZERO; channels * 2 * block],
-            spectra: vec![Complex::ZERO; channels * num_partitions * bins],
+            spectra: vec![S::ZERO; channels * num_partitions * 2 * bins],
             pending: vec![S::ZERO; channels * block],
-            accumulators: vec![Complex::ZERO; channels * bins],
+            accumulators: vec![S::ZERO; channels * 2 * bins],
+            spectrum,
             time: vec![S::ZERO; 2 * block],
+            head_sums: vec![S::ZERO; if head_len > 0 { block } else { 0 }],
+            head_group: vec![S::ZERO; if head_len > 0 { block } else { 0 }],
             fill: 0,
             position: 0,
             summed: 0,
@@ -458,13 +488,25 @@ impl<S: Sample> ConvolutionEngine<S> {
                 if head_len == 0 {
                     continue;
                 }
+                // Frame `at + n` meets the input from `at + n + 1 - head_len`
+                // on: tap `i` of the head, which is stored last tap first,
+                // meets the input `i` frames after that, for every frame
+                // of the piece at once.
+                let sums = &mut self.head_sums[..count];
+                let group = &mut self.head_group[..count];
                 for path in self.paths.iter().filter(|path| path.output == output) {
                     let head = &self.kernels[path.kernel].head;
                     let frame = &self.frames[path.input * 2 * block..][..2 * block];
-                    for (index, sample) in out.iter_mut().enumerate() {
-                        let newest = at + index;
-                        *sample += dot(head, &frame[newest + 1 - head_len..=newest]);
+                    sums.fill(S::ZERO);
+                    for (g, taps) in head.chunks(HEAD_GROUP).enumerate() {
+                        group.fill(S::ZERO);
+                        for (k, &tap) in taps.iter().enumerate() {
+                            let first = at + 1 - head_len + g * HEAD_GROUP + k;
+                            vector::add_scaled(group, &frame[first..first + count], tap);
+                        }
+                        vector::add(sums, group);
                     }
+                    vector::add(out, sums);
                 }
             }
 
@@ -501,11 +543,12 @@ impl<S: Sample> ConvolutionEngine<S> {
             // The newest spectrum goes to `position` at the end of this
             // partition; the one `partition` before it is here.
             let slot = (self.position + count - partition) % count;
+            let len = 2 * bins;
             for path in &self.paths {
-                let input = &self.spectra[(path.input * count + slot) * bins..][..bins];
-                let response = &self.kernels[path.kernel].partitions[partition * bins..][..bins];
-                let sum = &mut self.accumulators[path.output * bins..][..bins];
-                multiply_add(sum, input, response);
+                let input = &self.spectra[(path.input * count + slot) * len..][..len];
+                let response = &self.kernels[path.kernel].partitions[partition * len..][..len];
+                let sum = &mut self.accumulators[path.output * len..][..len];
+                vector::complex_multiply_add(sum, input, response);
             }
             self.summed += 1;
         }
@@ -517,22 +560,25 @@ impl<S: Sample> ConvolutionEngine<S> {
         if count > 0 {
             // Whatever the blocks left of the older partitions' share.
             self.sum_partitions(count - 1);
+            let len = 2 * bins;
             for (channel, frame) in self.frames.chunks_exact(2 * block).enumerate() {
-                let slot = &mut self.spectra[(channel * count + self.position) * bins..][..bins];
-                self.fft.forward(frame, slot);
+                self.fft.forward(frame, &mut self.spectrum);
+                let slot = &mut self.spectra[(channel * count + self.position) * len..][..len];
+                split_parts(&self.spectrum, slot);
             }
             // The first partition of the response meets the input just
             // completed.
             for path in &self.paths {
-                let input = &self.spectra[(path.input * count + self.position) * bins..][..bins];
-                let response = &self.kernels[path.kernel].partitions[..bins];
-                let sum = &mut self.accumulators[path.output * bins..][..bins];
-                multiply_add(sum, input, response);
+                let input = &self.spectra[(path.input * count + self.position) * len..][..len];
+                let response = &self.kernels[path.kernel].partitions[..len];
+                let sum = &mut self.accumulators[path.output * len..][..len];
+                vector::complex_multiply_add(sum, input, response);
             }
-            for (output, sum) in self.accumulators.chunks_exact_mut(bins).enumerate() {
-                self.fft.inverse(sum, &mut self.time);
+            for (output, sum) in self.accumulators.chunks_exact_mut(len).enumerate() {
+                join_parts(sum, &mut self.spectrum);
+                self.fft.inverse(&self.spectrum, &mut self.time);
                 self.pending[output * block..][..block].copy_from_slice(&self.time[block..]);
-                sum.fill(Complex::ZERO);
+                sum.fill(S::ZERO);
             }
             self.summed = 0;
             self.position = (self.position + 1) % count;
@@ -546,40 +592,27 @@ impl<S: Sample> ConvolutionEngine<S> {
     /// Forgets all past input. Real-time safe.
     pub fn clear(&mut self) {
         self.frames.fill(S::ZERO);
-        self.spectra.fill(Complex::ZERO);
+        self.spectra.fill(S::ZERO);
         self.pending.fill(S::ZERO);
-        self.accumulators.fill(Complex::ZERO);
+        self.accumulators.fill(S::ZERO);
         self.fill = 0;
         self.position = 0;
         self.summed = 0;
     }
 }
 
-#[inline]
-fn dot<S: Sample>(a: &[S], b: &[S]) -> S {
-    // Four running sums keep the loop short of dependency stalls; the order
-    // of operations is fixed, so the result is the same on every call.
-    let mut sums = [S::ZERO; 4];
-    let (a_chunks, b_chunks) = (a.chunks_exact(4), b.chunks_exact(4));
-    let (a_rest, b_rest) = (a_chunks.remainder(), b_chunks.remainder());
-    for (x, y) in a_chunks.zip(b_chunks) {
-        sums[0] += x[0] * y[0];
-        sums[1] += x[1] * y[1];
-        sums[2] += x[2] * y[2];
-        sums[3] += x[3] * y[3];
+/// A spectrum as interleaved real and imaginary parts.
+fn split_parts<S: Sample>(spectrum: &[Complex<S>], parts: &mut [S]) {
+    for (pair, value) in parts.chunks_exact_mut(2).zip(spectrum) {
+        pair[0] = value.re;
+        pair[1] = value.im;
     }
-    let mut total = (sums[0] + sums[1]) + (sums[2] + sums[3]);
-    for (&x, &y) in a_rest.iter().zip(b_rest) {
-        total += x * y;
-    }
-    total
 }
 
-#[inline]
-fn multiply_add<S: Sample>(sum: &mut [Complex<S>], a: &[Complex<S>], b: &[Complex<S>]) {
-    for ((sum, &a), &b) in sum.iter_mut().zip(a).zip(b) {
-        sum.re += a.re * b.re - a.im * b.im;
-        sum.im += a.re * b.im + a.im * b.re;
+/// Interleaved real and imaginary parts as a spectrum.
+fn join_parts<S: Sample>(parts: &[S], spectrum: &mut [Complex<S>]) {
+    for (value, pair) in spectrum.iter_mut().zip(parts.chunks_exact(2)) {
+        *value = Complex::new(pair[0], pair[1]);
     }
 }
 

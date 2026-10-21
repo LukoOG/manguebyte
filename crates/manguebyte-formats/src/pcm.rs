@@ -8,18 +8,32 @@
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
-use manguebyte_core::AudioBuffer;
+use manguebyte_core::{AudioBuffer, vector};
 
 /// How many bytes of samples are moved at a time. Large enough that an
 /// unbuffered file is read with few system calls, small enough to stay in
 /// the processor's cache.
 const CHUNK_BYTES: usize = 32 * 1024;
 
+/// How many samples are decoded or encoded at a time between the bytes and
+/// the channels, in a buffer on the stack. Frames of more channels than this
+/// are moved one sample at a time.
+const RUN_SAMPLES: usize = 1024;
+
 /// Turns the bytes of one stored sample into an `f32`.
 pub(crate) trait SampleDecoder: Copy {
     /// Decodes one sample. The length of `bytes` is the stream's sample
     /// width.
     fn decode(self, bytes: &[u8]) -> f32;
+
+    /// Decodes `out.len()` samples of `width` bytes each, stored one after
+    /// another in `bytes`. A format whose samples a vector of the
+    /// processor can decode overrides this.
+    fn decode_run(self, width: usize, bytes: &[u8], out: &mut [f32]) {
+        for (value, sample) in out.iter_mut().zip(bytes.chunks_exact(width)) {
+            *value = self.decode(sample);
+        }
+    }
 }
 
 /// Turns an `f32` into the bytes of one stored sample.
@@ -27,6 +41,15 @@ pub(crate) trait SampleEncoder: Copy {
     /// Encodes one sample into `bytes`, whose length is the format's sample
     /// width.
     fn encode(self, sample: f32, bytes: &mut [u8]);
+
+    /// Encodes `samples` one after another into `bytes`, `width` bytes
+    /// each. A format whose samples a vector of the processor can encode
+    /// overrides this.
+    fn encode_run(self, width: usize, samples: &[f32], bytes: &mut [u8]) {
+        for (&value, sample) in samples.iter().zip(bytes.chunks_exact_mut(width)) {
+            self.encode(value, sample);
+        }
+    }
 }
 
 /// Where the samples of a stream are and how they are laid out.
@@ -133,13 +156,14 @@ impl<R: Read + Seek, D: SampleDecoder> PcmReader<R, D> {
                 self.in_place = false;
                 return Err(error);
             }
-            for channel in 0..self.layout.channels {
-                let destination = &mut out.channel_mut(channel)[done..done + count];
-                let samples = bytes[channel * width..].chunks(self.frame_bytes);
-                for (value, sample) in destination.iter_mut().zip(samples) {
-                    *value = self.decoder.decode(&sample[..width]);
-                }
-            }
+            decode_frames(
+                self.decoder,
+                self.layout.channels,
+                width,
+                bytes,
+                out,
+                done..done + count,
+            );
             done += count;
             self.position += count as u64;
         }
@@ -168,13 +192,7 @@ pub(crate) fn write_planar<W: Write, E: SampleEncoder>(
     while done < buffer.num_frames() {
         let count = (buffer.num_frames() - done).min(chunk_frames);
         let bytes = &mut scratch[..count * frame_bytes];
-        for channel in 0..channels {
-            let source = &buffer.channel(channel)[done..done + count];
-            let samples = bytes[channel * width..].chunks_mut(frame_bytes);
-            for (&value, sample) in source.iter().zip(samples) {
-                encoder.encode(value, &mut sample[..width]);
-            }
-        }
+        encode_frames(encoder, width, buffer, done..done + count, bytes);
         writer.write_all(bytes)?;
         done += count;
     }
@@ -192,12 +210,116 @@ pub(crate) fn write_interleaved<W: Write, E: SampleEncoder>(
     let chunk_samples = scratch.len() / width;
     for chunk in samples.chunks(chunk_samples.max(1)) {
         let bytes = &mut scratch[..chunk.len() * width];
-        for (&value, sample) in chunk.iter().zip(bytes.chunks_mut(width)) {
-            encoder.encode(value, sample);
-        }
+        encoder.encode_run(width, chunk, bytes);
         writer.write_all(bytes)?;
     }
     Ok(())
+}
+
+/// Decodes the frames of `channels` channels held in `bytes` into `frames`
+/// of the first `channels` channels of `out`: a mono stream straight into
+/// its channel, others through a buffer of interleaved samples on the
+/// stack, split into the channels after.
+fn decode_frames<D: SampleDecoder>(
+    decoder: D,
+    channels: usize,
+    width: usize,
+    bytes: &[u8],
+    out: &mut AudioBuffer<f32>,
+    frames: core::ops::Range<usize>,
+) {
+    let frame_bytes = channels * width;
+    if channels == 1 {
+        decoder.decode_run(width, bytes, &mut out.channel_mut(0)[frames]);
+        return;
+    }
+    if channels > RUN_SAMPLES {
+        for channel in 0..channels {
+            let destination = &mut out.channel_mut(channel)[frames.clone()];
+            let samples = bytes[channel * width..].chunks(frame_bytes);
+            for (value, sample) in destination.iter_mut().zip(samples) {
+                *value = decoder.decode(&sample[..width]);
+            }
+        }
+        return;
+    }
+    let mut run = [0.0f32; RUN_SAMPLES];
+    let per_run = RUN_SAMPLES / channels;
+    let mut start = frames.start;
+    for piece in bytes.chunks(per_run * frame_bytes) {
+        let count = piece.len() / frame_bytes;
+        let samples = &mut run[..count * channels];
+        decoder.decode_run(width, piece, samples);
+        if channels == 2 {
+            let (left, right) = out.channel_pair_mut(0, 1);
+            vector::deinterleave_stereo(
+                &mut left[start..start + count],
+                &mut right[start..start + count],
+                samples,
+            );
+        } else {
+            for channel in 0..channels {
+                let destination = &mut out.channel_mut(channel)[start..start + count];
+                for (value, &sample) in destination
+                    .iter_mut()
+                    .zip(samples[channel..].iter().step_by(channels))
+                {
+                    *value = sample;
+                }
+            }
+        }
+        start += count;
+    }
+}
+
+/// Encodes `frames` of every channel of `buffer` into `bytes`, as
+/// interleaved frames: the counterpart of `decode_frames`.
+fn encode_frames<E: SampleEncoder>(
+    encoder: E,
+    width: usize,
+    buffer: &AudioBuffer<f32>,
+    frames: core::ops::Range<usize>,
+    bytes: &mut [u8],
+) {
+    let channels = buffer.num_channels();
+    let frame_bytes = channels * width;
+    if channels == 1 {
+        encoder.encode_run(width, &buffer.channel(0)[frames], bytes);
+        return;
+    }
+    if channels > RUN_SAMPLES {
+        for channel in 0..channels {
+            let source = &buffer.channel(channel)[frames.clone()];
+            let samples = bytes[channel * width..].chunks_mut(frame_bytes);
+            for (&value, sample) in source.iter().zip(samples) {
+                encoder.encode(value, &mut sample[..width]);
+            }
+        }
+        return;
+    }
+    let mut run = [0.0f32; RUN_SAMPLES];
+    let per_run = RUN_SAMPLES / channels;
+    let mut start = frames.start;
+    for piece in bytes.chunks_mut(per_run * frame_bytes) {
+        let count = piece.len() / frame_bytes;
+        let samples = &mut run[..count * channels];
+        if channels == 2 {
+            vector::interleave_stereo(
+                samples,
+                &buffer.channel(0)[start..start + count],
+                &buffer.channel(1)[start..start + count],
+            );
+        } else {
+            for channel in 0..channels {
+                let source = &buffer.channel(channel)[start..start + count];
+                for (slot, &value) in samples[channel..].iter_mut().step_by(channels).zip(source) {
+                    *slot = value;
+                }
+            }
+        }
+        encoder.encode_run(width, samples, piece);
+        start += count;
+    }
 }
 
 /// Reads into `bytes` until it is full or the stream ends, and returns how

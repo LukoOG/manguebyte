@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-use manguebyte_core::{AudioBuffer, NoDenormals};
+use manguebyte_core::{AudioBuffer, NoDenormals, vector};
 use manguebyte_dsp::{ProcessSpec, Processor, Voice};
 use manguebyte_params::{Param, ParamId, ParamSet};
 
@@ -1870,9 +1870,7 @@ impl Engine {
                 .into_iter()
                 .zip(self.stereo.iter_channels())
             {
-                for (output, &sample) in output[from..to].iter_mut().zip(part) {
-                    *output += sample;
-                }
+                vector::add(&mut output[from..to], part);
             }
             let (send_left, send_right) = self.master.sends(from, to);
             part.chain.send_into(&self.stereo, send_left, send_right);

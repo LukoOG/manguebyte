@@ -33,7 +33,7 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use manguebyte_core::AudioBuffer;
+use manguebyte_core::{AudioBuffer, vector};
 
 use crate::metadata::{Metadata, RiffMetadata, build_riff};
 use crate::pcm::{self, PcmLayout, PcmReader, SampleDecoder, SampleEncoder};
@@ -80,6 +80,19 @@ impl SampleEncoder for WavFormat {
                 bytes.copy_from_slice(&value.to_le_bytes()[..3]);
             }
             Self::Float32 => bytes.copy_from_slice(&sample.to_le_bytes()),
+        }
+    }
+
+    fn encode_run(self, _width: usize, samples: &[f32], bytes: &mut [u8]) {
+        // The same rules as `encode`, on vectors of samples.
+        match self {
+            Self::Int16 => vector::f32_to_i16_le(bytes, samples),
+            Self::Int24 => vector::f32_to_i24_le(bytes, samples),
+            Self::Float32 => {
+                for (out, &sample) in bytes.chunks_exact_mut(4).zip(samples) {
+                    out.copy_from_slice(&sample.to_le_bytes());
+                }
+            }
         }
     }
 }
@@ -555,6 +568,25 @@ pub(crate) struct WavDecoder {
 impl SampleDecoder for WavDecoder {
     fn decode(self, bytes: &[u8]) -> f32 {
         decode_sample(bytes, self.is_float)
+    }
+
+    fn decode_run(self, width: usize, bytes: &[u8], out: &mut [f32]) {
+        // The same rules as `decode_sample`, on vectors of samples.
+        match (self.is_float, width) {
+            (false, 2) => vector::i16_le_to_f32(out, bytes),
+            (false, 3) => vector::i24_le_to_f32(out, bytes),
+            (false, 4) => vector::i32_le_to_f32(out, bytes),
+            (true, 4) => {
+                for (value, sample) in out.iter_mut().zip(bytes.chunks_exact(4)) {
+                    *value = f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]);
+                }
+            }
+            _ => {
+                for (value, sample) in out.iter_mut().zip(bytes.chunks_exact(width)) {
+                    *value = decode_sample(sample, self.is_float);
+                }
+            }
+        }
     }
 }
 

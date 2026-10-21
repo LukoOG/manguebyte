@@ -2,7 +2,7 @@
 //! ([`Effect::PART_ORDER`]), then gain and pan, then the send to the
 //! master bus's reverb.
 
-use manguebyte_core::AudioBuffer;
+use manguebyte_core::{AudioBuffer, vector};
 use manguebyte_dsp::{ProcessSpec, Processor, Reverb};
 use manguebyte_params::{Param, ParamId, ParamSmoother};
 
@@ -541,6 +541,15 @@ impl ChainDsp {
             self.send.reset(self.send.target());
         }
         if !self.send.is_smoothing() && self.send.current() == 0.0 {
+            self.send_quiet = from_left[frames - 1] == 0.0 && from_right[frames - 1] == 0.0;
+            return;
+        }
+        if !self.send.is_smoothing() {
+            // A steady send: every frame gets the same gain, and resetting
+            // to the target would change nothing.
+            let send = self.send.next_value();
+            vector::add_scaled(&mut left[..frames], from_left, send);
+            vector::add_scaled(&mut right[..frames], from_right, send);
             self.send_quiet = from_left[frames - 1] == 0.0 && from_right[frames - 1] == 0.0;
             return;
         }
