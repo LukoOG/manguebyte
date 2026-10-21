@@ -25,9 +25,9 @@
 //! |---|---|
 //! | URI | `urn:manguebyte:` followed by the plugin's id ([`URI_PREFIX`], [`plugin_uri`]) |
 //! | Features | `urid:map` is required. `options:options` with `buf-size:maxBlockLength` sets the longest block the plugin is prepared for (4096 frames without it, never more than 65536); `log:log`, when offered, is told why an instance or a state was refused |
-//! | Audio ports | The main inputs and outputs of the plugin's layout, and the sidechain as more inputs with `lv2:isSideChain`. In-place processing is allowed |
+//! | Audio ports | The main inputs and outputs of the plugin's layout, and the sidechain as more inputs with `lv2:isSideChain`. In-place processing is allowed. The ports are fixed in the bundle, so the plugin always runs its own `LAYOUT`, whatever else its `LAYOUTS` offer |
 //! | Control ports | One input per parameter, in the parameter's own unit and range. A port the host changes becomes a parameter event on frame 0 of the block |
-//! | Atom ports | A `control` input sequence of MIDI events, each on its frame, read through a [`NoteInput`](manguebyte_dsp::note_input::NoteInput) so that MPE arrives as per-note events, and `time:Position` objects for the transport; a `notify` output sequence, written empty |
+//! | Atom ports | A `control` input sequence of MIDI events, each on its frame, read through a [`NoteInput`](manguebyte_dsp::note_input::NoteInput) so that MPE arrives as per-note events, and `time:Position` objects for the transport; a `notify` output sequence, which for a plugin that sends notes ([`Plugin::NOTE_OUTPUT`](manguebyte_plugin::Plugin::NOTE_OUTPUT)) supports `midi:MidiEvent` and carries what it sent, as MIDI 1.0 by the default translation, each message on its frame of the block; what does not fit in the host's buffer is dropped. Otherwise it is written empty |
 //! | Latency | A control output with `lv2:designation lv2:latency`, written on every block |
 //! | State | `state:interface`, holding the text of [`save_state`](manguebyte_plugin::save_state) as an `atom:String` under [`STATE_KEY_URI`]. Another plugin's state is refused and changes nothing |
 //!

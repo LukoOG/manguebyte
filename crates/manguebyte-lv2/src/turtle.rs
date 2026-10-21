@@ -535,17 +535,22 @@ fn plugin_ttl<P: Plugin>() -> String {
                     "lv2:designation lv2:control ;".to_owned(),
                 ],
             ),
-            PortRole::Notify => port(
-                &mut out,
-                "atom:AtomPort , lv2:OutputPort",
-                index,
-                &symbols.take("notify"),
-                "Notify",
-                &[
-                    "atom:bufferType atom:Sequence ;".to_owned(),
-                    "lv2:designation lv2:control ;".to_owned(),
-                ],
-            ),
+            PortRole::Notify => {
+                // A plugin that sends notes sends them here, as MIDI.
+                let mut lines = vec!["atom:bufferType atom:Sequence ;".to_owned()];
+                if P::NOTE_OUTPUT {
+                    lines.push("atom:supports midi:MidiEvent ;".to_owned());
+                }
+                lines.push("lv2:designation lv2:control ;".to_owned());
+                port(
+                    &mut out,
+                    "atom:AtomPort , lv2:OutputPort",
+                    index,
+                    &symbols.take("notify"),
+                    "Notify",
+                    &lines,
+                );
+            }
             PortRole::Latency => port(
                 &mut out,
                 "lv2:ControlPort , lv2:OutputPort",

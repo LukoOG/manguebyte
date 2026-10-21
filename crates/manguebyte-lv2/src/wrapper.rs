@@ -46,6 +46,7 @@ use manguebyte_dsp::note_input::NoteInput;
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Transport};
 use manguebyte_midi::MidiMessage;
 use manguebyte_params::ParamSet;
+use manguebyte_plugin::output::{OutputBuffer, OutputProtocol, OutputTranslator};
 use manguebyte_plugin::{ParamWatcher, Plugin, load_state, save_state};
 
 use crate::atom::{Events, NumberTypes, Object, Sequence, number};
@@ -621,6 +622,12 @@ struct Audio<P> {
     piece: EventBuffer,
     /// Reads the host's MIDI, MPE included, as every wrapper does.
     input: NoteInput,
+    /// What the plugin sends during a piece of the block.
+    output: OutputBuffer,
+    /// Turns it into MIDI 1.0 for the notify port.
+    translator: OutputTranslator,
+    /// The notify port's sequence, as it is written during the block.
+    notify: Notify,
     /// Parameter values as the plugin last saw them.
     watcher: ParamWatcher,
     position: Position,
@@ -731,6 +738,13 @@ unsafe extern "C" fn instantiate<P: Plugin>(
                 events: EventBuffer::with_capacity(EVENTS_PER_BLOCK),
                 piece: EventBuffer::with_capacity(EVENTS_PER_BLOCK),
                 input: NoteInput::new(P::MPE),
+                output: if P::NOTE_OUTPUT {
+                    OutputBuffer::with_capacity(EVENTS_PER_BLOCK)
+                } else {
+                    OutputBuffer::new()
+                },
+                translator: OutputTranslator::new(OutputProtocol::Midi1),
+                notify: Notify::default(),
                 watcher: ParamWatcher::new(&*params),
                 position: Position::default(),
                 resend_values: false,
@@ -818,6 +832,7 @@ unsafe extern "C" fn deactivate<P: Plugin>(handle: LV2_Handle) {
             audio.active = false;
             audio.plugin.reset();
             audio.input.reset();
+            audio.translator.reset();
         }
     });
 }
@@ -924,35 +939,99 @@ unsafe fn atom_bytes<'a>(port: *const u8) -> Option<&'a [u8]> {
     Some(unsafe { std::slice::from_raw_parts(port, len) })
 }
 
-/// Writes an empty sequence into the host's notify buffer, if there is
-/// room. The host sets the header's size to the room it has.
-///
-/// # Safety
-///
-/// `port` must be null or point to an atom header followed by as many
-/// writable bytes as its size gives.
-unsafe fn write_empty_sequence(port: *mut u8, urids: &Urids) {
-    if port.is_null() {
-        return;
+/// The sequence being written into the host's notify buffer during a
+/// block.
+#[derive(Debug, Clone, Copy)]
+struct Notify {
+    /// The buffer, or null if there is none or it cannot hold a sequence.
+    port: *mut u8,
+    /// How many bytes the host gave after the atom header.
+    room: usize,
+    /// How many of them the sequence takes, its body included.
+    used: usize,
+}
+
+impl Default for Notify {
+    fn default() -> Self {
+        Self {
+            port: ptr::null_mut(),
+            room: 0,
+            used: 0,
+        }
     }
-    // SAFETY: the atom header is readable.
-    let room = unsafe { port.cast::<u32>().read_unaligned() } as usize;
-    if room < size_of::<LV2_Atom_Sequence_Body>() {
-        return;
+}
+
+impl Notify {
+    /// Writes an empty sequence into the host's notify buffer, if there is
+    /// room, and returns the writer for the block's events. The host sets
+    /// the header's size to the room it has.
+    ///
+    /// # Safety
+    ///
+    /// `port` must be null or point to an atom header followed by as many
+    /// writable bytes as its size gives, for the rest of the block.
+    unsafe fn start(port: *mut u8, urids: &Urids) -> Self {
+        if port.is_null() {
+            return Self::default();
+        }
+        // SAFETY: the atom header is readable.
+        let room = unsafe { port.cast::<u32>().read_unaligned() } as usize;
+        let body = size_of::<LV2_Atom_Sequence_Body>();
+        if room < body {
+            return Self::default();
+        }
+        let empty = LV2_Atom_Sequence {
+            atom: LV2_Atom {
+                size: body as u32,
+                type_: urids.sequence,
+            },
+            body: LV2_Atom_Sequence_Body {
+                unit: urids.frame_time,
+                pad: 0,
+            },
+        };
+        // SAFETY: the header and `room` bytes after it are writable, and
+        // the sequence body fits in them.
+        unsafe { port.cast::<LV2_Atom_Sequence>().write_unaligned(empty) };
+        Self {
+            port,
+            room,
+            used: body,
+        }
     }
-    let empty = LV2_Atom_Sequence {
-        atom: LV2_Atom {
-            size: size_of::<LV2_Atom_Sequence_Body>() as u32,
-            type_: urids.sequence,
-        },
-        body: LV2_Atom_Sequence_Body {
-            unit: urids.frame_time,
-            pad: 0,
-        },
-    };
-    // SAFETY: the header and `room` bytes after it are writable, and the
-    // sequence body fits in them.
-    unsafe { port.cast::<LV2_Atom_Sequence>().write_unaligned(empty) };
+
+    /// Adds an event of type `type_` holding `data` on `frame`, after those
+    /// already there, if it fits. Returns whether it did.
+    ///
+    /// # Safety
+    ///
+    /// As for [`start`](Self::start), for the buffer it was started on.
+    unsafe fn push(&mut self, frame: u32, type_: u32, data: &[u8]) -> bool {
+        let header = size_of::<LV2_Atom_Event>();
+        let size = header + data.len().next_multiple_of(8);
+        if self.port.is_null() || self.used + size > self.room {
+            return false;
+        }
+        let event = LV2_Atom_Event {
+            time_frames: i64::from(frame),
+            body: LV2_Atom {
+                size: data.len() as u32,
+                type_,
+            },
+        };
+        // SAFETY: the bytes from `used` to `used + size` after the atom
+        // header lie within the room the host gave.
+        unsafe {
+            let at = self.port.add(size_of::<LV2_Atom>() + self.used);
+            at.cast::<LV2_Atom_Event>().write_unaligned(event);
+            let body = at.add(header);
+            ptr::copy_nonoverlapping(data.as_ptr(), body, data.len());
+            ptr::write_bytes(body.add(data.len()), 0, size - header - data.len());
+            self.used += size;
+            self.port.cast::<u32>().write_unaligned(self.used as u32);
+        }
+        true
+    }
 }
 
 impl<P: Plugin> Instance<P> {
@@ -964,7 +1043,7 @@ impl<P: Plugin> Instance<P> {
     unsafe fn run(&self, audio: &mut Audio<P>, frames: usize) {
         // SAFETY: the ports are valid for this block, per our contract.
         unsafe {
-            write_empty_sequence(audio.connections.notify, &self.urids);
+            audio.notify = Notify::start(audio.connections.notify, &self.urids);
             if !audio.connections.latency.is_null() {
                 audio.connections.latency.write_unaligned(audio.latency);
             }
@@ -1212,7 +1291,32 @@ impl<P: Plugin> Instance<P> {
         if P::LAYOUT.sidechain > 0 {
             context = context.with_sidechain(&audio.sidechain);
         }
-        audio.plugin.process(&mut audio.buffer, &context);
+        audio.output.clear();
+        audio
+            .plugin
+            .process_with_output(&mut audio.buffer, &context, &mut audio.output);
+
+        // What the plugin sent goes out on the notify port as MIDI 1.0, on
+        // the block's frames; past the piece's end is its last frame. What
+        // does not fit in the host's buffer is dropped.
+        let last = (frames - 1) as u32;
+        let Audio {
+            output,
+            translator,
+            notify,
+            ..
+        } = &mut *audio;
+        let midi_event = self.urids.midi_event;
+        for event in output.iter() {
+            let frame = start as u32 + event.offset.min(last);
+            translator.translate(&event.kind, |packet| {
+                if let Some(message) = packet.to_midi1() {
+                    // SAFETY: the notify port is valid for this block.
+                    let _ =
+                        unsafe { notify.push(frame, midi_event, message.to_bytes().as_slice()) };
+                }
+            });
+        }
 
         // Everything was read from the inputs before this point, so writing
         // is sound even when the host processes in place.
