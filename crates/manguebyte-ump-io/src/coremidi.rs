@@ -86,13 +86,22 @@ unsafe impl Send for Api {}
 // SAFETY: as above; nothing in `Api` is ever written after it is loaded.
 unsafe impl Sync for Api {}
 
-/// Reads the value of a `const CFStringRef` that a library exports.
-fn constant(library: &Library, name: &CStr) -> Option<CfStringRef> {
-    let address = library.address(name)?;
+/// Reads the value of a `const CFStringRef` that a library exports,
+/// looking it up in the library and then among every loaded image, or says
+/// which of the two steps failed.
+fn constant(library: &Library, name: &CStr) -> Result<CfStringRef, &'static str> {
+    let address = library
+        .address(name)
+        .or_else(|| Library::global_address(name))
+        .ok_or("the symbol is not exported")?;
     // SAFETY: `name` is declared `extern const CFStringRef` in
     // `MIDIServices.h`, so its address points at one initialised pointer.
     let value = unsafe { address.cast::<CfStringRef>().as_ptr().read() };
-    (!value.is_null()).then_some(value)
+    if value.is_null() {
+        Err("the symbol holds a null string")
+    } else {
+        Ok(value)
+    }
 }
 
 impl Api {
@@ -128,9 +137,9 @@ impl Api {
             string_create: function!(foundation, c"CFStringCreateWithBytes", missing),
             release: function!(foundation, c"CFRelease", missing),
             unique_id: constant(&coremidi, c"kMIDIPropertyUniqueID")
-                .ok_or_else(|| missing(c"kMIDIPropertyUniqueID"))?,
+                .map_err(|why| format!("{} ({why})", missing(c"kMIDIPropertyUniqueID")))?,
             protocol_id: constant(&coremidi, c"kMIDIPropertyProtocolID")
-                .ok_or_else(|| too_old(c"kMIDIPropertyProtocolID"))?,
+                .map_err(|why| format!("{} ({why})", too_old(c"kMIDIPropertyProtocolID")))?,
         })
     }
 

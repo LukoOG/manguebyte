@@ -36,6 +36,15 @@ impl Library {
         NonNull::new(unsafe { libc::dlsym(self.0.as_ptr(), name.as_ptr()) })
     }
 
+    /// The address of the symbol `name` in any image the process has
+    /// loaded (`RTLD_DEFAULT`), or `None`.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    pub(crate) fn global_address(name: &CStr) -> Option<NonNull<c_void>> {
+        // SAFETY: `RTLD_DEFAULT` is a pseudo-handle `dlsym` accepts, and
+        // `name` is NUL-terminated.
+        NonNull::new(unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) })
+    }
+
     /// The function `name`, as the function pointer type `F`.
     ///
     /// # Safety
