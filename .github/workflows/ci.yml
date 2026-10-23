@@ -131,7 +131,15 @@ jobs:
             echo "::notice::No ALSA sequencer on this runner (/dev/snd/seq): the UMP loopback did not run."
             exit 0
           fi
-          cargo test -p manguebyte-devices --test hardware midi_2_0_reaches -- --ignored --nocapture
+          # On macOS the receiving end is a virtual destination made with the
+          # `coremidi` crate (0.9.2), whose MIDI 2.0 receive block builds a
+          # `&mut T` from the connection's refcon, which CoreMIDI leaves null
+          # for a virtual destination; a debug build aborts there ("null
+          # reference produced"). The sending side under test is ours; the
+          # loopback runs as a release build, where that check is not made.
+          profile=""
+          if [ "$RUNNER_OS" = "macOS" ]; then profile="--release"; fi
+          cargo test $profile -p manguebyte-devices --test hardware midi_2_0_reaches -- --ignored --nocapture
 
   features:
     name: Without default features
