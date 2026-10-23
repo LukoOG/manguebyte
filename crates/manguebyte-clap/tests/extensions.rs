@@ -238,6 +238,22 @@ impl Plugin for Poly {
 }
 
 /// What the cutoff holds at `normalized`, as the plugin works it out.
+/// That a parameter's value read back is the one read before. The host
+/// reads it through the parameter's skewed range, so the same stored value
+/// gives the same bits; Miri adds noise to `ln` and `exp` on purpose, so
+/// under Miri the two reads may differ in the last bits.
+#[track_caller]
+fn assert_unmoved(now: f64, before: f64) {
+    if cfg!(miri) {
+        assert!(
+            (now - before).abs() <= 1e-12 * before.abs().max(1.0),
+            "{now} != {before}"
+        );
+    } else {
+        assert_eq!(now, before);
+    }
+}
+
 fn cutoff_at(normalized: f64) -> f64 {
     let params = POLY_PARAMS.lock().unwrap().clone().unwrap();
     params.cutoff.normalized_to_plain(normalized)
@@ -835,7 +851,7 @@ fn per_note_automation_lands_on_its_note_and_frame() {
         "{played:?}"
     );
     // The parameter itself did not move.
-    assert_eq!(host.param_value(CUTOFF), before);
+    assert_unmoved(host.param_value(CUTOFF), before);
 
     // By key: the second note, on frame 3.
     let mut outputs = [Samples::F32(vec![vec![0.0; 8]])];
@@ -875,7 +891,7 @@ fn a_flush_does_not_store_a_value_for_one_note() {
     let host = Host::new::<Poly>();
     let before = host.param_value(CUTOFF);
     host.flush(vec![value(0, CUTOFF, 3, -1, 0.9)]);
-    assert_eq!(host.param_value(CUTOFF), before);
+    assert_unmoved(host.param_value(CUTOFF), before);
     // A value for every note still is.
     host.flush(vec![value(0, CUTOFF, -1, -1, 0.9)]);
     assert!((host.param_value(CUTOFF) - 0.9).abs() < 1e-6);
