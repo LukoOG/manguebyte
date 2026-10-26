@@ -190,7 +190,7 @@ impl Plugin for Level {
     }
 
     fn tail_samples(&self) -> manguebyte_plugin::Tail {
-        manguebyte_plugin::Tail::Samples(90)
+        manguebyte_plugin::Tail::Samples(480)
     }
 }
 
