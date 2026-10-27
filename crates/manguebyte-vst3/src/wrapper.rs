@@ -205,7 +205,10 @@ const fn takes_notes_const(kind: PluginKind) -> bool {
 fn vst3_tail(tail: Tail) -> u32 {
     match tail {
         Tail::None => vst::kNoTail,
-        Tail::Samples(n) => u32::try_from(n).unwrap_or(vst::kInfiniteTail),
+        Tail::Samples(n) => u32::try_from(n)
+            .ok()
+            .filter(|&n| n < vst::kInfiniteTail)
+            .unwrap_or(vst::kInfiniteTail - 1),
         Tail::Infinite => vst::kInfiniteTail,
     }
 }
@@ -1998,6 +2001,14 @@ mod tests {
     #[test]
     pub fn vst3_tail_returns_value() {
         assert_eq!(345642, vst3_tail(Tail::Samples(345642)));
+    }
+
+    #[test]
+    pub fn vst3_tail_bigger_than_infinite_clamp_to_largest_value() {
+        assert_eq!(
+            vst::kInfiniteTail - 1,
+            vst3_tail(Tail::Samples(u32::MAX as usize))
+        );
     }
 
     #[test]

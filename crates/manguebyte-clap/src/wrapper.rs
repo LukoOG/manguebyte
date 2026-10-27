@@ -143,7 +143,9 @@ fn clap_tail(tail: manguebyte_plugin::Tail) -> u32 {
         Tail::Samples(samples) => u32::try_from(samples)
             .ok()
             .filter(|&n| n < INFINITE_TAIL)
-            .unwrap_or(INFINITE_TAIL),
+            // Values above INFINITE_TAIL are clamped to INFINITE_TAIL - 1
+            // Which is i32::MAX - 1
+            .unwrap_or(INFINITE_TAIL - 1),
         Tail::Infinite => INFINITE_TAIL,
     }
 }
@@ -2406,13 +2408,13 @@ mod tests {
         );
         assert_eq!(
             clap_tail(Tail::Samples(i32::MAX as usize)),
-            INFINITE_TAIL,
-            "i32::MAX is already infinite"
+            i32::MAX as u32 - 1,
+            "Values above i32::MAX are clamped to i32::MAX - 1"
         );
         assert_eq!(
             clap_tail(Tail::Samples(usize::MAX)),
-            INFINITE_TAIL,
-            "usize::MAX is already infinite"
+            i32::MAX as u32 - 1,
+            "Values above i32::MAX are clamped to i32::MAX - 1"
         );
         assert_eq!(
             clap_tail(Tail::Infinite),
