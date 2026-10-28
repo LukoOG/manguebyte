@@ -17,7 +17,6 @@ use std::ptr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use clap_sys::host;
 use manguebyte_clap::clap_sys::audio_buffer::clap_audio_buffer;
 use manguebyte_clap::clap_sys::entry::clap_plugin_entry;
 use manguebyte_clap::clap_sys::events::*;

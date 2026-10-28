@@ -139,6 +139,7 @@ pub struct AudioLayout {
 }
 
 /// The tail behavior of a plugin's output.
+#[derive(Debug)]
 pub enum Tail {
     /// The output stops when the input does.
     None,
@@ -631,15 +632,9 @@ pub trait Plugin: Send + 'static {
         0
     }
 
-    /// Describe this function.
-    /// This is read when the plugin is activated, after [`prepare`](Self::prepare), and offered to CLAP hosts as `tail-samples`.
-    /// # Arguments
-    ///
-    /// -  `&self` - unused
-    ///
-    /// # Returns
-    ///
-    /// - `Tail`
+    /// How many frames the output keeps sounding after the input stops, or
+    /// [`Tail::Infinite`] if it may never stop. `Tail::Infinite` is the default unless
+    /// overridden.
     fn tail_samples(&self) -> Tail {
         Tail::Infinite
     }
