@@ -29,7 +29,17 @@ Documentation: <https://docs.rs/manguebyte-ui>
   a version per density), `scroll_view` (a viewport with scroll bars, the
   wheel, the keys and nested views) and `list_view` (rows the application
   keeps, only those in sight drawn, with selection, the keyboard and
-  activation). Popup menus, hover and tooltips.
+  activation). Popup menus, hover and tooltips. `combo` and `toggle` bind a
+  parameter; `ComboBox::from_state` and `Toggle::from_state` bind a
+  `State<Choices>` or a `State<bool>` the application keeps, for lists
+  that change while the interface runs.
+- `audio_settings`: a ready-made settings view for a standalone program
+  (JUCE's `AudioDeviceSelectorComponent`): output and input devices,
+  sample rate, buffer size, MIDI input switches and the last change's
+  report, shown from a plain model and handing back requests the program
+  polls, with no dependency on the device crates (ADR 0022).
+  `manguebyte-gui`'s `standalone` feature glues it to a running
+  `Standalone`.
 - Navigation: `tabs` and `sidebar` (with section headers and icons)
   show one page at a time from a `State<usize>`, switched by clicks, the
   arrows, Control+Tab, assistive technology or the application, without

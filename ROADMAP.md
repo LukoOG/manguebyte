@@ -342,9 +342,11 @@ Write a processor once and ship it in every format.
   the plugin plays, with the same plugin instance, prepared again only
   when its rate changes (or kept at a fixed rate and resampled at the
   device's edge); a report of what each change opened and what fell back;
-  settings saved as text. Tested on the headless backend only; no
-  ready-made settings view, and the MIDI output port cannot be changed
-  while it runs (TECH_DEBT 114)
+  settings saved as text; a ready-made audio settings view in
+  `manguebyte-ui`, glued to the standalone by `manguebyte-gui`'s
+  `standalone` feature (ADR 0022). Tested on the headless backend only;
+  the view has no host, channel or MIDI output section, and the MIDI
+  output port cannot be changed while it runs (TECH_DEBT 114, 115)
 - 🚧 Aratu Bridge (`plugins/aratu-bridge`): an example CLAP, VST 3 and AU
   instrument that plays an Aratu page's music in a DAW, in time with its
   transport, from the control calls and events the page sends over a

@@ -1433,9 +1433,46 @@ Floating panels for an effect chain, which Parabolic asked for:
   move and after a language switch, making no heap call; golden images
   in both themes at 1x and 2x. `examples/effect_chain.rs` draws an effect
   chain of pills opening panels over a keyboard. Limits: TECH_DEBT 112.
+- **An audio settings view for standalone programs**
+  ([ADR 0022](docs/adr/0022-audio-settings-view.md)), the role of JUCE's
+  `AudioDeviceSelectorComponent`.
+  - `ComboBox::from_state` lists the `Choices` in a `State<Choices>` (texts
+    and the position chosen, which a list of devices that come and go
+    needs) and sets the choice when the person picks, with the same keys,
+    wheel, menu and description as the parameter-bound combo box, a
+    `placeholder` while nothing is chosen, and a pick from a menu opened
+    before the list changed found again by its text. `Toggle::from_state`
+    turns a `State<bool>` over. The parameter-bound API is unchanged.
+  - `Shown::First(n)`: a container shows the first `n` of its children,
+    so a list of controls whose length changes is built once as slots.
+  - `manguebyte_ui::audio_settings`: `AudioSettings::view` shows an
+    `AudioSettingsModel` (output and input `DeviceItem`s, sample rates,
+    buffer sizes, `MidiPortItem`s and the report's text) as combo boxes
+    for the output device, the input device (left out for an
+    instrument), the sample rate and the buffer size, a switch for each
+    MIDI input port (up to `MAX_MIDI_PORTS`) and the report's lines (up
+    to `REPORT_LINES`). `take_requests` returns an `AudioSettingsRequest`
+    for each section the person changed (`Output`, `Input`, `SampleRate`,
+    `BufferSize`, `MidiInput`), once; `set_model` shows what runs now. No
+    dependency on the device crates; `AudioSettings` is `Send` and `Sync`.
+  - `manguebyte_gui::audio_settings` (new feature `standalone`, turned on
+    by the umbrella crate's `gui` and `standalone` together): `sync`
+    carries the requests out on a `Standalone`, follows hot-plug through
+    `poll_devices` and fills the model in again only when something
+    changed; `apply`, `model` and `model_from` are its parts.
+  - Tested: `manguebyte-ui`'s `tests/state_controls.rs` and
+    `tests/audio_settings.rs` (requests, a model whose devices change,
+    a pick kept across a new model, the keyboard, assistive technology,
+    a floating panel), goldens `audio-settings` dark and light at 1x and
+    2x; `manguebyte-gui`'s `tests/audio_settings.rs` on the headless
+    device backend (a pick reaching the standalone and its report coming
+    back, MIDI ports, hot-plug, an effect's input). Limits: TECH_DEBT
+    115.
 
 ### Breaking
 
+- `manguebyte_ui::Shown` has a new variant, `First`, so a `match` on it
+  with no wildcard arm no longer compiles.
 - Device settings for a standalone plugin ([ADR 0021](docs/adr/0021-standalone-device-settings.md)):
   `StandaloneOptions` loses `output` and `open_midi_inputs`, which are
   now in `StandaloneOptions::settings` (`sample_rate`, `buffer_size`,

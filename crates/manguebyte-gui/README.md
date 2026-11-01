@@ -18,6 +18,12 @@ Documentation: <https://docs.rs/manguebyte-gui>
   program or a plugin run as one, with close requests the application
   answers, files dropped onto widgets and the system's file dialogs
   (ADR 0010). Windows only for now.
+- With the `standalone` feature, `audio_settings`: `sync` connects
+  `manguebyte-ui`'s audio settings view to a running
+  `manguebyte_standalone::Standalone`, carrying out what the person picks,
+  following devices that come and go and showing the report of each
+  change (ADR 0022). Off by default, since it brings the system's audio
+  and MIDI libraries.
 - Frames run from one window timer, about 60 a second; a frame where
   nothing changed presents nothing, and motion follows the system's
   setting in real windows (ADR 0011).

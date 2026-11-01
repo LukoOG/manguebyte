@@ -6,9 +6,11 @@
 //! the model in from [`Standalone::choices`], [`Standalone::settings`] and
 //! [`Standalone::report`], and carries each request out with the
 //! standalone's `set_` methods. [`sync`] does both, and follows devices
-//! that come and go: a program calls it from its own timer, about every
+//! that come and go: a program calls it about every
 //! [`DEFAULT_POLL_INTERVAL`](manguebyte_devices::DEFAULT_POLL_INTERVAL),
-//! on the thread that owns the standalone. ADR 0022 says why the glue
+//! from a timer of its own or from a thread that owns the standalone
+//! ([`AudioSettings`] is `Send` and `Sync`, so the view on the interface's
+//! thread and the glue on another share it). ADR 0022 says why the glue
 //! lives here.
 //!
 //! ```no_run

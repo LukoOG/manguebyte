@@ -23,7 +23,11 @@ where the system can play both (ADR 0021). `StandaloneSettings` is the
 value a program saves with its session, as text, and hands back in the
 next run. `Standalone::poll_devices`, from a timer, follows devices and
 ports as they come and go. `Standalone::start_on` runs on any device
-manager, such as the headless one the tests use.
+manager, such as the headless one the tests use. A ready-made settings
+screen for all of it is `manguebyte-ui`'s audio settings view, connected
+to a `Standalone` by `manguebyte_gui::audio_settings::sync` (feature
+`standalone` of `manguebyte-gui`, ADR 0022); this crate depends on no
+interface crate.
 
 A plugin's auxiliary output buses (`Plugin::AUX_OUTPUTS`) go to device
 channels of their own, by default the ones after the main output's, one
