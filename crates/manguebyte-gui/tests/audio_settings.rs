@@ -101,7 +101,7 @@ fn studio() -> MockBackend {
 fn start<P: Plugin>(mock: &MockBackend) -> Standalone<P> {
     let mut manager = DeviceManager::headless(mock);
     manager.set_crossfade(Duration::ZERO);
-    Standalone::<P>::start_on(manager, StandaloneOptions::default(), None).unwrap()
+    Standalone::<P>::start_on(manager, StandaloneOptions::default()).unwrap()
 }
 
 fn open(settings: &AudioSettings) -> Harness {
