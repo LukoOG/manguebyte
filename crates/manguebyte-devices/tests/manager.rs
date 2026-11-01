@@ -448,6 +448,98 @@ fn the_callback_is_prepared_before_and_released_after_every_run() {
 }
 
 #[test]
+fn a_preview_plans_a_setup_without_opening_it() {
+    let mock = studio();
+    let mut manager = DeviceManager::headless(&mock);
+    manager.start(&DeviceSetup::default(), level(0.5)).unwrap();
+    let gone = usb_setup().with_output(DeviceChoice::Device(DeviceRef::new("gone", "Gone")));
+    let preview = manager.preview(&gone).unwrap();
+    assert_eq!(
+        preview.output.as_ref().unwrap().0,
+        summary("speakers", "Speakers")
+    );
+    assert_eq!(
+        preview.input.as_ref().unwrap().0,
+        summary("usb-in", "USB Interface")
+    );
+    assert_eq!(preview.sample_rate(), Some(96_000));
+    assert!(matches!(
+        &preview.fallbacks[..],
+        [Fallback::DeviceReplaced { by_name: false, .. }]
+    ));
+    // Nothing changed: the speakers still play, and the setup is the one
+    // started.
+    assert_eq!(
+        mock.running(Direction::Output).map(|(id, _)| id),
+        Some(String::from("speakers"))
+    );
+    assert_eq!(manager.setup(), &DeviceSetup::default());
+}
+
+#[test]
+fn a_new_engine_format_prepares_the_same_callback_again() {
+    use manguebyte_devices::{EngineFormat, SwapKind};
+
+    let mock = studio();
+    let (formats, received) = mpsc::channel();
+    let callback = Counting {
+        formats: Some(formats),
+        ..Counting::default()
+    };
+    let (prepared, released) = (
+        Arc::clone(&callback.prepared),
+        Arc::clone(&callback.released),
+    );
+    let mut manager = DeviceManager::headless(&mock);
+    manager.set_crossfade(Duration::ZERO);
+    let at_48k = EngineFormat::new(48_000, 256, 0, 2);
+    manager
+        .start_engine(&DeviceSetup::default(), at_48k, callback)
+        .unwrap();
+    assert!(render(&mock, 2).is_some());
+
+    // The same format is a plain apply: nothing is prepared again.
+    manager
+        .apply_with_format(&DeviceSetup::default(), at_48k)
+        .unwrap();
+    assert_eq!(prepared.load(Ordering::Relaxed), 1);
+
+    // To the interface, at its rate: released, prepared at 96 kHz, and
+    // started again on the interface.
+    let at_96k = EngineFormat::new(96_000, 256, 0, 4);
+    let usb = usb_setup().with_input(DeviceChoice::None);
+    let report = manager.apply_with_format(&usb, at_96k).unwrap();
+    assert!(report.is_exact(), "{:?}", report.fallbacks);
+    assert_eq!(prepared.load(Ordering::Relaxed), 2);
+    assert_eq!(released.load(Ordering::Relaxed), 1);
+    assert_eq!(manager.engine_format(), Some(at_96k));
+    assert_eq!(manager.setup(), &usb);
+    assert_eq!(manager.last_swap().unwrap().kind, SwapKind::Gap);
+    assert_eq!(
+        mock.running(Direction::Output).map(|(id, _)| id),
+        Some(String::from("usb-out"))
+    );
+    assert_eq!(manager.format().unwrap().sample_rate, 96_000.0);
+    let block = render(&mock, 4).unwrap();
+    assert!(
+        block
+            .iter()
+            .step_by(4)
+            .skip(32)
+            .all(|&sample| sample == 1.0)
+    );
+    let formats: Vec<f64> = received.try_iter().map(|f| f.sample_rate).collect();
+    assert_eq!(formats, [48_000.0, 96_000.0]);
+
+    // A manager without an engine has no format to change.
+    let mut plain = DeviceManager::headless(&mock);
+    assert!(matches!(
+        plain.apply_with_format(&DeviceSetup::default(), at_48k),
+        Err(DeviceError::NoCallback)
+    ));
+}
+
+#[test]
 fn a_duplex_run_carries_input_to_output_with_its_latency() {
     let mock = studio();
     mock.set_latency(

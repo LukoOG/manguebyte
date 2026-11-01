@@ -41,6 +41,32 @@ const RETURN_TIMEOUT: Duration = Duration::from_secs(2);
 /// does not hold the swap up for longer.
 const FADE_TIMEOUT: Duration = Duration::from_millis(250);
 
+/// What a setup would open, as [`DeviceManager::preview`] works it out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SetupPreview {
+    /// The output device and what it would be asked for; `None` when no
+    /// output would run.
+    pub output: Option<(DeviceSummary, StreamSettings)>,
+    /// The input device and what it would be asked for; `None` when no
+    /// input would run.
+    pub input: Option<(DeviceSummary, StreamSettings)>,
+    /// The MIDI input ports that would be open.
+    pub midi_inputs: Vec<DeviceSummary>,
+    /// What would differ from the setup, as the restore report would say.
+    pub fallbacks: Vec<Fallback>,
+}
+
+impl SetupPreview {
+    /// The sample rate the devices would run at.
+    pub fn sample_rate(&self) -> Option<u32> {
+        self.output
+            .iter()
+            .chain(&self.input)
+            .find_map(|(_, settings)| settings.sample_rate)
+    }
+}
+
 /// The format a callback will run with, as told to
 /// [`AudioCallback::prepare`].
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -622,6 +648,58 @@ impl DeviceManager {
         self.open()
     }
 
+    /// Applies `setup` and gives the callback started with
+    /// [`start_engine`](Self::start_engine) a new format, for a change the
+    /// devices' edge should not hide, such as following a device to
+    /// another sample rate instead of resampling it.
+    ///
+    /// With the format the callback runs at, this is
+    /// [`apply`](Self::apply). Otherwise the running device fades out and
+    /// stops, the callback is released and prepared again with `format`,
+    /// and the setup's devices start with it and fade in: the same
+    /// callback goes on, and [`last_swap`](Self::last_swap) reports a
+    /// [`SwapKind::Gap`]. If the new devices cannot be started, the
+    /// callback keeps `format` and waits, as after a failed
+    /// [`apply`](Self::apply).
+    ///
+    /// Returns [`DeviceError::NoCallback`] for a manager that was not
+    /// started with [`start_engine`](Self::start_engine).
+    pub fn apply_with_format(
+        &mut self,
+        setup: &DeviceSetup,
+        format: EngineFormat,
+    ) -> Result<RestoreReport, DeviceError> {
+        let Some(engine) = &self.engine else {
+            return Err(DeviceError::NoCallback);
+        };
+        if engine.format == format {
+            return self.apply(setup);
+        }
+        self.finish_crossfades(true);
+        let faded = if self
+            .running
+            .as_ref()
+            .is_some_and(|running| !running.is_lost())
+        {
+            self.fade_out_running().map(|old| (old, Instant::now()))
+        } else {
+            None
+        };
+        self.collect_core();
+        let Some(engine) = &mut self.engine else {
+            return Err(DeviceError::NoCallback);
+        };
+        let Some(core) = &mut engine.core else {
+            return Err(DeviceError::NoCallback);
+        };
+        core.parked.callback.release();
+        core.parked.callback.prepare(&format.stream_format());
+        engine.format = format;
+        engine.dead = false;
+        self.setup = setup.clone();
+        self.open_engine_after(faded)
+    }
+
     /// Restarts the stream on the setup, for example after its device was
     /// lost: the saved devices are looked for again, with the same
     /// fallbacks as at the start.
@@ -784,11 +862,36 @@ impl DeviceManager {
     }
 
     fn plan_now(&self) -> Result<Plan, DeviceError> {
+        self.plan_for(&self.setup)
+    }
+
+    fn plan_for(&self, setup: &DeviceSetup) -> Result<Plan, DeviceError> {
         let snapshot = self.backend.snapshot()?;
         let backend = Arc::clone(&self.backend);
-        Ok(plan(&self.setup, &snapshot, &|direction, id| {
+        Ok(plan(setup, &snapshot, &|direction, id| {
             backend.device_info(direction, id).ok()
         }))
+    }
+
+    /// What [`apply`](Self::apply) would open for `setup` now, worked out
+    /// without opening or changing anything: the devices with their
+    /// settings, the MIDI input ports, and the fallbacks it would report,
+    /// for a caller that must choose something, such as an engine format,
+    /// before it applies the setup.
+    ///
+    /// It plans on the host in use: a setup that names another host is
+    /// planned as if it named this one. A backend that loads one driver
+    /// at a time may be unable to describe another device while a stream
+    /// runs, and then plans that device away, as [`apply`](Self::apply)
+    /// would before it stops the stream and plans again.
+    pub fn preview(&self, setup: &DeviceSetup) -> Result<SetupPreview, DeviceError> {
+        let planned = self.plan_for(setup)?;
+        Ok(SetupPreview {
+            output: planned.output,
+            input: planned.input,
+            midi_inputs: planned.midi_inputs,
+            fallbacks: planned.fallbacks,
+        })
     }
 
     fn park(&mut self, parked: Parked) {
@@ -1006,6 +1109,15 @@ impl DeviceManager {
 impl DeviceManager {
     fn open_engine(&mut self) -> Result<RestoreReport, DeviceError> {
         self.finish_crossfades(true);
+        self.open_engine_after(None)
+    }
+
+    /// Opens the setup for the engine. `faded` is a stream that has
+    /// already faded out and stopped, and when it did.
+    fn open_engine_after(
+        &mut self,
+        mut faded: Option<(Arc<EdgeShared>, Instant)>,
+    ) -> Result<RestoreReport, DeviceError> {
         let mut report = RestoreReport::default();
         let mut planned = self.plan_open(&mut report)?;
         // A backend that loads one driver at a time cannot describe another
@@ -1013,7 +1125,6 @@ impl DeviceManager {
         // describe away. It could not have run beside the old stream anyway:
         // the old stream fades out and stops, and the setup is planned
         // again.
-        let mut faded = None;
         let undescribed = planned.fallbacks.iter().any(|fallback| {
             matches!(
                 fallback,
