@@ -866,6 +866,50 @@ mod midi {
     }
 
     #[test]
+    fn a_change_of_port_lifts_the_sustain_pedal_it_holds_down() {
+        let mock = studio();
+        mock.add_midi_port(Direction::Output, "synth", "Synth");
+        mock.add_midi_port(Direction::Output, "drums", "Drums");
+        let mut manager = DeviceManager::headless(&mock);
+        manager
+            .set_midi_output(Some(DeviceRef::new("synth", "Synth")))
+            .unwrap();
+        // From the program's thread: a note, held by the pedal on channel
+        // 2 after its note-off, and the pedal on channel 1 down and up.
+        for bytes in [
+            [0x92, 60, 100],
+            [0xB2, 64, 127],
+            [0x82, 60, 0],
+            [0xB1, 64, 100],
+            [0xB1, 64, 0],
+        ] {
+            manager.send_midi(&bytes).unwrap();
+        }
+        // The same port again is left as it is.
+        manager
+            .set_midi_output(Some(DeviceRef::new("synth", "Synth")))
+            .unwrap();
+        assert_eq!(mock.take_sent_midi().len(), 5);
+        // A MIDI 2.0 note through the program's packets, followed too.
+        let note = Packet::from_words(&[0x4093_3E00, 0xC000_0000]).unwrap();
+        manager.send_midi_packet(&note).unwrap();
+        assert_eq!(mock.take_sent_midi(), [bytes("synth", &[0x93, 62, 0x60])]);
+        manager
+            .set_midi_output(Some(DeviceRef::new("drums", "Drums")))
+            .unwrap();
+        assert_eq!(
+            mock.take_sent_midi(),
+            [
+                bytes("synth", &[0x83, 62, 0]),
+                bytes("synth", &[0xB2, 64, 0]),
+            ]
+        );
+        // What the old port ended is not ended again on the new one.
+        manager.send_midi(&[0x83, 62, 0]).unwrap();
+        assert!(mock.take_sent_midi().is_empty());
+    }
+
+    #[test]
     fn dropping_the_manager_sends_what_is_waiting_and_ends_the_notes() {
         let mock = studio();
         mock.add_midi_port(Direction::Output, "synth", "Synth");

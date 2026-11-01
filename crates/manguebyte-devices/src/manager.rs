@@ -1640,7 +1640,8 @@ impl DeviceManager {
     /// while no port is open is dropped.
     ///
     /// A port that is changed or closed is first sent a note-off for every
-    /// note it plays, so that none is left hanging there, and a note-off
+    /// note it plays, and a controller 64 of zero for every sustain pedal
+    /// it holds down, so that none is left hanging there, and a note-off
     /// for a note the open port is not playing, such as one a change of
     /// port has already ended, is not sent. So every note-on reaches one
     /// port, and that port receives one note-off for it.
@@ -1708,7 +1709,8 @@ impl DeviceManager {
 
     /// Sets the MIDI output port of the setup and opens it, or closes it
     /// with `None`, without touching the audio. The port open before is
-    /// first sent a note-off for every note it plays; the same port again
+    /// first sent a note-off for every note it plays and its sustain
+    /// pedals are lifted; the same port again
     /// is left open as it is.
     ///
     /// A port that cannot be opened returns the error and leaves no port

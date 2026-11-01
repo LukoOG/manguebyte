@@ -744,9 +744,10 @@ impl<P: Plugin> Standalone<P> {
     /// settings change.
     ///
     /// The port that played before is first sent a note-off for every
-    /// note it plays, so that none hangs there, and the note-offs the
-    /// plugin sends later for those notes go nowhere: every note-on
-    /// reaches one port, and that port one note-off for it. Notes still
+    /// note it plays, and its sustain pedals are lifted, so that none
+    /// hangs there, and the note-offs the plugin sends later for those
+    /// notes go nowhere: every note-on reaches one port, and that port one
+    /// note-off for it. Notes still
     /// waiting for their moment go to the new port. The audio thread
     /// knows nothing of the change: it queues the plugin's notes, and the
     /// thread that sends them finds the port open when each is due.
