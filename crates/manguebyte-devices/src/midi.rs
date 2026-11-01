@@ -39,7 +39,12 @@
 //! through a [`midi_output_queue`]: its [`MidiTransmitter`] stamps each
 //! with the moment its frame is heard, one block late as input is, and
 //! [`MidiOutput::spawn`] starts the thread that sends them then. The audio
-//! thread's side is the same whatever the port speaks.
+//! thread's side is the same whatever the port speaks. Under a
+//! [`DeviceManager`](crate::DeviceManager),
+//! [`DeviceManager::midi_output_transmitter`](crate::DeviceManager::midi_output_transmitter)
+//! makes the queue to the manager's own output port instead, which can
+//! then change, or come and go, while the audio thread sends, without
+//! leaving a note hanging on the port it leaves.
 //!
 //! # MIDI 1.0 and MIDI 2.0 ports
 //!
@@ -96,12 +101,14 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 mod output;
+mod shared;
 mod ump;
 
 pub use output::{
     MidiOutputQueue, MidiOutputThread, MidiProtocol, MidiTransmitter, PacketWriter,
     SYSEX_OUT_CAPACITY, midi_output_queue,
 };
+pub(crate) use shared::{SharedOutput, SharedOutputThread};
 use std::time::{Duration, Instant};
 pub use ump::{MidiOutputPortInfo, ProtocolFallback, ump_output_backend};
 
