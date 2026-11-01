@@ -131,7 +131,7 @@ fn summary(id: &str, name: &str) -> DeviceSummary {
 fn start<P: Plugin>(mock: &MockBackend, options: StandaloneOptions) -> Standalone<P> {
     let mut manager = DeviceManager::headless(mock);
     manager.set_crossfade(Duration::ZERO);
-    Standalone::<P>::start_on(manager, options, None).unwrap()
+    Standalone::<P>::start_on(manager, options).unwrap()
 }
 
 fn with_settings(settings: StandaloneSettings) -> StandaloneOptions {

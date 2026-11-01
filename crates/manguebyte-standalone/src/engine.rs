@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use manguebyte_core::spsc::Consumer;
+use manguebyte_core::spsc::{self, Consumer, Producer};
 use manguebyte_core::{AudioBuffer, NoDenormals};
 use manguebyte_devices::midi::{MidiReceiver, MidiTransmitter};
 use manguebyte_devices::{AudioCallback, DeviceIo, StreamFormat};
@@ -47,12 +47,88 @@ pub struct Engine<P: Plugin> {
     /// sends anything.
     output: OutputBuffer,
     /// Where what it sends goes, written for the port, if anywhere.
-    midi_out: Option<(OutputTranslator, MidiTransmitter)>,
+    midi_out: Option<MidiOut>,
     /// The plugin's auxiliary output buses.
     aux: AuxOutputs,
     /// The device channel each auxiliary bus's first channel goes to, the
     /// others following it, or `None` for a bus that is not heard.
     aux_channels: Vec<Option<usize>>,
+}
+
+/// The MIDI output of an engine: the translator that writes what the
+/// plugin sends for the port, and the queue it goes through.
+struct MidiOut {
+    translator: OutputTranslator,
+    transmitter: MidiTransmitter,
+    /// Translators into another protocol, from a [`ProtocolSwitch`], and
+    /// the ones they replaced, going back to be dropped there.
+    switch: Option<(Consumer<OutputTranslator>, Producer<OutputTranslator>)>,
+}
+
+impl MidiOut {
+    /// Takes a translator the program sent, if there is one and room to
+    /// send the old one back. The old one first ends the notes it knows
+    /// to be sounding, at the start of the block, so that none hangs on
+    /// the port. Real-time safe: nothing is allocated or freed here.
+    fn take_switch(&mut self) {
+        let Some((incoming, retired)) = &mut self.switch else {
+            return;
+        };
+        if retired.free_len() == 0 {
+            return;
+        }
+        let Some(next) = incoming.pop() else {
+            return;
+        };
+        let mut old = std::mem::replace(&mut self.translator, next);
+        let transmitter = &mut self.transmitter;
+        old.end_all(|packet| {
+            transmitter.send(0, packet);
+        });
+        // There was room: checked above.
+        let _ = retired.push(old);
+    }
+}
+
+/// Changes the protocol an [`Engine`]'s MIDI output is written in, from
+/// the program's thread, while the engine plays: the engine takes the new
+/// translator at the start of its next block. Made by
+/// [`Engine::with_switchable_midi_output`].
+pub(crate) struct ProtocolSwitch {
+    incoming: Producer<OutputTranslator>,
+    retired: Consumer<OutputTranslator>,
+    /// The protocol asked for last.
+    protocol: OutputProtocol,
+    /// A protocol that could not be handed over yet, because the engine
+    /// had not taken the one before.
+    waiting: Option<OutputProtocol>,
+}
+
+impl ProtocolSwitch {
+    /// Asks the engine to write in `protocol` from its next block on.
+    /// Allocates; never call it on the audio thread.
+    pub(crate) fn set(&mut self, protocol: OutputProtocol) {
+        if protocol == self.protocol && self.waiting.is_none() {
+            return;
+        }
+        self.protocol = protocol;
+        self.waiting = Some(protocol);
+        self.hand_over();
+    }
+
+    /// Hands the engine the protocol waiting, if it has taken the one
+    /// before, and drops the translators it gave back.
+    pub(crate) fn hand_over(&mut self) {
+        while self.retired.pop().is_some() {}
+        let Some(protocol) = self.waiting else {
+            return;
+        };
+        if self.incoming.free_len() > 0
+            && self.incoming.push(OutputTranslator::new(protocol)).is_ok()
+        {
+            self.waiting = None;
+        }
+    }
 }
 
 /// The device channels the auxiliary buses of `P` go to unless told
@@ -173,8 +249,35 @@ impl<P: Plugin> Engine<P> {
         transmitter: MidiTransmitter,
         protocol: OutputProtocol,
     ) -> Self {
-        self.midi_out = Some((OutputTranslator::new(protocol), transmitter));
+        self.midi_out = Some(MidiOut {
+            translator: OutputTranslator::new(protocol),
+            transmitter,
+            switch: None,
+        });
         self
+    }
+
+    /// [`with_midi_output`](Self::with_midi_output), with a switch the
+    /// program changes the protocol with while the engine plays.
+    pub(crate) fn with_switchable_midi_output(
+        mut self,
+        transmitter: MidiTransmitter,
+        protocol: OutputProtocol,
+    ) -> (Self, ProtocolSwitch) {
+        let (incoming, to_engine) = spsc::channel(1);
+        let (from_engine, retired) = spsc::channel(2);
+        self.midi_out = Some(MidiOut {
+            translator: OutputTranslator::new(protocol),
+            transmitter,
+            switch: Some((to_engine, from_engine)),
+        });
+        let switch = ProtocolSwitch {
+            incoming,
+            retired,
+            protocol,
+            waiting: None,
+        };
+        (self, switch)
     }
 
     /// Plays `clock` in place of the engine's own transport, for example
@@ -256,8 +359,9 @@ impl<P: Plugin> Engine<P> {
     /// Starts the block's events: parameter changes first, then notes from
     /// the program. Returns how many were parameter announcements.
     fn begin_events(&mut self, frames: usize) -> usize {
-        if let Some((_, transmitter)) = &mut self.midi_out {
-            transmitter.begin_block(frames, self.sample_rate);
+        if let Some(out) = &mut self.midi_out {
+            out.transmitter.begin_block(frames, self.sample_rate);
+            out.take_switch();
         }
         let params: &dyn ParamSet = &*self.params;
         self.events.clear();
@@ -339,7 +443,12 @@ impl<P: Plugin> Engine<P> {
         self.aux.start_block(frames);
         self.plugin
             .process_with_aux(&mut self.work, &context, &mut self.output, &mut self.aux);
-        if let Some((translator, transmitter)) = &mut self.midi_out {
+        if let Some(MidiOut {
+            translator,
+            transmitter,
+            ..
+        }) = &mut self.midi_out
+        {
             let last = frames.saturating_sub(1) as u32;
             // What does not fit in the queue is dropped, and counted by
             // the transmitter.

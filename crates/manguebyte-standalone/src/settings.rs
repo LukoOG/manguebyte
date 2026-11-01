@@ -8,6 +8,7 @@ use manguebyte_devices::{
     DeviceChoice, DeviceInfo, DeviceRef, DeviceSetup, DeviceSummary, Direction, Fallback, HostInfo,
     ParseSetupError, SwapReport,
 };
+use manguebyte_midi::mpe::{Zone, ZoneKind};
 
 const HEADER: &str = "manguebyte-standalone-settings";
 const VERSION: u32 = 1;
@@ -93,9 +94,14 @@ pub enum RatePolicy {
 /// ([`SettingsReport::fallbacks`]).
 ///
 /// It is written as text, one `key=value` per line under a versioned
-/// header, with the keys of [`DeviceSetup`]'s text and one more,
-/// `midi_inputs`, which is `all` or `listed`. Reading ignores keys it does
-/// not know.
+/// header, with the keys of [`DeviceSetup`]'s text (the MIDI output port
+/// is its `midi_output`) and two more: `midi_inputs`, which is `all` or
+/// `listed`, and `midi_output_mpe`, such as `lower 15`, written only when
+/// the notes go out as MPE. Reading ignores keys it does not know, so
+/// text written before the MIDI output was in the settings reads as no
+/// MIDI output, and text written now reads in a program that does not
+/// know the MIDI output yet as its other settings; the version is still
+/// 1.
 ///
 /// ```
 /// use manguebyte_devices::{DeviceChoice, DeviceRef};
@@ -136,11 +142,22 @@ pub struct StandaloneSettings {
     pub input_channels: Option<u16>,
     /// The MIDI input ports to listen to.
     pub midi_inputs: MidiInputs,
+    /// The MIDI output port the plugin's notes go to, for a plugin that
+    /// sends notes ([`Plugin::NOTE_OUTPUT`](manguebyte_plugin::Plugin::NOTE_OUTPUT));
+    /// `None` sends them nowhere. Found by its identifier or, when that
+    /// changed, by its name.
+    pub midi_output: Option<DeviceRef>,
+    /// For a MIDI output port that speaks MIDI 1.0, as every port does
+    /// for now: `Some` writes the plugin's notes as MPE in this zone, so
+    /// that each keeps its own tuning, pressure and brightness, and `None`
+    /// as plain MIDI 1.0 by the default translation, which keeps
+    /// polyphonic pressure alone of them. Kept when the port is `None`.
+    pub midi_output_mpe: Option<Zone>,
 }
 
 impl Default for StandaloneSettings {
     /// The default devices, at their own rate and buffer size, with every
-    /// MIDI input port.
+    /// MIDI input port and no MIDI output.
     fn default() -> Self {
         Self {
             host: None,
@@ -151,6 +168,8 @@ impl Default for StandaloneSettings {
             output_channels: None,
             input_channels: None,
             midi_inputs: MidiInputs::All,
+            midi_output: None,
+            midi_output_mpe: None,
         }
     }
 }
@@ -205,9 +224,29 @@ impl StandaloneSettings {
         self
     }
 
+    /// Sets the MIDI output port.
+    #[must_use]
+    pub fn with_midi_output(mut self, port: DeviceRef) -> Self {
+        self.midi_output = Some(port);
+        self
+    }
+
+    /// Writes the notes sent to the MIDI output port as MPE in `zone`.
+    #[must_use]
+    pub fn with_midi_output_mpe(mut self, zone: Zone) -> Self {
+        self.midi_output_mpe = Some(zone);
+        self
+    }
+
     /// The device setup these settings stand for, for a plugin that takes
-    /// input or not, with `ports` as every MIDI input port connected.
-    pub(crate) fn to_setup(&self, uses_input: bool, ports: &[DeviceSummary]) -> DeviceSetup {
+    /// input or not and sends notes or not, with `ports` as every MIDI
+    /// input port connected.
+    pub(crate) fn to_setup(
+        &self,
+        uses_input: bool,
+        sends_notes: bool,
+        ports: &[DeviceSummary],
+    ) -> DeviceSetup {
         let midi_inputs = match &self.midi_inputs {
             MidiInputs::All => ports.iter().map(DeviceRef::from).collect(),
             MidiInputs::Only(ports) => ports.clone(),
@@ -225,15 +264,34 @@ impl StandaloneSettings {
             output_channels: self.output_channels,
             input_channels: self.input_channels,
             midi_inputs,
-            midi_output: None,
+            midi_output: self.midi_output.clone().filter(|_| sends_notes),
         }
+    }
+}
+
+/// An MPE zone as the settings' text writes it: `lower 15`, `upper 7`.
+fn write_zone(zone: Zone) -> String {
+    let kind = match zone.kind() {
+        ZoneKind::Lower => "lower",
+        ZoneKind::Upper => "upper",
+    };
+    format!("{kind} {}", zone.member_count())
+}
+
+fn parse_zone(text: &str) -> Option<Zone> {
+    let (kind, members) = text.trim().split_once(' ')?;
+    let members = members.trim().parse().ok()?;
+    match kind {
+        "lower" => Zone::lower(members),
+        "upper" => Zone::upper(members),
+        _ => None,
     }
 }
 
 impl fmt::Display for StandaloneSettings {
     /// Writes the settings as text that [`FromStr`] reads back.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut setup = self.to_setup(true, &[]);
+        let mut setup = self.to_setup(true, true, &[]);
         let mode = match &self.midi_inputs {
             MidiInputs::All => "all",
             MidiInputs::Only(_) => "listed",
@@ -247,7 +305,11 @@ impl fmt::Display for StandaloneSettings {
         for line in text.lines().skip(1) {
             writeln!(f, "{line}")?;
         }
-        writeln!(f, "midi_inputs={mode}")
+        writeln!(f, "midi_inputs={mode}")?;
+        if let Some(zone) = self.midi_output_mpe {
+            writeln!(f, "midi_output_mpe={}", write_zone(zone))?;
+        }
+        Ok(())
     }
 }
 
@@ -270,16 +332,22 @@ impl FromStr for StandaloneSettings {
         setup_text.push_str(SETUP_HEADER);
         setup_text.push('\n');
         let mut mode = None;
+        let mut mpe = None;
         for (index, line) in lines.enumerate() {
             let trimmed = line.trim_end_matches('\r');
+            // The header is line 1, and this line is after it.
+            let malformed = ParseSetupError::MalformedLine(index + 2);
             if let Some((key, value)) = trimmed.split_once('=') {
-                if key.trim() == "midi_inputs" {
-                    mode = Some(match value.trim() {
-                        "all" => true,
-                        "listed" => false,
-                        // The header is line 1, and this line is after it.
-                        _ => return Err(ParseSetupError::MalformedLine(index + 2)),
-                    });
+                match key.trim() {
+                    "midi_inputs" => {
+                        mode = Some(match value.trim() {
+                            "all" => true,
+                            "listed" => false,
+                            _ => return Err(malformed),
+                        });
+                    }
+                    "midi_output_mpe" => mpe = Some(parse_zone(value).ok_or(malformed)?),
+                    _ => {}
                 }
             }
             // Kept, so that the setup's line numbers are this text's.
@@ -303,6 +371,8 @@ impl FromStr for StandaloneSettings {
             } else {
                 MidiInputs::Only(setup.midi_inputs)
             },
+            midi_output: setup.midi_output,
+            midi_output_mpe: mpe,
         })
     }
 }
@@ -334,6 +404,10 @@ pub struct SettingsReport {
     pub prepared_again: bool,
     /// The MIDI input ports that are open.
     pub midi_inputs: Vec<DeviceSummary>,
+    /// The MIDI output port the plugin's notes go to, if one is open. A
+    /// port of the settings that is missing or could not be opened is a
+    /// [`Fallback::MidiPortMissing`] in [`fallbacks`](Self::fallbacks).
+    pub midi_output: Option<DeviceSummary>,
     /// Everything that could not be had as asked, and what was used
     /// instead.
     pub fallbacks: Vec<Fallback>,
@@ -378,6 +452,9 @@ impl fmt::Display for SettingsReport {
         }
         if let Some(input) = &self.input {
             write!(f, "; recording from \"{}\"", input.name)?;
+        }
+        if let Some(port) = &self.midi_output {
+            write!(f, "; sending notes to \"{}\"", port.name)?;
         }
         for fallback in &self.fallbacks {
             write!(f, "\n{fallback}")?;
@@ -461,7 +538,7 @@ impl DeviceOption {
     }
 }
 
-/// One MIDI input port a settings screen can offer.
+/// One MIDI port a settings screen can offer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MidiPortOption {
     /// The port.
@@ -471,7 +548,7 @@ pub struct MidiPortOption {
 }
 
 /// Everything a settings screen can offer now: hosts, devices with the
-/// rates and buffer sizes each accepts, and MIDI input ports.
+/// rates and buffer sizes each accepts, and MIDI ports.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SettingsChoices {
     /// The audio hosts that can be chosen.
@@ -484,6 +561,9 @@ pub struct SettingsChoices {
     pub inputs: Vec<DeviceOption>,
     /// The MIDI input ports.
     pub midi_inputs: Vec<MidiPortOption>,
+    /// The MIDI output ports, the one the plugin's notes go to marked
+    /// open; empty for a plugin that sends no notes.
+    pub midi_outputs: Vec<MidiPortOption>,
 }
 
 impl SettingsChoices {
@@ -517,11 +597,17 @@ mod tests {
 
     #[test]
     fn settings_round_trip_through_text() {
+        let with_output = full().with_midi_output(DeviceRef::new("synth\t2", "Synth = A"));
+        let mut mpe_without_port = full();
+        mpe_without_port.midi_output_mpe = Zone::upper(7);
         for settings in [
             StandaloneSettings::default(),
             full(),
             full().with_midi_inputs(MidiInputs::NONE),
             full().with_midi_inputs(MidiInputs::All),
+            with_output.clone(),
+            with_output.with_midi_output_mpe(Zone::lower(15).unwrap()),
+            mpe_without_port,
         ] {
             let text = settings.to_string();
             assert_eq!(text.parse::<StandaloneSettings>(), Ok(settings), "{text}");
@@ -564,6 +650,61 @@ mod tests {
             text.parse::<StandaloneSettings>().unwrap().midi_inputs,
             MidiInputs::Only(vec![DeviceRef::new("keys", "Keys")])
         );
+    }
+
+    #[test]
+    fn settings_written_before_the_midi_output_still_read() {
+        // As the settings of commit 3369941 wrote them, before there was
+        // a MIDI output in them.
+        let old = "manguebyte-standalone-settings 1\n\
+                   host=ASIO\n\
+                   output=device:speakers\tSpeakers\n\
+                   input=none\n\
+                   sample_rate=96000\n\
+                   buffer_size=64\n\
+                   output_channels=8\n\
+                   midi_input=keys\tKeys\n\
+                   midi_inputs=listed\n";
+        let settings: StandaloneSettings = old.parse().unwrap();
+        let expected = StandaloneSettings::default()
+            .with_host("ASIO")
+            .with_output(DeviceChoice::Device(DeviceRef::new("speakers", "Speakers")))
+            .with_input(DeviceChoice::None)
+            .with_sample_rate(96_000)
+            .with_buffer_size(64)
+            .with_output_channels(8)
+            .with_midi_inputs(MidiInputs::Only(vec![DeviceRef::new("keys", "Keys")]));
+        assert_eq!(settings, expected);
+        assert_eq!(settings.midi_output, None);
+        assert_eq!(settings.midi_output_mpe, None);
+        // Without a MIDI output they are written as they were.
+        assert_eq!(settings.to_string(), old);
+
+        // The new keys, in the order they are written, and what is wrong
+        // in them.
+        let text = format!("{old}midi_output=synth\tSynth\nmidi_output_mpe=upper 7\n");
+        let settings: StandaloneSettings = text.parse().unwrap();
+        assert_eq!(settings.midi_output, Some(DeviceRef::new("synth", "Synth")));
+        assert_eq!(settings.midi_output_mpe, Zone::upper(7));
+        for bad in ["middle 3", "lower 0", "upper 16", "lower"] {
+            let text = format!("{old}midi_output_mpe={bad}\n");
+            assert_eq!(
+                text.parse::<StandaloneSettings>(),
+                Err(ParseSetupError::MalformedLine(10)),
+                "{bad}"
+            );
+        }
+        // A device setup's own reader takes the port, and skips the rest.
+        let written = settings.to_string();
+        let setup: DeviceSetup = written
+            .replacen(
+                "manguebyte-standalone-settings 1",
+                "manguebyte-devices-setup 1",
+                1,
+            )
+            .parse()
+            .unwrap();
+        assert_eq!(setup.midi_output, Some(DeviceRef::new("synth", "Synth")));
     }
 
     #[test]

@@ -4,12 +4,13 @@
 //! audio goes to the sound card, its notes come from the MIDI keyboards
 //! the settings name (every connected one by default), and an effect takes
 //! its input from an input device. A plugin that sends notes
-//! ([`Plugin::NOTE_OUTPUT`]) can send them to a MIDI output port, as MIDI
-//! 1.0 or MPE, with [`Standalone::start_with_midi_output`].
+//! ([`Plugin::NOTE_OUTPUT`]) sends them to the MIDI output port the
+//! settings name, as MIDI 1.0 or MPE.
 //!
 //! The devices are those of [`StandaloneOptions::settings`]: devices by
-//! stable identifier, sample rate, buffer size and MIDI input ports, with
-//! fallbacks for what is missing, reported in [`Standalone::report`]. While
+//! stable identifier, sample rate, buffer size, MIDI input ports and the
+//! MIDI output port, with fallbacks for what is missing, reported in
+//! [`Standalone::report`]. While
 //! the plugin plays, the program lists what can be chosen
 //! ([`Standalone::choices`]) and changes any of it
 //! ([`Standalone::apply_settings`] and the `set_` methods) without making
@@ -18,7 +19,10 @@
 //! changes, as [`RatePolicy`] says. [`Standalone::settings`] is the value to
 //! save with the session and hand back in the options of the next run.
 //! [ADR 0021](https://github.com/alessonqueirozdev-hub/manguebyte/blob/main/docs/adr/0021-standalone-device-settings.md)
-//! tells why it works this way.
+//! tells why it works this way, and
+//! [ADR 0023](https://github.com/alessonqueirozdev-hub/manguebyte/blob/main/docs/adr/0023-standalone-midi-output.md)
+//! how the MIDI output port changes while notes go out, without leaving
+//! one hanging.
 //!
 //! The plugin plays with a real transport: a [`TransportClock`] that
 //! starts playing at [`StandaloneOptions::tempo_bpm`], and that the program
@@ -86,9 +90,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use manguebyte_core::spsc::{self, Producer};
-use manguebyte_devices::midi::{
-    MidiError, MidiOutput, MidiOutputThread, MidiProtocol, midi_output_queue,
-};
+use manguebyte_devices::midi::{MidiError, MidiProtocol};
 use manguebyte_devices::{
     DeviceChoice, DeviceError, DeviceEvent, DeviceInfo, DeviceManager, DeviceRef, DeviceSetup,
     DeviceSnapshot, DeviceSummary, Direction, EngineFormat, Fallback, HostInfo, RestoreReport,
@@ -101,6 +103,7 @@ use manguebyte_plugin::output::OutputProtocol;
 use manguebyte_plugin::{Plugin, StateError, load_state, save_state};
 
 pub use engine::Engine;
+use engine::ProtocolSwitch;
 pub use settings::{
     COMMON_BUFFER_SIZES, COMMON_SAMPLE_RATES, DeviceOption, MidiInputs, MidiPortOption, RatePolicy,
     SettingsChoices, SettingsReport, StandaloneSettings,
@@ -112,6 +115,17 @@ const MIDI_OUTPUT_QUEUE: usize = 8_192;
 
 /// The sample rate the plugin starts at when no device tells it one.
 const FALLBACK_SAMPLE_RATE: u32 = 48_000;
+
+/// The protocol the plugin's notes are written in for a port that speaks
+/// `port`, or for no port, with MPE in `mpe` asked for.
+fn output_protocol(port: Option<MidiProtocol>, mpe: Option<Zone>) -> OutputProtocol {
+    match (port, mpe) {
+        // A port that speaks MIDI 2.0 takes every note as it is.
+        (Some(MidiProtocol::Midi2), _) => OutputProtocol::Midi2,
+        (_, Some(zone)) => OutputProtocol::Mpe(zone),
+        _ => OutputProtocol::Midi1,
+    }
+}
 
 /// How to run a plugin standalone.
 #[derive(Debug, Clone, PartialEq)]
@@ -195,9 +209,9 @@ pub struct Standalone<P: Plugin> {
     params: Arc<P::Params>,
     notes: Mutex<Producer<MidiMessage>>,
     transport: ClockControl,
-    /// Runs the engine. Before the MIDI output thread, which it feeds, so
-    /// that it is dropped first, and the thread sends what the last blocks
-    /// left.
+    /// Runs the engine, and the MIDI output port the plugin's notes go
+    /// to. Dropping it stops the engine, sends what the last blocks left
+    /// for the port and ends the notes that still sound there.
     manager: DeviceManager,
     settings: StandaloneSettings,
     rate_policy: RatePolicy,
@@ -206,12 +220,17 @@ pub struct Standalone<P: Plugin> {
     format: EngineFormat,
     report: SettingsReport,
     midi_problems: Vec<MidiError>,
-    /// The thread that sends the plugin's notes to the MIDI output port,
-    /// and the port's name.
-    midi_output: Option<(MidiOutputThread, String)>,
+    /// Changes the protocol the engine writes the plugin's notes in, for
+    /// a plugin that sends notes.
+    midi_protocol: Option<ProtocolSwitch>,
 }
 
-/// Where a plugin that sends notes sends them when it runs standalone.
+/// Where a plugin that sends notes sends them when it runs standalone,
+/// for [`Standalone::start_with_midi_output`].
+///
+/// The same is now in the settings, [`StandaloneSettings::midi_output`]
+/// and [`StandaloneSettings::midi_output_mpe`], which can be changed while
+/// the plugin plays and are saved with the rest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MidiOutputOptions {
     /// The output port, as [`MidiPortInfo::id`] names it.
@@ -255,22 +274,32 @@ impl<P: Plugin> Standalone<P> {
     /// a missing keyboard should not stop the sound. With no output device
     /// at all the plugin starts and waits; [`poll_devices`](Self::poll_devices)
     /// starts it when one appears.
+    ///
+    /// A plugin that sends notes ([`Plugin::NOTE_OUTPUT`]) sends what it
+    /// sends out, from [`Plugin::process_with_output`], to the MIDI output
+    /// port of the settings, if they name one, each packet on time (see
+    /// [`MidiTransmitter`](manguebyte_devices::midi::MidiTransmitter)). A
+    /// port that cannot be opened is a fallback in the report, and the
+    /// plugin plays on.
     pub fn start(options: StandaloneOptions) -> Result<Self, StandaloneError> {
-        Self::start_on(DeviceManager::new(), options, None)
+        Self::start_on(DeviceManager::new(), options)
     }
 
-    /// [`start`](Self::start), and sends what the plugin sends out, from
-    /// [`Plugin::process_with_output`], to a MIDI output port, each packet
-    /// on time (see [`MidiTransmitter`](manguebyte_devices::midi::MidiTransmitter)).
+    /// [`start`](Self::start), with the MIDI output port of `midi_output`
+    /// in place of the settings' own.
     ///
-    /// For a plugin that does not set [`Plugin::NOTE_OUTPUT`] the port is
-    /// not opened. A port that cannot be opened is listed in
-    /// [`midi_problems`](Self::midi_problems), and the plugin plays on.
+    /// Kept for programs written before the MIDI output was in the
+    /// settings: new ones set [`StandaloneSettings::midi_output`] and
+    /// [`StandaloneSettings::midi_output_mpe`] in the options instead,
+    /// which [`settings`](Self::settings) then saves, and change them
+    /// while the plugin plays with [`set_midi_output`](Self::set_midi_output).
     pub fn start_with_midi_output(
-        options: StandaloneOptions,
+        mut options: StandaloneOptions,
         midi_output: MidiOutputOptions,
     ) -> Result<Self, StandaloneError> {
-        Self::start_on(DeviceManager::new(), options, Some(midi_output))
+        options.settings.midi_output = Some(DeviceRef::new(midi_output.port_id, String::new()));
+        options.settings.midi_output_mpe = midi_output.mpe;
+        Self::start(options)
     }
 
     /// [`start`](Self::start) on the devices of `manager` instead of the
@@ -279,16 +308,13 @@ impl<P: Plugin> Standalone<P> {
     /// [`DeviceManager::with_audio_backend`] for a driver model of the
     /// program's own. The manager is the standalone's from then on; its
     /// crossfade, error handler and drift correction, set before, are
-    /// kept. `midi_output` is as in
-    /// [`start_with_midi_output`](Self::start_with_midi_output), on the
-    /// system's MIDI ports.
+    /// kept, and its MIDI ports, a headless manager's included, are the
+    /// ones the plugin listens and sends to.
     pub fn start_on(
         mut manager: DeviceManager,
         options: StandaloneOptions,
-        midi_output: Option<MidiOutputOptions>,
     ) -> Result<Self, StandaloneError> {
         let block_size = options.block_size.max(1);
-        let mut midi_problems = Vec::new();
         let ports = manager
             .devices()
             .map(|snapshot| snapshot.midi_inputs)
@@ -319,23 +345,15 @@ impl<P: Plugin> Standalone<P> {
             .with_aux_channels(options.aux_channels);
         let params = engine.params();
 
-        let mut sender = None;
-        if let Some(choice) = midi_output.filter(|_| P::NOTE_OUTPUT) {
-            match MidiOutput::open(&choice.port_id) {
-                Ok(port) => {
-                    let protocol = match (port.protocol(), choice.mpe) {
-                        (MidiProtocol::Midi1, Some(zone)) => OutputProtocol::Mpe(zone),
-                        (MidiProtocol::Midi1, None) => OutputProtocol::Midi1,
-                        // A port that speaks MIDI 2.0, when there are any.
-                        _ => OutputProtocol::Midi2,
-                    };
-                    let (transmitter, queue) = midi_output_queue(MIDI_OUTPUT_QUEUE);
-                    engine = engine.with_midi_output(transmitter, protocol);
-                    let name = port.name().to_owned();
-                    sender = Some((port.spawn(queue), name));
-                }
-                Err(error) => midi_problems.push(error),
-            }
+        // The port itself is opened with the setup, by the manager, and
+        // the protocol follows it once it is open.
+        let mut midi_protocol = None;
+        if P::NOTE_OUTPUT {
+            let transmitter = manager.midi_output_transmitter(MIDI_OUTPUT_QUEUE);
+            let protocol = output_protocol(None, options.settings.midi_output_mpe);
+            let (with_output, switch) = engine.with_switchable_midi_output(transmitter, protocol);
+            engine = with_output;
+            midi_protocol = Some(switch);
         }
 
         let restored = manager.start_engine(&setup, format, engine)?;
@@ -350,8 +368,8 @@ impl<P: Plugin> Standalone<P> {
             rate_policy: options.rate_policy,
             format,
             report: SettingsReport::default(),
-            midi_problems,
-            midi_output: sender,
+            midi_problems: Vec::new(),
+            midi_protocol,
         };
         let mut fallbacks = restored.fallbacks;
         let mut error = None;
@@ -360,8 +378,33 @@ impl<P: Plugin> Standalone<P> {
             Ok(None) => {}
             Err(problem) => error = Some(problem.to_string()),
         }
-        app.report = app.current_report(fallbacks, false, error);
+        let report = app.current_report(fallbacks, false, error);
+        app.finish(report);
         Ok(app)
+    }
+
+    /// Keeps `report` as the last one, and brings what follows from it up
+    /// to date: the MIDI output's problems, and the protocol the plugin's
+    /// notes are written in for the port that is open.
+    fn finish(&mut self, report: SettingsReport) -> &SettingsReport {
+        self.midi_problems = report
+            .fallbacks
+            .iter()
+            .filter_map(|fallback| match fallback {
+                Fallback::MidiPortMissing {
+                    direction: Direction::Output,
+                    reason,
+                    ..
+                } => Some(MidiError::Connect(reason.clone())),
+                _ => None,
+            })
+            .collect();
+        let port = self.manager.midi_output_protocol();
+        if let Some(switch) = &mut self.midi_protocol {
+            switch.set(output_protocol(port, self.settings.midi_output_mpe));
+        }
+        self.report = report;
+        &self.report
     }
 
     /// The format to start with when nothing is known of the devices.
@@ -433,7 +476,7 @@ impl<P: Plugin> Standalone<P> {
         policy: RatePolicy,
         ports: &[DeviceSummary],
     ) -> DeviceSetup {
-        let mut setup = settings.to_setup(P::LAYOUT.inputs > 0, ports);
+        let mut setup = settings.to_setup(P::LAYOUT.inputs > 0, P::NOTE_OUTPUT, ports);
         if let (None, RatePolicy::Fixed(rate)) = (setup.sample_rate, policy) {
             setup.sample_rate = (rate > 0).then_some(rate);
         }
@@ -520,6 +563,7 @@ impl<P: Plugin> Standalone<P> {
             plugin_sample_rate: self.format.sample_rate,
             prepared_again,
             midi_inputs: manager.midi_inputs(),
+            midi_output: manager.midi_output().cloned(),
             fallbacks,
             error,
             swap: manager.last_swap(),
@@ -567,8 +611,7 @@ impl<P: Plugin> Standalone<P> {
                 }
             }
         };
-        self.report = report;
-        &self.report
+        self.finish(report)
     }
 
     /// Changes the audio host, by [`HostInfo::name`], or goes back to the
@@ -690,8 +733,70 @@ impl<P: Plugin> Standalone<P> {
             }
             self.manager.disable_midi_input(id);
         }
-        self.report = self.current_report(fallbacks, false, None);
-        &self.report
+        let report = self.current_report(fallbacks, false, None);
+        self.finish(report)
+    }
+
+    /// Sends the plugin's notes to the MIDI output port with this
+    /// identifier, among those [`choices`](Self::choices) lists, or to
+    /// none with `None`, without touching the audio, for a plugin that
+    /// sends notes ([`Plugin::NOTE_OUTPUT`]); for another, only the
+    /// settings change.
+    ///
+    /// The port that played before is first sent a note-off for every
+    /// note it plays, so that none hangs there, and the note-offs the
+    /// plugin sends later for those notes go nowhere: every note-on
+    /// reaches one port, and that port one note-off for it. Notes still
+    /// waiting for their moment go to the new port. The audio thread
+    /// knows nothing of the change: it queues the plugin's notes, and the
+    /// thread that sends them finds the port open when each is due.
+    ///
+    /// A port that cannot be opened is reported as a fallback, and no port
+    /// is open; it stays in the settings, and
+    /// [`poll_devices`](Self::poll_devices) opens it when it appears.
+    pub fn set_midi_output(&mut self, id: Option<&str>) -> &SettingsReport {
+        let port = id.map(|id| self.named_midi_output(id));
+        self.settings.midi_output = port.clone();
+        let mut fallbacks = Vec::new();
+        if P::NOTE_OUTPUT {
+            if let Err(error) = self.manager.set_midi_output(port.clone()) {
+                fallbacks.extend(port.map(|wanted| Fallback::MidiPortMissing {
+                    direction: Direction::Output,
+                    wanted,
+                    reason: error.to_string(),
+                }));
+            }
+        }
+        let report = self.current_report(fallbacks, false, None);
+        self.finish(report)
+    }
+
+    /// Writes the plugin's notes to the MIDI output port as MPE in `zone`,
+    /// or as plain MIDI 1.0 with `None`, while it plays. The notes sounding
+    /// are ended first, in the way they were written, so that none hangs
+    /// on the port; the engine takes the change at the start of its next
+    /// block. A port that speaks MIDI 2.0 takes every note as it is,
+    /// whatever this says.
+    pub fn set_midi_output_mpe(&mut self, zone: Option<Zone>) -> &SettingsReport {
+        self.settings.midi_output_mpe = zone;
+        let report = self.current_report(Vec::new(), false, None);
+        self.finish(report)
+    }
+
+    /// A MIDI output port by identifier, with its name when it is
+    /// connected.
+    fn named_midi_output(&self, id: &str) -> DeviceRef {
+        self.manager
+            .devices()
+            .ok()
+            .and_then(|snapshot| {
+                snapshot
+                    .midi_outputs
+                    .iter()
+                    .find(|port| port.id == id)
+                    .map(DeviceRef::from)
+            })
+            .unwrap_or_else(|| DeviceRef::new(id, String::new()))
     }
 
     /// Lists the devices and follows what changed since the last call, as
@@ -703,6 +808,11 @@ impl<P: Plugin> Standalone<P> {
     ///
     /// Returns the report of what changed, or `None` when nothing did.
     pub fn poll_devices(&mut self) -> Option<&SettingsReport> {
+        // A protocol change the engine could not take yet, because it had
+        // not taken the one before.
+        if let Some(switch) = &mut self.midi_protocol {
+            switch.hand_over();
+        }
         let events = self.manager.poll_devices();
         let mut changed = false;
         let mut fallbacks = Vec::new();
@@ -760,13 +870,14 @@ impl<P: Plugin> Standalone<P> {
             Ok(None) => {}
             Err(problem) => error = Some(problem.to_string()),
         }
-        self.report = self.current_report(fallbacks, prepared_again, error);
-        Some(&self.report)
+        let report = self.current_report(fallbacks, prepared_again, error);
+        Some(self.finish(report))
     }
 
     /// What can be chosen now: hosts, the devices with the rates and
     /// buffer sizes each accepts (inputs only for a plugin with inputs),
-    /// and MIDI input ports, each marked open or not.
+    /// MIDI input ports, each marked open or not, and MIDI output ports
+    /// (only for a plugin that sends notes), the one in use marked open.
     pub fn choices(&self) -> Result<SettingsChoices, DeviceError> {
         let snapshot = self.manager.devices()?;
         let describe = |direction: Direction, devices: &[DeviceSummary]| {
@@ -787,6 +898,7 @@ impl<P: Plugin> Standalone<P> {
                 .collect::<Vec<_>>()
         };
         let open = self.manager.midi_inputs();
+        let sending_to = self.manager.midi_output().map(|port| port.id.as_str());
         Ok(SettingsChoices {
             hosts: self.manager.hosts(),
             host: self.manager.host_name(),
@@ -804,6 +916,18 @@ impl<P: Plugin> Standalone<P> {
                     open: open.iter().any(|known| known.id == port.id),
                 })
                 .collect(),
+            midi_outputs: if P::NOTE_OUTPUT {
+                snapshot
+                    .midi_outputs
+                    .iter()
+                    .map(|port| MidiPortOption {
+                        port: port.clone(),
+                        open: sending_to == Some(port.id.as_str()),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
         })
     }
 
@@ -914,9 +1038,11 @@ impl<P: Plugin> Standalone<P> {
             .collect()
     }
 
-    /// Why the MIDI output port could not be opened, if it could not.
-    /// Input ports that could not be opened are in the
-    /// [report](Self::report)'s fallbacks.
+    /// Why the MIDI output port of the settings could not be opened by the
+    /// last change, if it could not, each as a [`MidiError::Connect`] with
+    /// the reason. The same are [`Fallback::MidiPortMissing`] entries in
+    /// the [report](Self::report)'s fallbacks, which also hold the input
+    /// ports that could not be opened.
     pub fn midi_problems(&self) -> &[MidiError] {
         &self.midi_problems
     }
@@ -924,12 +1050,15 @@ impl<P: Plugin> Standalone<P> {
     /// Name of the MIDI output port the plugin's notes are sent to, if one
     /// is open.
     pub fn midi_output_name(&self) -> Option<&str> {
-        self.midi_output.as_ref().map(|(_, name)| name.as_str())
+        self.manager.midi_output().map(|port| port.name.as_str())
     }
 
-    /// How many messages the MIDI output port refused, if one is open.
+    /// How many messages the MIDI output ports refused since the plugin
+    /// started, if one is open.
     pub fn midi_output_errors(&self) -> Option<u64> {
-        self.midi_output.as_ref().map(|(thread, _)| thread.errors())
+        self.manager
+            .midi_output()
+            .map(|_| self.manager.midi_output_errors())
     }
 
     /// Captures the plugin's state as text.
