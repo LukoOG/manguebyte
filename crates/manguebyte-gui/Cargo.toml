@@ -23,8 +23,18 @@ manguebyte-plugin.workspace = true
 manguebyte-ui.workspace = true
 # The child window inside the host's window, and the headless backend.
 manguebyte-window.workspace = true
+# Only with the `standalone` feature: the glue between a running
+# standalone plugin and the audio settings view (`audio_settings`). They
+# bring the system's audio and MIDI libraries, which an editor inside a
+# host never needs, so they are left out by default (ADR 0022).
+manguebyte-devices = { workspace = true, optional = true }
+manguebyte-standalone = { workspace = true, optional = true }
 
 [features]
+# Adds `audio_settings`: fills `manguebyte_ui::audio_settings`' model in
+# from a running `manguebyte_standalone::Standalone` and carries out its
+# requests. Only adds API.
+standalone = ["dep:manguebyte-devices", "dep:manguebyte-standalone"]
 # Adds `Editor::on_headless_open` and `HeadlessEditor`: an editor given a
 # hook opens in the headless window backend whatever the parent is, so
 # that tests can drive it through a real plugin wrapper on every system.
@@ -35,7 +45,10 @@ headless = []
 # The crate's own tests use the headless mode.
 # A path, not the workspace entry: cargo drops path-only dev-dependencies
 # when it publishes, and a crate cannot depend on itself from crates.io.
-manguebyte-gui = { path = ".", features = ["headless"] }
+manguebyte-gui = { path = ".", features = ["headless", "standalone"] }
+# The headless device backend the audio settings glue is tested on.
+manguebyte-devices.workspace = true
+manguebyte-standalone.workspace = true
 # Real windows for the Win32 tests of the glue.
 manguebyte-window = { workspace = true, features = ["testing"] }
 # The test plugins and the wrappers they are driven through.

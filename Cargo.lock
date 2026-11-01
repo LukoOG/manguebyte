@@ -743,11 +743,13 @@ version = "0.1.0"
 dependencies = [
  "manguebyte-clap",
  "manguebyte-core",
+ "manguebyte-devices",
  "manguebyte-dsp",
  "manguebyte-gfx",
  "manguebyte-gui",
  "manguebyte-params",
  "manguebyte-plugin",
+ "manguebyte-standalone",
  "manguebyte-ui",
  "manguebyte-vst3",
  "manguebyte-window",

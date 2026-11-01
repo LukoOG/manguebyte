@@ -98,6 +98,15 @@
 //! whether the feature is on or not, so a build that turns it on through
 //! another crate changes no editor.
 //!
+//! # Audio settings of a standalone program
+//!
+//! The `standalone` cargo feature adds the `audio_settings` module: the glue
+//! between a running `manguebyte_standalone::Standalone` and the ready-made
+//! view of `manguebyte_ui::audio_settings`, which a program shows in a
+//! floating panel or a window of its own. It is off by default because it
+//! brings the system's audio and MIDI libraries, which an editor inside a
+//! host never needs (ADR 0022).
+//!
 //! # Hygiene
 //!
 //! The crate has no `unsafe` code, keeps no global state and starts no
@@ -107,6 +116,8 @@
 #![forbid(unsafe_code)]
 
 mod app;
+#[cfg(feature = "standalone")]
+pub mod audio_settings;
 mod editor;
 #[cfg(feature = "headless")]
 mod headless;
