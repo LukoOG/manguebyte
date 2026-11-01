@@ -819,6 +819,39 @@ break the API.
   1.0 by the default translation, through `OutputTranslator`, from memory
   set aside before audio runs.
 - Limits: TECH_DEBT 91.
+- **Device settings for a standalone plugin** ([ADR 0021](docs/adr/0021-standalone-device-settings.md)).
+  The standalone runner runs its engine under a `DeviceManager`, on the
+  devices `StandaloneOptions::settings` names: a `StandaloneSettings`
+  with the output and input devices by stable identifier (and a name to
+  find them by), the sample rate, the hardware buffer size, channel
+  counts and the MIDI input ports (`MidiInputs::All`, which also takes
+  ports plugged in later, `MidiInputs::NONE` or a list). What cannot be
+  had falls back, and `Standalone::report` says so.
+  - While the plugin plays: `choices` lists the hosts, the devices with
+    the rates and buffer sizes each accepts, and the MIDI input ports,
+    open or not; `apply_settings`, `set_host`, `set_output_device`,
+    `set_input_device`, `set_sample_rate`, `set_buffer_size` and
+    `set_midi_input` change them with the same plugin instance, its
+    parameters, state and editor untouched. Each returns a
+    `SettingsReport`: the devices that play, their rate, buffer and
+    channels, the plugin's rate and whether it was prepared again, the
+    open ports, the fallbacks, the swap and any error; a change that
+    fails is undone.
+  - `StandaloneOptions::rate_policy`: under `RatePolicy::FollowDevice`,
+    the default, a device at another rate prepares the plugin again at
+    it, after a faded gap; under `RatePolicy::Fixed` the plugin keeps its
+    rate, the device is resampled at its edge, and a change of device
+    crossfades where the system can play both.
+  - `StandaloneSettings` is written as text, the device setup's lines
+    under a header of its own, for a program to save with its session
+    and hand back in the next run's options.
+  - `poll_devices` follows devices and ports as they come and go;
+    `start_on` runs on any device manager, such as the headless one;
+    `params_arc` hands an editor the parameters; `Engine` implements
+    `AudioCallback` and gains `prepare_for`.
+  - Tested on the headless backend, with the audio path under the
+    counting allocator before and after a change of device. No
+    ready-made settings view yet. Limits: TECH_DEBT 114.
 
 ### Hosting
 
@@ -1403,6 +1436,16 @@ Floating panels for an effect chain, which Parabolic asked for:
 
 ### Breaking
 
+- Device settings for a standalone plugin ([ADR 0021](docs/adr/0021-standalone-device-settings.md)):
+  `StandaloneOptions` loses `output` and `open_midi_inputs`, which are
+  now in `StandaloneOptions::settings` (`sample_rate`, `buffer_size`,
+  `output_channels`, `midi_inputs: MidiInputs::NONE`), gains
+  `rate_policy`, and is no longer `Copy`. MIDI input ports that cannot
+  be opened are fallbacks in `Standalone::report` instead of entries in
+  `midi_problems`, which keeps the MIDI output's. With no output device
+  `Standalone::start` succeeds and waits for one instead of returning an
+  error, and `device_name` is then empty. A plugin's rate follows the
+  device's, so it can be prepared again while it runs.
 - In `manguebyte-ui`: an Escape the focused widget does not use now
   goes to the widgets containing it, innermost first, before it is left
   to the host (a floating panel closes on it). `Root::scene` lists the
@@ -1528,6 +1571,14 @@ Floating panels for an effect chain, which Parabolic asked for:
     runner has the sequencer, on Linux, and checks that every word
     arrives.
   - Limits: TECH_DEBT 82 and 90.
+- `DeviceManager::preview` works out what a setup would open (devices,
+  their settings, MIDI ports and fallbacks) without opening or changing
+  anything, and `DeviceManager::apply_with_format` applies a setup and
+  gives a callback started with `start_engine` a new format: the running
+  device fades out and stops, the callback is released and prepared
+  again, and the new devices fade in, reported as a gap. The standalone
+  runner follows a device to another sample rate with them
+  ([ADR 0021](docs/adr/0021-standalone-device-settings.md)).
 
 ## [0.1.0] - 2026-10-19
 

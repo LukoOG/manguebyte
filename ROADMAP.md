@@ -337,6 +337,14 @@ Write a processor once and ship it in every format.
   names parameters were made with; not tried in a DAW (TECH_DEBT 113)
 - ✅ Standalone application wrapper: sound card, MIDI ports in and out,
   input for effects
+- 🚧 Standalone device settings (ADR 0021): devices by identifier, rate,
+  buffer size and MIDI input ports chosen in the options and changed while
+  the plugin plays, with the same plugin instance, prepared again only
+  when its rate changes (or kept at a fixed rate and resampled at the
+  device's edge); a report of what each change opened and what fell back;
+  settings saved as text. Tested on the headless backend only; no
+  ready-made settings view, and the MIDI output port cannot be changed
+  while it runs (TECH_DEBT 114)
 - 🚧 Aratu Bridge (`plugins/aratu-bridge`): an example CLAP, VST 3 and AU
   instrument that plays an Aratu page's music in a DAW, in time with its
   transport, from the control calls and events the page sends over a
