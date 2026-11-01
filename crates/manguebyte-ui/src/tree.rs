@@ -84,6 +84,7 @@ impl Node {
         match self.shown {
             Shown::All => true,
             Shown::Only(at) => self.kids.get(at) == Some(&child),
+            Shown::First(count) => self.kids.iter().take(count).any(|&kid| kid == child),
         }
     }
 }

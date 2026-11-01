@@ -1,4 +1,4 @@
-//! A switch for a parameter that is on or off.
+//! A switch for a parameter, or a state, that is on or off.
 
 use manguebyte_gfx::{Align, Circle, Point, Rect, RoundedRect, Scene, Size, TextStyle};
 
@@ -10,7 +10,7 @@ use crate::access::{AccessNode, Action, Actions, Role};
 use crate::event::{Button, Event, Handled, Key, KeyEvent};
 use crate::motion::{Animated, Lerp};
 use crate::param::{ParamBinding, ParamHandle};
-use crate::source::TextSource;
+use crate::source::{State, TextSource};
 use crate::widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
 
 /// Space between the switch and its name.
@@ -20,7 +20,8 @@ const SPACE: f32 = 6.0;
 /// ring around it.
 const INSET: f32 = 3.0;
 
-/// A switch and the parameter's name beside it.
+/// A switch and its name beside it, for a parameter ([`toggle`]) or for a
+/// `State<bool>` the application keeps ([`Toggle::from_state`]).
 ///
 /// The parameter is on when its normalized value is at least one half, as
 /// a [`BoolParam`](manguebyte_params::BoolParam) is. A click, or Space or
@@ -32,7 +33,7 @@ const INSET: f32 = 3.0;
 /// stay with the host, which may use Space to start and stop its
 /// transport. Tab and [`Action::Focus`] give it the focus.
 pub struct Toggle {
-    binding: ParamBinding,
+    bound: Bound,
     label: Option<TextSource>,
     name: Cached<TextStyle>,
     /// Where the thumb is, from 0 (off) to 1 (on), moving on a spring;
@@ -72,12 +73,67 @@ pub fn toggle(param: ParamHandle) -> Toggle {
     Toggle::new(param)
 }
 
+/// What a switch shows and changes.
+enum Bound {
+    Param(ParamBinding),
+    State {
+        state: State<bool>,
+        /// The value last read.
+        on: bool,
+    },
+}
+
+/// A switch's name: its label, or else its parameter's name.
+fn name_of<'a>(label: Option<&'a TextSource>, bound: &'a Bound) -> &'a str {
+    match (label, bound) {
+        (Some(label), _) => label.as_str(),
+        (None, Bound::Param(binding)) => binding.handle().name(),
+        (None, Bound::State { .. }) => "",
+    }
+}
+
 impl Toggle {
     /// A switch for `param`, named by the parameter.
     pub fn new(param: ParamHandle) -> Toggle {
         Toggle {
-            binding: ParamBinding::new(param),
+            bound: Bound::Param(ParamBinding::new(param)),
             label: None,
+            name: Cached::new(),
+            thumb: None,
+        }
+    }
+
+    /// A switch named `name`, fixed or read once per frame (see
+    /// [`TextSource`]), showing and turning over the value in `on`: a
+    /// choice of the application's own that is no parameter, such as
+    /// whether a MIDI port is open. The state is read once per frame; a
+    /// click, Space, Enter or [`Action::Press`] sets it to the other value
+    /// once, starting from what it holds at that moment. Its value for
+    /// assistive technology is "On" or "Off".
+    ///
+    /// ```
+    /// use manguebyte_gfx::Size;
+    /// use manguebyte_ui::testing::Harness;
+    /// use manguebyte_ui::{Role, State, Toggle};
+    ///
+    /// let open = State::new(false);
+    /// let view = Toggle::from_state("Keys 49", open.clone());
+    /// let mut ui = Harness::new(view, Size::new(160.0, 30.0), 1.0);
+    /// ui.frame();
+    /// ui.click(ui.get(Role::Switch, "Keys 49").center());
+    /// assert!(open.get());
+    /// // The application changes it too.
+    /// open.set(false);
+    /// ui.frame();
+    /// assert_eq!(ui.get(Role::Switch, "Keys 49").node.state.checked, Some(false));
+    /// ```
+    pub fn from_state(name: impl Into<TextSource>, on: State<bool>) -> Toggle {
+        Toggle {
+            bound: Bound::State {
+                on: on.get(),
+                state: on,
+            },
+            label: Some(name.into()),
             name: Cached::new(),
             thumb: None,
         }
@@ -102,23 +158,35 @@ impl Toggle {
     }
 
     fn name_text(&self) -> &str {
-        match &self.label {
-            Some(label) => label.as_str(),
-            None => self.binding.handle().name(),
-        }
+        name_of(self.label.as_ref(), &self.bound)
     }
 
     fn is_on(&self) -> bool {
-        self.binding.shown() >= 0.5
+        match &self.bound {
+            Bound::Param(binding) => binding.shown() >= 0.5,
+            Bound::State { on, .. } => *on,
+        }
+    }
+
+    fn value_text(&self) -> String {
+        match &self.bound {
+            Bound::Param(binding) => binding.text(),
+            Bound::State { on: true, .. } => String::from("On"),
+            Bound::State { on: false, .. } => String::from("Off"),
+        }
     }
 
     fn press(&mut self, cx: &mut EventCx<'_>) {
-        let next = if self.binding.current() >= 0.5 {
-            0.0
-        } else {
-            1.0
-        };
-        self.binding.set_once(cx.context(), next);
+        match &mut self.bound {
+            Bound::Param(binding) => {
+                let next = if binding.current() >= 0.5 { 0.0 } else { 1.0 };
+                binding.set_once(cx.context(), next);
+            }
+            Bound::State { state, on } => {
+                *on = !state.get();
+                state.set(*on);
+            }
+        }
         cx.request_paint();
     }
 }
@@ -126,7 +194,7 @@ impl Toggle {
 impl Widget for Toggle {
     fn access(&self, _cx: &AccessCx<'_>) -> AccessNode {
         AccessNode::new(Role::Switch, self.name_text())
-            .with_value(self.binding.text())
+            .with_value(self.value_text())
             .with_checked(self.is_on())
             .with_actions(Actions::PRESS)
     }
@@ -147,8 +215,20 @@ impl Widget for Toggle {
 
     fn update(&mut self, cx: &mut UpdateCx<'_>) {
         super::poll_label(&mut self.label, &mut self.name, cx);
-        if self.binding.poll(cx.now()) {
-            cx.request_paint();
+        match &mut self.bound {
+            Bound::Param(binding) => {
+                if binding.poll(cx.now()) {
+                    cx.request_paint();
+                }
+            }
+            Bound::State { state, on } => {
+                let now = state.get();
+                if now != *on {
+                    *on = now;
+                    cx.request_paint();
+                    cx.request_access_update();
+                }
+            }
         }
         // The thumb slides to where the value is, on a spring.
         let target = if self.is_on() { 1.0 } else { 0.0 };
@@ -212,11 +292,8 @@ impl Widget for Toggle {
 
         let text_x = pill.right() + SPACE;
         let room = (rect.right() - MARGIN - text_x).max(0.0);
-        let (label, binding) = (self.label.as_ref().map(TextSource::as_str), &self.binding);
-        let name = self.name.get(room, style, || {
-            let text = label.unwrap_or_else(|| binding.handle().name());
-            line(text, &style, room)
-        });
+        let text = name_of(self.label.as_ref(), &self.bound);
+        let name = self.name.get(room, style, || line(text, &style, room));
         let y = middle - line_height(&style) * 0.5;
         draw_text(scene, name, Point::new(text_x, y));
     }

@@ -6,11 +6,11 @@
 //! | [`Knob`] | [`Slider`](crate::Role::Slider) | a parameter, as an arc and as text | the parameter, by dragging up and down, the wheel, the keys and a typed value |
 //! | [`Slider`] | [`Slider`](crate::Role::Slider) | a parameter, as a track and as text | the parameter, by dragging sideways, the wheel, the keys and a typed value |
 //! | [`TextField`] | [`TextInput`](crate::Role::TextInput) | one line of text from a [`State`](crate::State) | the text, by typing, the clipboard and input methods |
-//! | [`Toggle`] | [`Switch`](crate::Role::Switch) | a parameter that is on or off | the parameter, by clicking, Space and Enter |
+//! | [`Toggle`] | [`Switch`](crate::Role::Switch) | a parameter, or a `State<bool>`, that is on or off | the parameter or the state, by clicking, Space and Enter |
 //! | [`Pill`] | [`Button`](crate::Role::Button) | a label, a status dot | a count of presses the application polls, by clicking, Space and Enter |
 //! | [`FloatingPanel`] | [`Region`](crate::Role::Region) | a title bar and any view, over the interface without stopping it | where it is and whether it is open, by its title bar, its close button and Escape |
 //! | [`ActionButton`] | [`Button`](crate::Role::Button) | a label from a [`TextSource`], an optional icon, a primary, secondary or destructive look, disabled or not | a count of presses the application polls, by clicking, Space and Enter |
-//! | [`ComboBox`] | [`ComboBox`](crate::Role::ComboBox) | a parameter with a few named values | the parameter, from a menu of its values, the arrows and the wheel |
+//! | [`ComboBox`] | [`ComboBox`](crate::Role::ComboBox) | a parameter with a few named values, or [`Choices`] from a [`State`](crate::State) that change while it runs | the parameter or the choice, from a menu of its values, the arrows and the wheel |
 //! | [`Meter`] | [`Meter`](crate::Role::Meter) | a level the audio thread publishes, as a bar and as text | nothing |
 //! | [`Canvas`] | [`Image`](crate::Role::Image) | whatever a closure draws | nothing |
 //! | [`ImageView`] | [`Image`](crate::Role::Image) | an image, fitted to its rectangle, sharp at any scale it has a version for | nothing |
@@ -72,7 +72,7 @@ mod zone_map;
 
 pub use action::{ActionButton, action_button};
 pub use canvas::{Canvas, CanvasCx, canvas};
-pub use combo::{ComboBox, MAX_CHOICES, combo};
+pub use combo::{Choices, ComboBox, MAX_CHOICES, combo};
 pub use container::Container;
 pub use dialog::{ConfirmDialog, DialogResult, DialogState, confirm_dialog};
 pub use envelope::{EnvelopeEditor, envelope};

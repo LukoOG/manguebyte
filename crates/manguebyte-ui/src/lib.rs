@@ -212,8 +212,8 @@ pub use tree::NodeId;
 pub use view::{Children, IntoView, View, card, column, filled, panel, row, stack};
 pub use widget::{AccessCx, EventCx, MeasureCx, PaintCx, Shown, UpdateCx, Widget};
 pub use widgets::{
-    ActionButton, Canvas, CanvasCx, ComboBox, ConfirmDialog, Container, DialogResult, DialogState,
-    Fit, Icon, ImageView, Knob, Label, ListData, ListEvent, ListState, ListView,
+    ActionButton, Canvas, CanvasCx, Choices, ComboBox, ConfirmDialog, Container, DialogResult,
+    DialogState, Fit, Icon, ImageView, Knob, Label, ListData, ListEvent, ListState, ListView,
     MAX_PIXELS_PER_FRAME, MAX_ZERO_SEARCH, Marker, MarkerKind, MarkerOrder, Meter, Pages, Pill,
     RowCx, ScrollView, ScrollViewBuilder, Slider, TextField, Toggle, Waveform, WaveformEvent,
     WaveformState, WaveformView, ZOOM_STEP, action_button, canvas, combo, confirm_dialog, image,

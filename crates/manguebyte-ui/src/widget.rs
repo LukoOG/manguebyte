@@ -270,6 +270,9 @@ pub enum Shown {
     /// Only the child at this position among its children, from 0; none
     /// if there is no child there.
     Only(usize),
+    /// The first this many children, in order: a list whose length
+    /// changes while the interface runs, out of slots built once.
+    First(usize),
 }
 
 impl Shown {
@@ -278,6 +281,7 @@ impl Shown {
         match self {
             Shown::All => true,
             Shown::Only(at) => at == child,
+            Shown::First(count) => child < count,
         }
     }
 }
