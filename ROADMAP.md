@@ -338,15 +338,17 @@ Write a processor once and ship it in every format.
 - ✅ Standalone application wrapper: sound card, MIDI ports in and out,
   input for effects
 - 🚧 Standalone device settings (ADR 0021): devices by identifier, rate,
-  buffer size and MIDI input ports chosen in the options and changed while
-  the plugin plays, with the same plugin instance, prepared again only
-  when its rate changes (or kept at a fixed rate and resampled at the
-  device's edge); a report of what each change opened and what fell back;
+  buffer size, MIDI input ports and the MIDI output port for the plugin's
+  notes (ADR 0023, with MPE or not) chosen in the options and changed
+  while the plugin plays, with the same plugin instance, prepared again
+  only when its rate changes (or kept at a fixed rate and resampled at
+  the device's edge); a change of MIDI output port leaves no note
+  hanging; a report of what each change opened and what fell back;
   settings saved as text; a ready-made audio settings view in
   `manguebyte-ui`, glued to the standalone by `manguebyte-gui`'s
   `standalone` feature (ADR 0022). Tested on the headless backend only;
-  the view has no host, channel or MIDI output section, and the MIDI
-  output port cannot be changed while it runs (TECH_DEBT 114, 115)
+  the view has no host, channel or MIDI output section (TECH_DEBT 114,
+  115, 116)
 - 🚧 Aratu Bridge (`plugins/aratu-bridge`): an example CLAP, VST 3 and AU
   instrument that plays an Aratu page's music in a DAW, in time with its
   transport, from the control calls and events the page sends over a

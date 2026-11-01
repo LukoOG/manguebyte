@@ -29,6 +29,15 @@ to a `Standalone` by `manguebyte_gui::audio_settings::sync` (feature
 `standalone` of `manguebyte-gui`, ADR 0022); this crate depends on no
 interface crate.
 
+A plugin that sends notes (`Plugin::NOTE_OUTPUT`) sends them to the MIDI
+output port `StandaloneSettings::midi_output` names, as MIDI 1.0 or, with
+`midi_output_mpe`, as MPE. The port is opened by the device manager, so
+it runs on the headless backend too, follows hot-plug, and changes while
+the plugin plays (`Standalone::set_midi_output`, `set_midi_output_mpe`):
+the port that is left is sent a note-off for each note it plays and has
+its sustain pedals lifted, so no note hangs there, and the audio thread
+only queues the notes (ADR 0023).
+
 A plugin's auxiliary output buses (`Plugin::AUX_OUTPUTS`) go to device
 channels of their own, by default the ones after the main output's, one
 bus after another, for the buses on by default;

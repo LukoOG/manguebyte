@@ -171,7 +171,8 @@ another change (TECH_DEBT item 114).
   one instead of failing.
 - The MIDI output for a plugin's notes is still opened directly on the
   system's ports, outside the manager, and cannot be changed while it
-  runs.
+  runs. ([ADR 0023](0023-standalone-midi-output.md) moves it under the
+  manager and into the settings.)
 - No real device has been switched under a running standalone yet; the
   crossfade itself has only run on the headless backend (TECH_DEBT item
   114).

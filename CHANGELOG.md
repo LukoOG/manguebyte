@@ -852,6 +852,35 @@ break the API.
   - Tested on the headless backend, with the audio path under the
     counting allocator before and after a change of device. No
     ready-made settings view yet. Limits: TECH_DEBT 114.
+- **The MIDI output port of a standalone plugin in its settings**
+  ([ADR 0023](docs/adr/0023-standalone-midi-output.md)). The port a
+  plugin that sends notes sends them to is opened by the device manager
+  the plugin runs under, so it runs on the headless backend too.
+  - `StandaloneSettings::midi_output` (a port by identifier, found by
+    name when that changed) and `midi_output_mpe` (an MPE zone, or plain
+    MIDI 1.0), saved in the settings' text as the device setup's
+    `midi_output` key and a new `midi_output_mpe` key; the version stays
+    1, and the text of before reads as no output.
+  - While the plugin plays: `Standalone::set_midi_output` changes the
+    port without touching the audio, `set_midi_output_mpe` the protocol
+    from the engine's next block, and `apply_settings` and
+    `poll_devices` open, close and follow the port as it comes and goes.
+    `choices` lists the output ports (`SettingsChoices::midi_outputs`),
+    `SettingsReport::midi_output` names the open one and its `Display`
+    says where notes go; a missing port is a `Fallback::MidiPortMissing`
+    and falls back to none.
+  - No note hangs: the port that is left is sent a note-off for each
+    note it plays and its sustain pedals are lifted, and the plugin's
+    later note-offs for those notes are not sent anywhere, so every
+    note-on reaches one port and that port one note-off for it. The
+    audio thread only queues the notes; the engine takes a new protocol
+    over a wait-free hand-over and ends the old one's notes there.
+  - Tested in `tests/midi_output.rs` (choosing by identifier, a missing
+    port, hot-plug, a change of port and of MPE, notes from a device
+    thread while ports and protocols change) and `tests/realtime.rs`
+    (no heap use while the output changes under flowing notes).
+    `start_with_midi_output` stays as a path that fills the settings.
+    Limits: TECH_DEBT 116.
 
 ### Hosting
 
@@ -1483,6 +1512,18 @@ Floating panels for an effect chain, which Parabolic asked for:
   `Standalone::start` succeeds and waits for one instead of returning an
   error, and `device_name` is then empty. A plugin's rate follows the
   device's, so it can be prepared again while it runs.
+- The MIDI output port of a standalone plugin
+  ([ADR 0023](docs/adr/0023-standalone-midi-output.md)):
+  `Standalone::start_on` loses its `midi_output` argument, the port being
+  in the options' settings; `StandaloneSettings` gains `midi_output` and
+  `midi_output_mpe`, `SettingsReport` `midi_output` and
+  `SettingsChoices` `midi_outputs`, which struct literals must add;
+  `midi_problems`
+  holds the reasons of the output's fallbacks as `MidiError::Connect`.
+  `DeviceManager::send_midi` and `send_midi_packet` leave out a note-off
+  for a note the port is not playing, and `send_midi_packet` sends a
+  port that speaks MIDI 2.0 the packet unchanged instead of MIDI 1.0
+  bytes.
 - In `manguebyte-ui`: an Escape the focused widget does not use now
   goes to the widgets containing it, innermost first, before it is left
   to the host (a floating panel closes on it). `Root::scene` lists the
@@ -1616,6 +1657,19 @@ Floating panels for an effect chain, which Parabolic asked for:
   again, and the new devices fade in, reported as a gap. The standalone
   runner follows a device to another sample rate with them
   ([ADR 0021](docs/adr/0021-standalone-device-settings.md)).
+- `DeviceManager::midi_output_transmitter` makes a wait-free queue from
+  the audio thread to the manager's own MIDI output port and starts the
+  thread that sends it, each packet when it is due, to the port open
+  then: `set_midi_output`, `apply` and `follow` can change the port while
+  the audio thread sends. A port that is changed or closed is sent a
+  note-off for every note it plays and has its sustain pedals lifted
+  first, and a note-off for a note the open port is not playing is not
+  sent (`midi_output_notes_ended`, `midi_output_errors`,
+  `midi_output_protocol`, `is_sending_midi`). Following a MIDI port
+  event reports the setup's MIDI fallbacks, such as an output port that
+  went away. `MockBackend::hold_midi_output` makes the headless output
+  ports hang, which tests that the audio goes on meanwhile
+  ([ADR 0023](docs/adr/0023-standalone-midi-output.md)).
 
 ## [0.1.0] - 2026-10-19
 

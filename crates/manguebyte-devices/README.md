@@ -37,7 +37,11 @@ translation, and says why (`MidiOutput::fallback`): so does every port
 on Windows, where Windows MIDI Services' own API is not reachable from
 the `windows` crate. `midi_output_ports_with_protocols` lists the ports
 with the protocol each would speak; the example `midi2_output` prints
-them.
+them. Under a `DeviceManager`, `DeviceManager::midi_output_transmitter`
+makes the queue to the manager's own output port instead, which can
+then change, or come and go, while the audio thread sends: the port that
+is left is sent a note-off for each note it plays and has its sustain
+pedals lifted first, so that no note hangs there.
 
 `AudioBackend` is a public seam through which a backend from another
 crate runs behind the device manager. The ASIO crate
