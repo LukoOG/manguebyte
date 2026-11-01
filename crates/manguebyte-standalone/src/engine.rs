@@ -3,6 +3,7 @@ use std::sync::Arc;
 use manguebyte_core::spsc::Consumer;
 use manguebyte_core::{AudioBuffer, NoDenormals};
 use manguebyte_devices::midi::{MidiReceiver, MidiTransmitter};
+use manguebyte_devices::{AudioCallback, DeviceIo, StreamFormat};
 use manguebyte_dsp::ProcessContext;
 use manguebyte_dsp::ProcessSpec;
 use manguebyte_dsp::event::EventBuffer;
@@ -21,9 +22,11 @@ const EVENTS_PER_BLOCK: usize = 2_048;
 /// It does for a plugin what a host does: gathers MIDI into events with
 /// their frames, turns parameter changes into events, plays a transport
 /// moving and maps the plugin's channels onto the device's.
-/// [`Standalone`](crate::Standalone) owns one and gives it to the device
-/// callback; it is public so that the same logic can be driven by something
-/// else, such as a test or a custom audio back end.
+/// [`Standalone`](crate::Standalone) makes one and hands it to a
+/// [`DeviceManager`](manguebyte_devices::DeviceManager) as its
+/// [`AudioCallback`]; it is public so that the same logic can be driven by
+/// something else, such as a test or a custom audio back end, through
+/// [`render`](Self::render).
 pub struct Engine<P: Plugin> {
     plugin: P,
     params: Arc<P::Params>,
@@ -197,6 +200,46 @@ impl<P: Plugin> Engine<P> {
         Arc::clone(&self.params)
     }
 
+    /// The sample rate the plugin was last prepared at, in hertz.
+    pub fn sample_rate(&self) -> f64 {
+        self.sample_rate
+    }
+
+    /// The largest block the engine renders, in frames.
+    pub fn max_block_size(&self) -> usize {
+        self.work.capacity()
+    }
+
+    /// Prepares the plugin again for another sample rate or largest block,
+    /// keeping it, its parameters and its state: what a host does when its
+    /// device changes. The transport keeps its place in beats. Does
+    /// nothing when neither changes, or when `sample_rate` is not a
+    /// positive, finite number or `max_block_size` is zero. Allocates when
+    /// the largest block changes; never call it on the audio thread.
+    ///
+    /// Returns whether the plugin was prepared.
+    pub fn prepare_for(&mut self, sample_rate: f64, max_block_size: usize) -> bool {
+        let rate_ok = sample_rate.is_finite() && sample_rate > 0.0;
+        if !rate_ok || max_block_size == 0 {
+            return false;
+        }
+        if sample_rate == self.sample_rate && max_block_size == self.work.capacity() {
+            return false;
+        }
+        if max_block_size != self.work.capacity() {
+            self.work = AudioBuffer::new(P::LAYOUT.outputs, max_block_size);
+            self.aux = AuxOutputs::for_plugin::<P>(max_block_size);
+        }
+        self.sample_rate = sample_rate;
+        self.clock.set_sample_rate(sample_rate);
+        self.plugin.prepare(&ProcessSpec {
+            sample_rate,
+            max_block_size,
+            num_channels: P::LAYOUT.outputs,
+        });
+        true
+    }
+
     /// Produces one block for the device.
     ///
     /// `input` is what the device captured, if anything. `output` is the
@@ -205,13 +248,18 @@ impl<P: Plugin> Engine<P> {
     pub fn render(&mut self, input: Option<&AudioBuffer<f32>>, output: &mut AudioBuffer<f32>) {
         let _quiet = NoDenormals::new();
         let frames = output.num_frames().min(self.work.capacity());
+        let announced = self.begin_events(frames);
+        self.end_events(frames, announced);
+        self.run(input, output, frames);
+    }
+
+    /// Starts the block's events: parameter changes first, then notes from
+    /// the program. Returns how many were parameter announcements.
+    fn begin_events(&mut self, frames: usize) -> usize {
         if let Some((_, transmitter)) = &mut self.midi_out {
             transmitter.begin_block(frames, self.sample_rate);
         }
         let params: &dyn ParamSet = &*self.params;
-
-        // Parameter changes first, then notes from the program, then MIDI
-        // ports, each message on the frame its arrival time maps to.
         self.events.clear();
         self.watcher.emit_changes(params, &mut self.events);
         let announced = self.events.len();
@@ -221,8 +269,6 @@ impl<P: Plugin> Engine<P> {
             events,
             input: reader,
             notes,
-            midi,
-            sample_rate,
             ..
         } = self;
         while let Some(message) = notes.pop() {
@@ -230,15 +276,39 @@ impl<P: Plugin> Engine<P> {
                 let _ = events.push(event);
             });
         }
+        announced
+    }
+
+    /// Ends the block's events with the MIDI ports the engine reads
+    /// itself, each message on the frame its arrival time maps to, and
+    /// stores what changed the parameters.
+    fn end_events(&mut self, frames: usize, announced: usize) {
+        let Self {
+            events,
+            input: reader,
+            midi,
+            sample_rate,
+            ..
+        } = self;
         for receiver in midi {
             receiver.read_events(frames, *sample_rate, reader, events);
         }
         // Only what came after the announcements is stored: the announced
         // values were read from the parameters, and storing them again
         // would undo an edit the interface made in the meantime.
+        let params: &dyn ParamSet = &*self.params;
         self.watcher
             .apply_and_remember(params, &self.events.as_slice()[announced..]);
+    }
 
+    /// Runs the plugin on the block whose events are gathered, and writes
+    /// it to the device's channels.
+    fn run(
+        &mut self,
+        input: Option<&AudioBuffer<f32>>,
+        output: &mut AudioBuffer<f32>,
+        frames: usize,
+    ) {
         self.work.set_num_frames(frames);
         self.work.clear();
         if let Some(input) = input {
@@ -310,6 +380,29 @@ impl<P: Plugin> Engine<P> {
                 }
             }
         }
+    }
+}
+
+/// An engine runs under a [`DeviceManager`](manguebyte_devices::DeviceManager)
+/// as its callback: it reads the MIDI of the manager's ports along with its
+/// own, and the captured input when the block has any.
+impl<P: Plugin> AudioCallback for Engine<P> {
+    /// Prepares the plugin again if `format` has another sample rate or
+    /// largest block than it was last prepared with (see
+    /// [`Engine::prepare_for`]); otherwise does nothing.
+    fn prepare(&mut self, format: &StreamFormat) {
+        self.prepare_for(format.sample_rate, format.max_block_size);
+    }
+
+    /// Real-time safe.
+    fn process(&mut self, io: &mut DeviceIo<'_>) {
+        let _quiet = NoDenormals::new();
+        let frames = io.num_frames().min(self.work.capacity());
+        let announced = self.begin_events(frames);
+        io.read_midi_events(&mut self.input, &mut self.events);
+        self.end_events(frames, announced);
+        let input = (io.input.num_channels() > 0).then_some(io.input);
+        self.run(input, io.output, frames);
     }
 }
 

@@ -16,7 +16,12 @@ the devices under it in the middle of a song, without stopping or
 preparing it again: a crossfade where two devices can play at once, a
 short faded gap where they cannot (`DeviceManager::start_engine`, the
 `hotswap` module). The crossfade is proven on the headless backend; two
-real outputs have not crossfaded yet.
+real outputs have not crossfaded yet. `DeviceManager::preview` works out
+what a setup would open without opening it, and
+`DeviceManager::apply_with_format` changes the engine's own format when
+the devices should not hide a change, such as a new sample rate: the
+same callback is released, prepared again and goes on, after a faded
+gap. The standalone runner follows a device's rate that way.
 
 MIDI goes out from the audio thread too: `midi::midi_output_queue`
 stamps each Universal MIDI Packet with the moment its frame is heard,
