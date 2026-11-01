@@ -23,6 +23,7 @@ use std::sync::atomic::Ordering;
 use manguebyte_gfx::snapshot::Snapshots;
 use manguebyte_gfx::{Point, Rect, RoundedRect, Size};
 use manguebyte_params::{ChoiceParam, param_set};
+use manguebyte_ui::audio_settings::{AudioSettings, AudioSettingsModel, DeviceItem, MidiPortItem};
 use manguebyte_ui::layout::Align;
 use manguebyte_ui::testing::Harness;
 use manguebyte_ui::{
@@ -562,6 +563,68 @@ fn floating_panels_match_their_goldens() {
             ui.assert_accessible();
             assert!(ui.find(Role::Region, "Reverb").is_some(), "{name}");
             assert!(ui.get(Role::Slider, "Cutoff").is_focused(), "{name}");
+            assert!(ui.pixels() == &ui.render_fresh(), "{name}");
+            if let Err(mismatch) = snapshots.check(&name, ui.pixels(), &ui.dump()) {
+                panic!("{mismatch}");
+            }
+        }
+    }
+}
+
+/// An effect's audio settings on a card: two outputs, an input, a rate,
+/// a buffer, three MIDI ports (one open) and a report of two lines, with
+/// the keyboard's focus ring on the sample rate.
+fn audio_settings(scale: f32, theme: Theme) -> Harness {
+    let settings = AudioSettings::new();
+    settings.set_model(AudioSettingsModel {
+        outputs: vec![
+            DeviceItem::new("spk", "Speakers"),
+            DeviceItem::new("usb", "USB Interface"),
+        ],
+        output: Some("usb".into()),
+        inputs: vec![DeviceItem::new("mic", "Microphone")],
+        input: Some("mic".into()),
+        show_input: true,
+        sample_rates: vec![44_100, 48_000, 96_000],
+        sample_rate: Some(48_000),
+        buffer_sizes: vec![64, 128, 256, 512],
+        buffer_size: Some(128),
+        midi_inputs: vec![
+            MidiPortItem::new("keys", "Keys 49", true),
+            MidiPortItem::new("pads", "Pads", false),
+            MidiPortItem::new("pedal", "Pedalboard", false),
+        ],
+        report: "Playing on \"USB Interface\" at 48000 Hz, 128-frame buffer\n\
+            The output \"Studio\" is missing; \"USB Interface\" plays instead"
+            .into(),
+    });
+    let view = column((card(settings.view()),))
+        .padding(16.0)
+        .align(Align::Start);
+    let mut ui = Harness::new(view, Size::new(380.0, 360.0), scale);
+    ui.set_theme(theme);
+    ui.frame();
+    for _ in 0..3 {
+        ui.tab();
+    }
+    ui.advance_ms(16);
+    ui
+}
+
+#[test]
+fn the_audio_settings_view_matches_its_goldens() {
+    let snapshots = snapshots();
+    for (scale, suffix) in [(1.0, "@1x"), (2.0, "@2x")] {
+        for (theme, look) in [(Theme::dark(), ""), (Theme::light(), "-light")] {
+            let ui = audio_settings(scale, theme);
+            let name = format!("audio-settings{look}{suffix}");
+            ui.assert_accessible();
+            assert!(ui.get(Role::ComboBox, "Sample rate").is_focused(), "{name}");
+            assert_eq!(
+                ui.get(Role::Switch, "Keys 49").node.state.checked,
+                Some(true),
+                "{name}"
+            );
             assert!(ui.pixels() == &ui.render_fresh(), "{name}");
             if let Err(mismatch) = snapshots.check(&name, ui.pixels(), &ui.dump()) {
                 panic!("{mismatch}");

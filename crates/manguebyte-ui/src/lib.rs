@@ -70,6 +70,11 @@
 //!   a keyboard over the same [`KeySpan`] and takes dropped samples. Each
 //!   shares what it shows and changes through a state the application
 //!   polls.
+//! - **[Audio settings](audio_settings)**: a ready-made view of a
+//!   standalone program's output and input devices, sample rate, buffer
+//!   size and MIDI input ports, built from a plain model the program fills
+//!   in and handing back requests it polls, with no dependency on the
+//!   device crates.
 //! - **Hover and tooltips**: the widget under the pointer hears it
 //!   ([`Widget::hover_changed`]), and a view given a
 //!   [`tooltip`](IntoView::tooltip) shows it after the pointer rests on it
@@ -176,6 +181,7 @@
 #![forbid(unsafe_code)]
 
 pub mod access;
+pub mod audio_settings;
 pub mod clipboard;
 mod damage;
 pub mod drag;
