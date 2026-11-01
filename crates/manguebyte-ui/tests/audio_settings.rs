@@ -10,7 +10,7 @@ use manguebyte_ui::audio_settings::{
 use manguebyte_ui::testing::Harness;
 use manguebyte_ui::{Action, IntoView, Key, Role, State, Theme, floating_panel, label};
 
-use AudioSettingsRequest::{BufferSize, Input, MidiInput, Output, SampleRate};
+use AudioSettingsRequest::{BufferSize, Input, MidiInput, MidiOutput, Output, SampleRate};
 
 /// An effect's settings: three outputs, a microphone, two MIDI ports.
 fn model() -> AudioSettingsModel {
@@ -35,6 +35,7 @@ fn model() -> AudioSettingsModel {
         report:
             "Playing on \"Speakers\" at 48000 Hz, 256-frame buffer; recording from \"Microphone\""
                 .into(),
+        ..AudioSettingsModel::default()
     }
 }
 
@@ -440,4 +441,94 @@ fn the_view_fits_in_a_floating_panel() {
     ui.frame();
     assert!(!open_panel.get());
     assert!(ui.find(Role::ComboBox, "Output device").is_none());
+}
+
+/// An instrument that sends notes: two MIDI output ports, none chosen.
+fn sending() -> AudioSettingsModel {
+    AudioSettingsModel {
+        show_input: false,
+        midi_outputs: vec![
+            DeviceItem::new("synth", "Hardware Synth"),
+            DeviceItem::new("loop", "Loopback"),
+        ],
+        midi_output: None,
+        show_midi_output: true,
+        ..model()
+    }
+}
+
+#[test]
+fn a_plugin_that_sends_notes_picks_its_midi_output_port() {
+    let settings = settings(sending());
+    let mut ui = open(&settings);
+    assert_eq!(
+        ui.get(Role::ComboBox, "MIDI output").value_text(),
+        Some("None")
+    );
+    ui.assert_accessible();
+
+    pick(&mut ui, "MIDI output", "Hardware Synth");
+    assert_eq!(settings.take_requests(), [MidiOutput(Some("synth".into()))]);
+    assert_eq!(settings.model().midi_output.as_deref(), Some("synth"));
+    pick(&mut ui, "MIDI output", "Hardware Synth");
+    assert!(settings.take_requests().is_empty(), "shown already");
+    pick(&mut ui, "MIDI output", "None");
+    assert_eq!(settings.take_requests(), [MidiOutput(None)]);
+
+    // The section comes after the input ports, in requests as on screen.
+    pick(&mut ui, "MIDI output", "Loopback");
+    ui.click(ui.get(Role::Switch, "Pads").center());
+    assert_eq!(
+        settings.take_requests(),
+        [
+            MidiInput {
+                id: "pads".into(),
+                open: true
+            },
+            MidiOutput(Some("loop".into())),
+        ]
+    );
+}
+
+#[test]
+fn a_midi_output_port_that_went_away_shows_nothing_chosen() {
+    let settings = settings(AudioSettingsModel {
+        midi_output: Some("synth".into()),
+        ..sending()
+    });
+    let ui = open(&settings);
+    assert_eq!(
+        ui.get(Role::ComboBox, "MIDI output").value_text(),
+        Some("Hardware Synth")
+    );
+    settings.set_model(AudioSettingsModel {
+        midi_outputs: vec![DeviceItem::new("loop", "Loopback")],
+        midi_output: Some("synth".into()),
+        ..sending()
+    });
+    let mut ui = ui;
+    ui.frame();
+    assert_eq!(
+        ui.get(Role::ComboBox, "MIDI output").value_text(),
+        Some("No port")
+    );
+    assert!(settings.take_requests().is_empty(), "nothing was picked");
+}
+
+#[test]
+fn a_plugin_that_sends_no_notes_has_no_midi_output_section() {
+    let settings = settings(model());
+    let ui = open(&settings);
+    assert!(ui.find(Role::ComboBox, "MIDI output").is_none());
+
+    // Shown, picked, then hidden before the program took the pick: the
+    // pick is kept, as it was made on a model that showed the section.
+    settings.set_model(sending());
+    let mut ui = ui;
+    ui.frame();
+    pick(&mut ui, "MIDI output", "Loopback");
+    settings.set_model(model());
+    ui.frame();
+    assert!(ui.find(Role::ComboBox, "MIDI output").is_none());
+    assert_eq!(settings.take_requests(), [MidiOutput(Some("loop".into()))]);
 }

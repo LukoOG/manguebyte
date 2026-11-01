@@ -1,6 +1,6 @@
 //! A ready-made "Audio settings" view for a standalone program: output and
-//! input devices, sample rate, buffer size, MIDI input ports, and what the
-//! last change opened.
+//! input devices, sample rate, buffer size, MIDI input ports, the MIDI
+//! output port, and what the last change opened.
 //!
 //! The view knows nothing of devices. It shows an [`AudioSettingsModel`],
 //! plain names, identifiers and numbers the program fills in, and turns
@@ -25,6 +25,9 @@
 //!   is known, milliseconds.
 //! - **MIDI inputs**: a switch for each port, on when it is open, up to
 //!   [`MAX_MIDI_PORTS`]; "No MIDI input ports" when there is none.
+//! - **MIDI output**, a combo box of the output ports' names after "None",
+//!   for a plugin that sends notes
+//!   ([`show_midi_output`](AudioSettingsModel::show_midi_output)).
 //! - The report of the last change, a line for each line of
 //!   [`report`](AudioSettingsModel::report), up to [`REPORT_LINES`].
 //!
@@ -169,6 +172,14 @@ pub struct AudioSettingsModel {
     pub buffer_size: Option<u32>,
     /// The MIDI input ports, open or not.
     pub midi_inputs: Vec<MidiPortItem>,
+    /// The MIDI output ports, in the order shown after "None".
+    pub midi_outputs: Vec<DeviceItem>,
+    /// The identifier of the MIDI output port the notes go to; `None` for
+    /// none.
+    pub midi_output: Option<String>,
+    /// Whether the MIDI output section is shown: true for a plugin that
+    /// sends notes.
+    pub show_midi_output: bool,
     /// What the last change opened, in a few lines.
     pub report: String,
 }
@@ -192,6 +203,9 @@ pub enum AudioSettingsRequest {
         /// Whether to open it.
         open: bool,
     },
+    /// Send the notes to the MIDI output port with this identifier, or to
+    /// none.
+    MidiOutput(Option<String>),
 }
 
 /// An audio settings view's states, shared by every view it builds and the
@@ -224,6 +238,9 @@ struct Shared {
     ports: State<Shown>,
     port_names: Vec<State<String>>,
     port_open: Vec<State<bool>>,
+    /// The MIDI inputs alone, or with the MIDI output.
+    midi_sections: State<Shown>,
+    midi_output: State<Choices>,
     /// How many report lines are shown.
     lines: State<Shown>,
     report: Vec<State<String>>,
@@ -261,7 +278,7 @@ impl AudioSettings {
                 input: State::new(Choices::default()),
                 rate: State::new(Choices::default()),
                 buffer: State::new(Choices::default()),
-                sections: shown(Shown::First(4)),
+                sections: shown(Shown::First(3)),
                 devices: shown(Shown::First(1)),
                 midi: shown(Shown::Only(0)),
                 ports: shown(Shown::First(0)),
@@ -269,6 +286,8 @@ impl AudioSettings {
                     .map(|_| State::new(String::new()))
                     .collect(),
                 port_open: (0..MAX_MIDI_PORTS).map(|_| State::new(false)).collect(),
+                midi_sections: shown(Shown::First(2)),
+                midi_output: State::new(Choices::default()),
                 lines: shown(Shown::First(0)),
                 report: (0..REPORT_LINES)
                     .map(|_| State::new(String::new()))
@@ -321,7 +340,8 @@ impl AudioSettings {
     }
 
     /// The changes the person asked for since the last call, in the order
-    /// of the sections: output, input, rate, buffer, then each port. A
+    /// of the sections: output, input, rate, buffer, each input port, then
+    /// the output port. A
     /// section changed twice asks once, for its last value; picking what
     /// the model shows already asks nothing.
     pub fn take_requests(&self) -> Vec<AudioSettingsRequest> {
@@ -345,14 +365,7 @@ impl AudioSettings {
         }
         if model.show_input {
             if let Some(at) = shared.input.with(Choices::chosen) {
-                let id = match at {
-                    0 => Some(None),
-                    _ => model
-                        .inputs
-                        .get(at - 1)
-                        .map(|device| Some(device.id.clone())),
-                };
-                if let Some(id) = id.filter(|id| *id != model.input) {
+                if let Some(id) = after_none(&model.inputs, at).filter(|id| *id != model.input) {
                     model.input.clone_from(&id);
                     pending.push(AudioSettingsRequest::Input(id));
                 }
@@ -384,6 +397,16 @@ impl AudioSettings {
                 });
             }
         }
+        if model.show_midi_output {
+            if let Some(at) = shared.midi_output.with(Choices::chosen) {
+                if let Some(id) =
+                    after_none(&model.midi_outputs, at).filter(|id| *id != model.midi_output)
+                {
+                    model.midi_output.clone_from(&id);
+                    pending.push(AudioSettingsRequest::MidiOutput(id));
+                }
+            }
+        }
     }
 
     /// Puts `model` into the widgets' states, setting only those that
@@ -402,19 +425,7 @@ impl AudioSettings {
                 selected: position(&model.outputs, &model.output),
             },
         );
-        let mut inputs: Vec<String> = vec![String::from("None")];
-        inputs.extend(model.inputs.iter().map(|device| device.name.clone()));
-        let input = match &model.input {
-            None => Some(0),
-            id => position(&model.inputs, id).map(|at| at + 1),
-        };
-        set(
-            &shared.input,
-            Choices {
-                items: inputs,
-                selected: input,
-            },
-        );
+        set(&shared.input, with_none(&model.inputs, &model.input));
         set(
             &shared.rate,
             Choices {
@@ -452,6 +463,14 @@ impl AudioSettings {
             set(&shared.port_names[at], port.name.clone());
             set(&shared.port_open[at], port.open);
         }
+        set(
+            &shared.midi_sections,
+            Shown::First(if model.show_midi_output { 3 } else { 2 }),
+        );
+        set(
+            &shared.midi_output,
+            with_none(&model.midi_outputs, &model.midi_output),
+        );
         let mut lines: Vec<String> = model
             .report
             .lines()
@@ -465,7 +484,7 @@ impl AudioSettings {
         }
         set(
             &shared.sections,
-            Shown::First(if lines.is_empty() { 4 } else { 5 }),
+            Shown::First(if lines.is_empty() { 3 } else { 4 }),
         );
         set(&shared.lines, Shown::First(lines.len()));
         for (at, line) in lines.into_iter().enumerate() {
@@ -509,10 +528,21 @@ impl AudioSettings {
                 .map(|(name, open)| Toggle::from_state(name.clone(), open.clone()).into_view())
                 .collect::<Vec<_>>(),
         );
-        let midi = reveal(
+        let inputs = reveal(
             &shared.midi,
             Style::stack(),
             vec![label("No MIDI input ports").muted().into_view(), ports],
+        );
+        let midi = reveal(
+            &shared.midi_sections,
+            Style::column().with_spacing(SPACING),
+            vec![
+                label("MIDI inputs").heading().into_view(),
+                inputs,
+                ComboBox::from_state("MIDI output", shared.midi_output.clone())
+                    .placeholder("No port")
+                    .into_view(),
+            ],
         );
         let report = reveal(
             &shared.lines,
@@ -526,15 +556,33 @@ impl AudioSettings {
         reveal(
             &shared.sections,
             Style::column().with_spacing(SPACING),
-            vec![
-                devices,
-                format,
-                label("MIDI inputs").heading().into_view(),
-                midi,
-                report,
-            ],
+            vec![devices, format, midi, report],
         )
         .named("Audio settings")
+    }
+}
+
+/// The choices of a list of "None", then `devices`, with `chosen`
+/// selected: "None" for none.
+fn with_none(devices: &[DeviceItem], chosen: &Option<String>) -> Choices {
+    let mut items = vec![String::from("None")];
+    items.extend(devices.iter().map(|device| device.name.clone()));
+    let selected = match chosen {
+        None => Some(0),
+        Some(id) => devices
+            .iter()
+            .position(|device| device.id == *id)
+            .map(|at| at + 1),
+    };
+    Choices { items, selected }
+}
+
+/// The identifier picked at `at` in a list [`with_none`] made: `Some(None)`
+/// for "None", `None` past the end.
+fn after_none(devices: &[DeviceItem], at: usize) -> Option<Option<String>> {
+    match at {
+        0 => Some(None),
+        _ => devices.get(at - 1).map(|device| Some(device.id.clone())),
     }
 }
 

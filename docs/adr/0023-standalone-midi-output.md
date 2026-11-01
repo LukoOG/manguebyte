@@ -124,7 +124,8 @@ port that goes away is reported, not only closed.
 ## Consequences
 
 - A standalone program can choose the MIDI output port and MPE in its
-  settings screen, change them while the plugin plays and save them with
+  settings screen (the ready-made view of ADR 0022 offers the port, for a
+  plugin that sends notes), change them while the plugin plays and save them with
   the session; the port follows hot-plug, on the headless backend too.
   Tested there: a port chosen by identifier, a missing one falling back
   to none and opened when it appears, a port unplugged, a change of port

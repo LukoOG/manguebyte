@@ -597,6 +597,7 @@ fn audio_settings(scale: f32, theme: Theme) -> Harness {
         report: "Playing on \"USB Interface\" at 48000 Hz, 128-frame buffer\n\
             The output \"Studio\" is missing; \"USB Interface\" plays instead"
             .into(),
+        ..AudioSettingsModel::default()
     });
     let view = column((card(settings.view()),))
         .padding(16.0)
@@ -629,6 +630,63 @@ fn the_audio_settings_view_matches_its_goldens() {
             if let Err(mismatch) = snapshots.check(&name, ui.pixels(), &ui.dump()) {
                 panic!("{mismatch}");
             }
+        }
+    }
+}
+
+/// An instrument's audio settings on a card: no input section, one MIDI
+/// input port and the MIDI output on a hardware synth, with the focus
+/// ring on the MIDI output.
+fn audio_settings_midi_output(theme: Theme) -> Harness {
+    let settings = AudioSettings::new();
+    settings.set_model(AudioSettingsModel {
+        outputs: vec![DeviceItem::new("spk", "Speakers")],
+        output: Some("spk".into()),
+        sample_rates: vec![44_100, 48_000],
+        sample_rate: Some(44_100),
+        buffer_sizes: vec![256, 512],
+        buffer_size: Some(512),
+        midi_inputs: vec![MidiPortItem::new("keys", "Keys 49", true)],
+        midi_outputs: vec![
+            DeviceItem::new("synth", "Hardware Synth"),
+            DeviceItem::new("loop", "Loopback"),
+        ],
+        midi_output: Some("synth".into()),
+        show_midi_output: true,
+        report: "Playing on \"Speakers\" at 44100 Hz, 512-frame buffer\n\
+            Sending notes to \"Hardware Synth\""
+            .into(),
+        ..AudioSettingsModel::default()
+    });
+    let view = column((card(settings.view()),))
+        .padding(16.0)
+        .align(Align::Start);
+    let mut ui = Harness::new(view, Size::new(380.0, 340.0), 1.0);
+    ui.set_theme(theme);
+    ui.frame();
+    for _ in 0..5 {
+        ui.tab();
+    }
+    ui.advance_ms(16);
+    ui
+}
+
+#[test]
+fn the_midi_output_section_matches_its_goldens() {
+    let snapshots = snapshots();
+    for (theme, look) in [(Theme::dark(), ""), (Theme::light(), "-light")] {
+        let ui = audio_settings_midi_output(theme);
+        let name = format!("audio-settings-midi-output{look}@1x");
+        ui.assert_accessible();
+        assert!(ui.get(Role::ComboBox, "MIDI output").is_focused(), "{name}");
+        assert_eq!(
+            ui.get(Role::ComboBox, "MIDI output").value_text(),
+            Some("Hardware Synth"),
+            "{name}"
+        );
+        assert!(ui.pixels() == &ui.render_fresh(), "{name}");
+        if let Err(mismatch) = snapshots.check(&name, ui.pixels(), &ui.dump()) {
+            panic!("{mismatch}");
         }
     }
 }

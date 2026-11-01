@@ -1497,6 +1497,17 @@ Floating panels for an effect chain, which Parabolic asked for:
     device backend (a pick reaching the standalone and its report coming
     back, MIDI ports, hot-plug, an effect's input). Limits: TECH_DEBT
     115.
+  - The MIDI output port, for a plugin that sends notes: a "MIDI output"
+    combo box of "None" and the output ports, after the MIDI inputs,
+    shown when `AudioSettingsModel::show_midi_output` (from
+    `Plugin::NOTE_OUTPUT` in the glue); the model gains `midi_outputs`,
+    `midi_output` and `show_midi_output`, the requests
+    `AudioSettingsRequest::MidiOutput`, which `apply` carries out with
+    `Standalone::set_midi_output`, and `model_from` a `show_midi_output`
+    argument. A port that went away shows "No port". Tested: the
+    requests, a port gone, the section hidden for a plugin that sends no
+    notes; a pick reaching a standalone on the headless backend; goldens
+    `audio-settings-midi-output` dark and light at 1x.
 - Timers of an application ([ADR 0024](docs/adr/0024-application-timers.md)):
   `App::set_timer(id, period_ms, tick)` calls `tick(&App)` on the
   application's thread about every `period_ms`, whether or not a window

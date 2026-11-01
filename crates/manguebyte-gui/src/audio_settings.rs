@@ -111,6 +111,7 @@ pub fn apply<'a, P: Plugin>(
         AudioSettingsRequest::SampleRate(rate) => standalone.set_sample_rate(Some(*rate)),
         AudioSettingsRequest::BufferSize(frames) => standalone.set_buffer_size(Some(*frames)),
         AudioSettingsRequest::MidiInput { id, open } => standalone.set_midi_input(id, *open),
+        AudioSettingsRequest::MidiOutput(id) => standalone.set_midi_output(id.as_deref()),
     }
 }
 
@@ -124,6 +125,7 @@ pub fn model<P: Plugin>(standalone: &Standalone<P>) -> AudioSettingsModel {
             standalone.settings(),
             standalone.report(),
             P::LAYOUT.inputs > 0,
+            P::NOTE_OUTPUT,
         ),
         Err(error) => {
             let mut model = model_from(
@@ -131,6 +133,7 @@ pub fn model<P: Plugin>(standalone: &Standalone<P>) -> AudioSettingsModel {
                 standalone.settings(),
                 standalone.report(),
                 P::LAYOUT.inputs > 0,
+                P::NOTE_OUTPUT,
             );
             model.report = format!("{}\nThe devices cannot be listed: {error}", model.report);
             model
@@ -138,8 +141,9 @@ pub fn model<P: Plugin>(standalone: &Standalone<P>) -> AudioSettingsModel {
     }
 }
 
-/// The model of `choices`, with the devices, rate and buffer that `report`
-/// says run, and the input section shown when `show_input`.
+/// The model of `choices`, with the devices, rate, buffer and MIDI output
+/// port that `report` says run, the input section shown when `show_input`
+/// and the MIDI output section when `show_midi_output`.
 ///
 /// The rates and buffer sizes are those the output device that plays
 /// accepts, with the ones in use added if the device did not list them, so
@@ -150,6 +154,7 @@ pub fn model_from(
     settings: &StandaloneSettings,
     report: &SettingsReport,
     show_input: bool,
+    show_midi_output: bool,
 ) -> AudioSettingsModel {
     let items = |options: &[DeviceOption]| {
         options
@@ -193,6 +198,13 @@ pub fn model_from(
             .iter()
             .map(|port| MidiPortItem::new(&port.port.id, &port.port.name, port.open))
             .collect(),
+        midi_outputs: choices
+            .midi_outputs
+            .iter()
+            .map(|port| DeviceItem::new(&port.port.id, &port.port.name))
+            .collect(),
+        midi_output: report.midi_output.as_ref().map(|port| port.id.clone()),
+        show_midi_output,
         report: report.to_string(),
     }
 }

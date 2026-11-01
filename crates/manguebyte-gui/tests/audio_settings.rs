@@ -345,3 +345,88 @@ fn listing_that_fails_shows_empty_lists_and_says_why() {
     );
     mock.fail_listing(false);
 }
+
+/// Sends notes; an instrument with a MIDI output.
+struct Arp(Arc<Params>);
+
+impl Plugin for Arp {
+    const INFO: PluginInfo = PluginInfo {
+        id: "org.manguebyte.test.gui-settings-arp",
+        name: "Arp",
+        vendor: "Manguebyte tests",
+        version: "0.1.0",
+        description: "Sends notes",
+        kind: PluginKind::Instrument,
+    };
+    const LAYOUT: AudioLayout = AudioLayout::STEREO_INSTRUMENT;
+    const NOTE_OUTPUT: bool = true;
+    type Params = Params;
+
+    fn new() -> Self {
+        Self(Synth::new().0)
+    }
+    fn params(&self) -> Arc<Params> {
+        Arc::clone(&self.0)
+    }
+    fn prepare(&mut self, _: &ProcessSpec) {}
+    fn process(&mut self, _: &mut AudioBuffer<f32>, _: &ProcessContext<'_, f32>) {}
+}
+
+/// The studio with two MIDI output ports.
+fn studio_with_outputs() -> MockBackend {
+    let mock = studio();
+    mock.add_midi_port(Direction::Output, "synth", "Hardware Synth");
+    mock.add_midi_port(Direction::Output, "loop", "Loopback");
+    mock
+}
+
+#[test]
+fn the_midi_output_pick_reaches_a_plugin_that_sends_notes() {
+    let mock = studio_with_outputs();
+    let mut app = start::<Arp>(&mock);
+    let settings = AudioSettings::new();
+    assert!(audio_settings::sync(&mut app, &settings));
+    let model = settings.model();
+    assert!(model.show_midi_output);
+    assert_eq!(
+        model.midi_outputs,
+        [
+            DeviceItem::new("synth", "Hardware Synth"),
+            DeviceItem::new("loop", "Loopback"),
+        ]
+    );
+    assert_eq!(model.midi_output, None);
+    let mut ui = open(&settings);
+    assert_eq!(
+        ui.get(Role::ComboBox, "MIDI output").value_text(),
+        Some("None")
+    );
+
+    pick(&mut ui, "MIDI output", "Hardware Synth");
+    assert!(audio_settings::sync(&mut app, &settings));
+    assert_eq!(app.midi_output_name(), Some("Hardware Synth"));
+    assert_eq!(settings.model().midi_output.as_deref(), Some("synth"));
+    assert!(app.report().to_string().contains("Hardware Synth"));
+    ui.frame();
+    assert_eq!(
+        ui.get(Role::ComboBox, "MIDI output").value_text(),
+        Some("Hardware Synth")
+    );
+
+    pick(&mut ui, "MIDI output", "None");
+    assert!(audio_settings::sync(&mut app, &settings));
+    assert_eq!(app.midi_output_name(), None);
+    assert_eq!(app.settings().midi_output, None);
+    assert!(!audio_settings::sync(&mut app, &settings), "quiet");
+}
+
+#[test]
+fn a_plugin_that_sends_no_notes_is_offered_no_midi_output() {
+    let mock = studio_with_outputs();
+    let mut app = start::<Synth>(&mock);
+    let settings = AudioSettings::new();
+    audio_settings::sync(&mut app, &settings);
+    assert!(!settings.model().show_midi_output);
+    let ui = open(&settings);
+    assert!(ui.find(Role::ComboBox, "MIDI output").is_none());
+}

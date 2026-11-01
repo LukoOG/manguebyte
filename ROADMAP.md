@@ -346,9 +346,9 @@ Write a processor once and ship it in every format.
   hanging; a report of what each change opened and what fell back;
   settings saved as text; a ready-made audio settings view in
   `manguebyte-ui`, glued to the standalone by `manguebyte-gui`'s
-  `standalone` feature (ADR 0022). Tested on the headless backend only;
-  the view has no host, channel or MIDI output section (TECH_DEBT 114,
-  115, 116)
+  `standalone` feature (ADR 0022), with the MIDI output port for a
+  plugin that sends notes. Tested on the headless backend only; the view
+  has no host, channel or MPE section (TECH_DEBT 114, 115, 116)
 - 🚧 Aratu Bridge (`plugins/aratu-bridge`): an example CLAP, VST 3 and AU
   instrument that plays an Aratu page's music in a DAW, in time with its
   transport, from the control calls and events the page sends over a

@@ -113,7 +113,7 @@ are on.
   variant, which breaks a `match` on it with no wildcard arm.
 - At most `MAX_MIDI_PORTS` (16) ports and `REPORT_LINES` (4) lines of
   the report are shown. There is no host (device type) section, no
-  channel selection, no MIDI output section, no test tone and no CPU or
+  channel selection, no test tone and no CPU or
   latency readout; a buffer size the device chooses itself shows as
   "Default". A program calls `sync` from an application timer
   (`App::set_timer`, added by ADR 0024) or from a thread of its own
