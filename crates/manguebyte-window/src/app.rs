@@ -9,7 +9,7 @@ use manguebyte_gfx::{MAX_SIDE, Size};
 use manguebyte_plugin::editor::checked_scale;
 
 use crate::dispatch::WindowHandler;
-use crate::event::{PhysicalPoint, PhysicalSize};
+use crate::event::{PhysicalPoint, PhysicalSize, TimerId};
 use crate::headless::{Headless, HeadlessPlatform};
 use crate::window::{Inner, Platform, Window, WindowError, WindowOptions};
 
@@ -247,12 +247,32 @@ enum AppBackend {
     Win32(crate::win32::app::Win32App),
 }
 
+/// What an application timer calls.
+type Tick = Box<dyn FnMut(&App)>;
+
+/// A timer of the application: how often it ticks and what it calls.
+struct AppTimer {
+    id: TimerId,
+    period_ms: u32,
+    /// Which setting of the timer this is, so that a call that ends after
+    /// its timer was set again or killed is not put back.
+    serial: u64,
+    /// Out while it runs, so that a tick a nested loop lets through
+    /// meanwhile (a file dialog's, a move of a window) is dropped.
+    tick: Option<Tick>,
+    /// The system's id of the timer.
+    #[cfg(windows)]
+    system: usize,
+}
+
 /// What an application and its windows share.
 pub(crate) struct AppInner {
     backend: AppBackend,
     windows: RefCell<Vec<Weak<Inner>>>,
     quit: Cell<bool>,
     running: Cell<bool>,
+    timers: RefCell<Vec<AppTimer>>,
+    serials: Cell<u64>,
 }
 
 impl AppInner {
@@ -262,6 +282,63 @@ impl AppInner {
             windows: RefCell::new(Vec::new()),
             quit: Cell::new(false),
             running: Cell::new(false),
+            timers: RefCell::new(Vec::new()),
+            serials: Cell::new(0),
+        }
+    }
+
+    /// Runs the call of the first timer `find` picks, unless it is running
+    /// already. Returns whether it ran.
+    fn fire(inner: &Rc<AppInner>, find: impl Fn(&AppTimer) -> bool) -> bool {
+        let taken = {
+            let mut timers = inner.timers.borrow_mut();
+            timers
+                .iter_mut()
+                .find(|timer| find(timer))
+                .and_then(|timer| Some((timer.serial, timer.tick.take()?)))
+        };
+        let Some((serial, mut tick)) = taken else {
+            return false;
+        };
+        tick(&App {
+            inner: Rc::clone(inner),
+        });
+        let mut timers = inner.timers.borrow_mut();
+        if let Some(timer) = timers.iter_mut().find(|timer| timer.serial == serial) {
+            timer.tick = Some(tick);
+        } else {
+            // Set again or killed while it ran: the call goes, outside the
+            // borrow, since what it holds may reach the timers as it drops.
+            drop(timers);
+            drop(tick);
+        }
+        true
+    }
+
+    /// Runs the call of the timer the system knows as `system`.
+    #[cfg(windows)]
+    pub(crate) fn fire_system(inner: &Rc<AppInner>, system: usize) -> bool {
+        AppInner::fire(inner, |timer| timer.system == system)
+    }
+
+    /// Stops the timer the system knows as `system`, as after its call
+    /// panicked.
+    #[cfg(windows)]
+    pub(crate) fn kill_system(inner: &Rc<AppInner>, system: usize) {
+        let id = inner
+            .timers
+            .borrow()
+            .iter()
+            .find(|timer| timer.system == system)
+            .map(|timer| timer.id);
+        match id {
+            Some(id) => {
+                App {
+                    inner: Rc::clone(inner),
+                }
+                .kill_timer(id);
+            }
+            None => crate::win32::app::kill_timer(system),
         }
     }
 
@@ -280,6 +357,19 @@ impl AppInner {
         let open = windows.iter().filter(|window| window.is_open()).count();
         drop(windows);
         open
+    }
+}
+
+impl Drop for AppInner {
+    fn drop(&mut self) {
+        let timers = std::mem::take(self.timers.get_mut());
+        #[cfg(windows)]
+        if matches!(self.backend, AppBackend::Win32(_)) {
+            for timer in &timers {
+                crate::win32::app::kill_timer(timer.system);
+            }
+        }
+        drop(timers);
     }
 }
 
@@ -508,6 +598,133 @@ impl App {
     pub fn open_windows(&self) -> usize {
         self.inner.open_count()
     }
+
+    /// Starts or restarts the application's timer `id`, which calls `tick`
+    /// about every `period_ms` milliseconds on the application's thread,
+    /// between the events of its windows, until it is killed or the
+    /// application goes: for work that is the program's and no window's,
+    /// such as asking the audio devices what changed. Setting an id again
+    /// replaces its call and period. Win32 fires no faster than every
+    /// 10 ms.
+    ///
+    /// Ticks come while the thread takes messages: while [`run`](Self::run)
+    /// runs, and inside the loops a call made from it runs, such as a file
+    /// dialog's or the system's while the person moves a window. A tick
+    /// that comes while the timer's own call still runs (from a loop inside
+    /// it) is dropped, and late ticks are not made up. A call may set or
+    /// kill its own timer or any other. On Win32 a call that panics is
+    /// caught there, and its timer killed.
+    ///
+    /// The call is given the application, so it need not keep a clone of
+    /// it: one would keep the application alive through its own timer.
+    ///
+    /// A headless application keeps its timers for the test to fire
+    /// ([`HeadlessApp::fire_timers`]).
+    ///
+    /// ```
+    /// use std::cell::Cell;
+    /// use std::rc::Rc;
+    /// use manguebyte_window::{App, TimerId};
+    ///
+    /// let (app, test) = App::headless();
+    /// let polls = Rc::new(Cell::new(0));
+    /// let counted = Rc::clone(&polls);
+    /// app.set_timer(TimerId(1), 100, move |app: &App| {
+    ///     counted.set(counted.get() + 1);
+    ///     if counted.get() == 2 {
+    ///         app.kill_timer(TimerId(1));
+    ///     }
+    /// })
+    /// .expect("a period");
+    /// assert_eq!(test.timers(), [(TimerId(1), 100)]);
+    /// assert_eq!(test.fire_timers(), 1);
+    /// assert_eq!(test.fire_timers(), 1);
+    /// assert_eq!(test.fire_timers(), 0, "it killed itself");
+    /// assert_eq!(polls.get(), 2);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`WindowError::InvalidPeriod`] for 0, or [`WindowError::Platform`]
+    /// if the system refuses.
+    pub fn set_timer(
+        &self,
+        id: TimerId,
+        period_ms: u32,
+        tick: impl FnMut(&App) + 'static,
+    ) -> Result<(), WindowError> {
+        if period_ms == 0 {
+            return Err(WindowError::InvalidPeriod);
+        }
+        #[cfg(windows)]
+        let system = match &self.inner.backend {
+            AppBackend::Win32(_) => {
+                let running = self
+                    .inner
+                    .timers
+                    .borrow()
+                    .iter()
+                    .find(|timer| timer.id == id)
+                    .map(|timer| timer.system);
+                crate::win32::app::set_timer(running, period_ms, Rc::downgrade(&self.inner))?
+            }
+            AppBackend::Headless { .. } => 0,
+        };
+        let serial = self.inner.serials.get() + 1;
+        self.inner.serials.set(serial);
+        let timer = AppTimer {
+            id,
+            period_ms,
+            serial,
+            tick: Some(Box::new(tick)),
+            #[cfg(windows)]
+            system,
+        };
+        let replaced = {
+            let mut timers = self.inner.timers.borrow_mut();
+            match timers.iter_mut().find(|kept| kept.id == id) {
+                Some(kept) => Some(std::mem::replace(kept, timer)),
+                None => {
+                    timers.push(timer);
+                    None
+                }
+            }
+        };
+        // Outside the borrow, as in a kill.
+        drop(replaced);
+        Ok(())
+    }
+
+    /// Stops the application's timer `id`. Returns whether it was running.
+    /// A call that runs now finishes, and no tick comes after.
+    pub fn kill_timer(&self, id: TimerId) -> bool {
+        let removed = {
+            let mut timers = self.inner.timers.borrow_mut();
+            let index = timers.iter().position(|timer| timer.id == id);
+            index.map(|index| timers.remove(index))
+        };
+        let Some(timer) = removed else {
+            return false;
+        };
+        #[cfg(windows)]
+        if matches!(self.inner.backend, AppBackend::Win32(_)) {
+            crate::win32::app::kill_timer(timer.system);
+        }
+        // What the call holds may reach the timers as it drops.
+        drop(timer);
+        true
+    }
+
+    /// The application's running timers and their periods in
+    /// milliseconds, in the order they were first set.
+    pub fn timers(&self) -> Vec<(TimerId, u32)> {
+        self.inner
+            .timers
+            .borrow()
+            .iter()
+            .map(|timer| (timer.id, timer.period_ms))
+            .collect()
+    }
 }
 
 impl fmt::Debug for App {
@@ -571,6 +788,34 @@ impl HeadlessApp {
             .iter()
             .map(|window| Headless::new(Rc::downgrade(window)))
             .collect()
+    }
+
+    /// The application's running timers and their periods, as
+    /// [`App::timers`] says.
+    pub fn timers(&self) -> Vec<(TimerId, u32)> {
+        self.inner
+            .upgrade()
+            .map_or_else(Vec::new, |inner| App { inner }.timers())
+    }
+
+    /// Fires each of the application's running timers once, in the order
+    /// they were first set, as the system would when their periods pass,
+    /// and returns how many calls ran. A timer a call sets meanwhile fires
+    /// the next time, and one a call kills does not fire.
+    pub fn fire_timers(&self) -> usize {
+        let Some(inner) = self.inner.upgrade() else {
+            return 0;
+        };
+        let serials: Vec<u64> = inner
+            .timers
+            .borrow()
+            .iter()
+            .map(|timer| timer.serial)
+            .collect();
+        serials
+            .into_iter()
+            .filter(|&serial| AppInner::fire(&inner, |timer| timer.serial == serial))
+            .count()
     }
 
     /// Sets the system's scale for windows opened from now on, as if they

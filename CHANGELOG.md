@@ -1497,6 +1497,22 @@ Floating panels for an effect chain, which Parabolic asked for:
     device backend (a pick reaching the standalone and its report coming
     back, MIDI ports, hot-plug, an effect's input). Limits: TECH_DEBT
     115.
+- Timers of an application ([ADR 0024](docs/adr/0024-application-timers.md)):
+  `App::set_timer(id, period_ms, tick)` calls `tick(&App)` on the
+  application's thread about every `period_ms`, whether or not a window
+  is shown, for work that is the program's (following the audio devices
+  with `manguebyte_gui::audio_settings::sync`, whose example now uses
+  it); `kill_timer` and `timers` stop and list them. On Win32 they are
+  thread timers with a timer procedure, so they tick in `App::run` and in
+  the system's modal loops; a tick that comes while its own call runs is
+  dropped, late ones are not made up, a call may set or kill any timer,
+  its own included, and a panicking call is caught and its timer killed.
+  `HeadlessApp::fire_timers` and `timers` drive them in tests. Tested:
+  `manguebyte-window`'s `tests/app.rs` (setting, replacing, killing,
+  order, re-entrance, drops that reach the timers, the loop, the
+  application going) and `tests/win32_app.rs` (real thread timers, a
+  loop that is not the application's, a panicking call, no tick after
+  the application goes). Limits: TECH_DEBT 117.
 
 ### Breaking
 

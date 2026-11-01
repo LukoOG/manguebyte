@@ -8,10 +8,12 @@
 //! standalone's `set_` methods. [`sync`] does both, and follows devices
 //! that come and go: a program calls it about every
 //! [`DEFAULT_POLL_INTERVAL`](manguebyte_devices::DEFAULT_POLL_INTERVAL),
-//! from a timer of its own or from a thread that owns the standalone
-//! ([`AudioSettings`] is `Send` and `Sync`, so the view on the interface's
-//! thread and the glue on another share it). ADR 0022 says why the glue
-//! lives here.
+//! from a timer of the application ([`App::set_timer`]) or from a thread
+//! that owns the standalone ([`AudioSettings`] is `Send` and `Sync`, so the
+//! view on the interface's thread and the glue on another share it).
+//! ADR 0022 says why the glue lives here.
+//!
+//! [`App::set_timer`]: manguebyte_window::App::set_timer
 //!
 //! ```no_run
 //! # use std::sync::Arc;
@@ -31,13 +33,15 @@
 //! #     fn prepare(&mut self, _: &ProcessSpec) {}
 //! #     fn process(&mut self, _: &mut AudioBuffer<f32>, _: &ProcessContext<'_, f32>) {}
 //! # }
-//! use manguebyte_gfx::Point;
-//! use manguebyte_gui::audio_settings;
+//! use manguebyte_devices::DEFAULT_POLL_INTERVAL;
+//! use manguebyte_gfx::{Point, Size};
+//! use manguebyte_gui::{audio_settings, open_app_window};
 //! use manguebyte_standalone::{Standalone, StandaloneOptions};
 //! use manguebyte_ui::audio_settings::AudioSettings;
-//! use manguebyte_ui::{IntoView, State, floating_panel, label, pill, row};
+//! use manguebyte_ui::{IntoView, State, Theme, floating_panel, label, pill, row};
+//! use manguebyte_window::{App, AppWindowOptions, TimerId};
 //!
-//! let mut app = Standalone::<MySynth>::start(StandaloneOptions::default())?;
+//! let mut synth = Standalone::<MySynth>::start(StandaloneOptions::default())?;
 //!
 //! // The view, in a panel a pill opens over the program's own interface.
 //! let settings = AudioSettings::new();
@@ -45,13 +49,19 @@
 //! let view = row((label("My synth"), pill("Audio settings").opens(&open))).with_panels([
 //!     floating_panel("Audio settings", open.clone(), State::new(Point::new(20.0, 40.0)), settings.view()),
 //! ]);
-//! # let _ = view;
+//! let app = App::new()?;
+//! let window = open_app_window(&app, AppWindowOptions::new("My synth", Size::new(480.0, 320.0)), Theme::default(), None, view)?;
 //!
-//! // From the program's timer: carry out what the person picked, follow
-//! // devices that came or went, and show what runs now.
-//! if audio_settings::sync(&mut app, &settings) {
-//!     println!("{}", app.report());
-//! }
+//! // From the application's timer: carry out what the person picked,
+//! // follow devices that came or went, and show what runs now.
+//! let polled = settings.clone();
+//! app.set_timer(TimerId(1), DEFAULT_POLL_INTERVAL.as_millis() as u32, move |_: &App| {
+//!     if audio_settings::sync(&mut synth, &polled) {
+//!         println!("{}", synth.report());
+//!     }
+//! })?;
+//! app.run()?;
+//! # drop(window);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 

@@ -12,7 +12,7 @@
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use manguebyte_gfx::{IRect, Pixmap, Point, Size};
 use manguebyte_window::win32::testing::{self, Drag, Message, Ole, ReadBack, TopLevel};
@@ -563,4 +563,99 @@ fn the_file_dialogs_are_made_and_configured_as_asked() {
         prepared.folder.as_ref().map(canonical),
         Some(canonical(&folder))
     );
+}
+
+/// Runs `app` with a hidden window open, so that only a timer ends the
+/// run, and a guard timer that ends it after `limit` whatever happens.
+fn run_with_timers(app: &App, limit: Duration) -> RunEnd {
+    let _window = app
+        .open_window(
+            options("Timers", 40.0, 30.0).hidden(),
+            |_: &WindowCx<'_>, _| Handled::Yes,
+        )
+        .expect("an application window");
+    let started = Instant::now();
+    app.set_timer(TimerId(u32::MAX), 50, move |app: &App| {
+        if started.elapsed() > limit {
+            app.quit();
+        }
+    })
+    .expect("a thread timer");
+    let end = app.run().expect("the loop");
+    app.kill_timer(TimerId(u32::MAX));
+    end
+}
+
+#[test]
+fn application_timers_tick_in_the_message_loop_with_no_window_of_their_own() {
+    let app = App::new().expect("Win32");
+    let ticks = Rc::new(Cell::new(0));
+    let counted = Rc::clone(&ticks);
+    app.set_timer(TimerId(1), 10, move |app: &App| {
+        counted.set(counted.get() + 1);
+        if counted.get() == 3 {
+            app.quit();
+        }
+    })
+    .expect("a thread timer");
+    let started = Instant::now();
+    assert_eq!(run_with_timers(&app, Duration::from_secs(10)), RunEnd::Quit);
+    assert_eq!(ticks.get(), 3);
+    assert!(
+        started.elapsed() >= Duration::from_millis(20),
+        "10 ms apart at least"
+    );
+
+    // Set again, it ticks with its new call; killed, it stops.
+    let again = Rc::clone(&ticks);
+    app.set_timer(TimerId(1), 10, move |app: &App| {
+        again.set(again.get() + 1);
+        if again.get() == 5 {
+            assert!(app.kill_timer(TimerId(1)));
+            app.quit();
+        }
+    })
+    .expect("a thread timer");
+    assert_eq!(run_with_timers(&app, Duration::from_secs(10)), RunEnd::Quit);
+    assert_eq!(ticks.get(), 5);
+    assert!(app.timers().is_empty());
+    testing::pump(Duration::from_millis(60));
+    assert_eq!(ticks.get(), 5, "a killed timer never ticks");
+}
+
+#[test]
+fn a_panicking_timer_call_is_caught_and_its_timer_killed() {
+    let app = App::new().expect("Win32");
+    app.set_timer(TimerId(1), 10, |_: &App| panic!("a timer bug"))
+        .expect("a thread timer");
+    let ticks = Rc::new(Cell::new(0));
+    let counted = Rc::clone(&ticks);
+    app.set_timer(TimerId(2), 10, move |app: &App| {
+        counted.set(counted.get() + 1);
+        if counted.get() == 4 {
+            app.quit();
+        }
+    })
+    .expect("a thread timer");
+    assert_eq!(run_with_timers(&app, Duration::from_secs(10)), RunEnd::Quit);
+    assert_eq!(ticks.get(), 4);
+    assert_eq!(app.timers(), [(TimerId(2), 10)]);
+}
+
+#[test]
+fn application_timers_tick_in_any_loop_of_the_thread_and_go_with_the_application() {
+    // A loop that is not the application's, as a modal one, dispatches
+    // them too.
+    let app = App::new().expect("Win32");
+    let ticks = Rc::new(Cell::new(0));
+    let counted = Rc::clone(&ticks);
+    app.set_timer(TimerId(1), 10, move |_: &App| {
+        counted.set(counted.get() + 1)
+    })
+    .expect("a thread timer");
+    assert!(testing::pump_until(Duration::from_secs(10), || ticks.get() >= 2));
+    drop(app);
+    let after = ticks.get();
+    testing::pump(Duration::from_millis(60));
+    assert_eq!(ticks.get(), after, "the timers go with the application");
 }

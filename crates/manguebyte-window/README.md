@@ -18,6 +18,9 @@ Documentation: <https://docs.rs/manguebyte-window>
   scale.
 - `App::run`: the loop of an application's windows, until the last one
   closes or it is asked to quit. Plugins never need it.
+- `App::set_timer`: timers of the application, which call the program
+  on the application's thread (to follow devices, save state) whether or
+  not a window is shown (ADR 0024).
 - Files and text dragged onto a window (`with_file_drops`,
   `Event::Drop`), through OLE on Win32.
 - The system's dialogs to open files, pick a folder and save

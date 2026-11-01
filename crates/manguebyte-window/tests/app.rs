@@ -2,7 +2,7 @@
 //! backend: the same code the Win32 backend runs for everything but the
 //! system calls, on every system.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -620,4 +620,177 @@ fn a_headless_application_is_gone_with_its_last_handle() {
     assert!(!test.post(|| {}));
     assert!(!test.set_system_scale(2.0));
     let _: HeadlessApp = test;
+}
+
+/// The names of the calls that ran, in order.
+type Calls = Rc<RefCell<Vec<&'static str>>>;
+
+fn count(calls: &Calls, name: &'static str) -> impl FnMut(&App) + 'static {
+    let calls = Rc::clone(calls);
+    move |_: &App| calls.borrow_mut().push(name)
+}
+
+#[test]
+fn application_timers_are_set_again_killed_and_listed() {
+    let (app, test) = App::headless();
+    let calls: Calls = Rc::default();
+    assert_eq!(
+        app.set_timer(TimerId(1), 0, count(&calls, "never")),
+        Err(WindowError::InvalidPeriod)
+    );
+    assert!(app.timers().is_empty());
+    app.set_timer(TimerId(2), 50, count(&calls, "devices"))
+        .expect("a period");
+    app.set_timer(TimerId(1), 16, count(&calls, "meters"))
+        .expect("a period");
+    assert_eq!(app.timers(), [(TimerId(2), 50), (TimerId(1), 16)]);
+    assert_eq!(test.fire_timers(), 2);
+    assert_eq!(*calls.borrow(), ["devices", "meters"]);
+
+    // Setting an id again replaces its call and period, in its place.
+    app.set_timer(TimerId(2), 250, count(&calls, "slow devices"))
+        .expect("a period");
+    assert_eq!(test.timers(), [(TimerId(2), 250), (TimerId(1), 16)]);
+    calls.borrow_mut().clear();
+    assert_eq!(test.fire_timers(), 2);
+    assert_eq!(*calls.borrow(), ["slow devices", "meters"]);
+
+    assert!(app.kill_timer(TimerId(2)));
+    assert!(!app.kill_timer(TimerId(2)));
+    calls.borrow_mut().clear();
+    assert_eq!(test.fire_timers(), 1);
+    assert_eq!(*calls.borrow(), ["meters"]);
+}
+
+#[test]
+fn a_timer_call_may_set_and_kill_timers_its_own_included() {
+    let (app, test) = App::headless();
+    let calls: Calls = Rc::default();
+    let log = Rc::clone(&calls);
+    let replacement = Rc::clone(&calls);
+    app.set_timer(TimerId(1), 10, move |app: &App| {
+        log.borrow_mut().push("first");
+        // Kills the timer after it before that one's turn, replaces itself
+        // with a call for the next round, and starts one more.
+        assert!(app.kill_timer(TimerId(2)));
+        app.set_timer(TimerId(1), 10, count(&replacement, "second"))
+            .expect("a period");
+        app.set_timer(TimerId(3), 10, count(&replacement, "new"))
+            .expect("a period");
+    })
+    .expect("a period");
+    app.set_timer(TimerId(2), 10, count(&calls, "killed"))
+        .expect("a period");
+    assert_eq!(test.fire_timers(), 1, "the killed one and the new one wait");
+    assert_eq!(*calls.borrow(), ["first"]);
+    assert_eq!(test.fire_timers(), 2);
+    assert_eq!(*calls.borrow(), ["first", "second", "new"]);
+}
+
+#[test]
+fn a_tick_that_comes_while_its_own_call_runs_is_dropped() {
+    let (app, test) = App::headless();
+    let calls: Calls = Rc::default();
+    let log = Rc::clone(&calls);
+    let nested = test.clone();
+    app.set_timer(TimerId(1), 10, move |_: &App| {
+        log.borrow_mut().push("outer");
+        // A loop inside the call (a dialog's) lets the ticks through: the
+        // other timer runs, this one does not run inside itself.
+        assert_eq!(nested.fire_timers(), 1);
+    })
+    .expect("a period");
+    app.set_timer(TimerId(2), 10, count(&calls, "other"))
+        .expect("a period");
+    assert_eq!(test.fire_timers(), 2);
+    assert_eq!(*calls.borrow(), ["outer", "other", "other"]);
+    // The call is back for the next round.
+    calls.borrow_mut().clear();
+    assert_eq!(test.fire_timers(), 2);
+    assert_eq!(*calls.borrow(), ["outer", "other", "other"]);
+}
+
+/// Runs its closure when it drops.
+struct OnDrop<F: FnMut()>(F);
+
+impl<F: FnMut()> Drop for OnDrop<F> {
+    fn drop(&mut self) {
+        (self.0)();
+    }
+}
+
+#[test]
+fn what_a_timer_call_holds_may_reach_the_timers_as_it_drops() {
+    let (app, test) = App::headless();
+    let dropped = Rc::new(Cell::new(0));
+    // A call holding what reaches the timers as it drops. It holds the
+    // application weakly: a clone would keep it alive.
+    let call = || {
+        let (test, dropped) = (test.clone(), Rc::clone(&dropped));
+        let guard = OnDrop(move || {
+            dropped.set(dropped.get() + 1);
+            let _ = test.timers();
+            let _ = test.fire_timers();
+        });
+        move |_: &App| {
+            let _ = &guard;
+        }
+    };
+    app.set_timer(TimerId(1), 10, call()).expect("a period");
+    app.set_timer(TimerId(1), 20, call()).expect("a period");
+    assert_eq!(dropped.get(), 1, "replaced");
+    assert!(app.kill_timer(TimerId(1)));
+    assert_eq!(dropped.get(), 2, "killed");
+
+    // Replaced from inside its own call: it goes once the call returns.
+    let replaced = Rc::clone(&dropped);
+    let guard = OnDrop(move || replaced.set(replaced.get() + 1));
+    app.set_timer(TimerId(1), 10, move |app: &App| {
+        let _ = &guard;
+        app.set_timer(TimerId(1), 10, |_: &App| {})
+            .expect("a period");
+    })
+    .expect("a period");
+    assert_eq!(test.fire_timers(), 1);
+    assert_eq!(dropped.get(), 3);
+}
+
+#[test]
+fn timers_tick_between_the_steps_of_the_loop_and_may_end_it() {
+    let (app, test) = App::headless();
+    let (_window, _) = logged(&app, options("Ticks", 10.0, 10.0));
+    let ticks = Rc::new(Cell::new(0));
+    let counted = Rc::clone(&ticks);
+    app.set_timer(TimerId(1), 10, move |app: &App| {
+        counted.set(counted.get() + 1);
+        if counted.get() == 3 {
+            app.quit();
+        }
+    })
+    .expect("a period");
+    for _ in 0..5 {
+        let system = test.clone();
+        test.post(move || {
+            system.fire_timers();
+        });
+    }
+    assert_eq!(app.run(), Ok(RunEnd::Quit));
+    assert_eq!(ticks.get(), 3);
+    assert_eq!(test.pending_steps(), 2);
+}
+
+#[test]
+fn the_calls_go_with_the_application() {
+    let (app, test) = App::headless();
+    let held = Rc::new(());
+    let kept = Rc::clone(&held);
+    app.set_timer(TimerId(1), 10, move |_: &App| {
+        let _ = &kept;
+    })
+    .expect("a period");
+    assert_eq!(Rc::strong_count(&held), 2);
+    drop(app);
+    assert_eq!(Rc::strong_count(&held), 1);
+    assert!(test.timers().is_empty());
+    assert_eq!(test.fire_timers(), 0);
 }

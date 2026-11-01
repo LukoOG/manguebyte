@@ -115,6 +115,6 @@ are on.
   the report are shown. There is no host (device type) section, no
   channel selection, no MIDI output section, no test tone and no CPU or
   latency readout; a buffer size the device chooses itself shows as
-  "Default". `manguebyte-window`'s `App` has no timer, so a program calls
-  `sync` from a thread of its own or a widget's frame (TECH_DEBT item
-  115).
+  "Default". A program calls `sync` from an application timer
+  (`App::set_timer`, added by ADR 0024) or from a thread of its own
+  (TECH_DEBT item 115).

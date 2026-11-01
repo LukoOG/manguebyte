@@ -91,7 +91,8 @@
 //!   returns, in the Unicode text format. Opening is tried four times,
 //!   2 ms apart, while another program holds it.
 //! - Timers are `SetTimer` timers on the window's own `HWND`, so they end
-//!   with it.
+//!   with it. An application's timers are thread timers with a timer
+//!   procedure (`app`).
 //! - Nothing unwinds into the host: a panic in the window procedure is
 //!   caught there.
 //!
