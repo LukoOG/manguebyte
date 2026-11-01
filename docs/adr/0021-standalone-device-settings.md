@@ -87,10 +87,12 @@ starts the new device, fading in. `Engine::prepare_for` calls the plugin's
 transport keeps its place in beats. If what opened still differs from the
 plan (a driver that could not be described while another ran, another
 host), the format is corrected once more after the fact.
-`RatePolicy::Fixed(rate)` keeps the plugin at `rate`, prepared once: a
-device at another rate is fed through the edge's resampler, under a
-millisecond of latency, and a change of device crosses over without a gap
-where the backend can run two streams.
+`RatePolicy::Fixed(rate)` keeps the plugin at `rate`, prepared once: the
+devices are asked for `rate` unless the settings name another (a device
+that cannot run at it is not reported as a fallback, since nobody asked
+the device for it), a device at another rate is fed through the edge's
+resampler, under a millisecond of latency, and a change of device crosses
+over without a gap where the backend can run two streams.
 
 The engine format also carries the output device's channel count. A
 change of channel count goes through `apply_with_format` too, without

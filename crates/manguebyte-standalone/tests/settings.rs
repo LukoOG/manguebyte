@@ -315,6 +315,13 @@ fn the_same_plugin_plays_on_when_the_output_changes() {
 fn a_fixed_rate_prepares_the_plugin_once_and_resamples_the_device() {
     let mock = studio();
     mock.set_concurrent_streams(true);
+    // An interface that runs at 44.1 kHz and nothing else.
+    let mut old = MockBackend::device("old", "Old Interface", 2, 44_100);
+    for config in &mut old.configs {
+        config.min_sample_rate = 44_100;
+        config.max_sample_rate = 44_100;
+    }
+    mock.add_device(Direction::Output, old);
     let options = StandaloneOptions {
         rate_policy: RatePolicy::Fixed(48_000),
         ..StandaloneOptions::default()
@@ -323,12 +330,14 @@ fn a_fixed_rate_prepares_the_plugin_once_and_resamples_the_device() {
     assert_eq!(app.rate_policy(), RatePolicy::Fixed(48_000));
     play(&mock, "speakers").unwrap();
 
-    let report = app.set_output_device("usb").clone();
-    assert_eq!(report.output, Some(summary("usb", "USB Interface")));
+    let report = app.set_output_device("old").clone();
+    assert_eq!(report.output, Some(summary("old", "Old Interface")));
     assert_eq!(report.device_sample_rate, Some(44_100));
     assert_eq!(report.plugin_sample_rate, 48_000);
     assert!(report.is_resampled());
     assert!(!report.prepared_again);
+    // The rate was the plugin's, not the settings': no fallback to tell.
+    assert!(report.is_exact(), "{report}");
     // Both devices can play at once: a crossfade, with no gap.
     assert_eq!(report.swap.map(|swap| swap.kind), Some(SwapKind::Crossfade));
     assert!(report.to_string().contains("resampled from 48000 Hz"));
@@ -336,13 +345,19 @@ fn a_fixed_rate_prepares_the_plugin_once_and_resamples_the_device() {
     let mut handed_over = false;
     for _ in 0..64 {
         let _ = play(&mock, "speakers");
-        if play(&mock, "usb").is_some_and(|(left, _)| left == 0.5) {
+        if play(&mock, "old").is_some_and(|(left, _)| left == 0.5) {
             handed_over = true;
             break;
         }
     }
     assert!(handed_over, "the new device never played the plugin");
     assert_eq!(prepared(&app), [48_000.0]);
+
+    // A device that can run at the plugin's rate is asked for it, though
+    // its own is 44.1 kHz.
+    let report = app.set_output_device("usb").clone();
+    assert_eq!(report.device_sample_rate, Some(48_000));
+    assert!(!report.is_resampled());
 
     // Asking the devices for another rate leaves the plugin's alone.
     let report = app.set_sample_rate(Some(96_000)).clone();

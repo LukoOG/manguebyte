@@ -74,7 +74,8 @@ pub enum RatePolicy {
     #[default]
     FollowDevice,
     /// The plugin always runs at this rate, in hertz, and is prepared
-    /// once. A device at another rate is fed through a resampler at its
+    /// once. The devices are asked for it unless the settings name another
+    /// rate; a device at another rate is fed through a resampler at its
     /// edge, which adds under a millisecond of latency, and a change of
     /// device crosses over without a gap where the system can play both.
     Fixed(u32),

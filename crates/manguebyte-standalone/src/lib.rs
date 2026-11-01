@@ -293,7 +293,7 @@ impl<P: Plugin> Standalone<P> {
             .devices()
             .map(|snapshot| snapshot.midi_inputs)
             .unwrap_or_default();
-        let setup = options.settings.to_setup(P::LAYOUT.inputs > 0, &ports);
+        let setup = Self::device_setup(&options.settings, options.rate_policy, &ports);
         let format = Self::planned_format(
             &manager,
             &setup,
@@ -421,7 +421,23 @@ impl<P: Plugin> Standalone<P> {
                 .unwrap_or_default(),
             MidiInputs::Only(_) => Vec::new(),
         };
-        self.settings.to_setup(P::LAYOUT.inputs > 0, &ports)
+        Self::device_setup(&self.settings, self.rate_policy, &ports)
+    }
+
+    /// The device setup `settings` stand for, with `ports` as the MIDI
+    /// input ports connected. Under a fixed rate, the devices are asked
+    /// for the plugin's rate unless the settings name one, so that they
+    /// are resampled only when they cannot run at it.
+    fn device_setup(
+        settings: &StandaloneSettings,
+        policy: RatePolicy,
+        ports: &[DeviceSummary],
+    ) -> DeviceSetup {
+        let mut setup = settings.to_setup(P::LAYOUT.inputs > 0, ports);
+        if let (None, RatePolicy::Fixed(rate)) = (setup.sample_rate, policy) {
+            setup.sample_rate = (rate > 0).then_some(rate);
+        }
+        setup
     }
 
     /// Whether the plugin should be at another format on what runs now:
@@ -480,10 +496,15 @@ impl<P: Plugin> Standalone<P> {
     /// What runs now, as a report.
     fn current_report(
         &self,
-        fallbacks: Vec<Fallback>,
+        mut fallbacks: Vec<Fallback>,
         prepared_again: bool,
         error: Option<String>,
     ) -> SettingsReport {
+        // A rate the settings did not ask for, but a fixed rate did, is
+        // not a fallback: the device is resampled, as the report says.
+        if self.settings.sample_rate.is_none() {
+            fallbacks.retain(|fallback| !matches!(fallback, Fallback::SampleRate { .. }));
+        }
         let manager = &self.manager;
         let format = manager.format();
         SettingsReport {
