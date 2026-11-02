@@ -6,6 +6,9 @@ on:
     # be checked on every system before it is merged.
     branches: [main, "ci/**"]
   pull_request:
+    # A pull request into an `audit/...` branch is never merged: it only
+    # asks for a review of code already in main (AGENTS.md).
+    branches-ignore: ["audit/**"]
 
 env:
   CARGO_TERM_COLOR: always
