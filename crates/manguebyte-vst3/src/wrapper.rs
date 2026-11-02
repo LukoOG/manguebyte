@@ -89,7 +89,7 @@ use manguebyte_midi::MidiMessage;
 use manguebyte_params::{Param, ParamSet};
 use manguebyte_plugin::{
     AudioLayout, AuxOutputs, MidiController, MidiControllers, ParamWatcher, Plugin, PluginKind,
-    apply_param_events, load_state, offered_layouts, save_state,
+    Tail, apply_param_events, load_state, offered_layouts, save_state,
 };
 use vst3::Steinberg::Vst::RestartFlags_::kParamTitlesChanged;
 use vst3::Steinberg::Vst::{self as vst, BusDirections_, BusTypes_, MediaTypes_};

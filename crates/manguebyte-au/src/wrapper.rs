@@ -49,9 +49,8 @@ use manguebyte_midi::MidiMessage;
 use manguebyte_params::{Param, ParamSet};
 use manguebyte_plugin::output::{OutputBuffer, OutputProtocol, OutputTranslator};
 use manguebyte_plugin::{
-    AudioLayout, AuxOutputs, ParamWatcher, Plugin, PluginKind, load_state, offered_layouts,
+    AudioLayout, AuxOutputs, ParamWatcher, Plugin, PluginKind, Tail, load_state, offered_layouts,
     plugin_info, save_state,
-    AudioLayout, ParamWatcher, Plugin, PluginKind, Tail, load_state, offered_layouts, save_state,
 };
 
 use crate::cf::{self, Owned};
