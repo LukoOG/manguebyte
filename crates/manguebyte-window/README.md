@@ -13,7 +13,7 @@ Documentation: <https://docs.rs/manguebyte-window>
 - `Window`: a child of a host's window for a plugin editor
   (`Window::open`), or an application's own top-level window
   (`App::open_window`) with a title, size limits and a close request the
-  application answers. Both present premultiplied pixmaps from a back
+  application answers, with the program's icon (resource 1) on Win32. Both present premultiplied pixmaps from a back
   buffer, with damage, timers, input, the clipboard and the system's
   scale.
 - `App::run`: the loop of an application's windows, until the last one

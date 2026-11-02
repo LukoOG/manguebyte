@@ -1508,6 +1508,12 @@ Floating panels for an effect chain, which Parabolic asked for:
     requests, a port gone, the section hidden for a plugin that sends no
     notes; a pick reaching a standalone on the headless backend; goldens
     `audio-settings-midi-output` dark and light at 1x.
+- An application window shows its program's icon on Win32: the icon
+  resource 1 of the executable, at the system's large and small sizes
+  (`WM_SETICON`), in the title bar and the taskbar; a program with no
+  such icon keeps the system's default. Tested in
+  `manguebyte-window`'s `tests/win32_app.rs` with a system module that
+  has one, through `testing::show_icons_of` and `window_icons`.
 - Timers of an application ([ADR 0024](docs/adr/0024-application-timers.md)):
   `App::set_timer(id, period_ms, tick)` calls `tick(&App)` on the
   application's thread about every `period_ms`, whether or not a window

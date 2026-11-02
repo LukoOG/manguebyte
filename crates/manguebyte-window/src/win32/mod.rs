@@ -142,18 +142,20 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CREATESTRUCTW, CW_USEDEFAULT, CreateCaret, CreateWindowExW,
     DLGC_WANTALLKEYS, DLGC_WANTARROWS, DLGC_WANTCHARS, DLGC_WANTTAB, DefWindowProcW, DestroyCaret,
     DestroyWindow, GetClassInfoExW, GetClientRect, GetParent, GetSystemMetrics,
-    GetWindowThreadProcessId, IDC_ARROW, IsWindow, KillTimer, LoadCursorW, MINMAXINFO,
-    RegisterClassExW, SIZE_MINIMIZED, SM_CXDOUBLECLK, SM_CYDOUBLECLK, SPI_GETCLIENTAREAANIMATION,
-    SW_HIDE, SW_SHOW, SW_SHOWNA, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
-    SendMessageW, SetCaretPos, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow,
-    SystemParametersInfoW, USER_TIMER_MINIMUM, UnregisterClassW, WM_CAPTURECHANGED, WM_CHAR,
-    WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_DPICHANGED_AFTERPARENT, WM_ERASEBKGND, WM_GETDLGCODE,
-    WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_PRINTCLIENT, WM_RBUTTONDBLCLK,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
-    WNDCLASSEXW, WNDPROC, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_MINIMIZEBOX,
-    WS_OVERLAPPED, WS_OVERLAPPEDWINDOW, WS_SYSMENU, WS_VISIBLE,
+    GetWindowThreadProcessId, ICON_BIG, ICON_SMALL, IDC_ARROW, IMAGE_ICON, IsWindow, KillTimer,
+    LR_SHARED, LoadCursorW, LoadImageW, MINMAXINFO, RegisterClassExW, SIZE_MINIMIZED,
+    SM_CXDOUBLECLK, SM_CXICON, SM_CXSMICON, SM_CYDOUBLECLK, SM_CYICON, SM_CYSMICON,
+    SPI_GETCLIENTAREAANIMATION, SW_HIDE, SW_SHOW, SW_SHOWNA, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOZORDER, SendMessageW, SetCaretPos, SetTimer, SetWindowPos, SetWindowTextW,
+    ShowWindow, SystemParametersInfoW, USER_TIMER_MINIMUM, UnregisterClassW, WM_CAPTURECHANGED,
+    WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_DPICHANGED_AFTERPARENT, WM_ERASEBKGND,
+    WM_GETDLGCODE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_PRINTCLIENT,
+    WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SETICON, WM_SIZE,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WNDPROC, WS_CAPTION, WS_CHILD,
+    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_OVERLAPPEDWINDOW,
+    WS_SYSMENU, WS_VISIBLE,
 };
 
 use crate::app::{AppInner, AppWindowOptions, Frame, device_size};
@@ -627,10 +629,58 @@ pub(crate) fn open_top_level(
     if options.accepts_drops && ole {
         platform.register_drops(&inner);
     }
+    if let Some(hwnd) = platform.hwnd() {
+        // SAFETY: a null name gives the executable's own module, which
+        // lives as long as the process.
+        let program = unsafe { GetModuleHandleW(ptr::null()) };
+        show_icons(hwnd, program);
+    }
     if options.visible {
         platform.set_visible(true);
     }
     Ok(inner)
+}
+
+/// Gives the top-level window `hwnd` the icon resource 1 of `module`, at
+/// the system's large and small icon sizes, and returns which of the two
+/// it found. A module with no such icon leaves the window with the
+/// system's default.
+pub(crate) fn show_icons(hwnd: HWND, module: HMODULE) -> (bool, bool) {
+    if module.is_null() {
+        return (false, false);
+    }
+    // MAKEINTRESOURCEW(1): a resource named by its number.
+    let name = ptr::without_provenance::<u16>(1);
+    let mut found = [false; 2];
+    for (at, (which, width, height)) in [
+        (ICON_BIG, SM_CXICON, SM_CYICON),
+        (ICON_SMALL, SM_CXSMICON, SM_CYSMICON),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // SAFETY: `module` is a loaded module and `name` a resource number;
+        // a shared icon is owned by the system, so it is never destroyed
+        // here, and a missing one gives null.
+        let icon = unsafe {
+            LoadImageW(
+                module,
+                name,
+                IMAGE_ICON,
+                GetSystemMetrics(width),
+                GetSystemMetrics(height),
+                LR_SHARED,
+            )
+        };
+        if !icon.is_null() {
+            // SAFETY: `hwnd` is our window and `icon` a valid icon.
+            unsafe {
+                SendMessageW(hwnd, WM_SETICON, which as WPARAM, icon as LPARAM);
+            }
+            found[at] = true;
+        }
+    }
+    (found[0], found[1])
 }
 
 /// How to make a window.

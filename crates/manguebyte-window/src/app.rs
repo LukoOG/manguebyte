@@ -486,7 +486,10 @@ impl App {
 
     /// Opens a top-level window of the application, whose events go to
     /// `handler`. The window is as large inside as the options say, in
-    /// logical pixels, at the system's scale for where it opens.
+    /// logical pixels, at the system's scale for where it opens. On Win32
+    /// its title bar and the taskbar show the program's icon: the icon
+    /// resource 1 of the executable, at the system's large and small
+    /// sizes, or the system's default when it has none.
     ///
     /// # Errors
     ///

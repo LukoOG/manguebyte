@@ -890,6 +890,28 @@ pub fn desktop_window() -> usize {
     unsafe { GetDesktopWindow() }.addr()
 }
 
+/// Whether the window `handle` has a large and a small icon of its own
+/// (`WM_GETICON`), as opposed to the system's default.
+pub fn window_icons(handle: usize) -> (bool, bool) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ICON_BIG, ICON_SMALL, WM_GETICON};
+    let get = |which: u32| {
+        // SAFETY: WM_GETICON only reads; an unknown window gives 0.
+        unsafe { SendMessageW(handle as HWND, WM_GETICON, which as WPARAM, 0) != 0 }
+    };
+    (get(ICON_BIG), get(ICON_SMALL))
+}
+
+/// Gives the window `handle` the icon resource 1 of the loaded module
+/// `module` (a system DLL, say), as an application window takes its
+/// program's, and returns which of the large and small icons it found.
+pub fn show_icons_of(handle: usize, module: &str) -> (bool, bool) {
+    let name = super::com::wide(module);
+    // SAFETY: a NUL-terminated name; the module is not loaded by this.
+    let module =
+        unsafe { windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(name.as_ptr()) };
+    super::show_icons(handle as HWND, module)
+}
+
 /// Whether `handle` is a live window of any kind.
 pub fn is_window(handle: usize) -> bool {
     let hwnd: HWND = ptr::with_exposed_provenance_mut(handle);
