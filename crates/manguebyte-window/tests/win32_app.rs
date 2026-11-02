@@ -670,11 +670,24 @@ fn an_app_window_shows_its_programs_icon_or_the_systems() {
         )
         .expect("an application window");
     // The test program embeds no icon: the system's default stays.
-    assert_eq!(testing::window_icons(handle(&window)), (false, false));
-    // A module with icon 1, as a program that embeds one: both sizes.
+    assert_eq!(testing::window_icons(handle(&window)), (0, 0));
+    // A module with icon 1, as a program that embeds one: each size its own.
     assert_eq!(
         testing::show_icons_of(handle(&window), "shell32.dll"),
         (true, true)
     );
-    assert_eq!(testing::window_icons(handle(&window)), (true, true));
+    let (big, small) = testing::window_icons(handle(&window));
+    assert_ne!(big, small, "two images, not one shared by name");
+    let (big_size, small_size) = testing::system_icon_sizes();
+    assert_eq!(testing::icon_size(big), Some(big_size));
+    assert_eq!(testing::icon_size(small), Some(small_size));
+    // Another window takes the same two: nothing is loaded again.
+    let other = app
+        .open_window(
+            options("Icon too", 60.0, 40.0).hidden(),
+            |_: &WindowCx<'_>, _| Handled::Yes,
+        )
+        .expect("an application window");
+    testing::show_icons_of(handle(&other), "shell32.dll");
+    assert_eq!(testing::window_icons(handle(&other)), (big, small));
 }

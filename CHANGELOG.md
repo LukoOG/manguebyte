@@ -1513,7 +1513,9 @@ Floating panels for an effect chain, which Parabolic asked for:
   (`WM_SETICON`), in the title bar and the taskbar; a program with no
   such icon keeps the system's default. Tested in
   `manguebyte-window`'s `tests/win32_app.rs` with a system module that
-  has one, through `testing::show_icons_of` and `window_icons`.
+  has one: each size its own image at the size asked for, loaded once for
+  all windows (not `LR_SHARED`, which finds the first image cached for the
+  name whatever the size).
 - Timers of an application ([ADR 0024](docs/adr/0024-application-timers.md)):
   `App::set_timer(id, period_ms, tick)` calls `tick(&App)` on the
   application's thread about every `period_ms`, whether or not a window

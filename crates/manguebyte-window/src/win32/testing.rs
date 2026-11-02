@@ -890,15 +890,67 @@ pub fn desktop_window() -> usize {
     unsafe { GetDesktopWindow() }.addr()
 }
 
-/// Whether the window `handle` has a large and a small icon of its own
-/// (`WM_GETICON`), as opposed to the system's default.
-pub fn window_icons(handle: usize) -> (bool, bool) {
+/// The large and small icons the window `handle` has of its own
+/// (`WM_GETICON`), 0 where it shows the system's default.
+pub fn window_icons(handle: usize) -> (usize, usize) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{ICON_BIG, ICON_SMALL, WM_GETICON};
     let get = |which: u32| {
         // SAFETY: WM_GETICON only reads; an unknown window gives 0.
-        unsafe { SendMessageW(handle as HWND, WM_GETICON, which as WPARAM, 0) != 0 }
+        unsafe { SendMessageW(handle as HWND, WM_GETICON, which as WPARAM, 0) as usize }
     };
     (get(ICON_BIG), get(ICON_SMALL))
+}
+
+/// The width and height of the icon `icon`, in pixels.
+pub fn icon_size(icon: usize) -> Option<(u32, u32)> {
+    use windows_sys::Win32::Graphics::Gdi::{BITMAP, DeleteObject, GetObjectW};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetIconInfo, ICONINFO};
+    let mut info = ICONINFO::default();
+    // SAFETY: `info` is a valid place; on success the caller owns its two
+    // bitmaps, deleted below.
+    if unsafe { GetIconInfo(icon as _, &mut info) } == 0 {
+        return None;
+    }
+    let mut bitmap = BITMAP::default();
+    // A colour icon has a colour bitmap; a monochrome one only a mask, of
+    // twice the height.
+    let (source, parts) = if info.hbmColor.is_null() {
+        (info.hbmMask, 2)
+    } else {
+        (info.hbmColor, 1)
+    };
+    // SAFETY: a bitmap we own and a place of its size.
+    let read = unsafe {
+        GetObjectW(
+            source as _,
+            std::mem::size_of::<BITMAP>() as i32,
+            (&raw mut bitmap).cast(),
+        )
+    };
+    for owned in [info.hbmColor, info.hbmMask] {
+        if !owned.is_null() {
+            // SAFETY: GetIconInfo gave us these bitmaps to delete.
+            unsafe {
+                DeleteObject(owned as _);
+            }
+        }
+    }
+    (read != 0).then_some((bitmap.bmWidth as u32, bitmap.bmHeight as u32 / parts))
+}
+
+/// The system's large and small icon sizes, in pixels, each width by height.
+pub fn system_icon_sizes() -> ((u32, u32), (u32, u32)) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON,
+    };
+    let metric = |which| {
+        // SAFETY: reads a system metric.
+        unsafe { GetSystemMetrics(which) as u32 }
+    };
+    (
+        (metric(SM_CXICON), metric(SM_CYICON)),
+        (metric(SM_CXSMICON), metric(SM_CYSMICON)),
+    )
 }
 
 /// Gives the window `handle` the icon resource 1 of the loaded module

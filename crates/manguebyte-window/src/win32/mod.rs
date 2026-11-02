@@ -106,6 +106,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::ptr;
 use std::rc::Rc;
+use std::sync::{Mutex, PoisonError};
 
 use manguebyte_gfx::IRect;
 use windows_sys::Win32::Foundation::{
@@ -143,7 +144,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     DLGC_WANTALLKEYS, DLGC_WANTARROWS, DLGC_WANTCHARS, DLGC_WANTTAB, DefWindowProcW, DestroyCaret,
     DestroyWindow, GetClassInfoExW, GetClientRect, GetParent, GetSystemMetrics,
     GetWindowThreadProcessId, ICON_BIG, ICON_SMALL, IDC_ARROW, IMAGE_ICON, IsWindow, KillTimer,
-    LR_SHARED, LoadCursorW, LoadImageW, MINMAXINFO, RegisterClassExW, SIZE_MINIMIZED,
+    LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MINMAXINFO, RegisterClassExW, SIZE_MINIMIZED,
     SM_CXDOUBLECLK, SM_CXICON, SM_CXSMICON, SM_CYDOUBLECLK, SM_CYICON, SM_CYSMICON,
     SPI_GETCLIENTAREAANIMATION, SW_HIDE, SW_SHOW, SW_SHOWNA, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOZORDER, SendMessageW, SetCaretPos, SetTimer, SetWindowPos, SetWindowTextW,
@@ -649,38 +650,50 @@ pub(crate) fn show_icons(hwnd: HWND, module: HMODULE) -> (bool, bool) {
     if module.is_null() {
         return (false, false);
     }
-    // MAKEINTRESOURCEW(1): a resource named by its number.
-    let name = ptr::without_provenance::<u16>(1);
-    let mut found = [false; 2];
-    for (at, (which, width, height)) in [
-        (ICON_BIG, SM_CXICON, SM_CYICON),
-        (ICON_SMALL, SM_CXSMICON, SM_CYSMICON),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    let [big, small] = module_icons(module);
+    for (which, icon) in [(ICON_BIG, big), (ICON_SMALL, small)] {
+        if icon != 0 {
+            // SAFETY: `hwnd` is our window and `icon` an icon of this
+            // process, which is never destroyed.
+            unsafe {
+                SendMessageW(hwnd, WM_SETICON, which as WPARAM, icon as LPARAM);
+            }
+        }
+    }
+    (big != 0, small != 0)
+}
+
+/// The icon resource 1 of `module` at the large and small sizes, 0 where it
+/// has none. Each is loaded once, and kept until the process ends, when the
+/// system frees it, however many windows show it. They are not `LR_SHARED`:
+/// a shared load finds the first image cached for the name whatever the
+/// size asked for, so the small icon would be the large one.
+fn module_icons(module: HMODULE) -> [isize; 2] {
+    static LOADED: Mutex<Vec<(usize, [isize; 2])>> = Mutex::new(Vec::new());
+    let mut loaded = LOADED.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((_, icons)) = loaded.iter().find(|(kept, _)| *kept == module.addr()) {
+        return *icons;
+    }
+    let load = |width, height| {
+        // MAKEINTRESOURCEW(1): a resource named by its number.
+        let name = ptr::without_provenance::<u16>(1);
         // SAFETY: `module` is a loaded module and `name` a resource number;
-        // a shared icon is owned by the system, so it is never destroyed
-        // here, and a missing one gives null.
-        let icon = unsafe {
+        // a missing icon gives null.
+        unsafe {
             LoadImageW(
                 module,
                 name,
                 IMAGE_ICON,
                 GetSystemMetrics(width),
                 GetSystemMetrics(height),
-                LR_SHARED,
+                LR_DEFAULTCOLOR,
             )
-        };
-        if !icon.is_null() {
-            // SAFETY: `hwnd` is our window and `icon` a valid icon.
-            unsafe {
-                SendMessageW(hwnd, WM_SETICON, which as WPARAM, icon as LPARAM);
-            }
-            found[at] = true;
         }
-    }
-    (found[0], found[1])
+        .addr() as isize
+    };
+    let icons = [load(SM_CXICON, SM_CYICON), load(SM_CXSMICON, SM_CYSMICON)];
+    loaded.push((module.addr(), icons));
+    icons
 }
 
 /// How to make a window.
