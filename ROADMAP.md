@@ -187,6 +187,16 @@ Everything a standalone audio application needs, short of a user interface.
   0.16 of a core on AVX2 against a whole core for the scalar kernel. NEON
   and WebAssembly SIMD are not yet run, and a block biquad across lanes is
   not started (TECH_DEBT 103)
+- 🚧 The space around an organ's pipes (`manguebyte_dsp::space`, ADR
+  0025): each pipe placed into up to 16 channels with pan, fractional
+  delay, distance gain and air absorption, through shared fixed-point
+  rings (300 sounding pipes into stereo in 8 to 11 % of a block's time on
+  a busy laptop, bit for bit the same whatever the blocks); early
+  reflections of a rectangular room by image sources up to order 6; a
+  swell box. Done and tested, but not yet used by Caecilia or any
+  example instrument, and no frequency-dependent walls beyond one
+  one-pole a path, no diffraction, no binaural output, no Doppler
+  (TECH_DEBT 118)
 
 **Formats**
 - ✅ Streaming readers and writers that do not load whole files, with

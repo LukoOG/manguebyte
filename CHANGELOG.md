@@ -122,6 +122,58 @@ break the API.
 
 ### DSP
 
+- The space around an organ's pipes (`manguebyte_dsp::space`, ADR 0025),
+  for an organ that renders each pipe as its own mono signal. Geometry in
+  metres: `Position`, `Speakers` (one azimuth per channel, up to 16;
+  pairwise equal-power panning with the sine law, stereo at ±30°), and a
+  `Listener` whose `place` gives a `Placement`: pan, delay (distance over
+  343 m/s), distance gain (`reference / r`, held near the listener) and
+  air absorption as a one-pole whose cutoff falls with distance, matched
+  below it to a loss growing with the square of the frequency (0.077 dB/m
+  at 8 kHz, about ISO 9613-1's at 20 °C and 70 %; an approximation, not
+  the standard). `Chest` lays a rank out: chromatic, C and C♯ sides with
+  the largest pipes outside or in the middle, mitre, and heights that
+  follow the pipes' lengths. `Windchest` places thousands of pipes into
+  one accumulation ring per output channel: a sounding pipe's block goes
+  through its air filter and four Lagrange taps (or linear, or none),
+  then is written ahead at its delay with each channel's gain, as
+  fixed-point integers so that the output is the same bit for bit
+  whatever the block size and whatever order the pipes are added in; a
+  pipe holds five numbers of state and costs nothing while silent. Moving
+  a sounding pipe crossfades over 20 ms. `Reflections` computes a
+  rectangular room's image sources (Allen and Berkley, 1979) up to order
+  6, with absorption and an optional one-pole per wall, panned from each
+  image's direction; `EarlyReflections` plays them from a division's
+  mono bus into the output channels, gathered in a fixed order, and
+  crossfades to a new set. `keep_tail` takes the first part off an
+  impulse response for the `Convolution` tail. `SwellBox` is a
+  `Processor` for an enclosed division: an opening from 0 to 1 sets a
+  level linear in decibels (−30 dB closed) and a one-pole cutoff linear in
+  octaves (1 kHz to 20 kHz), both smoothed sample by sample over 50 ms.
+  Tested (`tests/space.rs`): the power of the pan within 1e-14 of one all
+  round for stereo, 5 and 8 channels; a pipe on the left louder on the
+  left, the two channels' power the same within 1e-4 across ±60°; a
+  pulse arriving at `d / 343` s within 1e-3 of a sample (measured 1.2e-4)
+  from 1.3 m to 40 m; the high-frequency cost of each interpolation at the
+  worst fraction as documented (cubic: 1.1 dB at 12 kHz, 3.3 dB at 16 kHz,
+  8.4 dB at 20 kHz of 48); the air's loss at 10 kHz as the law says to
+  1e-4 from 2 m to 80 m; the windchest, the reflections and the swell box
+  bit for bit the same over block sizes from 1 to 512, with pipes
+  starting, stopping and moving and a set of reflections changed; the
+  windchest's pipes added in reverse order giving the same bits; a moving
+  pipe and a new set of reflections stepping no more than the steeper of
+  the two steady signals and what the 20 ms fade adds, a tenth of the jump
+  without it; first-order reflections' images, delays, gains and pans as
+  computed independently, within 1e-12; the lattice's `4k² + 2` paths of
+  each order; the swell box's level at 200 Hz within 0.25 dB of the law
+  and its loss at 8 kHz growing as it closes; sweeping and slamming the
+  pedal never stepping more than the glide's slope, where no glide jumps
+  by 0.9; no heap use under the counting allocator. Measured
+  (`examples/space_speed.rs`, a busy Intel Core i3-1215U): 300 sounding
+  pipes of 2 000 into stereo, 128 frames at 48 kHz, 0.22 to 0.28 ms a
+  block (8 to 11 % of its time), about three times that while all of them
+  crossfade; reflections of order 3 about 0.04 ms, of order 6 0.21 to
+  0.25 ms; the swell box under 0.01 ms. Limits: TECH_DEBT 118.
 - `TableShape::cycle` and `TableShape::frames`: the poly synth's
   wavetables as cycles to draw, one at any position or all
   `TableShape::FRAMES` frames, read from the richest level as a low note

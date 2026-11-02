@@ -160,6 +160,49 @@ let (mut left, mut right) = (vec![0.0f32; 256], vec![0.0f32; 256]);
 bank.render_add(&mut left, &mut right);
 ```
 
+## The space around the pipes
+
+The `space` module puts an organ's pipes in a room, for an organ that
+renders each pipe as its own mono signal:
+
+- `Listener::place` turns a pipe's position in metres into a `Placement`:
+  a pan between loudspeakers (`Speakers`, stereo or up to 16 channels,
+  equal power), a delay of the distance over 343 m/s, a gain of one over
+  the distance, and a gentle low-pass for the air whose cutoff falls with
+  distance. `Chest` lays a rank out across a windchest: chromatic, C and
+  C♯ sides, or a mitre.
+- `Windchest` places thousands of pipes and costs only for those that
+  sound: each sounding pipe's block is filtered, delayed by a fraction of
+  a sample through four Lagrange taps, and written ahead into one
+  accumulation ring per output channel, in fixed point, so the output is
+  the same bit for bit whatever the block size and whatever order the
+  pipes come in. Moving a sounding pipe crossfades over 20 ms.
+- `Reflections` and `EarlyReflections`: the early reflections of a
+  rectangular nave by image sources, up to order 6, with each wall's
+  absorption and an optional one-pole, played from a division's bus;
+  `keep_tail` trims a measured response to follow them as the
+  `Convolution` tail.
+- `SwellBox`: an enclosed division's shutters, one opening from 0 to 1
+  setting a level and a cutoff, smoothed so the pedal never steps.
+
+300 sounding pipes into stereo, 128 frames at 48 kHz, take 0.22 to
+0.28 ms a block on a busy Intel Core i3-1215U (`examples/space_speed.rs`),
+early reflections of order 3 about 0.04 ms.
+
+```rust
+use manguebyte_core::AudioBuffer;
+use manguebyte_dsp::space::{Listener, Position, Speakers, Windchest, WindchestSettings};
+
+let listener = Listener::new(Position::new(0.0, 0.0, 1.6), Speakers::stereo());
+let mut chest = Windchest::new(&WindchestSettings::new(2_000, 2, 48_000.0, 128)).unwrap();
+chest.set_placement(0, &listener.place(Position::new(-2.0, 15.0, 4.0)));
+
+// Each block, for each sounding pipe, then once:
+chest.add(0, &[0.1; 128]);
+let mut out = AudioBuffer::<f32>::new(2, 128);
+chest.finish(&mut out);
+```
+
 ## Tuning
 
 The `tuning` module gives every key of a `Synth` or a sampler a pitch other
