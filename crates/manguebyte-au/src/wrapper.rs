@@ -78,7 +78,9 @@ const MAX_STATE_BYTES: usize = 64 << 20;
 
 /// What AU hosts are told for an infinite tail. `TailTime` is in seconds and has
 /// no infinite value; a host may multiply it by the sample rate and convert the
-/// result to an integer.
+/// result to an integer, so it stays finite: 2,000 s is about 1.5 × 10⁹ frames
+/// at 768 kHz, inside an `i32`. auval accepted 0, 2,000, larger values and
+/// `f64::INFINITY` alike; GarageBand loaded, played and exported the units.
 pub const INFINITE_TAIL_SECONDS: f64 = 2000.0;
 
 /// Most property listeners and render notifications kept.
@@ -613,11 +615,12 @@ impl<P: Plugin> Instance<P> {
         if self.latency.swap(latency, Ordering::Relaxed) != latency {
             self.changed(kAudioUnitProperty_Latency, kAudioUnitScope_Global, 0);
         }
-        // Hosts are told when initialization changes the tail; changes while running are TECH_DEBT 22.
+        // Hosts are told when initialization changes the tail; changes while
+        // running are TECH_DEBT 22.
         let tail = au_tail_seconds(tail, sample_rate);
         if self.tail.swap(tail, Ordering::Relaxed) != tail {
             self.changed(kAudioUnitProperty_TailTime, kAudioUnitScope_Global, 0);
-        };
+        }
     }
 
     fn uninitialize(&self) -> OSStatus {

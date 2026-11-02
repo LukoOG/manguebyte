@@ -305,7 +305,19 @@ break the API.
     transport, as LV2 does with `time:Position` (TECH_DEBT 86).
   - The CLAP host (`manguebyte-host`) sends `NoteParamValue` to a hosted
     plugin as a per-note parameter value.
-- **Tail** (issue #25). `Plugin::tail_samples` returns the Tail enum (None, Samples(usize), Infinite), defaulting to Infinite and read at activation like with `Plugin::latency_samples`. vst3 has `getTailSamples` which defaults to kInfiniteTail. CLAP has a tail extension which defaults to INFINITE_TAIL defined within the wrapper.rs file which is a i32::MAX value casted to u32 because the official clap repo says INT_32 MAX corresponds to infinite on CLAP. Both vst3 and CLAP clamp sample values larger than their largest possible finite values, rather than turning them to infinte. Au TailTime reports in seconds and clamps to the constant derived by testing.
+- **Tail** (issue [#25](https://github.com/alessonqueirozdev-hub/manguebyte/issues/25)).
+  `Plugin::tail_samples` says how long a plugin goes on sounding after
+  its input stops, as a `Tail`: `None`, `Samples(n)` or `Infinite`, the
+  default. It is read when the plugin is activated, as the latency is.
+  VST 3 reports it from `getTailSamples`, CLAP through the new `tail`
+  extension, and AU as `kAudioUnitProperty_TailTime`, in seconds, with
+  the host told when initializing changes it. A finite tail is never
+  reported as infinite: it is clamped to `kInfiniteTail - 1` in VST 3
+  and `i32::MAX - 1` in CLAP. AU has no infinite value, so an infinite
+  tail is 2,000 s, which stays inside an `i32` of frames at 768 kHz; AU
+  units that state no tail now report 2,000 s instead of 0. Mangue
+  Pluck states its longest release plus its reverb's decay; Mangue Duck
+  states none.
 - **Notes out of AU and LV2** (TECH_DEBT 82). An Audio Unit that sends
   notes has one MIDI output (`kAudioUnitProperty_MIDIOutputCallbackInfo`)
   and hands the host's `kAudioUnitProperty_MIDIOutputCallback` a
