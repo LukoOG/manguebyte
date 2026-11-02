@@ -138,17 +138,6 @@ pub struct AudioLayout {
     pub sidechain: usize,
 }
 
-/// The tail behavior of a plugin's output.
-#[derive(Debug)]
-pub enum Tail {
-    /// The output stops when the input does.
-    None,
-    /// The output keeps sounding for this many frames after the input stops.
-    Samples(usize),
-    /// The output may never stop, or its length is unknown.
-    Infinite,
-}
-
 impl AudioLayout {
     /// Stereo in, stereo out.
     pub const STEREO_EFFECT: Self = Self {
@@ -215,6 +204,17 @@ impl AudioLayout {
             && (self.outputs > 0) == (base.outputs > 0)
             && (self.sidechain == 0 || base.sidechain > 0)
     }
+}
+
+/// The tail behavior of a plugin's output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tail {
+    /// The output stops when the input does.
+    None,
+    /// The output keeps sounding for this many frames after the input stops.
+    Samples(usize),
+    /// The output may never stop, or its length is unknown.
+    Infinite,
 }
 
 /// The layouts a wrapper offers a host for `P`: [`Plugin::LAYOUT`] first,

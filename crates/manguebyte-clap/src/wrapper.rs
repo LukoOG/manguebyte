@@ -2333,8 +2333,6 @@ unsafe extern "C" fn tail_get<P: Plugin>(plugin: *const clap_plugin) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_eq;
-
     use super::*;
 
     fn clap_transport(flags: u32) -> clap_event_transport {

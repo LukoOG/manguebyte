@@ -78,7 +78,7 @@ const MAX_STATE_BYTES: usize = 64 << 20;
 
 /// What AU hosts are told for an infinite tail. `TailTime` is in seconds and has
 /// no infinite value; a host may multiply it by the sample rate and convert the
-/// result to an integer;
+/// result to an integer.
 pub const INFINITE_TAIL_SECONDS: f64 = 2000.0;
 
 /// Most property listeners and render notifications kept.
@@ -613,9 +613,11 @@ impl<P: Plugin> Instance<P> {
         if self.latency.swap(latency, Ordering::Relaxed) != latency {
             self.changed(kAudioUnitProperty_Latency, kAudioUnitScope_Global, 0);
         }
-        // Fixed at activation; telling the host about later changes is TECH_DEBT 22.
-        self.tail
-            .store(au_tail_seconds(tail, sample_rate), Ordering::Relaxed);
+        // Hosts are told when initialization changes the tail; changes while running are TECH_DEBT 22.
+        let tail = au_tail_seconds(tail, sample_rate);
+        if self.tail.swap(tail, Ordering::Relaxed) != tail {
+            self.changed(kAudioUnitProperty_TailTime, kAudioUnitScope_Global, 0);
+        };
     }
 
     fn uninitialize(&self) -> OSStatus {
@@ -2637,7 +2639,7 @@ mod tests {
         assert_eq!(
             au_tail_seconds(Tail::Samples(44_100), 48_000.0),
             0.91875,
-            "44,100 samples at 48,000 Hz equals 1.0 seconds"
+            "44,100 samples at 48,000 Hz equals 0.91875 seconds"
         );
         assert_eq!(
             au_tail_seconds(Tail::Samples(96_000), 48_000.0),
