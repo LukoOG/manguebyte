@@ -394,3 +394,62 @@ fn a_label_reads_its_source_every_frame_and_draws_only_changes() {
     assert!(ui.find(Role::Label, "12 presets").is_some());
     assert_eq!(ui.frame().damaged, 0);
 }
+
+/// Asks, every frame, for the light theme while its switch is on, and
+/// for the dark one while it is off.
+struct ThemeSwitch(Rc<Cell<bool>>);
+
+impl manguebyte_ui::Widget for ThemeSwitch {
+    fn access(&self, _cx: &manguebyte_ui::AccessCx<'_>) -> manguebyte_ui::AccessNode {
+        manguebyte_ui::AccessNode::new(Role::Group, "Theme switch")
+    }
+    fn measure(&mut self, _cx: &manguebyte_ui::MeasureCx<'_>) -> Size {
+        Size::new(1.0, 1.0)
+    }
+    fn update(&mut self, cx: &mut manguebyte_ui::UpdateCx<'_>) {
+        cx.set_theme(if self.0.get() {
+            manguebyte_ui::Theme::light()
+        } else {
+            manguebyte_ui::Theme::dark()
+        });
+    }
+    fn paint(&mut self, _cx: &manguebyte_ui::PaintCx<'_>, _scene: &mut manguebyte_gfx::Scene) {}
+}
+
+#[test]
+fn a_widget_can_change_the_theme_of_the_whole_interface() {
+    let params = params();
+    let levels = levels();
+    let light = Rc::new(Cell::new(false));
+    let view = column((
+        manguebyte_ui::View::new(ThemeSwitch(Rc::clone(&light))),
+        panel_view(&params, &levels),
+    ));
+    let mut ui = Harness::with_params(
+        view,
+        PANEL,
+        1.0,
+        Arc::clone(&params) as Arc<dyn manguebyte_params::ParamSet>,
+    );
+    ui.frame();
+    assert!(ui.dump().contains("solid(#eef0f6ff)"), "dark text");
+    // Asking for the theme in use draws nothing.
+    assert_eq!(ui.frame().damaged, 0);
+
+    light.set(true);
+    let summary = ui.frame();
+    assert!(summary.laid_out);
+    assert_eq!(ui.last_damage(), [IRect::new(0, 0, 400, 300)]);
+    let dump = ui.dump();
+    assert!(
+        dump.contains("solid(#16150fff)"),
+        "light text, in the same frame"
+    );
+    assert!(!dump.contains("#eef0f6"), "nothing kept the dark colours");
+    assert!(ui.pixels() == &ui.render_fresh());
+    assert_eq!(ui.frame().damaged, 0, "and only once");
+
+    light.set(false);
+    ui.frame();
+    assert!(ui.dump().contains("solid(#eef0f6ff)"), "back to dark");
+}

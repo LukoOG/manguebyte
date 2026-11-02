@@ -1516,6 +1516,14 @@ Floating panels for an effect chain, which Parabolic asked for:
   has one: each size its own image at the size asked for, loaded once for
   all windows (not `LR_SHARED`, which finds the first image cached for the
   name whatever the size).
+- A widget can change the theme of the whole interface while it runs:
+  `UpdateCx::set_theme` measures and paints every widget again in the new
+  theme in the same frame, as `Root::set_theme` does, in a plugin's editor
+  and an application's window alike, so a program can offer a light and a
+  dark look without making its window again. Asking for the theme in use
+  draws nothing. Tested in `manguebyte-ui`'s `tests/damage.rs` (the whole
+  window drawn once in the new colours, the same as a fresh render, and
+  back) and a doctest.
 - Timers of an application ([ADR 0024](docs/adr/0024-application-timers.md)):
   `App::set_timer(id, period_ms, tick)` calls `tick(&App)` on the
   application's thread about every `period_ms`, whether or not a window

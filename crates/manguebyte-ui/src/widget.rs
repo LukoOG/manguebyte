@@ -254,6 +254,8 @@ pub(crate) struct Requests {
     pub(crate) raise: bool,
     /// The focus goes to the first widget inside it that takes it.
     pub(crate) focus_within: bool,
+    /// The theme the whole interface is drawn with from now on.
+    pub(crate) theme: Option<Theme>,
 }
 
 /// Which of its children a container shows (see [`UpdateCx::show`]).
@@ -486,6 +488,55 @@ impl UpdateCx<'_> {
     /// ```
     pub fn show(&mut self, shown: Shown) {
         self.requests.shown = Some(shown);
+    }
+
+    /// Draws the whole interface in `theme` from this frame on: every
+    /// widget is measured and painted again with it, as
+    /// [`Root::set_theme`](crate::Root::set_theme) does, in a plugin's
+    /// editor and an application's window alike. When several widgets ask
+    /// in one frame, the last in the tree's order wins. Asking for the
+    /// theme in use changes nothing.
+    ///
+    /// ```
+    /// use std::cell::Cell;
+    /// use std::rc::Rc;
+    /// use manguebyte_gfx::{Scene, Size};
+    /// use manguebyte_ui::testing::Harness;
+    /// use manguebyte_ui::{
+    ///     AccessCx, AccessNode, MeasureCx, PaintCx, Role, Theme, UpdateCx, View, Widget,
+    /// };
+    ///
+    /// /// Follows a switch the program flips, and keeps the background it
+    /// /// was last painted with.
+    /// struct Look(Rc<Cell<bool>>, Rc<Cell<Option<manguebyte_gfx::Color>>>);
+    ///
+    /// impl Widget for Look {
+    ///     fn access(&self, _cx: &AccessCx<'_>) -> AccessNode {
+    ///         AccessNode::new(Role::Group, "Look")
+    ///     }
+    ///     fn measure(&mut self, _cx: &MeasureCx<'_>) -> Size {
+    ///         Size::new(10.0, 10.0)
+    ///     }
+    ///     fn update(&mut self, cx: &mut UpdateCx<'_>) {
+    ///         let theme = if self.0.get() { Theme::light() } else { Theme::dark() };
+    ///         cx.set_theme(theme);
+    ///     }
+    ///     fn paint(&mut self, cx: &PaintCx<'_>, _scene: &mut Scene) {
+    ///         self.1.set(Some(cx.theme().palette.background));
+    ///     }
+    /// }
+    ///
+    /// let (light, seen) = (Rc::new(Cell::new(false)), Rc::new(Cell::new(None)));
+    /// let view = View::new(Look(light.clone(), seen.clone()));
+    /// let mut ui = Harness::new(view, Size::new(40.0, 40.0), 1.0);
+    /// ui.frame();
+    /// assert_eq!(seen.get(), Some(Theme::dark().palette.background));
+    /// light.set(true);
+    /// ui.frame();
+    /// assert_eq!(seen.get(), Some(Theme::light().palette.background));
+    /// ```
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.requests.theme = Some(theme);
     }
 
     /// Makes the subtree of the widget's child at position `child` modal,

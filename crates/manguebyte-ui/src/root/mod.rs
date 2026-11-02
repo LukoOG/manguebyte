@@ -1271,6 +1271,7 @@ impl Root {
         let (hover, pressed_on) = (self.hover, self.pressed_on);
         let mut focus_wanted = None;
         let mut focus_within = None;
+        let mut theme_wanted = None;
         let mut index = 0;
         while index < self.tree.nodes.len() {
             let focus = self.focus.filter(|_| self.focus_visible);
@@ -1345,7 +1346,13 @@ impl Root {
             if requests.focus_within {
                 focus_within = Some(index);
             }
+            if requests.theme.is_some() {
+                theme_wanted = requests.theme;
+            }
             index += 1;
+        }
+        if let Some(theme) = theme_wanted.filter(|theme| *theme != self.theme) {
+            self.set_theme(theme);
         }
         if let Some(index) = focus_within {
             focus_wanted = self.focus_within(index).or(focus_wanted);
