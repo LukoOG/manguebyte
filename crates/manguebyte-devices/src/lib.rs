@@ -118,7 +118,9 @@ pub use hotplug::{
     MIN_POLL_INTERVAL, STALL_TIMEOUT,
 };
 pub use hotswap::{DEFAULT_CROSSFADE, EngineFormat, SwapKind, SwapReport};
-pub use manager::{AudioCallback, DEFAULT_MAX_BLOCK_SIZE, DeviceIo, DeviceManager, StreamFormat};
+pub use manager::{
+    AudioCallback, DEFAULT_MAX_BLOCK_SIZE, DeviceIo, DeviceManager, SetupPreview, StreamFormat,
+};
 pub use mock::MockBackend;
 pub use settings::{ConfigRange, StreamSettings};
 pub use setup::{DeviceChoice, DeviceRef, DeviceSetup, Fallback, ParseSetupError, RestoreReport};

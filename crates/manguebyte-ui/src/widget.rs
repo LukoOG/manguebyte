@@ -5,11 +5,14 @@ use std::time::Duration;
 use manguebyte_gfx::{Point, Rect, Scene, Size};
 use manguebyte_plugin::editor::EditorContext;
 
-use crate::access::{AccessNode, Action};
+use crate::access::{AccessItem, AccessNode, Action};
 use crate::clipboard::Clipboard;
+use crate::drag::{DragEvent, DragPayload};
 use crate::event::{Event, Handled};
 use crate::menu::Menu;
-use crate::root::{Anchor, MenuRequest};
+use crate::motion::{Animated, Lerp, Motion};
+use crate::root::{Anchor, FloatMetrics, MenuRequest};
+use crate::scroll::ScrollMetrics;
 use crate::theme::Theme;
 use crate::tree::NodeId;
 
@@ -158,9 +161,30 @@ pub trait Widget: 'static {
     /// The pointer came over the widget (`true`), with no button held, or
     /// went off it (`false`): only the innermost widget under the pointer
     /// is hovered. It is drawn again either way, and can show it with
-    /// [`PaintCx::is_hovered`]. Nothing unless overridden.
+    /// [`PaintCx::is_hovered`] and [`PaintCx::hover`]. Nothing unless
+    /// overridden.
     fn hover_changed(&mut self, cx: &mut EventCx<'_>, hovered: bool) {
         let _ = (cx, hovered);
+    }
+
+    /// The pointer moved to `at`, in logical pixels, over the widget while
+    /// it is hovered (with no button held): for a widget that lights the
+    /// part of itself under the pointer, such as a row, a key or a zone.
+    /// It asks to be drawn again if that part changed. Nothing unless
+    /// overridden.
+    fn hover_moved(&mut self, cx: &mut EventCx<'_>, at: Point) {
+        let _ = (cx, at);
+    }
+
+    /// How far beyond its rectangle, in logical pixels, the widget draws:
+    /// the reach of a shadow or a glow around it, such as a card's. The
+    /// root clips what the widget draws to its rectangle grown by this,
+    /// and draws that much around it again when it changes, so a shadow
+    /// that spills over its neighbours is never cut and never left behind.
+    /// Asked whenever layout runs. Zero unless overridden.
+    fn overflow(&self, cx: &MeasureCx<'_>) -> f32 {
+        let _ = cx;
+        0.0
     }
 
     /// Where the text caret is, in logical pixels, while the widget is
@@ -171,6 +195,35 @@ pub trait Widget: 'static {
         let _ = cx;
         None
     }
+
+    /// Takes part in a drag (see [`crate::drag`]): as a possible target,
+    /// [`DragEvent::Over`] is accepted with [`Handled::Yes`], and
+    /// [`DragEvent::Drop`] taken the same way; the widget that started the
+    /// drag hears [`DragEvent::Ended`]. Refuses everything unless
+    /// overridden.
+    fn drag(&mut self, cx: &mut EventCx<'_>, event: &DragEvent<'_>) -> Handled {
+        let _ = (cx, event);
+        Handled::No
+    }
+
+    /// Adds the parts of the widget that assistive technology should see
+    /// as nodes of their own to `items`, such as the rows of a list that
+    /// are shown, each after the widget in the accessibility tree and
+    /// inside it (see [`AccessItem`]). Nothing unless overridden: most
+    /// widgets are one node.
+    fn access_items(&self, cx: &AccessCx<'_>, items: &mut Vec<AccessItem>) {
+        let _ = (cx, items);
+    }
+
+    /// Carries out `action` on the item with `key` (see
+    /// [`access_items`](Widget::access_items)), which the item's node
+    /// allows (the root checks), and returns whether it did. For
+    /// [`Action::Focus`] the root gives the widget itself the focus first.
+    /// Does nothing unless overridden.
+    fn act_item(&mut self, cx: &mut EventCx<'_>, key: usize, action: Action) -> bool {
+        let _ = (cx, key, action);
+        false
+    }
 }
 
 /// What a widget asked for during a call; the root acts on it afterwards.
@@ -179,17 +232,70 @@ pub(crate) struct Requests {
     pub(crate) paint: bool,
     pub(crate) layout: bool,
     pub(crate) frame: bool,
+    /// The widget's description for assistive technology changed.
+    pub(crate) access: bool,
     /// `Some(true)` to take the pointer, `Some(false)` to let it go.
     pub(crate) capture: Option<bool>,
     pub(crate) focus: bool,
     /// A menu to open, hung from the widget or a point.
     pub(crate) menu: Option<MenuRequest>,
+    /// Where a scroll node asked to be scrolled to.
+    pub(crate) scroll: Option<Point>,
+    /// A drag to start.
+    pub(crate) drag: Option<DragPayload>,
+    /// Which of its children a container shows from now on.
+    pub(crate) shown: Option<Shown>,
+    /// `Some(Some(child))` to make a child's subtree modal, `Some(None)`
+    /// to end it.
+    pub(crate) modal: Option<Option<usize>>,
+    /// Where the widget asked to float, from its parent's corner.
+    pub(crate) float: Option<Point>,
+    /// The widget asked to be brought in front of its floating siblings.
+    pub(crate) raise: bool,
+    /// The focus goes to the first widget inside it that takes it.
+    pub(crate) focus_within: bool,
+    /// The theme the whole interface is drawn with from now on.
+    pub(crate) theme: Option<Theme>,
+}
+
+/// Which of its children a container shows (see [`UpdateCx::show`]).
+///
+/// A child that is not shown is kept, with every widget inside it and
+/// their state, but the root does not poll it, lay it out, draw it, let
+/// it be hit or focused, or describe it to assistive technology: it costs
+/// nothing until it is shown again. Pages and tabs are built on this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Shown {
+    /// Every child, as containers do unless they ask otherwise.
+    #[default]
+    All,
+    /// Only the child at this position among its children, from 0; none
+    /// if there is no child there.
+    Only(usize),
+    /// The first this many children, in order: a list whose length
+    /// changes while the interface runs, out of slots built once.
+    First(usize),
+}
+
+impl Shown {
+    /// Whether the child at position `child` is shown.
+    pub fn includes(self, child: usize) -> bool {
+        match self {
+            Shown::All => true,
+            Shown::Only(at) => at == child,
+            Shown::First(count) => child < count,
+        }
+    }
 }
 
 /// What [`Widget::update`] is given.
 pub struct UpdateCx<'a> {
     pub(crate) theme: &'a Theme,
+    pub(crate) motion: Motion,
+    /// The root's amounts for the widget: hover, press, focus ring.
+    pub(crate) amounts: (f32, f32, f32),
     pub(crate) rect: Rect,
+    pub(crate) scroll: Option<ScrollMetrics>,
     pub(crate) scale: f32,
     pub(crate) now: Duration,
     pub(crate) elapsed: Duration,
@@ -223,6 +329,75 @@ impl UpdateCx<'_> {
         self.elapsed
     }
 
+    /// The motion tokens in effect: the theme's, with every transition a
+    /// jump when the theme or the system turns motion off.
+    pub fn motion(&self) -> Motion {
+        self.motion
+    }
+
+    /// How far the hover has come in this frame (see [`PaintCx::hover`]).
+    /// For a scroll view, the pointer anywhere over its content counts.
+    pub fn hover(&self) -> f32 {
+        self.amounts.0
+    }
+
+    /// How far the focus ring has come in this frame (see
+    /// [`PaintCx::focus_ring`]).
+    pub fn focus_ring(&self) -> f32 {
+        self.amounts.2
+    }
+
+    /// Moves `value` on to this frame's time; while it changes the widget
+    /// is drawn again, and while it runs the root keeps frames coming.
+    /// Returns whether it changed.
+    ///
+    /// ```
+    /// use manguebyte_gfx::{Color, Rect, Scene, Size};
+    /// use manguebyte_ui::access::{AccessNode, Role};
+    /// use manguebyte_ui::testing::Harness;
+    /// use manguebyte_ui::{AccessCx, Animated, MeasureCx, PaintCx, UpdateCx, Widget};
+    ///
+    /// /// A light that fades in once.
+    /// struct Fade(Animated<f32>);
+    ///
+    /// impl Widget for Fade {
+    ///     fn access(&self, _cx: &AccessCx<'_>) -> AccessNode {
+    ///         AccessNode::new(Role::Image, "Fade")
+    ///     }
+    ///     fn measure(&mut self, _cx: &MeasureCx<'_>) -> Size {
+    ///         Size::new(10.0, 10.0)
+    ///     }
+    ///     fn update(&mut self, cx: &mut UpdateCx<'_>) {
+    ///         let (now, base) = (cx.now(), cx.motion().base());
+    ///         self.0.transition(1.0, now, base);
+    ///         cx.animate(&mut self.0);
+    ///     }
+    ///     fn paint(&mut self, cx: &PaintCx<'_>, scene: &mut Scene) {
+    ///         scene.fill(cx.rect(), Color::WHITE.with_opacity(self.0.value()));
+    ///     }
+    /// }
+    ///
+    /// let mut ui = Harness::new(Fade(Animated::new(0.0)), Size::new(10.0, 10.0), 1.0);
+    /// ui.set_motion(true);
+    /// assert!(ui.frame().animating);
+    /// ui.advance_ms(100);
+    /// assert!(ui.frame().animating);
+    /// ui.advance_ms(100);
+    /// // Settled: no more frames wanted, nothing drawn.
+    /// assert!(!ui.frame().animating);
+    /// assert_eq!(ui.frame().damaged, 0);
+    /// ```
+    pub fn animate<T: Lerp>(&mut self, value: &mut Animated<T>) -> bool {
+        let changed = value.tick(self.now);
+        if changed {
+            self.requests.paint = true;
+        }
+        if value.is_running() {
+            self.requests.frame = true;
+        }
+        changed
+    }
+
     /// Asks for [`Widget::paint`] to be called this frame.
     pub fn request_paint(&mut self) {
         self.requests.paint = true;
@@ -239,6 +414,185 @@ impl UpdateCx<'_> {
     /// meter), so the window should keep delivering frames.
     pub fn request_frame(&mut self) {
         self.requests.frame = true;
+    }
+
+    /// Says the widget's description for assistive technology changed in
+    /// a way a screen reader should hear about, such as its name: the
+    /// frame lists it in [`Frame::access`](crate::Frame::access), for the
+    /// window layer to tell the platform. It draws nothing by itself.
+    pub fn request_access_update(&mut self) {
+        self.requests.access = true;
+    }
+
+    /// Where the widget is scrolled, if it is laid out as a scroll node
+    /// (see [`crate::scroll`]).
+    pub fn scroll(&self) -> Option<ScrollMetrics> {
+        self.scroll
+    }
+
+    /// Scrolls the widget, a scroll node, so that `offset` is at the
+    /// viewport's top-left corner: kept within the content and rounded to
+    /// whole device pixels, before this frame is laid out. Does nothing for
+    /// a widget that does not scroll.
+    pub fn scroll_to(&mut self, offset: Point) {
+        self.requests.scroll = Some(offset);
+    }
+
+    /// Shows only some of the widget's children from this frame on (see
+    /// [`Shown`]); the others, and everything inside them, are kept with
+    /// their state but cost nothing until they are shown again. The
+    /// window is not built again: the root lays out again, draws what the
+    /// change uncovered and what it hid, and nothing else.
+    ///
+    /// A widget inside a child that is hidden loses the focus, the
+    /// pointer and the hover. Asking for what is already shown changes
+    /// nothing; a widget usually asks only when what it shows changed.
+    ///
+    /// ```
+    /// use std::cell::Cell;
+    /// use std::rc::Rc;
+    /// use manguebyte_gfx::{Scene, Size};
+    /// use manguebyte_ui::access::{AccessNode, Role};
+    /// use manguebyte_ui::layout::Style;
+    /// use manguebyte_ui::testing::Harness;
+    /// use manguebyte_ui::{
+    ///     AccessCx, MeasureCx, PaintCx, Shown, UpdateCx, View, Widget, label,
+    /// };
+    ///
+    /// /// Shows one of its children, the one `page` says.
+    /// struct OneOf(Rc<Cell<usize>>);
+    ///
+    /// impl Widget for OneOf {
+    ///     fn access(&self, _cx: &AccessCx<'_>) -> AccessNode {
+    ///         AccessNode::new(Role::Group, "Pages")
+    ///     }
+    ///     fn measure(&mut self, _cx: &MeasureCx<'_>) -> Size {
+    ///         Size::default()
+    ///     }
+    ///     fn paint(&mut self, _cx: &PaintCx<'_>, _scene: &mut Scene) {}
+    ///     fn update(&mut self, cx: &mut UpdateCx<'_>) {
+    ///         cx.show(Shown::Only(self.0.get()));
+    ///     }
+    /// }
+    ///
+    /// let page = Rc::new(Cell::new(0));
+    /// let view = View::with_children(OneOf(page.clone()), Style::stack(), (label("One"), label("Two")));
+    /// let mut ui = Harness::new(view, Size::new(100.0, 20.0), 1.0);
+    /// ui.frame();
+    /// assert!(ui.find(Role::Label, "One").is_some());
+    /// assert!(ui.find(Role::Label, "Two").is_none(), "hidden, so not described");
+    /// page.set(1);
+    /// ui.frame();
+    /// assert!(ui.find(Role::Label, "One").is_none());
+    /// assert!(ui.find(Role::Label, "Two").is_some());
+    /// ```
+    pub fn show(&mut self, shown: Shown) {
+        self.requests.shown = Some(shown);
+    }
+
+    /// Draws the whole interface in `theme` from this frame on: every
+    /// widget is measured and painted again with it, as
+    /// [`Root::set_theme`](crate::Root::set_theme) does, in a plugin's
+    /// editor and an application's window alike. When several widgets ask
+    /// in one frame, the last in the tree's order wins. Asking for the
+    /// theme in use changes nothing.
+    ///
+    /// ```
+    /// use std::cell::Cell;
+    /// use std::rc::Rc;
+    /// use manguebyte_gfx::{Scene, Size};
+    /// use manguebyte_ui::testing::Harness;
+    /// use manguebyte_ui::{
+    ///     AccessCx, AccessNode, MeasureCx, PaintCx, Role, Theme, UpdateCx, View, Widget,
+    /// };
+    ///
+    /// /// Follows a switch the program flips, and keeps the background it
+    /// /// was last painted with.
+    /// struct Look(Rc<Cell<bool>>, Rc<Cell<Option<manguebyte_gfx::Color>>>);
+    ///
+    /// impl Widget for Look {
+    ///     fn access(&self, _cx: &AccessCx<'_>) -> AccessNode {
+    ///         AccessNode::new(Role::Group, "Look")
+    ///     }
+    ///     fn measure(&mut self, _cx: &MeasureCx<'_>) -> Size {
+    ///         Size::new(10.0, 10.0)
+    ///     }
+    ///     fn update(&mut self, cx: &mut UpdateCx<'_>) {
+    ///         let theme = if self.0.get() { Theme::light() } else { Theme::dark() };
+    ///         cx.set_theme(theme);
+    ///     }
+    ///     fn paint(&mut self, cx: &PaintCx<'_>, _scene: &mut Scene) {
+    ///         self.1.set(Some(cx.theme().palette.background));
+    ///     }
+    /// }
+    ///
+    /// let (light, seen) = (Rc::new(Cell::new(false)), Rc::new(Cell::new(None)));
+    /// let view = View::new(Look(light.clone(), seen.clone()));
+    /// let mut ui = Harness::new(view, Size::new(40.0, 40.0), 1.0);
+    /// ui.frame();
+    /// assert_eq!(seen.get(), Some(Theme::dark().palette.background));
+    /// light.set(true);
+    /// ui.frame();
+    /// assert_eq!(seen.get(), Some(Theme::light().palette.background));
+    /// ```
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.requests.theme = Some(theme);
+    }
+
+    /// Makes the subtree of the widget's child at position `child` modal,
+    /// or ends that with `None`: while it is, only the widgets inside it
+    /// can be hit by the pointer, take the focus (Tab goes round inside
+    /// it) or be acted on by assistive technology, keys that the widget
+    /// with the focus does not use go to that child, and every key is
+    /// used. Open menus close, and a drag or a held pointer outside ends.
+    /// When it ends, the focus goes back to the widget that had it before.
+    /// One subtree is modal at a time; asking for another ends the first.
+    /// [`with_dialog`](crate::IntoView::with_dialog) is built on this.
+    pub fn set_modal(&mut self, child: Option<usize>) {
+        self.requests.modal = Some(child);
+    }
+
+    /// Takes the keyboard focus at the end of this frame's polling, if
+    /// the widget accepts [`Action::Focus`] then: what a dialog's default
+    /// button does when the dialog opens.
+    pub fn request_focus(&mut self) {
+        self.requests.focus = true;
+    }
+
+    /// Floats the widget over its siblings, its top-left corner at
+    /// `position` from its parent's, in logical pixels, from this frame
+    /// on: layout places it as any child, at the size it is given (a
+    /// floating widget usually aligns itself to the start, so that it has
+    /// its natural size), and the root then moves it, and everything
+    /// inside it, by whole device pixels to where it asked, as near as
+    /// keeps it inside its parent's rectangle. Asking again moves it, and
+    /// lays the interface out again.
+    ///
+    /// A floating widget is drawn after its parent's other children, and
+    /// in front of its floating siblings raised before it (see
+    /// [`raise`](Self::raise)); a press anywhere inside it, or the focus
+    /// moving inside it, raises it. The focus order stays the tree's.
+    /// [`with_panels`](crate::IntoView::with_panels) is built on this.
+    pub fn float_at(&mut self, position: Point) {
+        self.requests.float = Some(position);
+    }
+
+    /// Brings the widget, if it floats, in front of its floating siblings,
+    /// and draws again what it covers. Nothing if it is in front already.
+    pub fn raise(&mut self) {
+        self.requests.raise = true;
+    }
+
+    /// Gives the keyboard focus, at the end of this frame's polling, to
+    /// the first widget inside this one that takes it, in tree order, if
+    /// there is one. For a floating widget (see
+    /// [`float_at`](Self::float_at)) the root remembers the widget that
+    /// had the focus, or else the one pressed last if it takes the focus:
+    /// when this widget next hides what is inside it (see
+    /// [`show`](Self::show)) while the focus is inside or nowhere, that
+    /// widget gets it back, as a dialog gives it back to its opener.
+    pub fn focus_within(&mut self) {
+        self.requests.focus_within = true;
     }
 }
 
@@ -264,10 +618,13 @@ impl MeasureCx<'_> {
 pub struct PaintCx<'a> {
     pub(crate) theme: &'a Theme,
     pub(crate) rect: Rect,
+    pub(crate) scroll: Option<ScrollMetrics>,
     pub(crate) scale: f32,
     pub(crate) focused: bool,
     pub(crate) hovered: bool,
     pub(crate) now: Duration,
+    /// The root's amounts for the widget: hover, press, focus ring.
+    pub(crate) amounts: (f32, f32, f32),
 }
 
 impl PaintCx<'_> {
@@ -300,9 +657,35 @@ impl PaintCx<'_> {
         self.hovered
     }
 
+    /// How far the hover has come in, from 0 (not hovered) to 1, eased over
+    /// the theme's [`fast`](Motion::fast) duration: what a widget blends its
+    /// hover look by.
+    pub fn hover(&self) -> f32 {
+        self.amounts.0
+    }
+
+    /// How far a press on the widget has come in, from 0 to 1: the pointer
+    /// went down on it and has not been let go.
+    pub fn press(&self) -> f32 {
+        self.amounts.1
+    }
+
+    /// How far the focus ring has come in, from 0 to 1. It comes in only
+    /// while the widget has the focus and the focus should be shown (see
+    /// [`Root::focus_visible`](crate::Root::focus_visible)).
+    pub fn focus_ring(&self) -> f32 {
+        self.amounts.2
+    }
+
     /// The time of this frame.
     pub fn now(&self) -> Duration {
         self.now
+    }
+
+    /// Where the widget is scrolled, if it is laid out as a scroll node
+    /// (see [`crate::scroll`]).
+    pub fn scroll(&self) -> Option<ScrollMetrics> {
+        self.scroll
     }
 }
 
@@ -310,6 +693,7 @@ impl PaintCx<'_> {
 pub struct AccessCx<'a> {
     pub(crate) theme: &'a Theme,
     pub(crate) rect: Rect,
+    pub(crate) scroll: Option<ScrollMetrics>,
     pub(crate) focused: bool,
 }
 
@@ -329,12 +713,20 @@ impl AccessCx<'_> {
     pub fn is_focused(&self) -> bool {
         self.focused
     }
+
+    /// Where the widget is scrolled, if it is laid out as a scroll node
+    /// (see [`crate::scroll`]).
+    pub fn scroll(&self) -> Option<ScrollMetrics> {
+        self.scroll
+    }
 }
 
 /// What [`Widget::event`] and [`Widget::act`] are given.
 pub struct EventCx<'a> {
     pub(crate) theme: &'a Theme,
+    pub(crate) motion: Motion,
     pub(crate) rect: Rect,
+    pub(crate) scroll: Option<ScrollMetrics>,
     pub(crate) scale: f32,
     pub(crate) focused: bool,
     pub(crate) captured: bool,
@@ -342,6 +734,8 @@ pub struct EventCx<'a> {
     pub(crate) context: &'a EditorContext,
     pub(crate) clipboard: &'a dyn Clipboard,
     pub(crate) id: NodeId,
+    /// Where the nearest floating widget around this one is.
+    pub(crate) floating: Option<FloatMetrics>,
     pub(crate) requests: &'a mut Requests,
 }
 
@@ -365,6 +759,11 @@ impl EventCx<'_> {
     /// The time of the last frame.
     pub fn now(&self) -> Duration {
         self.now
+    }
+
+    /// The motion tokens in effect (see [`UpdateCx::motion`]).
+    pub fn motion(&self) -> Motion {
+        self.motion
     }
 
     /// Whether the widget has the keyboard focus.
@@ -442,5 +841,38 @@ impl EventCx<'_> {
             menu,
             anchor: Anchor::Point(at),
         });
+    }
+
+    /// Where the widget is scrolled, if it is laid out as a scroll node
+    /// (see [`crate::scroll`]).
+    pub fn scroll(&self) -> Option<ScrollMetrics> {
+        self.scroll
+    }
+
+    /// Scrolls the widget, a scroll node, so that `offset` is at the
+    /// viewport's top-left corner: kept within the content and rounded to
+    /// whole device pixels, and laid out on the next frame. Does nothing
+    /// for a widget that does not scroll.
+    pub fn scroll_to(&mut self, offset: Point) {
+        self.requests.scroll = Some(offset);
+    }
+
+    /// Where the nearest floating widget around this one, or this one, is
+    /// (see [`UpdateCx::float_at`]), as of the last layout: what a title
+    /// bar that moves its panel reads. `None` inside no floating widget.
+    pub fn floating(&self) -> Option<FloatMetrics> {
+        self.floating
+    }
+
+    /// Starts dragging `payload` (see [`crate::drag`]), if a button is
+    /// held and no drag runs already: from when the widget returns, the
+    /// root has the pointer, draws the payload's description under it,
+    /// and offers the payload to the widgets it passes over. The widget
+    /// no longer holds the pointer, and hears how the drag ended as
+    /// [`DragEvent::Ended`]. A widget usually starts a drag once the
+    /// pointer has moved a few pixels with the button held, so that a
+    /// click stays a click.
+    pub fn start_drag(&mut self, payload: DragPayload) {
+        self.requests.drag = Some(payload);
     }
 }

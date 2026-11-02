@@ -6,12 +6,13 @@ use core::marker::PhantomData;
 use manguebyte_core::spsc::{self, Consumer, Producer};
 use manguebyte_core::{AudioBuffer, Sample};
 use manguebyte_dsp::event::{Event, EventKind, Expression, NoteRef};
-use manguebyte_dsp::{ProcessContext, ProcessSpec, Processor, split_at_events};
+use manguebyte_dsp::{ProcessContext, ProcessSpec, Processor, Tuning};
 use manguebyte_midi::MidiMessage;
 
+use crate::controllers::{ControllerTable, MAX_CONTROLLERS};
 use crate::instrument::Instrument;
 use crate::interpolate::Interpolation;
-use crate::player::{Bend, FAST_FADE_SECONDS, Hold, Player, Start};
+use crate::player::{Bend, FAST_FADE_SECONDS, Hold, Modulation, Player, Start};
 use crate::region::Trigger;
 
 /// Most voices a [`Sampler`] accepts.
@@ -26,6 +27,9 @@ pub const MAX_LOADER_CAPACITY: usize = 1_024;
 /// the oldest is forgotten, and its key coming up starts no release
 /// regions.
 pub const MAX_HELD_NOTES: usize = 256;
+
+/// Most changes [`Sampler::set_controller`] holds for one block.
+pub const MAX_PENDING_CONTROLLER_CHANGES: usize = 1_024;
 
 /// What the sampler remembers about one key of one channel.
 #[derive(Debug, Clone, Copy)]
@@ -66,6 +70,34 @@ const CHANNEL_AT_REST: ChannelState = ChannelState {
     keys: [KEY_UP; 128],
 };
 
+/// A pitch ratio and a gain set from outside, as they ramp over a block:
+/// from `from` at its start to `to` on its last frame, and `next` for the
+/// block after.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Line {
+    from: (f64, f64),
+    to: (f64, f64),
+    next: (f64, f64),
+}
+
+const LEVEL: Line = Line {
+    from: (1.0, 1.0),
+    to: (1.0, 1.0),
+    next: (1.0, 1.0),
+};
+
+impl Line {
+    /// The block starts: on to what was set for it.
+    fn advance(&mut self) {
+        self.from = self.to;
+        self.to = self.next;
+    }
+
+    fn is_level(&self) -> bool {
+        self.from == (1.0, 1.0) && self.to == (1.0, 1.0)
+    }
+}
+
 /// A voice of the pool: what it plays and which instrument it reads.
 #[derive(Debug, Clone)]
 struct Voice {
@@ -82,6 +114,15 @@ struct Voice {
 /// ([`Expression`]), note chokes, and controllers 120 (all sound off), 121
 /// (reset controllers) and 123 (all notes off). A note-on with velocity 0
 /// is a note-off, as in MIDI.
+///
+/// Controllers 0 to 119, from MIDI messages on any channel, and every
+/// controller below [`MAX_CONTROLLERS`], from
+/// [`set_controller`](Self::set_controller), modulate the opcodes of the
+/// notes playing (`<opcode>_onccN`); see the
+/// [crate documentation](crate#controllers). Controller 121 puts back
+/// the initial values of MIDI's controllers that MIDI's recommended
+/// practice RP-015 resets, and leaves the others, those above 127
+/// included, alone.
 ///
 /// For every note it starts each region whose keys, velocities, channels,
 /// trigger, round-robin turn and random range accept it (see the
@@ -167,7 +208,38 @@ pub struct Sampler<S: Sample = f32> {
     clock: u64,
     /// Note events handled, which numbers the voices they start.
     serial: u64,
+    controllers: ControllerTable,
+    /// Changes [`set_controller`](Self::set_controller) asked for, in the
+    /// order of their frames in the next block; allocated once, never
+    /// grown.
+    changes: Vec<PendingChange>,
+    /// How many of `changes` the block under way has applied.
+    applied: usize,
+    /// Pitch and level from outside, per key and for every voice.
+    keys: Box<[Line]>,
+    all: Line,
+    /// Frames of the block under way, and of it rendered.
+    block_frames: u64,
+    block_done: u64,
+    /// The tuning of the keys.
+    tuning: Tuning,
     marker: PhantomData<S>,
+}
+
+/// A controller change waiting for its frame.
+#[derive(Debug, Clone, Copy)]
+struct PendingChange {
+    frame: u32,
+    controller: u16,
+    value: f64,
+}
+
+/// Whether controller 121 (reset all controllers) puts controller
+/// `controller` back to its initial value. MIDI's recommended practice
+/// RP-015 leaves alone bank select, volume, pan, the sound and effect
+/// controllers and the channel mode messages.
+fn reset_by_121(controller: u8) -> bool {
+    !matches!(controller, 0 | 7 | 10 | 32 | 39 | 42 | 70..=79 | 91..=95 | 120..)
 }
 
 impl<S: Sample> fmt::Debug for Sampler<S> {
@@ -243,6 +315,14 @@ impl<S: Sample> Sampler<S> {
                 interpolation: Interpolation::Sinc,
                 clock: 0,
                 serial: 0,
+                controllers: ControllerTable::new(),
+                changes: Vec::with_capacity(MAX_PENDING_CONTROLLER_CHANGES),
+                applied: 0,
+                keys: vec![LEVEL; 128].into_boxed_slice(),
+                all: LEVEL,
+                block_frames: 0,
+                block_done: 0,
+                tuning: Tuning::default(),
                 marker: PhantomData,
             },
             SamplerLoader {
@@ -257,9 +337,140 @@ impl<S: Sample> Sampler<S> {
     /// Creates a sampler already playing `instrument`.
     pub fn with_instrument(instrument: Instrument, polyphony: usize) -> (Self, SamplerLoader) {
         let (mut sampler, mut loader) = Self::new(polyphony);
+        sampler.controllers.reset(&instrument.controller_defaults);
         sampler.instruments[0] = Some(Box::new(instrument));
         loader.in_flight = 1;
         (sampler, loader)
+    }
+
+    /// Sets controller `controller` to `value`, 0 to 1, from frame `frame`
+    /// of the next block processed: a plugin's way of moving a parameter
+    /// bound to a controller without making a MIDI message. Any controller
+    /// below [`MAX_CONTROLLERS`] can be set, those above 127 included,
+    /// which MIDI messages never reach. The value moves there along a
+    /// straight line over [`CONTROLLER_SMOOTHING_SECONDS`], from wherever
+    /// it is on that frame; a note that starts during the line starts
+    /// with the value it has then.
+    ///
+    /// [`CONTROLLER_SMOOTHING_SECONDS`]: crate::CONTROLLER_SMOOTHING_SECONDS
+    ///
+    /// Several changes may be set for one block, each landing on its own
+    /// frame, up to [`MAX_PENDING_CONTROLLER_CHANGES`]; past that, a
+    /// change lands on the block's first frame. A frame past the block's
+    /// end lands on its end. A value that is not a number is ignored, and
+    /// one outside 0 to 1 is held to it. Real-time safe.
+    ///
+    /// ```
+    /// use manguebyte_core::AudioBuffer;
+    /// use manguebyte_dsp::event::NoteRef;
+    /// use manguebyte_dsp::{ProcessSpec, Processor};
+    /// use manguebyte_sampler::{Instrument, MemorySource, Sampler};
+    ///
+    /// // Controller 300, out of MIDI's reach, is the region's volume knob.
+    /// let instrument = Instrument::from_sfz(
+    ///     "<control> set_hdcc300=1
+    ///      <region> sample=*sine amplitude=0 amplitude_oncc300=100",
+    ///     &mut MemorySource::new(),
+    /// )?;
+    /// let (mut sampler, _loader) = Sampler::<f32>::with_instrument(instrument, 8);
+    /// sampler.prepare(&ProcessSpec { sample_rate: 48_000.0, max_block_size: 4_800, num_channels: 1 });
+    /// sampler.note_on(NoteRef::new(0, 69), 1.0);
+    /// let mut block = AudioBuffer::<f32>::new(1, 4_800);
+    /// sampler.process(&mut block);
+    /// assert!(block.peak() > 0.99);
+    ///
+    /// // Turned down to a quarter halfway through the next block.
+    /// sampler.set_controller(300, 0.25, 2_400);
+    /// sampler.process(&mut block);
+    /// assert!(block.channel(0)[..2_400].iter().any(|s| s.abs() > 0.99));
+    /// assert!(block.channel(0)[3_600..].iter().all(|s| s.abs() < 0.26));
+    /// assert_eq!(sampler.controller(300), 0.25);
+    /// # Ok::<(), manguebyte_sampler::InstrumentError>(())
+    /// ```
+    pub fn set_controller(&mut self, controller: u16, value: f32, frame: u32) {
+        if value.is_nan() || usize::from(controller) >= MAX_CONTROLLERS {
+            return;
+        }
+        let change = PendingChange {
+            frame,
+            controller,
+            value: f64::from(value).clamp(0.0, 1.0),
+        };
+        if self.changes.len() < self.changes.capacity() {
+            // After every change already set for the same frame or an
+            // earlier one.
+            let at = self.changes.partition_point(|change| change.frame <= frame);
+            self.changes.insert(at, change);
+        } else {
+            self.controllers.set(controller, change.value, self.clock);
+        }
+    }
+
+    /// The value controller `controller` has, or is moving to, 0 to 1: its
+    /// initial value until a MIDI message or
+    /// [`set_controller`](Self::set_controller) changes it. A change set for
+    /// a block not yet processed does not count until that block.
+    pub fn controller(&self, controller: u16) -> f32 {
+        self.controllers.target(controller) as f32
+    }
+
+    /// Applies the changes set for frames up to `frame` of the block.
+    fn apply_pending(&mut self, frame: u32) {
+        while let Some(change) = self.changes.get(self.applied) {
+            if change.frame > frame {
+                break;
+            }
+            self.controllers
+                .set(change.controller, change.value, self.clock);
+            self.applied += 1;
+        }
+    }
+
+    /// Renders the block from `*position` up to `until`, cut at the frames
+    /// of the controller changes due before it.
+    fn render_until(&mut self, buffer: &mut AudioBuffer<S>, position: &mut usize, until: usize) {
+        loop {
+            self.apply_pending(*position as u32);
+            let next = self
+                .changes
+                .get(self.applied)
+                .map_or(until, |change| (change.frame as usize).min(until));
+            if next > *position {
+                buffer.windowed(*position..next, |piece| self.render(piece));
+                *position = next;
+            }
+            if *position >= until {
+                return;
+            }
+        }
+    }
+
+    /// Sets the pitch ratio and gain a model outside the sampler gives the
+    /// voices of `key` (the note's key, 0 to 127, on any channel, before
+    /// `note_offset`): the wind of an organ's model, which moves every
+    /// pipe's pitch and level a little. The next block processed moves
+    /// them along a straight line from where they stand to these values on
+    /// its last frame, every frame of the way, and they hold after it. The
+    /// ratio multiplies the step the voice reads its sample at (1 leaves it
+    /// alone, and 2 is an octave up), through the same interpolator, so a
+    /// few cents never alias; it is held to what a voice can read. The gain
+    /// multiplies the voice's level. They multiply with those of
+    /// [`modulate_all`](Self::modulate_all). A value that is not a number
+    /// is ignored. Real-time safe.
+    ///
+    /// The line is laid over the host's block, so the same values set
+    /// before blocks cut differently give a slightly different output; a
+    /// model that runs once a block wants exactly that.
+    pub fn modulate_key(&mut self, key: u8, pitch_ratio: f32, gain: f32) {
+        if let Some(line) = self.keys.get_mut(usize::from(key & 0x7F)) {
+            set_line(line, pitch_ratio, gain);
+        }
+    }
+
+    /// Sets the pitch ratio and gain of every voice, as
+    /// [`modulate_key`](Self::modulate_key) does for one key's.
+    pub fn modulate_all(&mut self, pitch_ratio: f32, gain: f32) {
+        set_line(&mut self.all, pitch_ratio, gain);
     }
 
     /// Chooses how samples are read between their frames. The default is
@@ -271,6 +482,29 @@ impl<S: Sample> Sampler<S> {
     /// How samples are read between their frames.
     pub fn interpolation(&self) -> Interpolation {
         self.interpolation
+    }
+
+    /// Plays from now on in `tuning` instead of 12-tone equal temperament
+    /// with A4 at 440 Hz. Real-time safe: the tuning is copied, which
+    /// allocates nothing (see [`manguebyte_dsp::tuning`]).
+    ///
+    /// A key's pitch in the tuning takes the place of the key number in the
+    /// region's pitch, `(pitch - pitch_keycenter) * pitch_keytrack / 100`
+    /// semitones, so a sample sounds at its own pitch on its keycenter only
+    /// where the tuning gives that key its equal-tempered pitch. The
+    /// instrument's `note_offset` and `octave_offset` move the pitch in
+    /// semitones on top, and the pitch wheel and `tune` and `transpose`
+    /// stay intervals in cents and semitones. Regions are still chosen by
+    /// key, and the filter still follows the key number. Notes already
+    /// sounding keep their pitch; a note on a key the tuning leaves
+    /// unmapped does not start.
+    pub fn set_tuning(&mut self, tuning: &Tuning) {
+        self.tuning.clone_from(tuning);
+    }
+
+    /// The tuning last given to [`set_tuning`](Self::set_tuning).
+    pub fn tuning(&self) -> &Tuning {
+        &self.tuning
     }
 
     /// The instrument new notes play, if any has arrived.
@@ -294,10 +528,15 @@ impl<S: Sample> Sampler<S> {
     }
 
     /// Starts a note now. A velocity of 0 or less, or one that is not a
-    /// number, releases it instead. Real-time safe.
+    /// number, releases it instead. A note on a key the
+    /// [tuning](Self::set_tuning) leaves unmapped is ignored. Real-time
+    /// safe.
     pub fn note_on(&mut self, note: NoteRef, velocity: f32) {
         if velocity.is_nan() || velocity <= 0.0 {
             self.note_off(note, 0.0);
+            return;
+        }
+        if !self.tuning.is_mapped(note.key & 0x7F) {
             return;
         }
         let channel = usize::from(note.channel & 0x0F);
@@ -472,6 +711,12 @@ impl<S: Sample> Sampler<S> {
                 value,
             } => {
                 let index = usize::from(channel & 0x0F);
+                if controller < 120 {
+                    // MIDI's own controllers, shared by every channel.
+                    let value = f64::from(value.min(127)) / 127.0;
+                    self.controllers
+                        .set(u16::from(controller), value, self.clock);
+                }
                 match controller {
                     64 => self.set_sustain(channel, value >= 64),
                     120 => {
@@ -487,6 +732,15 @@ impl<S: Sample> Sampler<S> {
                     121 => {
                         self.set_bend(channel, 0);
                         self.set_sustain(channel, false);
+                        let clock = self.clock;
+                        let defaults: &[f64] = self.instruments[self.current]
+                            .as_deref()
+                            .map_or(&[], |instrument| &instrument.controller_defaults);
+                        for number in 0..120u8 {
+                            if reset_by_121(number) {
+                                self.controllers.restore(u16::from(number), defaults, clock);
+                            }
+                        }
                     }
                     123 => {
                         for voice in &mut self.voices {
@@ -596,6 +850,7 @@ impl<S: Sample> Sampler<S> {
         let random = instrument.next_random();
         let channel = note.channel & 0x0F;
         let bend = self.channels[usize::from(channel)].bend;
+        let pitch = self.tuning.key_pitch(note.key & 0x7F) + f64::from(instrument.note_shift);
         for &index in list {
             let index = index as usize;
             let Some(zone) = instrument.zones.get(index) else {
@@ -611,14 +866,36 @@ impl<S: Sample> Sampler<S> {
             if !wanted || !zone.accepts(channel, key, velocity) {
                 continue;
             }
+            if release.is_some_and(|(_, held)| !zone.accepts_held(held)) {
+                continue;
+            }
             if !instrument.take_turn(index) || !zone.accepts_random(random) {
                 continue;
             }
+            // The note's loudest sustaining voice, which a release with a
+            // crossfade takes over from.
+            let sustain = if release.is_some() && zone.release_crossfade > 0.0 {
+                self.voices
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, voice)| {
+                        voice.player.active
+                            && voice.slot == slot
+                            && !voice.player.release_trigger
+                            && !voice.player.dying
+                            && note.matches(&voice.player.note)
+                    })
+                    .max_by(|a, b| a.1.player.loudness().total_cmp(&b.1.player.loudness()))
+                    .map(|(at, _)| at)
+            } else {
+                None
+            };
             let attenuation_db = release.map_or(0.0, |(_, held)| zone.rt_decay * held);
             let start = Start {
                 zone: index,
                 note,
                 key,
+                pitch,
                 velocity,
                 serial,
                 age: serial,
@@ -627,7 +904,29 @@ impl<S: Sample> Sampler<S> {
                 attenuation_db,
                 sample_rate: self.sample_rate,
             };
-            start_voice(&mut self.voices, self.polyphony, instrument, slot, &start);
+            let controls = (&self.controllers, self.clock);
+            let started = start_voice(
+                &mut self.voices,
+                self.polyphony,
+                instrument,
+                slot,
+                &start,
+                controls,
+            );
+            if let (Some(sustain), Some(started)) = (sustain, started) {
+                if sustain != started {
+                    let rate = self.sample_rate;
+                    let upcoming = self.voices[sustain].player.upcoming(instrument);
+                    let release = &mut self.voices[started].player;
+                    if zone.release_align > 0 {
+                        release.align(instrument, &upcoming, zone.release_align);
+                    }
+                    release.fade_in(zone.release_crossfade, rate);
+                    self.voices[sustain]
+                        .player
+                        .hand_over(zone.release_crossfade, rate);
+                }
+            }
         }
     }
 
@@ -660,6 +959,11 @@ impl<S: Sample> Sampler<S> {
             self.retire(old);
         }
         if let Some(pending) = self.pending.take() {
+            // Controllers no one has set take the new instrument's initial
+            // values: at once if nothing sounds, and smoothly otherwise.
+            let at_once = !self.voices.iter().any(|voice| voice.player.active);
+            self.controllers
+                .adopt(&pending.controller_defaults, self.clock, at_once);
             self.instruments[other] = Some(pending);
             self.current = other;
         }
@@ -675,33 +979,73 @@ impl<S: Sample> Sampler<S> {
     }
 
     fn render(&mut self, piece: &mut AudioBuffer<S>) {
+        let len = self.block_frames.max(1);
+        let all = self.all;
+        let offset = self.block_done;
         for voice in &mut self.voices {
             if !voice.player.active {
                 continue;
             }
+            let key = &self.keys[usize::from(voice.player.note.key & 0x7F)];
+            let modulation = if key.is_level() && all.is_level() {
+                Modulation::NONE
+            } else {
+                let step = |line: &Line| {
+                    (
+                        (line.to.0 - line.from.0) / len as f64,
+                        (line.to.1 - line.from.1) / len as f64,
+                    )
+                };
+                let (key_step, all_step) = (step(key), step(&all));
+                Modulation {
+                    active: true,
+                    ratio: [key.from.0, all.from.0],
+                    ratio_step: [key_step.0, all_step.0],
+                    gain: [key.from.1, all.from.1],
+                    gain_step: [key_step.1, all_step.1],
+                    offset,
+                    len,
+                }
+            };
             match self.instruments[voice.slot].as_deref() {
-                Some(instrument) => voice.player.render(instrument, self.interpolation, piece),
+                Some(instrument) => voice.player.render(
+                    instrument,
+                    self.interpolation,
+                    piece,
+                    &self.controllers,
+                    self.clock,
+                    &modulation,
+                ),
                 None => voice.player.stop(),
             }
         }
         self.clock = self.clock.wrapping_add(piece.num_frames() as u64);
+        self.block_done += piece.num_frames() as u64;
     }
 }
 
+/// Sets what a line heads for in the next block.
+fn set_line(line: &mut Line, pitch_ratio: f32, gain: f32) {
+    if pitch_ratio.is_nan() || gain.is_nan() {
+        return;
+    }
+    let ratio = f64::from(pitch_ratio).clamp(1.0 / 65_536.0, 256.0);
+    line.next = (ratio, f64::from(gain).max(0.0));
+}
+
 /// Finds a voice for a region and starts it, after silencing what its
-/// choke group and polyphony call for.
+/// choke group and polyphony call for. Returns the voice, if it started.
 fn start_voice(
     voices: &mut [Voice],
     polyphony: usize,
     instrument: &Instrument,
     slot: usize,
     start: &Start,
-) {
-    let Some(zone) = instrument.zones.get(start.zone) else {
-        return;
-    };
+    (controls, now): (&ControllerTable, u64),
+) -> Option<usize> {
+    let zone = instrument.zones.get(start.zone)?;
     if voices.is_empty() {
-        return;
+        return None;
     }
     // Choke groups: this region's group silences the voices that name it
     // in `off_by`, except those started by the same event.
@@ -715,10 +1059,8 @@ fn start_voice(
             player.off(instrument, start.sample_rate);
         }
     }
-    if zone.sample.is_none() {
-        // A region that never sounds still chokes, as `end=-1` is for.
-        return;
-    }
+    // A region that never sounds still chokes, as `end=-1` is for.
+    zone.sample?;
     // The region's own polyphony, over the voices it covers: those of its
     // group if it names one, and otherwise those of the regions under the
     // header that set the limit. Voices of other notes go first.
@@ -791,10 +1133,12 @@ fn start_voice(
             chosen
         }
     };
-    if let Some(voice) = voices.get_mut(free) {
-        voice.slot = slot;
-        voice.player.start(instrument, start);
-    }
+    let voice = voices.get_mut(free)?;
+    voice.slot = slot;
+    voice
+        .player
+        .start(instrument, start, controls, now)
+        .then_some(free)
 }
 
 impl<S: Sample> Processor<S> for Sampler<S> {
@@ -803,6 +1147,7 @@ impl<S: Sample> Processor<S> for Sampler<S> {
         if spec.sample_rate.is_finite() && spec.sample_rate > 0.0 {
             self.sample_rate = spec.sample_rate;
         }
+        self.controllers.set_sample_rate(self.sample_rate);
         self.reset();
     }
 
@@ -810,23 +1155,39 @@ impl<S: Sample> Processor<S> for Sampler<S> {
         self.process_with(buffer, &ProcessContext::empty());
     }
 
+    /// Renders a block, each event and each change set by
+    /// [`set_controller`](Sampler::set_controller) on its frame (a change
+    /// before an event on the same frame).
     fn process_with(&mut self, buffer: &mut AudioBuffer<S>, context: &ProcessContext<'_, S>) {
         self.take_arrivals();
         buffer.clear();
-        split_at_events(
-            self,
-            buffer,
-            context.events,
-            |sampler, event| sampler.handle_event(event),
-            |sampler, piece| sampler.render(piece),
-        );
+        let frames = buffer.num_frames();
+        for line in self.keys.iter_mut() {
+            line.advance();
+        }
+        self.all.advance();
+        self.block_frames = frames as u64;
+        self.block_done = 0;
+        let mut position = 0;
+        for event in context.events {
+            let at = (event.offset as usize).min(frames);
+            self.render_until(buffer, &mut position, at);
+            self.apply_pending(at as u32);
+            self.handle_event(event);
+        }
+        self.render_until(buffer, &mut position, frames);
+        // What is set for the block's end or later lands there.
+        self.apply_pending(u32::MAX);
+        self.changes.clear();
+        self.applied = 0;
     }
 
     /// Silences every voice at once and returns to the state of a sampler
     /// that has just received its instrument: pedals up, wheels centred,
-    /// no key down, and the instrument's round robins and random numbers
-    /// started again. Playing the same notes after a reset gives the same
-    /// output, bit for bit.
+    /// no key down, every controller at the instrument's initial value
+    /// (or, at once, at a value set for a block not yet processed), and the
+    /// instrument's round robins and random numbers started again. Playing
+    /// the same notes after a reset gives the same output, bit for bit.
     fn reset(&mut self) {
         for voice in &mut self.voices {
             voice.player.stop();
@@ -852,6 +1213,20 @@ impl<S: Sample> Processor<S> for Sampler<S> {
         if let Some(instrument) = self.instruments[self.current].as_deref() {
             instrument.restart();
         }
+        let defaults: &[f64] = self.instruments[self.current]
+            .as_deref()
+            .map_or(&[], |instrument| &instrument.controller_defaults);
+        self.controllers.reset(defaults);
+        for change in &self.changes {
+            self.controllers.jump(change.controller, change.value);
+        }
+        // What was set from outside holds, at once.
+        for line in self.keys.iter_mut().chain(core::iter::once(&mut self.all)) {
+            line.from = line.next;
+            line.to = line.next;
+        }
+        self.changes.clear();
+        self.applied = 0;
     }
 }
 

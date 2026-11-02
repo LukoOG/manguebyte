@@ -5,13 +5,13 @@ use std::sync::atomic::Ordering;
 
 use manguebyte_core::spsc::Consumer;
 use manguebyte_core::{AudioBuffer, NoDenormals};
-use manguebyte_dsp::event::{Event, EventKind, Expression};
+use manguebyte_dsp::event::{Event, EventKind};
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Processor, Transport};
-use manguebyte_midi::MidiMessage;
 
-use super::CARRIED_EVENTS;
 use super::atom::{AtomBuffer, Urids};
 use super::plugin::{Layout, Lv2Param, ParamSlot, Shared, ToAudio, clamp_latency, find_param};
+use super::{CARRIED_EVENTS, EVENTS_PER_BLOCK};
+use crate::delivery::{Sent, advance, midi_of};
 
 /// Everything [`Lv2Processor::new`] needs.
 pub(crate) struct Setup<'a> {
@@ -81,6 +81,18 @@ pub(crate) struct Setup<'a> {
 ///
 /// An event at or beyond the end of a block is delivered on the first
 /// frame of the next; 1,024 can wait that way.
+///
+/// # What the plugin sends
+///
+/// Every atom output is given an empty buffer of the size the plugin was
+/// told (`options:sequenceSize`, at least the `rsz:minimumSize` it asks
+/// for) before each call of `run`, as LV2 has a host ready an output: a
+/// chunk whose size is the room there is, for the plugin to overwrite
+/// with a sequence. After the call, the outputs that say they carry
+/// `midi:MidiEvent` are read, and every MIDI 1.0 message the plugin wrote
+/// there is in [`output_events`](Self::output_events), on its frame of the
+/// caller's block, however many pieces the block was run in. Other atoms
+/// in those sequences, and the other outputs, are not read.
 pub struct Lv2Processor {
     shared: Arc<Shared>,
     layout: Arc<Layout>,
@@ -103,6 +115,8 @@ pub struct Lv2Processor {
     param_ports: Box<[u32]>,
     from_main: Option<Consumer<ToAudio>>,
     carry: Vec<Event>,
+    /// What the plugin sent during the last block.
+    sent: Sent,
     wrong_rate: bool,
     lost: u64,
     undeliverable: u64,
@@ -140,7 +154,13 @@ impl Lv2Processor {
             inputs: (0..layout.main_inputs.len() + layout.sidechain_inputs.len())
                 .map(|_| buffer())
                 .collect(),
-            outputs: (0..layout.main_outputs.len() + layout.other_outputs.len())
+            outputs: (0..layout.main_outputs.len()
+                + layout.other_outputs.len()
+                + layout
+                    .aux_outputs
+                    .iter()
+                    .map(|bus| bus.ports.len())
+                    .sum::<usize>())
                 .map(|_| buffer())
                 .collect(),
             cv: (0..layout.cv.len()).map(|_| buffer()).collect(),
@@ -151,6 +171,7 @@ impl Lv2Processor {
             param_ports,
             from_main: Some(setup.from_main),
             carry: Vec::with_capacity(CARRIED_EVENTS),
+            sent: Sent::new(EVENTS_PER_BLOCK),
             wrong_rate: false,
             lost: 0,
             undeliverable: 0,
@@ -182,6 +203,25 @@ impl Lv2Processor {
         processor
     }
 
+    /// Processes one block as [`process_with`](Processor::process_with)
+    /// does, and copies what the plugin wrote on its auxiliary output buses,
+    /// those of [`Lv2Plugin::aux_outputs`](super::Lv2Plugin::aux_outputs),
+    /// into `aux`: one buffer per bus, in their order.
+    ///
+    /// Each buffer gets as many channels as both it and its bus have, on
+    /// the frames of `buffer`; anything else in it is left as it was. A bus
+    /// without a buffer is not copied, and one switched off is silent.
+    /// Real-time safe.
+    pub fn process_with_aux(
+        &mut self,
+        buffer: &mut AudioBuffer<f32>,
+        context: &ProcessContext<'_, f32>,
+        aux: &mut [AudioBuffer<f32>],
+    ) {
+        let _quiet = NoDenormals::new();
+        self.run(buffer, context, aux);
+    }
+
     /// The sample rate the plugin runs at.
     pub fn sample_rate(&self) -> f64 {
         self.sample_rate
@@ -190,6 +230,22 @@ impl Lv2Processor {
     /// The longest piece the plugin is run for.
     pub fn max_block_size(&self) -> usize {
         self.max_frames
+    }
+
+    /// What the plugin sent during the last call to
+    /// [`process_with`](Processor::process_with), on the frames of the
+    /// block it was sent on, in the order it was sent.
+    ///
+    /// LV2 has a plugin send MIDI 1.0, so a note comes with a velocity in 7
+    /// bits and no id, and pressure on one key as a note expression;
+    /// controllers, the wheel, programs and channel pressure are
+    /// [`EventKind::Midi`]. System messages are left out. At most
+    /// [`EVENTS_PER_BLOCK`] are kept for one block; more are dropped and
+    /// counted in [`Lv2Plugin::lost_events`](super::Lv2Plugin::lost_events).
+    /// What the plugin could not fit into its buffer it drops itself, and
+    /// no host can count. Real-time safe.
+    pub fn output_events(&self) -> &[Event] {
+        self.sent.as_slice()
     }
 
     /// Tells the plugin where every port's data is, with pointers taken
@@ -210,9 +266,25 @@ impl Lv2Processor {
             for (&port, buffer) in audio_in.zip(&mut self.inputs) {
                 connect(handle, port, buffer.as_mut_ptr().cast());
             }
-            let audio_out = layout.main_outputs.iter().chain(&layout.other_outputs);
-            for (&port, buffer) in audio_out.zip(&mut self.outputs) {
-                connect(handle, port, buffer.as_mut_ptr().cast());
+            // An auxiliary bus switched off is left unconnected.
+            let audio_out = layout
+                .main_outputs
+                .iter()
+                .chain(&layout.other_outputs)
+                .map(|&port| (port, true))
+                .chain(
+                    layout
+                        .aux_outputs
+                        .iter()
+                        .flat_map(|bus| bus.ports.iter().map(|&port| (port, bus.connected))),
+                );
+            for ((port, connected), buffer) in audio_out.zip(&mut self.outputs) {
+                let data = if connected {
+                    buffer.as_mut_ptr().cast()
+                } else {
+                    std::ptr::null_mut()
+                };
+                connect(handle, port, data);
             }
             for (&port, buffer) in layout.cv.iter().zip(&mut self.cv) {
                 connect(handle, port, buffer.as_mut_ptr().cast());
@@ -289,8 +361,23 @@ impl Lv2Processor {
         }
     }
 
+    /// Reads the MIDI the plugin wrote into its outputs during the piece
+    /// that starts `start` frames into the block and is `frames` long.
+    fn read_outputs(&mut self, start: usize, frames: usize) {
+        let urids = self.urids;
+        let outputs = self.atom_outputs.iter().zip(&self.layout.midi_outputs);
+        for (buffer, _) in outputs.filter(|(_, midi)| **midi) {
+            buffer.read_events(&urids, |frame, type_, body| {
+                if type_ == urids.midi_event {
+                    self.sent.midi(start, frames, frame, body);
+                }
+            });
+        }
+    }
+
     /// Passes the counts and the values on to the other half.
     fn publish(&mut self) {
+        self.lost += self.sent.take_lost();
         let shared = &self.shared;
         if self.lost > 0 {
             shared.lost_events.fetch_add(self.lost, Ordering::Relaxed);
@@ -316,11 +403,20 @@ impl Lv2Processor {
         }
     }
 
-    fn run(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+    fn run(
+        &mut self,
+        buffer: &mut AudioBuffer<f32>,
+        context: &ProcessContext<'_, f32>,
+        aux: &mut [AudioBuffer<f32>],
+    ) {
+        self.sent.clear();
         self.take_from_main();
         let events = context.events.as_slice();
         if self.wrong_rate {
             buffer.clear();
+            for bus in aux.iter_mut() {
+                bus.clear();
+            }
             self.keep(events);
             self.shared.failed_blocks.fetch_add(1, Ordering::Relaxed);
             self.shared.wrong_rate.store(true, Ordering::Relaxed);
@@ -385,7 +481,9 @@ impl Lv2Processor {
                 // to the thread that holds this value.
                 unsafe { run(instance.handle, frames as u32) };
             }
+            self.read_outputs(start, frames);
             self.store(buffer, start, frames);
+            self.store_aux(aux, start, frames);
 
             start = end;
             if start < total {
@@ -465,6 +563,27 @@ impl Lv2Processor {
         }
     }
 
+    /// Copies the plugin's auxiliary output buses, in their order, into
+    /// frames `start..start + frames` of `aux`, one buffer per bus; a bus
+    /// switched off is silent. Channels a buffer has and its bus lacks, and
+    /// frames past a buffer's end, are left as they were.
+    fn store_aux(&self, aux: &mut [AudioBuffer<f32>], start: usize, frames: usize) {
+        let mut first = self.layout.main_outputs.len() + self.layout.other_outputs.len();
+        for (bus, target) in self.layout.aux_outputs.iter().zip(aux.iter_mut()) {
+            let outputs = &self.outputs[first..first + bus.ports.len()];
+            first += bus.ports.len();
+            for (channel, target) in target.iter_channels_mut().enumerate() {
+                let Some(target) = target.get_mut(start..start + frames) else {
+                    continue;
+                };
+                match outputs.get(channel).filter(|_| bus.connected) {
+                    Some(output) => target.copy_from_slice(&output[..frames]),
+                    None => target.fill(0.0),
+                }
+            }
+        }
+    }
+
     /// Copies the plugin's main outputs into frames `start..start + frames`
     /// of the caller's block.
     fn store(&self, buffer: &mut AudioBuffer<f32>, start: usize, frames: usize) {
@@ -477,48 +596,6 @@ impl Lv2Processor {
             }
         }
     }
-}
-
-/// The MIDI 1.0 message for an event, if it has one.
-fn midi_of(kind: &EventKind) -> Option<MidiMessage> {
-    let byte = |value: f64| (value * 127.0).round().clamp(0.0, 127.0) as u8;
-    Some(match *kind {
-        EventKind::NoteOn { note, velocity } => MidiMessage::NoteOn {
-            channel: note.channel & 0x0F,
-            note: note.key & 0x7F,
-            velocity: byte(f64::from(velocity)).max(1),
-        },
-        EventKind::NoteOff { note, velocity } => MidiMessage::NoteOff {
-            channel: note.channel & 0x0F,
-            note: note.key & 0x7F,
-            velocity: byte(f64::from(velocity)),
-        },
-        EventKind::NoteExpression {
-            note,
-            expression: Expression::Pressure,
-            value,
-        } if value.is_finite() => MidiMessage::PolyPressure {
-            channel: note.channel & 0x0F,
-            note: note.key & 0x7F,
-            pressure: byte(value),
-        },
-        EventKind::Midi(message) => message,
-        _ => return None,
-    })
-}
-
-/// Moves `transport` on by `frames` for the next piece of a block, as
-/// [`Transport::advance`] does, with the position in frames stopping at
-/// the end of its range instead of overflowing.
-fn advance(transport: &mut Transport, frames: usize, sample_rate: f64) {
-    let position = transport.position_samples.take();
-    transport.advance(frames, sample_rate);
-    transport.position_samples = match position {
-        Some(position) if transport.playing => {
-            Some(position.saturating_add(i64::try_from(frames).unwrap_or(i64::MAX)))
-        }
-        position => position,
-    };
 }
 
 impl Processor<f32> for Lv2Processor {
@@ -535,8 +612,7 @@ impl Processor<f32> for Lv2Processor {
     }
 
     fn process_with(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
-        let _quiet = NoDenormals::new();
-        self.run(buffer, context);
+        self.process_with_aux(buffer, context, &mut []);
     }
 
     /// Deactivates and activates the instance, which clears its voices and
@@ -595,66 +671,5 @@ impl std::fmt::Debug for Lv2Processor {
             .field("sample_rate", &self.sample_rate)
             .field("max_block_size", &self.max_frames)
             .finish_non_exhaustive()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use manguebyte_dsp::event::NoteRef;
-
-    use super::*;
-
-    #[test]
-    fn notes_become_midi_and_what_midi_cannot_carry_does_not() {
-        let note = NoteRef::with_id(17, 200, 9);
-        assert_eq!(
-            midi_of(&EventKind::NoteOn {
-                note,
-                velocity: 0.0
-            }),
-            Some(MidiMessage::NoteOn {
-                channel: 1,
-                note: 72,
-                velocity: 1
-            })
-        );
-        assert_eq!(
-            midi_of(&EventKind::NoteOff {
-                note,
-                velocity: 2.0
-            }),
-            Some(MidiMessage::NoteOff {
-                channel: 1,
-                note: 72,
-                velocity: 127
-            })
-        );
-        assert_eq!(
-            midi_of(&EventKind::NoteExpression {
-                note,
-                expression: Expression::Pressure,
-                value: 0.5
-            }),
-            Some(MidiMessage::PolyPressure {
-                channel: 1,
-                note: 72,
-                pressure: 64
-            })
-        );
-        for nothing in [
-            EventKind::NoteChoke { note },
-            EventKind::NoteExpression {
-                note,
-                expression: Expression::Tuning,
-                value: 1.0,
-            },
-            EventKind::NoteExpression {
-                note,
-                expression: Expression::Pressure,
-                value: f64::NAN,
-            },
-        ] {
-            assert_eq!(midi_of(&nothing), None, "{nothing:?}");
-        }
     }
 }

@@ -43,12 +43,28 @@
 //! the editor stores at that moment still counts as news; and after the
 //! host was asked to read every value again, the values it was asked to
 //! read count as known, gestures or not.
+//!
+//! # New parameter names
+//!
+//! A plugin may give parameters new names, short names and units while it
+//! runs ([`ParamInfo::set_display_name`](manguebyte_params::ParamInfo::set_display_name)),
+//! and `get_info` always reports the current ones. The audio side polls
+//! the set's [`labels_version`](ParamSet::labels_version), an atomic count,
+//! before each block and in `flush`; when it changes and the host has not
+//! been told, it asks for `on_main_thread` with `request_callback`, which
+//! is thread-safe. On the main thread, `on_main_thread`, `activate`, a
+//! state load and the editor's `values_changed` compare the count with the
+//! one the host was last told and, if it moved, call the host's
+//! `rescan(CLAP_PARAM_RESCAN_INFO)` once (with `VALUES` in the last two),
+//! however many parameters were renamed in between. Neither side ever
+//! takes the names' lock to find out (ADR 0020).
 
 use std::any::TypeId;
 use std::cell::UnsafeCell;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -96,8 +112,8 @@ use manguebyte_params::{Param, ParamSet};
 use manguebyte_plugin::editor::{GestureCounters, GestureReader};
 use manguebyte_plugin::output::{OutputBuffer, OutputEvent};
 use manguebyte_plugin::{
-    AudioLayout, ParamWatcher, Plugin, PluginKind, Tail, VoiceInfo, load_state, offered_layouts,
-    save_state,
+    AudioLayout, AuxOutputs, ParamWatcher, Plugin, PluginKind, Tail, VoiceInfo, load_state,
+    offered_layouts, plugin_info, save_state, set_library_path,
 };
 
 use crate::gui::{self, Gui, GuiVtables, HostRef, SharedFlags};
@@ -196,6 +212,11 @@ fn leak_c_string(text: &str) -> *const c_char {
 
 /// The CLAP descriptor of `P`, built once and kept for the rest of the
 /// program, as CLAP requires descriptors to outlive every plugin instance.
+///
+/// It is built from [`plugin_info`], so the first time a host asks for it
+/// is when [`Plugin::info`] runs, before any instance exists. Its strings
+/// and the descriptor itself are leaked, once per plugin type, so the
+/// pointers handed to the host stay valid until the library is unloaded.
 fn descriptor<P: Plugin>() -> &'static clap_plugin_descriptor {
     let mut all = DESCRIPTORS
         .lock()
@@ -205,7 +226,7 @@ fn descriptor<P: Plugin>() -> &'static clap_plugin_descriptor {
         return found;
     }
 
-    let info = P::INFO;
+    let info = plugin_info::<P>();
     let mut features: Vec<*const c_char> = match info.kind {
         PluginKind::Instrument => vec![
             CLAP_PLUGIN_FEATURE_INSTRUMENT.as_ptr(),
@@ -250,8 +271,27 @@ pub const fn plugin_entry<P: Plugin>() -> clap_plugin_entry {
     }
 }
 
-unsafe extern "C" fn entry_init(_plugin_path: *const c_char) -> bool {
-    true
+/// Records the path the host gives as the library's own, for
+/// [`manguebyte_plugin::library_path`], when it names a file. On macOS
+/// hosts give the bundle's folder, and the library's file is asked of the
+/// system instead. Under Miri, which has no file system, nothing is
+/// recorded.
+unsafe extern "C" fn entry_init(plugin_path: *const c_char) -> bool {
+    guard(true, || {
+        if plugin_path.is_null() || cfg!(miri) {
+            return true;
+        }
+        // SAFETY: the host passes a NUL-terminated path, valid for the call.
+        let given = unsafe { CStr::from_ptr(plugin_path) };
+        if let Ok(given) = given.to_str() {
+            let given = Path::new(given);
+            if given.is_file() {
+                let absolute = std::path::absolute(given);
+                set_library_path(absolute.as_deref().unwrap_or(given));
+            }
+        }
+        true
+    })
 }
 
 unsafe extern "C" fn entry_deinit() {}
@@ -349,7 +389,9 @@ unsafe extern "C" fn factory_create<P: Plugin>(
         }
         // SAFETY: the host passes a valid `clap_host` and a NUL-terminated id.
         let (host_version, wanted) = unsafe { ((*host).clap_version, CStr::from_ptr(plugin_id)) };
-        if !clap_version_is_compatible(host_version) || wanted.to_bytes() != P::INFO.id.as_bytes() {
+        if !clap_version_is_compatible(host_version)
+            || wanted.to_bytes() != plugin_info::<P>().id.as_bytes()
+        {
             return ptr::null();
         }
 
@@ -401,6 +443,11 @@ unsafe extern "C" fn factory_create<P: Plugin>(
             layouts: offered_layouts::<P>(),
             config: AtomicUsize::new(0),
             sidechain_on: AtomicBool::new(true),
+            // Every port starts active, as `audio-ports-activation` says.
+            aux_on: P::AUX_OUTPUTS
+                .iter()
+                .map(|_| AtomicBool::new(true))
+                .collect(),
             active: AtomicBool::new(false),
             has_voice_info: voices.is_some(),
             voices: Mutex::new(voices),
@@ -417,6 +464,7 @@ unsafe extern "C" fn factory_create<P: Plugin>(
                 layout: P::LAYOUT,
                 buffer: AudioBuffer::new(P::LAYOUT.outputs, 0),
                 sidechain: AudioBuffer::new(P::LAYOUT.sidechain, 0),
+                aux: AuxOutputs::new(),
                 events: EventBuffer::new(),
                 piece: EventBuffer::new(),
                 changes: Vec::with_capacity(TRANSPORT_CHANGES),
@@ -428,6 +476,7 @@ unsafe extern "C" fn factory_create<P: Plugin>(
                     OutputBuffer::new()
                 },
                 resend_values: false,
+                labels_seen: params.labels_version(),
             }),
             ids,
             params,
@@ -466,6 +515,10 @@ pub(crate) struct Instance<P: Plugin> {
     /// Whether the sidechain port is active (`audio-ports-activation`).
     /// Only changed while the plugin is not active.
     sidechain_on: AtomicBool,
+    /// Whether each auxiliary output port is active
+    /// (`audio-ports-activation`), in the order of [`Plugin::AUX_OUTPUTS`].
+    /// Only changed while the plugin is not active.
+    aux_on: Box<[AtomicBool]>,
     /// Whether the plugin is active, so that ports are not changed under
     /// it.
     active: AtomicBool,
@@ -494,6 +547,9 @@ struct Audio<P> {
     layout: AudioLayout,
     buffer: AudioBuffer<f32>,
     sidechain: AudioBuffer<f32>,
+    /// The auxiliary output ports, switched as `Instance::aux_on` was
+    /// when the plugin was activated.
+    aux: AuxOutputs,
     events: EventBuffer,
     /// The events of one piece of a block cut at a transport event,
     /// counted from the piece's start.
@@ -526,6 +582,10 @@ struct Audio<P> {
     /// block it did not finish were stored and remembered as seen, but may
     /// never have reached it.
     resend_values: bool,
+    /// The parameters' [`labels_version`](ParamSet::labels_version) as the
+    /// audio side last saw it, so that it asks for a call on the main
+    /// thread once per change it sees, not once per block.
+    labels_seen: u64,
 }
 
 /// Turns the editor's gesture counts into events, and remembers what the
@@ -700,6 +760,10 @@ unsafe extern "C" fn plugin_activate<P: Plugin>(
         audio.layout = layout;
         audio.buffer = AudioBuffer::new(layout.outputs, max_frames);
         audio.sidechain = AudioBuffer::new(layout.sidechain, max_frames);
+        audio.aux = AuxOutputs::for_plugin::<P>(max_frames);
+        for (index, on) in instance.aux_on.iter().enumerate() {
+            audio.aux.set_active(index, on.load(Ordering::Relaxed));
+        }
         audio.events = EventBuffer::with_capacity(EVENTS_PER_BLOCK);
         audio.piece = EventBuffer::with_capacity(EVENTS_PER_BLOCK);
         audio.plugin.set_layout(layout);
@@ -729,6 +793,8 @@ unsafe extern "C" fn plugin_activate<P: Plugin>(
             }
         }
         instance.active.store(true, Ordering::Relaxed);
+        // SAFETY: `activate` runs on the main thread.
+        unsafe { instance.tell_new_labels() };
         true
     })
 }
@@ -804,6 +870,16 @@ unsafe extern "C" fn plugin_stop_processing<P: Plugin>(plugin: *const clap_plugi
 }
 
 unsafe extern "C" fn plugin_on_main_thread<P: Plugin>(plugin: *const clap_plugin) {
+    // New parameter names first: the audio side asks for this call when it
+    // sees some, with or without an editor.
+    guard((), || {
+        // SAFETY: the host passes a plugin it created through our factory,
+        // on the main thread.
+        if let Some(instance) = unsafe { instance::<P>(plugin) } {
+            // SAFETY: this is the main thread.
+            unsafe { instance.tell_new_labels() };
+        }
+    });
     // SAFETY: the host passes a plugin it created through our factory, on
     // the main thread. A plugin without an editor has nothing to do here.
     unsafe { gui::on_main_thread::<P>(plugin) };
@@ -850,7 +926,7 @@ unsafe extern "C" fn plugin_get_extension<P: Plugin>(
         ptr::from_ref(Vtables::<P>::PORTS_CONFIG).cast()
     } else if (id == CLAP_EXT_AUDIO_PORTS_ACTIVATION
         || id == CLAP_EXT_AUDIO_PORTS_ACTIVATION_COMPAT)
-        && P::LAYOUT.sidechain > 0
+        && (P::LAYOUT.sidechain > 0 || !P::AUX_OUTPUTS.is_empty())
     {
         ptr::from_ref(Vtables::<P>::PORTS_ACTIVATION).cast()
     } else if id == CLAP_EXT_VOICE_INFO && has_voice_info {
@@ -910,7 +986,9 @@ unsafe extern "C" fn plugin_process<P: Plugin>(
         }
         audio.buffer.set_num_frames(frames);
         audio.buffer.clear();
+        audio.aux.start_block(frames);
         let layout = audio.layout;
+        instance.notice_new_labels(audio);
 
         // SAFETY: the pointers in `process` are valid for this call.
         unsafe {
@@ -947,9 +1025,17 @@ unsafe extern "C" fn plugin_process<P: Plugin>(
         // Everything was read from the inputs before this point, so writing
         // is sound even when the host processes in place.
         unsafe {
+            // The main output, if there is one, then the auxiliary ones; a
+            // port switched off, or one the plugin lacks, is silent.
             let outputs = ports(process.audio_outputs, process.audio_outputs_count);
+            let mains = usize::from(layout.outputs > 0);
             for (index, port) in outputs.iter().enumerate() {
-                write_port(port, (index == 0).then_some(&audio.buffer), frames);
+                let source = if index < mains {
+                    Some(&audio.buffer)
+                } else {
+                    audio.aux.bus(index - mains)
+                };
+                write_port(port, source, frames);
             }
             // What the plugin sent goes after the parameter values that
             // went before the block, all of which are on frame 0.
@@ -978,6 +1064,7 @@ impl<P: Plugin> Audio<P> {
             layout,
             buffer,
             sidechain,
+            aux,
             events,
             piece,
             changes,
@@ -998,7 +1085,7 @@ impl<P: Plugin> Audio<P> {
             }
             let output = &mut notes.output;
             return catch_unwind(AssertUnwindSafe(|| {
-                plugin.process_with_output(buffer, &context, output);
+                plugin.process_with_aux(buffer, &context, output, aux);
             }))
             .is_ok();
         }
@@ -1039,10 +1126,12 @@ impl<P: Plugin> Audio<P> {
             let output: &mut OutputBuffer = piece_output;
             let finished = buffer.windowed(start..end, |window| {
                 let mut run = |context: &ProcessContext<'_, f32>| {
-                    catch_unwind(AssertUnwindSafe(|| {
-                        plugin.process_with_output(window, context, output);
-                    }))
-                    .is_ok()
+                    aux.windowed(start..end, |aux| {
+                        catch_unwind(AssertUnwindSafe(|| {
+                            plugin.process_with_aux(window, context, output, aux);
+                        }))
+                        .is_ok()
+                    })
                 };
                 if keyed {
                     sidechain.windowed(start..end, |side| {
@@ -1747,7 +1836,7 @@ unsafe extern "C" fn params_get_info<P: Plugin>(
         info.id = param.param_id().0;
         info.flags = clap_flags;
         info.cookie = ptr::null_mut();
-        copy_text(param.name(), &mut info.name);
+        copy_text(&param.display_name(), &mut info.name);
         copy_text("", &mut info.module);
         info.min_value = 0.0;
         info.max_value = stepped.unwrap_or(1.0);
@@ -1791,10 +1880,10 @@ unsafe extern "C" fn params_value_to_text<P: Plugin>(
             return false;
         }
         let mut text = param.plain_to_text(from_clap(param, value));
-        let unit = param.info().unit();
+        let unit = param.info().display_unit();
         if !unit.is_empty() {
             text.push(' ');
-            text.push_str(unit);
+            text.push_str(&unit);
         }
         // SAFETY: the host provides `capacity` writable characters at `out`.
         copy_text(&text, unsafe {
@@ -1852,6 +1941,7 @@ unsafe extern "C" fn params_flush<P: Plugin>(
         // SAFETY: `output` is valid for this call, or null, and this runs
         // where `process` would.
         unsafe { instance.report_to_host(audio, output) };
+        instance.notice_new_labels(audio);
 
         // Then the host's values. They are stored straight into
         // the parameters; the plugin's watcher is left alone, so the next
@@ -1962,20 +2052,58 @@ unsafe extern "C" fn state_load<P: Plugin>(
             // audio side must not report them back as if they were news.
             flags.host_rereads(&*instance.params);
         }
+        // A plugin may rename parameters as it loads, as one that loads a
+        // whole new instrument does: the names are read in the same rescan.
+        let mut rescan = CLAP_PARAM_RESCAN_VALUES;
+        if flags.take_new_labels(&*instance.params) {
+            rescan |= CLAP_PARAM_RESCAN_INFO;
+        }
         // SAFETY: `load` runs on the main thread, where the host's parameter
         // extension may be called, and the host outlives the plugin.
-        unsafe { rescan_values(instance.host.as_ptr()) };
+        unsafe { rescan_params(instance.host.as_ptr(), rescan) };
         true
     })
 }
 
-/// Asks the host to read every parameter value again.
+impl<P: Plugin> Instance<P> {
+    /// Audio side, before each block and in `flush`: if the parameters'
+    /// names changed since it last looked, and the host has not been told,
+    /// asks for a call on the main thread, which tells it. Real-time safe:
+    /// it loads one atomic per parameter and never takes the names' lock.
+    fn notice_new_labels(&self, audio: &mut Audio<P>) {
+        let now = self.params.labels_version();
+        if now != audio.labels_seen {
+            audio.labels_seen = now;
+            if self.flags.labels_untold(now) {
+                self.host.request_callback();
+            }
+        }
+    }
+
+    /// Main thread: if any parameter was renamed since the host was last
+    /// told, asks it once to read the parameters' information again, which
+    /// CLAP allows while the plugin is active.
+    ///
+    /// # Safety
+    ///
+    /// Must be called on the main thread.
+    unsafe fn tell_new_labels(&self) {
+        if self.flags.take_new_labels(&*self.params) {
+            // SAFETY: on the main thread, per this function's contract; the
+            // host outlives the plugin.
+            unsafe { rescan_params(self.host.as_ptr(), CLAP_PARAM_RESCAN_INFO) };
+        }
+    }
+}
+
+/// Asks the host to read again what `flags` names: every parameter's value,
+/// information, or both.
 ///
 /// # Safety
 ///
 /// `host` must be the live host that created the plugin, or null, and this
 /// must be called on the main thread.
-unsafe fn rescan_values(host: *const clap_host) {
+unsafe fn rescan_params(host: *const clap_host, flags: clap_param_rescan_flags) {
     // SAFETY: guaranteed by this function's contract.
     let Some(get_extension) = (unsafe { host.as_ref() }).and_then(|host| host.get_extension) else {
         return;
@@ -1990,7 +2118,7 @@ unsafe fn rescan_values(host: *const clap_host) {
     };
     if let Some(rescan) = params.and_then(|params| params.rescan) {
         // SAFETY: as above, and we are on the main thread.
-        unsafe { rescan(host, CLAP_PARAM_RESCAN_VALUES) };
+        unsafe { rescan(host, flags) };
     }
 }
 
@@ -2022,6 +2150,13 @@ fn port_channels(layout: AudioLayout, is_input: bool) -> ([usize; 2], usize) {
     (present, count)
 }
 
+/// How many ports there are in one direction under `layout`: the main and
+/// sidechain ports, and after the main output the auxiliary ones.
+fn port_count<P: Plugin>(layout: AudioLayout, is_input: bool) -> usize {
+    let aux = if is_input { 0 } else { P::AUX_OUTPUTS.len() };
+    port_channels(layout, is_input).1 + aux
+}
+
 /// The port type of a port of `channels` channels.
 fn port_type(channels: usize) -> *const c_char {
     match channels {
@@ -2048,7 +2183,7 @@ unsafe extern "C" fn audio_ports_count<P: Plugin>(
 ) -> u32 {
     guard(0, || {
         // SAFETY: the host passes a plugin it created through our factory.
-        port_channels(unsafe { selected::<P>(plugin) }, is_input).1 as u32
+        port_count::<P>(unsafe { selected::<P>(plugin) }, is_input) as u32
     })
 }
 
@@ -2064,9 +2199,23 @@ unsafe extern "C" fn audio_ports_get<P: Plugin>(
         let (channels, count) = port_channels(layout, is_input);
         let index = index as usize;
         // SAFETY: `info` is a struct the host owns, or null.
-        let Some(info) = (unsafe { info.as_mut() }).filter(|_| index < count) else {
+        let Some(info) =
+            (unsafe { info.as_mut() }).filter(|_| index < port_count::<P>(layout, is_input))
+        else {
             return false;
         };
+        if index >= count {
+            // An auxiliary output, after the main one: its own name and
+            // width, never main, never in place.
+            let aux = P::AUX_OUTPUTS[index - count];
+            info.id = index as clap_id;
+            copy_text(aux.name, &mut info.name);
+            info.flags = CLAP_AUDIO_PORT_SUPPORTS_64BITS;
+            info.channel_count = aux.channels as u32;
+            info.port_type = port_type(aux.channels);
+            info.in_place_pair = CLAP_INVALID_ID;
+            return true;
+        }
         let channels = channels[index];
         // The main port is the first one, except that an instrument's only
         // input port is its sidechain.
@@ -2144,7 +2293,7 @@ unsafe extern "C" fn ports_config_get<P: Plugin>(
         config.id = index;
         copy_text(&config_name(layout), &mut config.name);
         config.input_port_count = port_channels(layout, true).1 as u32;
-        config.output_port_count = port_channels(layout, false).1 as u32;
+        config.output_port_count = port_count::<P>(layout, false) as u32;
         config.has_main_input = layout.inputs > 0;
         config.main_input_channel_count = layout.inputs as u32;
         config.main_input_port_type = port_type(layout.inputs);
@@ -2172,6 +2321,9 @@ unsafe extern "C" fn ports_config_select<P: Plugin>(
         // A new configuration has its ports active again, as
         // `audio-ports-activation` says of a selection.
         instance.sidechain_on.store(true, Ordering::Relaxed);
+        for on in &instance.aux_on {
+            on.store(true, Ordering::Relaxed);
+        }
         true
     })
 }
@@ -2197,13 +2349,24 @@ unsafe extern "C" fn ports_set_active<P: Plugin>(
         }
         let layout = instance.selected();
         let index = port_index as usize;
-        if index >= port_channels(layout, is_input).1 {
+        let mains = port_channels(layout, is_input).1;
+        if index >= port_count::<P>(layout, is_input) {
             return false;
         }
         let is_sidechain =
             is_input && layout.sidechain > 0 && index == usize::from(layout.inputs > 0);
         if is_sidechain {
             instance.sidechain_on.store(is_active, Ordering::Relaxed);
+            return true;
+        }
+        if let Some(on) = (!is_input)
+            .then(|| index.checked_sub(mains))
+            .flatten()
+            .and_then(|aux| instance.aux_on.get(aux))
+        {
+            // An auxiliary output: off, it is not given to the plugin and
+            // is written silent.
+            on.store(is_active, Ordering::Relaxed);
             return true;
         }
         // The main ports carry what the plugin is; they stay on.

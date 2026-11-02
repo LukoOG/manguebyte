@@ -6,10 +6,23 @@
 //! | [`Knob`] | [`Slider`](crate::Role::Slider) | a parameter, as an arc and as text | the parameter, by dragging up and down, the wheel, the keys and a typed value |
 //! | [`Slider`] | [`Slider`](crate::Role::Slider) | a parameter, as a track and as text | the parameter, by dragging sideways, the wheel, the keys and a typed value |
 //! | [`TextField`] | [`TextInput`](crate::Role::TextInput) | one line of text from a [`State`](crate::State) | the text, by typing, the clipboard and input methods |
-//! | [`Toggle`] | [`Switch`](crate::Role::Switch) | a parameter that is on or off | the parameter, by clicking, Space and Enter |
-//! | [`ComboBox`] | [`ComboBox`](crate::Role::ComboBox) | a parameter with a few named values | the parameter, from a menu of its values, the arrows and the wheel |
+//! | [`Toggle`] | [`Switch`](crate::Role::Switch) | a parameter, or a `State<bool>`, that is on or off | the parameter or the state, by clicking, Space and Enter |
+//! | [`Pill`] | [`Button`](crate::Role::Button) | a label, a status dot | a count of presses the application polls, by clicking, Space and Enter |
+//! | [`FloatingPanel`] | [`Region`](crate::Role::Region) | a title bar and any view, over the interface without stopping it | where it is and whether it is open, by its title bar, its close button and Escape |
+//! | [`ActionButton`] | [`Button`](crate::Role::Button) | a label from a [`TextSource`], an optional icon, a primary, secondary or destructive look, disabled or not | a count of presses the application polls, by clicking, Space and Enter |
+//! | [`ComboBox`] | [`ComboBox`](crate::Role::ComboBox) | a parameter with a few named values, or [`Choices`] from a [`State`](crate::State) that change while it runs | the parameter or the choice, from a menu of its values, the arrows and the wheel |
 //! | [`Meter`] | [`Meter`](crate::Role::Meter) | a level the audio thread publishes, as a bar and as text | nothing |
 //! | [`Canvas`] | [`Image`](crate::Role::Image) | whatever a closure draws | nothing |
+//! | [`ImageView`] | [`Image`](crate::Role::Image) | an image, fitted to its rectangle, sharp at any scale it has a version for | nothing |
+//! | [`ListView`] | [`List`](crate::Role::List), its rows [`ListItem`](crate::Role::ListItem) | rows the application keeps, only those in sight | the selection, by clicks, the keys and typing; rows dragged out and dropped in |
+//! | [`ScrollView`] | [`ScrollView`](crate::Role::ScrollView) | one child larger than itself, through a viewport, with scroll bars | the offset, by the wheel, the bars and the keys |
+//! | [`EnvelopeEditor`] | [`Group`](crate::Role::Group), its parts [`Slider`](crate::Role::Slider)s | four parameters, and curves if given, as an attack, decay, sustain and release | the parameters, by dragging the curve's corners (one gesture per parameter), the wheel, the keys and typed values |
+//! | [`PianoKeyboard`] | [`Group`](crate::Role::Group), its keys [`Button`](crate::Role::Button)s | keys over a [`KeySpan`], those held and those the application lights, and key ranges | notes, polled as [`NoteEvent`]s, from presses, glissandi, the computer's letters and assistive technology |
+//! | [`ZoneMap`] | [`List`](crate::Role::List), its zones [`ListItem`](crate::Role::ListItem)s | zones over keys and velocities, lined up with a keyboard over the same span, and where they overlap | the zones and the selection, by dragging zones and their edges, a band, the keys, and drops that make zones |
+//! | [`WaveformView`] | [`Group`](crate::Role::Group), its markers [`Slider`](crate::Role::Slider)s | a sample's channels, drawn from a [`Waveform`]'s summary, markers, a selection and a playhead | the markers (within their rules, onto zero crossings if asked), the selection and the zoom, by dragging, the wheel and the keys |
+//! | [`Wheel`] | [`Slider`](crate::Role::Slider) | a pitch bend or modulation wheel in a slot, its value glowing | a parameter or a [`WheelState`], by dragging, the wheel and the keys; the pitch bend wheel springs back when let go |
+//! | [`WaveView`] | [`Image`](crate::Role::Image) | one cycle of a waveform from a [`WaveData`]: samples, frames or a wavetable, at a polled position | nothing |
+//! | [`WavetableView`] | [`Image`](crate::Role::Image) | a wavetable's frames stacked in depth, the frame at a polled position lit | nothing |
 //!
 //! Containers ([`row`](crate::row), [`column`](crate::column),
 //! [`stack`](crate::stack), [`panel`](crate::panel)) are
@@ -28,31 +41,80 @@
 //! words ([`Param::plain_to_text`](manguebyte_params::Param::plain_to_text)
 //! and its unit), and switches give theirs to assistive technology.
 
+mod action;
 mod adjust;
 mod canvas;
 mod combo;
 mod container;
+mod dialog;
+mod envelope;
+mod floating;
+mod icon;
+mod image;
+mod keyboard;
+mod keys;
 mod knob;
 mod label;
+mod list;
 mod meter;
+mod nav;
+mod pill;
+mod scroll_view;
 mod slider;
 mod text_edit;
 mod text_field;
 mod toggle;
+mod wave_data;
+mod waveform;
+mod wavetable;
+mod wheel;
+mod zone_map;
 
+pub use action::{ActionButton, action_button};
 pub use canvas::{Canvas, CanvasCx, canvas};
-pub use combo::{ComboBox, MAX_CHOICES, combo};
+pub use combo::{Choices, ComboBox, MAX_CHOICES, combo};
 pub use container::Container;
+pub use dialog::{ConfirmDialog, DialogResult, DialogState, confirm_dialog};
+pub use envelope::{EnvelopeEditor, envelope};
+pub(crate) use floating::over as panels_over;
+pub use floating::{FloatingPanel, TITLE_BAR_HEIGHT, floating_panel};
+pub use icon::Icon;
+pub use image::{Fit, ImageView, image};
+pub use keyboard::{
+    KeyRange, KeyboardState, NoteEvent, PianoKeyboard, piano_keyboard, piano_keyboard_named,
+};
+pub use keys::{KeySpan, is_black, note_name, note_name_portuguese};
 pub use knob::{Knob, knob};
 pub use label::{Label, label};
+pub use list::{ListData, ListEvent, ListState, ListView, RowCx, list_view, list_view_named};
 pub use meter::{Meter, meter};
+pub use nav::{Pages, sidebar, tabs};
+pub use pill::{Pill, pill};
+pub use scroll_view::{ScrollView, ScrollViewBuilder, scroll_view};
 pub use slider::{Slider, slider};
 pub use text_field::{TextField, text_field};
 pub use toggle::{Toggle, toggle};
+pub use wave_data::{MAX_ZERO_SEARCH, Waveform};
+pub use waveform::{
+    MAX_PIXELS_PER_FRAME, Marker, MarkerKind, MarkerOrder, WaveformEvent, WaveformState,
+    WaveformView, ZOOM_STEP, waveform_view, waveform_view_named,
+};
+pub use wavetable::{
+    MAX_STACKED_FRAMES, WaveData, WaveView, WavetableView, wave_view, wavetable_view,
+};
+pub use wheel::{
+    BEND_RETURN_AFTER, Wheel, WheelBinding, WheelKind, WheelState, mod_wheel, pitch_wheel,
+};
+pub use zone_map::{Zone, ZoneEvent, ZoneMap, ZoneMapState, zone_map, zone_map_named};
 
-use manguebyte_gfx::{Color, Point, Rect, RoundedRect, Scene, Stroke, TextLayout, TextStyle};
+use manguebyte_gfx::{
+    Color, Extend, LinearGradient, Point, Rect, RoundedRect, Scene, Shadow, Shape, Stop, Stroke,
+    TextLayout, TextStyle,
+};
 
+use crate::source::TextSource;
 use crate::theme::Theme;
+use crate::widget::UpdateCx;
 
 /// Space every control keeps free inside its rectangle, in logical pixels:
 /// room for the focus ring, and for the rasteriser's tolerance, so that
@@ -91,6 +153,11 @@ impl<K: PartialEq> Cached<K> {
         Cached { entry: None }
     }
 
+    /// Forgets the layout kept, because what it shows changed.
+    pub(crate) fn clear(&mut self) {
+        self.entry = None;
+    }
+
     /// The layout for `width` and `key`, made by `make` if the one kept was
     /// made for something else.
     pub(crate) fn get(
@@ -111,22 +178,271 @@ impl<K: PartialEq> Cached<K> {
     }
 }
 
-/// Draws the focus ring just inside `rect`.
-pub(crate) fn focus_ring(scene: &mut Scene, rect: Rect, theme: &Theme) {
+/// Reads a control's own name again, if it was given one. When it changed
+/// the layout kept of it is forgotten, the interface is laid out again
+/// (the control's width depends on its name) and the control drawn
+/// again, and assistive technology is told.
+pub(crate) fn poll_label(
+    label: &mut Option<TextSource>,
+    name: &mut Cached<TextStyle>,
+    cx: &mut UpdateCx<'_>,
+) {
+    if label.as_mut().is_some_and(TextSource::poll) {
+        name.clear();
+        cx.request_layout();
+        cx.request_access_update();
+    }
+}
+
+/// Reads a widget's name for assistive technology again; when it changed,
+/// assistive technology is told. Nothing is drawn: the widget does not
+/// show its name.
+pub(crate) fn poll_name(name: &mut TextSource, cx: &mut UpdateCx<'_>) {
+    if name.poll() {
+        cx.request_access_update();
+    }
+}
+
+/// Draws the focus ring along `ring`, faded in by `amount` (the root's
+/// [`focus_ring`](crate::PaintCx::focus_ring) amount): a soft line in the
+/// theme's focus colour, with a faint glow of it in a theme that glows.
+/// Nothing at 0. The caller keeps `ring` far enough inside its rectangle
+/// for the line and its glow.
+pub(crate) fn focus_ring<'s>(
+    scene: &mut Scene,
+    ring: impl Into<Shape<'s>>,
+    theme: &Theme,
+    amount: f32,
+) {
+    if amount.is_nan() || amount <= 0.0 {
+        return;
+    }
+    let ring = ring.into();
     let width = theme.sizes.focus_ring.max(0.0);
-    // Half the width, and a pixel for the rasteriser's tolerance, inside
-    // the edge: the ring never reaches past the widget's rectangle.
-    let inset = width * 0.5 + 1.0;
-    let ring = Rect::new(
-        rect.x + inset,
-        rect.y + inset,
-        (rect.width - 2.0 * inset).max(0.0),
-        (rect.height - 2.0 * inset).max(0.0),
+    let color = theme.palette.focus.with_opacity(amount);
+    glow_stroke(scene, ring, Stroke::round(width), theme, 0.5 * amount);
+    scene.stroke(ring, Stroke::round(width), color);
+}
+
+/// The theme's glow, at `strength` (0 to 1) of its opacity, around the
+/// outline of `shape` drawn with `stroke`. Nothing in a theme without
+/// glow, or at no strength.
+pub(crate) fn glow_stroke<'s>(
+    scene: &mut Scene,
+    shape: impl Into<Shape<'s>>,
+    stroke: Stroke,
+    theme: &Theme,
+    strength: f32,
+) {
+    let glow = theme.elevation.glow;
+    let color = glow.color.with_opacity(strength);
+    if color.a == 0 {
+        return;
+    }
+    scene.stroke_shadow(shape, stroke, glow.with_color(color));
+}
+
+/// The theme's glow in `color` (its opacity times `strength`) around the
+/// filled `shape`. Nothing in a theme without glow.
+pub(crate) fn glow_fill<'s>(
+    scene: &mut Scene,
+    shape: impl Into<Shape<'s>>,
+    color: Color,
+    theme: &Theme,
+    strength: f32,
+) {
+    let glow = theme.elevation.glow;
+    if glow.color.a == 0 {
+        return;
+    }
+    let alpha = f32::from(glow.color.a) / 255.0 * strength;
+    let color = color.with_opacity(alpha * f32::from(color.a) / 255.0);
+    if color.a == 0 {
+        return;
+    }
+    scene.shadow(shape, glow.with_color(color));
+}
+
+/// Draws a floating surface over `rect`: menus, tooltips, a drag's ghost.
+/// The theme's large shadow, its overlay surface with corners of
+/// `radius`, and a strong hairline.
+pub(crate) fn floating(scene: &mut Scene, rect: Rect, radius: f32, theme: &Theme, scale: f32) {
+    let radius = radius.min(rect.width * 0.5).min(rect.height * 0.5).max(0.0);
+    let shape = RoundedRect::new(rect, radius);
+    drop_shadow(scene, shape, theme.elevation.lg);
+    scene.fill(shape, theme.palette.overlay);
+    hairline(scene, rect, radius, scale, theme.palette.hairline_strong);
+}
+
+/// How far a floating surface's shadow reaches beyond it (see
+/// [`floating`]).
+pub(crate) fn floating_overflow(theme: &Theme) -> f32 {
+    let shadow = theme.elevation.lg;
+    if shadow.color.a == 0 {
+        return 0.0;
+    }
+    let offset = shadow.offset.x.abs().max(shadow.offset.y.abs());
+    (shadow.reach_exact() + offset).max(0.0).ceil()
+}
+
+/// The shadow under a small thumb (a switch's, a slider's): the theme's
+/// small elevation at half its offset and blur, so that it stays inside
+/// the control.
+pub(crate) fn thumb_shadow(theme: &Theme) -> Shadow {
+    let sm = theme.elevation.sm;
+    sm.with_offset(sm.offset.x * 0.5, sm.offset.y * 0.5)
+        .with_blur(sm.blur * 0.5)
+}
+
+/// Draws `shadow` behind `shape` unless it is fully transparent.
+pub(crate) fn drop_shadow<'s>(scene: &mut Scene, shape: impl Into<Shape<'s>>, shadow: Shadow) {
+    if shadow.color.a > 0 {
+        scene.shadow(shape, shadow);
+    }
+}
+
+/// Fills `rect` with a gradient from `top` to `bottom`.
+pub(crate) fn vertical<'s>(
+    scene: &mut Scene,
+    shape: impl Into<Shape<'s>>,
+    (y0, y1): (f32, f32),
+    top: Color,
+    bottom: Color,
+) {
+    if top == bottom {
+        scene.fill(shape, top);
+        return;
+    }
+    let stops = [Stop::new(0.0, top), Stop::new(1.0, bottom)];
+    scene.fill(
+        shape,
+        LinearGradient {
+            start: Point::new(0.0, y0),
+            end: Point::new(0.0, y1),
+            stops: &stops,
+            extend: Extend::Pad,
+        },
+    );
+}
+
+/// A hairline a device pixel wide just inside `rect`, with corners of
+/// `radius`: the border of a card or a control.
+pub(crate) fn hairline(scene: &mut Scene, rect: Rect, radius: f32, scale: f32, color: Color) {
+    let px = device_px(1.0, scale);
+    let edge = Rect::new(
+        rect.x + px * 0.5,
+        rect.y + px * 0.5,
+        (rect.width - px).max(0.0),
+        (rect.height - px).max(0.0),
     );
     scene.stroke(
-        RoundedRect::new(ring, theme.corners.medium),
-        Stroke::round(width),
-        theme.palette.focus,
+        RoundedRect::new(edge, (radius - px * 0.5).max(0.0)),
+        Stroke::new(px),
+        color,
+    );
+}
+
+/// The light caught along the top of a raised surface: a line a device
+/// pixel high inside the top edge of `rect`, cut by its corners of
+/// `radius` (CSS's `inset 0 1px 0`).
+pub(crate) fn top_highlight(scene: &mut Scene, rect: Rect, radius: f32, scale: f32, color: Color) {
+    if color.a == 0 {
+        return;
+    }
+    // A thin band along the top edge, as round as the corners: the
+    // rectangle's top less the same rectangle a pixel lower, drawn as one
+    // outline filled even-odd (no clip, which costs a mask).
+    let px = device_px(1.0, scale);
+    let r = radius.min(rect.width * 0.5).min(rect.height * 0.5).max(0.0);
+    let band = Rect::new(rect.x, rect.y, rect.width, (r + px).min(rect.height));
+    let mut path = manguebyte_gfx::Path::new();
+    top_rounded(&mut path, band, r);
+    top_rounded(
+        &mut path,
+        Rect::new(band.x, band.y + px, band.width, (band.height - px).max(0.0)),
+        r,
+    );
+    path.set_fill_rule(manguebyte_gfx::FillRule::EvenOdd);
+    scene.fill(&path, color);
+}
+
+/// Adds to `path` the outline of `rect` with its top corners rounded by
+/// `r` (each corner a cubic close to a quarter circle) and its bottom
+/// corners square.
+fn top_rounded(path: &mut manguebyte_gfx::Path, rect: Rect, r: f32) {
+    // How far a cubic's controls lie along the tangents for a quarter
+    // circle.
+    const K: f32 = 0.552_284_8;
+    let (x0, y0, x1, y1) = (rect.x, rect.y, rect.right(), rect.bottom());
+    let r = r.min(rect.height).min(rect.width * 0.5).max(0.0);
+    path.move_to(Point::new(x0, y1))
+        .line_to(Point::new(x0, y0 + r))
+        .cubic_to(
+            Point::new(x0, y0 + r - K * r),
+            Point::new(x0 + r - K * r, y0),
+            Point::new(x0 + r, y0),
+        )
+        .line_to(Point::new(x1 - r, y0))
+        .cubic_to(
+            Point::new(x1 - r + K * r, y0),
+            Point::new(x1, y0 + r - K * r),
+            Point::new(x1, y0 + r),
+        )
+        .line_to(Point::new(x1, y1))
+        .close();
+}
+
+/// `x`, in logical pixels, moved to the nearest edge between device
+/// pixels at `scale`, so that what starts there starts sharp.
+pub(crate) fn snap_px(x: f32, scale: f32) -> f32 {
+    if scale > 0.0 && scale.is_finite() && x.is_finite() {
+        (x * scale).round() / scale
+    } else {
+        x
+    }
+}
+
+/// `count` whole device pixels at `scale`, in logical pixels: a line that
+/// is that many pixels wide at every scale.
+pub(crate) fn device_px(count: f32, scale: f32) -> f32 {
+    if scale > 0.0 && scale.is_finite() {
+        count / scale
+    } else {
+        count
+    }
+}
+
+/// A vertical line `pixels` device pixels wide from `top` to `bottom`,
+/// starting at the device pixel edge nearest `x`.
+pub(crate) fn vline(
+    scene: &mut Scene,
+    x: f32,
+    (top, bottom): (f32, f32),
+    pixels: f32,
+    scale: f32,
+    color: Color,
+) {
+    let x = snap_px(x, scale);
+    scene.fill(
+        Rect::new(x, top, device_px(pixels, scale), (bottom - top).max(0.0)),
+        color,
+    );
+}
+
+/// A horizontal line `pixels` device pixels tall from `left` to `right`,
+/// starting at the device pixel edge nearest `y`.
+pub(crate) fn hline(
+    scene: &mut Scene,
+    y: f32,
+    (left, right): (f32, f32),
+    pixels: f32,
+    scale: f32,
+    color: Color,
+) {
+    let y = snap_px(y, scale);
+    scene.fill(
+        Rect::new(left, y, (right - left).max(0.0), device_px(pixels, scale)),
+        color,
     );
 }
 
@@ -135,29 +451,20 @@ pub(crate) fn draw_text(scene: &mut Scene, layout: &TextLayout, at: Point) {
     scene.text(layout, at);
 }
 
-/// The style of a control's name, in the theme's text colour.
+/// The style of a control's name, in the theme's secondary text colour.
 pub(crate) fn name_style(theme: &Theme) -> TextStyle {
     theme
         .typography
         .label
-        .with_color(theme.palette.text)
+        .with_color(theme.palette.text_secondary)
         .with_align(manguebyte_gfx::Align::Center)
 }
 
-/// The style of a control's value, in the theme's muted text colour.
+/// The style of a control's value, in the theme's text colour.
 pub(crate) fn value_style(theme: &Theme) -> TextStyle {
     theme
         .typography
         .value
-        .with_color(theme.palette.text_muted)
+        .with_color(theme.palette.text)
         .with_align(manguebyte_gfx::Align::Center)
-}
-
-/// The colour of a switch's track or a knob's arc, by state.
-pub(crate) fn on_off(theme: &Theme, on: bool) -> Color {
-    if on {
-        theme.palette.accent
-    } else {
-        theme.palette.track
-    }
 }

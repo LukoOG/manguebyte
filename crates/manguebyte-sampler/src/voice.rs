@@ -4,11 +4,11 @@ use std::sync::Arc;
 
 use manguebyte_core::{AudioBuffer, Sample};
 use manguebyte_dsp::event::{Expression, NoteRef};
-use manguebyte_dsp::{ProcessSpec, Voice};
+use manguebyte_dsp::{ProcessSpec, Tuning, Voice};
 
 use crate::instrument::Instrument;
 use crate::interpolate::Interpolation;
-use crate::player::{Bend, FAST_FADE_SECONDS, Hold, Player, Start};
+use crate::player::{Bend, FAST_FADE_SECONDS, Hold, Modulation, Player, Start};
 use crate::region::Trigger;
 
 /// Most regions one [`SamplerVoice`] plays at once, the fading ones of a
@@ -31,6 +31,9 @@ pub const MAX_LAYERS: usize = 8;
 /// - `polyphony` is ignored (the synth's voice count is the limit);
 /// - `trigger=first` regions always play and `trigger=legato` never do;
 /// - the pitch wheel range is the synth's, not `bend_up` and `bend_down`;
+/// - controllers stay at their initial values (`set_ccN`, `set_hdccN`):
+///   a voice sees no controller messages, so `<opcode>_onccN` modulates
+///   with those values only;
 /// - the instrument cannot be swapped while playing: build a new synth
 ///   off the audio thread instead.
 ///
@@ -64,11 +67,18 @@ pub struct SamplerVoice {
     /// Whether the note is down (or held by the pedal, which the synth
     /// handles).
     held: bool,
+    /// Pitch ratio and gain from outside, where they stand, what they head
+    /// for, and the frames of the way left.
+    outside: (f64, f64),
+    outside_to: (f64, f64),
+    outside_left: u64,
     serial: u64,
     bend_cents: f64,
     volume: f64,
     pan: f64,
     tuning: f64,
+    /// The tuning of the keys, from `Synth::set_tuning`.
+    key_tuning: Tuning,
 }
 
 impl SamplerVoice {
@@ -83,11 +93,15 @@ impl SamplerVoice {
             velocity: 0,
             held_frames: 0,
             held: false,
+            outside: (1.0, 1.0),
+            outside_to: (1.0, 1.0),
+            outside_left: 0,
             serial: 0,
             bend_cents: 0.0,
             volume: 1.0,
             pan: 0.0,
             tuning: 0.0,
+            key_tuning: Tuning::default(),
         }
     }
 
@@ -99,6 +113,25 @@ impl SamplerVoice {
     /// The instrument it plays.
     pub fn instrument(&self) -> &Arc<Instrument> {
         &self.instrument
+    }
+
+    /// Sets the pitch ratio and gain a model outside the sampler gives this
+    /// voice, as [`Sampler::modulate_key`](crate::Sampler::modulate_key)
+    /// does for a key's, reached along a straight line over the next
+    /// `frames` frames it renders (at once for 0), and held after them.
+    /// A value that is not a number is ignored. Real-time safe.
+    pub fn modulate(&mut self, pitch_ratio: f32, gain: f32, frames: usize) {
+        if pitch_ratio.is_nan() || gain.is_nan() {
+            return;
+        }
+        self.outside_to = (
+            f64::from(pitch_ratio).clamp(1.0 / 65_536.0, 256.0),
+            f64::from(gain).max(0.0),
+        );
+        self.outside_left = frames as u64;
+        if frames == 0 {
+            self.outside = self.outside_to;
+        }
     }
 
     /// How many regions are sounding.
@@ -124,6 +157,8 @@ impl SamplerVoice {
         self.serial += 1;
         let random = instrument.next_random();
         let channel = self.note.channel & 0x0F;
+        let pitch =
+            self.key_tuning.key_pitch(self.note.key & 0x7F) + f64::from(instrument.note_shift);
         for &index in list {
             let index = index as usize;
             let Some(zone) = instrument.zones.get(index) else {
@@ -134,7 +169,11 @@ impl SamplerVoice {
                 (Some(wanted), trigger) => wanted == trigger,
                 _ => false,
             };
+            let held = self.held_frames as f64 / self.sample_rate;
             if !wanted || !zone.accepts(channel, key, self.velocity) {
+                continue;
+            }
+            if release.is_some() && !zone.accepts_held(held) {
                 continue;
             }
             if !instrument.take_turn(index) || !zone.accepts_random(random) {
@@ -148,11 +187,23 @@ impl SamplerVoice {
             if zone.sample.is_none() {
                 continue;
             }
-            let held = self.held_frames as f64 / self.sample_rate;
+            // The loudest sustaining layer, which a release with a
+            // crossfade takes over from.
+            let sustain = if release.is_some() && zone.release_crossfade > 0.0 {
+                self.layers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, layer)| layer.active && !layer.release_trigger && !layer.dying)
+                    .max_by(|a, b| a.1.loudness().total_cmp(&b.1.loudness()))
+                    .map(|(at, _)| at)
+            } else {
+                None
+            };
             let start = Start {
                 zone: index,
                 note: self.note,
                 key,
+                pitch,
                 velocity: self.velocity,
                 serial: self.serial,
                 age: self.serial,
@@ -165,7 +216,12 @@ impl SamplerVoice {
                 },
                 sample_rate: self.sample_rate,
             };
-            let slot = match self.layers.iter().position(|layer| !layer.active) {
+            let free = self
+                .layers
+                .iter()
+                .enumerate()
+                .position(|(at, layer)| !layer.active && Some(at) != sustain);
+            let slot = match free {
                 Some(free) => free,
                 None => {
                     // All busy: the quietest layer gives way.
@@ -180,11 +236,19 @@ impl SamplerVoice {
                     chosen
                 }
             };
+            let upcoming = sustain.map(|at| self.layers[at].upcoming(instrument));
             let layer = &mut self.layers[slot];
-            if layer.start(instrument, &start) {
+            if layer.start(instrument, &start, &*instrument.controller_defaults, 0) {
                 layer.set_volume(self.volume);
                 layer.set_pan(self.pan);
                 layer.set_tuning(self.tuning);
+                if let (Some(at), Some(upcoming)) = (sustain.filter(|&at| at != slot), upcoming) {
+                    if zone.release_align > 0 {
+                        layer.align(instrument, &upcoming, zone.release_align);
+                    }
+                    layer.fade_in(zone.release_crossfade, self.sample_rate);
+                    self.layers[at].hand_over(zone.release_crossfade, self.sample_rate);
+                }
             }
         }
     }
@@ -196,6 +260,13 @@ impl<S: Sample> Voice<S> for SamplerVoice {
             self.sample_rate = spec.sample_rate;
         }
         Voice::<S>::choke(self);
+    }
+
+    /// Keeps the tuning for the notes to come; see
+    /// [`Sampler::set_tuning`](crate::Sampler::set_tuning) for what it
+    /// changes.
+    fn set_tuning(&mut self, tuning: &Tuning) {
+        self.key_tuning.clone_from(tuning);
     }
 
     fn note_on(&mut self, note: NoteRef, velocity: f32) {
@@ -246,10 +317,44 @@ impl<S: Sample> Voice<S> for SamplerVoice {
     }
 
     fn render(&mut self, buffer: &mut AudioBuffer<S>) {
+        let defaults = &*self.instrument.controller_defaults;
+        let frames = buffer.num_frames() as u64;
+        let modulation = if self.outside == (1.0, 1.0) && self.outside_to == (1.0, 1.0) {
+            Modulation::NONE
+        } else {
+            let left = self.outside_left.max(1) as f64;
+            Modulation {
+                active: true,
+                ratio: [self.outside.0, 1.0],
+                ratio_step: [(self.outside_to.0 - self.outside.0) / left, 0.0],
+                gain: [self.outside.1, 1.0],
+                gain_step: [(self.outside_to.1 - self.outside.1) / left, 0.0],
+                offset: 0,
+                len: self.outside_left,
+            }
+        };
         for layer in &mut self.layers {
-            layer.render(&self.instrument, self.interpolation, buffer);
+            layer.render(
+                &self.instrument,
+                self.interpolation,
+                buffer,
+                defaults,
+                0,
+                &modulation,
+            );
         }
-        self.held_frames = self.held_frames.wrapping_add(buffer.num_frames() as u64);
+        // Along the line by this many frames.
+        if self.outside_left > 0 {
+            let done = frames.min(self.outside_left);
+            let part = done as f64 / self.outside_left as f64;
+            self.outside.0 += (self.outside_to.0 - self.outside.0) * part;
+            self.outside.1 += (self.outside_to.1 - self.outside.1) * part;
+            self.outside_left -= done;
+        }
+        if self.outside_left == 0 {
+            self.outside = self.outside_to;
+        }
+        self.held_frames = self.held_frames.wrapping_add(frames);
     }
 
     fn expression(&mut self, expression: Expression, value: f64) {

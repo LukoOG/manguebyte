@@ -12,7 +12,9 @@ use common::*;
 use manguebyte_core::AudioBuffer;
 use manguebyte_dsp::event::{Event, EventBuffer, EventKind, Expression, NoteRef};
 use manguebyte_dsp::{ProcessContext, ProcessSpec, Processor, Synth, Transport};
-use manguebyte_sampler::{Instrument, Interpolation, MemorySource, Sampler, SamplerVoice};
+use manguebyte_sampler::{
+    Instrument, Interpolation, MAX_PENDING_CONTROLLER_CHANGES, MemorySource, Sampler, SamplerVoice,
+};
 
 thread_local! {
     static WATCHING: Cell<bool> = const { Cell::new(false) };
@@ -66,17 +68,22 @@ fn assert_no_heap_use(what: &str, work: impl FnOnce()) {
 }
 
 const TEXT: &str = "
-<global> ampeg_attack=0.001 ampeg_release=0.01
-<group> lokey=40 hikey=70 seq_length=2
+<control> set_cc74=64 set_hdcc300=0.5
+<global> ampeg_attack=0.001 ampeg_release=0.01 cutoff=3000 resonance=6 fil_keytrack=50
+         fil_veltrack=600 fileg_depth=1200 fileg_attack=0.002 fileg_decay=0.01 fileg_sustain=40
+         fileg_release=0.01 cutoff_oncc74=2400 resonance_oncc300=12 volume_oncc300=-6
+         amplitude_oncc301=-50 pan_oncc20=50 tune_oncc1=100 ampeg_attack_oncc300=0.002
+         ampeg_release_oncc301=0.01 fileg_depth_oncc301=-600 fileg_decay_oncc300=0.01
+<group> lokey=40 hikey=70 seq_length=2 fil_type=lpf_4p
 <region> sample=a.wav seq_position=1 loop_mode=loop_sustain loop_start=100 loop_end=3000 loop_crossfade=0.005
 <region> sample=b.wav seq_position=2 pan=30
-<group> lokey=71 hikey=90 group=5 off_by=6 polyphony=2
+<group> lokey=71 hikey=90 group=5 off_by=6 polyphony=2 fil_type=hpf_2p
 <region> sample=a.wav hirand=0.5 offset=10 off_mode=time off_time=0.002
 <region> sample=b.wav lorand=0.5 loop_mode=one_shot
-<group> key=36 group=6
+<group> key=36 group=6 fil_type=bpf_2p
 <region> sample=*sine
-<group> lokey=40 hikey=90
-<region> sample=a.wav trigger=release rt_decay=3
+<group> lokey=40 hikey=90 fil_type=lpf_1p
+<region> sample=a.wav trigger=release rt_decay=3 mangue_release_crossfade=0.004 mangue_release_align=300 mangue_hiheld=4
 <region> sample=*silence trigger=release_key end=-1 group=6
 ";
 
@@ -118,7 +125,7 @@ fn busy_events(seed: u64) -> EventBuffer {
                 value: random.unit(),
             },
             6 => controller(
-                [64, 120, 121, 123][random.below(4)],
+                [64, 120, 121, 123, 1, 20, 74, 200][random.below(8)],
                 random.below(128) as u8,
             ),
             7 => bend(random.below(16_384) as i16 - 8_192),
@@ -130,6 +137,21 @@ fn busy_events(seed: u64) -> EventBuffer {
         events.push(Event { offset, kind }).unwrap();
     }
     events
+}
+
+/// A plugin moving the parameters bound to controllers, as it would before
+/// each block.
+fn set_parameters(sampler: &mut Sampler<f32>, block: usize) {
+    for (turn, controller) in [300u16, 301, 74, 1].into_iter().enumerate() {
+        let value = ((block * 7 + turn * 3) % 11) as f32 / 10.0;
+        sampler.set_controller(controller, value, ((block * 37 + turn * 61) % 300) as u32);
+    }
+    // A wind model moving pitch and level.
+    let wind = (block % 5) as f32 * 0.001;
+    sampler.modulate_all(1.0 + wind, 1.0 - wind);
+    for key in 36..92 {
+        sampler.modulate_key(key, 1.0 - wind * 0.5, 0.9 + wind);
+    }
 }
 
 #[test]
@@ -156,8 +178,15 @@ fn the_sampler_never_allocates_while_playing_or_swapping() {
             assert_no_heap_use("the sampler", || {
                 for (index, events) in blocks.iter().enumerate() {
                     buffer.set_num_frames([256, 1, 77, 256][index % 4]);
+                    set_parameters(&mut sampler, index);
                     sampler.process_with(&mut buffer, &ProcessContext::new(events, &transport));
                 }
+                // More changes than the sampler holds for a block.
+                for frame in 0..(MAX_PENDING_CONTROLLER_CHANGES as u32 + 10) {
+                    sampler.set_controller(300, (frame % 7) as f32 / 7.0, frame % 256);
+                }
+                sampler.process(&mut buffer);
+                set_parameters(&mut sampler, 3);
                 sampler.reset();
                 sampler.process(&mut buffer);
             });
@@ -170,6 +199,7 @@ fn the_sampler_never_allocates_while_playing_or_swapping() {
             assert_no_heap_use("swapping instruments", || {
                 for (index, events) in blocks.iter().enumerate() {
                     buffer.set_num_frames([256, 1, 77, 256][index % 4]);
+                    set_parameters(&mut sampler, index);
                     sampler.process_with(&mut buffer, &ProcessContext::new(events, &transport));
                 }
             });
@@ -199,8 +229,95 @@ fn the_voice_never_allocates_inside_a_synth() {
     let transport = Transport::STOPPED;
     assert_no_heap_use("the synth of sampler voices", || {
         for events in &blocks {
+            for (turn, voice) in synth.voices_mut().enumerate() {
+                voice.modulate(1.0 + turn as f32 * 0.001, 0.9, 100);
+            }
             synth.process_with(&mut buffer, &ProcessContext::new(events, &transport));
         }
         synth.reset();
     });
+}
+
+#[test]
+fn streaming_voices_and_cursors_never_allocate() {
+    use manguebyte_sampler::{CursorRead, SampleStore, Sfz, StreamOptions};
+
+    // The process id keeps two runs that share a target directory apart.
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("realtime-streaming-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // Long enough that every voice reads past its head.
+    let long = sine_wav(440.0, 48_000, 2.0, 0.5);
+    let stereo = wav_bytes(
+        &[
+            sine(330.0, 44_100.0, 80_000, 0.4),
+            sine(331.0, 44_100.0, 80_000, 0.4),
+        ],
+        44_100,
+    );
+    std::fs::write(dir.join("a.wav"), long).unwrap();
+    std::fs::write(dir.join("b.wav"), stereo).unwrap();
+    // Streamed, and streamed with what stays in memory packed.
+    for compress in [false, true] {
+        let options = StreamOptions::new()
+            .preload_frames(4_096)
+            .ring_frames(16_384)
+            .voices(12)
+            .compress(compress);
+        let sfz = Sfz::parse(TEXT).unwrap();
+        let instrument = Instrument::load_streaming(&sfz, &dir, &options).unwrap();
+        assert!(instrument.is_streaming());
+        let probe = instrument.clone();
+        let (mut sampler, _loader) = Sampler::<f32>::with_instrument(instrument, 8);
+        sampler.prepare(&ProcessSpec {
+            sample_rate: 48_000.0,
+            max_block_size: 256,
+            num_channels: 2,
+        });
+        let blocks: Vec<EventBuffer> = (200..400).map(busy_events).collect();
+        let mut buffer = AudioBuffer::<f32>::new(2, 256);
+        let transport = Transport::STOPPED;
+        // Starting, streaming, retargeting round loops, starving and stopping.
+        assert_no_heap_use("streaming voices", || {
+            for (index, events) in blocks.iter().enumerate() {
+                buffer.set_num_frames([256, 1, 77, 256][index % 4]);
+                sampler.process_with(&mut buffer, &ProcessContext::new(events, &transport));
+            }
+            sampler.reset();
+            sampler.process(&mut buffer);
+        });
+        assert!(probe.streaming_voices() == 0);
+
+        let store = SampleStore::open([dir.join("a.wav"), dir.join("b.wav")], &options).unwrap();
+        let a = store.handle(0).unwrap();
+        let b = store.handle(1).unwrap();
+        let (mut left, mut right) = (vec![0.0f32; 512], vec![0.0f32; 512]);
+        let mut reader = manguebyte_sampler::SincReader::new();
+        let ratios: Vec<f32> = (0..512).map(|n| 1.0 + n as f32 * 1e-4).collect();
+        let mut read = vec![0.0f32; 512];
+        assert_no_heap_use("the sinc reader", || {
+            for _ in 0..10 {
+                reader.process(&left, &ratios, &mut read);
+                reader.set_position(0.0);
+            }
+        });
+        assert_no_heap_use("cursors", || {
+            let mut cursors = [store.cursor(a, 0), store.cursor(b, 100)];
+            for turn in 0..200 {
+                for cursor in &mut cursors {
+                    if let CursorRead::Frames(0) = cursor.read(&mut left, &mut right) {
+                        cursor.seek(0);
+                    }
+                    if turn % 17 == 0 {
+                        cursor.seek(cursor.position() / 2);
+                    }
+                }
+            }
+            drop(cursors);
+        });
+        drop(store);
+        drop(probe);
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
 }

@@ -251,3 +251,298 @@ fn a_steady_frame_with_a_tooltip_waiting_or_shown_makes_no_heap_call() {
     });
     assert_eq!(calls, 0, "100 frames showing made {calls} heap calls");
 }
+
+#[test]
+fn a_steady_frame_with_names_that_follow_the_language_makes_no_heap_call() {
+    use common::languages::{language_params, screen};
+
+    let params = language_params();
+    let language = manguebyte_ui::State::new(String::from("en"));
+    let mut ui = screen(&params, &language);
+    ui.advance_ms(100);
+    // Every name is read on each of these frames and found unchanged.
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+        }
+    });
+    assert_eq!(calls, 0, "100 steady frames made {calls} heap calls");
+
+    // A switch may touch the heap: names are laid out and drawn again.
+    language.set(String::from("pt"));
+    let (summary, _) = counted(|| ui.frame());
+    assert_eq!(summary.painted, 4);
+    assert_eq!(ui.access_updates().len(), 8);
+    ui.advance_ms(100);
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+        }
+    });
+    assert_eq!(
+        calls, 0,
+        "100 frames after the switch made {calls} heap calls"
+    );
+}
+
+#[test]
+fn a_steady_frame_with_pages_makes_no_heap_call() {
+    use manguebyte_ui::{IntoView, State, TextSource, label, row, sidebar, tabs};
+
+    let params = params();
+    let levels = levels();
+    let language = State::new(0_usize);
+    let title = |words: [&'static str; 2]| {
+        let language = language.clone();
+        TextSource::dynamic(move || words[language.get()])
+    };
+    let page = State::new(0_usize);
+    let division = State::new(1_usize);
+    let view = row((
+        sidebar("Divisions", division.clone())
+            .section(title(["Manuals", "Teclados"]))
+            .page(title(["Great", "Grande órgão"]), label("Great"))
+            .page(title(["Swell", "Expressivo"]), label("Swell")),
+        tabs("Sections", page.clone())
+            .page(title(["Synth", "Síntese"]), panel_view(&params, &levels))
+            .page(title(["Effects", "Efeitos"]), label("Reverb"))
+            .flex(1.0),
+    ));
+    let mut ui = Harness::with_params(
+        view,
+        manguebyte_gfx::Size::new(700.0, 400.0),
+        2.0,
+        Arc::clone(&params) as Arc<dyn manguebyte_params::ParamSet>,
+    );
+    ui.advance_ms(100);
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+        }
+    });
+    assert_eq!(calls, 0, "100 steady frames made {calls} heap calls");
+    // A switch and a language change may touch it; the frames after do
+    // not, with the panel hidden behind the other tab.
+    page.set(1);
+    division.set(0);
+    language.set(1);
+    ui.advance_ms(100);
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+        }
+    });
+    assert_eq!(
+        calls, 0,
+        "100 frames after a switch made {calls} heap calls"
+    );
+}
+
+#[test]
+fn a_steady_frame_with_a_dialog_closed_or_open_makes_no_heap_call() {
+    use manguebyte_ui::{
+        DialogState, IntoView, State, TextSource, action_button, column, confirm_dialog,
+    };
+
+    let language = State::new(0_usize);
+    let title = |words: [&'static str; 2]| {
+        let language = language.clone();
+        TextSource::dynamic(move || words[language.get()])
+    };
+    let ask = DialogState::new();
+    let view = column((
+        action_button(title(["Delete", "Apagar"])).opens(&ask),
+        action_button(title(["Save", "Salvar"]))
+            .primary()
+            .enabled(|| true),
+    ))
+    .with_dialog(
+        confirm_dialog(
+            ask.clone(),
+            title(["Delete it?", "Apagar?"]),
+            title(["It cannot be undone.", "Não se desfaz."]),
+        )
+        .confirm_label(title(["Delete", "Apagar"]))
+        .cancel_label(title(["Keep", "Manter"])),
+    );
+    let mut ui = Harness::new(view, manguebyte_gfx::Size::new(500.0, 300.0), 2.0);
+    ui.advance_ms(100);
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+        }
+    });
+    assert_eq!(calls, 0, "100 frames, closed, made {calls} heap calls");
+    ask.open();
+    ui.advance_ms(300);
+    assert!(ui.root().modal().is_some());
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+        }
+    });
+    assert_eq!(calls, 0, "100 frames, open, made {calls} heap calls");
+}
+
+#[test]
+fn a_steady_frame_with_floating_panels_open_makes_no_heap_call() {
+    use manguebyte_ui::{
+        IntoView, ParamHandle, State, TextSource, floating_panel, knob, pill, row,
+    };
+
+    let params = params();
+    let levels = levels();
+    let language = State::new(0_usize);
+    let title = |words: [&'static str; 2]| {
+        let language = language.clone();
+        TextSource::dynamic(move || words[language.get()])
+    };
+    let (filter, delay) = (State::new(false), State::new(true));
+    let view = row((pill("Filter").opens(&filter), panel_view(&params, &levels)))
+        .spacing(8.0)
+        .with_panels([
+            floating_panel(
+                title(["Filter", "Filtro"]),
+                filter.clone(),
+                State::new(Point::new(120.0, 40.0)),
+                knob(ParamHandle::new(Arc::clone(&params), |p| &p.resonance)).label("Q"),
+            )
+            .close_label(title(["Close", "Fechar"])),
+            floating_panel(
+                title(["Delay", "Atraso"]),
+                delay.clone(),
+                State::new(Point::new(260.0, 160.0)),
+                knob(ParamHandle::new(Arc::clone(&params), |p| &p.mix)).label("Mix"),
+            ),
+        ]);
+    let mut ui = Harness::with_params(
+        view,
+        manguebyte_gfx::Size::new(640.0, 360.0),
+        2.0,
+        Arc::clone(&params) as Arc<dyn manguebyte_params::ParamSet>,
+    );
+    ui.advance_ms(100);
+    // Opened from its pill, with the focus inside, over the panel's meters.
+    ui.click(ui.get(Role::Button, "Filter").center());
+    ui.advance_ms(100);
+    assert!(ui.get(Role::Slider, "Q").is_focused());
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+        }
+    });
+    assert_eq!(
+        calls, 0,
+        "100 frames with panels open made {calls} heap calls"
+    );
+    // Moved, and the language switched: the frames after make none.
+    let region = ui.get(Role::Region, "Filter");
+    ui.drag(
+        Point::new(region.bounds.x + 20.0, region.bounds.y + 12.0),
+        (40.0, 30.0),
+        4,
+    );
+    language.set(1);
+    ui.advance_ms(100);
+    assert!(ui.find(Role::Region, "Filtro").is_some());
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+        }
+    });
+    assert_eq!(calls, 0, "100 frames after a move made {calls} heap calls");
+}
+
+#[test]
+fn a_name_built_as_a_string_every_frame_touches_the_heap_every_frame() {
+    // What the documentation of `TextSource` warns about, and what the
+    // test above would catch.
+    let language = manguebyte_ui::State::new(String::from("en"));
+    let read = language.clone();
+    let view = manguebyte_ui::Label::dynamic(move || read.with(|code| format!("Language: {code}")));
+    let mut ui = Harness::new(view, manguebyte_gfx::Size::new(200.0, 30.0), 1.0);
+    ui.advance_ms(50);
+    let ((), calls) = counted(|| {
+        for _ in 0..10 {
+            ui.frame();
+        }
+    });
+    assert!(calls >= 10, "10 frames made only {calls} heap calls");
+}
+
+#[test]
+fn steady_frames_of_the_oscillator_views_make_no_heap_call() {
+    use manguebyte_ui::{AtomicSource, WaveData, row, wave_view, wavetable_view};
+
+    let frames: Vec<Vec<f32>> = (0..16)
+        .map(|k| {
+            (0..256)
+                .map(|i| (i as f32 / 256.0 * std::f32::consts::TAU * (1 + k) as f32).sin())
+                .collect()
+        })
+        .collect();
+    let data = WaveData::from_frames(&frames);
+    let position = Arc::new(manguebyte_core::AtomicF32::new(3.0));
+    let view = row((
+        wave_view("Cycle", data.clone()).position(AtomicSource::new(Arc::clone(&position))),
+        wavetable_view("Table", data, AtomicSource::new(Arc::clone(&position))),
+    ));
+    let mut ui = Harness::new(view, manguebyte_gfx::Size::new(420.0, 160.0), 2.0);
+    ui.advance_ms(100);
+    // The audio thread stores the same position every block: nothing
+    // changes, nothing is read but the atomics, nothing touches the heap.
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            position.store(3.0, Ordering::Relaxed);
+            ui.frame();
+        }
+    });
+    assert_eq!(calls, 0, "100 steady frames made {calls} heap calls");
+    // A new position draws both again, once.
+    position.store(4.25, Ordering::Relaxed);
+    assert_eq!(ui.frame().painted, 2);
+    ui.frame();
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+        }
+    });
+    assert_eq!(calls, 0, "100 frames after made {calls} heap calls");
+}
+
+#[test]
+fn steady_frames_of_wheels_make_no_heap_call() {
+    use manguebyte_ui::{WheelState, mod_wheel, pitch_wheel, row};
+
+    let (bend, modulation) = (WheelState::new(), WheelState::new());
+    let view = row((
+        pitch_wheel("Pitch", bend.clone()),
+        mod_wheel("Mod", modulation.clone()),
+    ));
+    let mut ui = Harness::new(view, manguebyte_gfx::Size::new(120.0, 170.0), 2.0);
+    ui.set_motion(true);
+    ui.advance_ms(100);
+    let pitch = ui.get(Role::Slider, "Pitch");
+    // Held away from the middle, with nothing moving.
+    ui.press(pitch.center());
+    ui.move_to(pitch.center() - Point::new(0.0, 20.0));
+    ui.advance_ms(100);
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+        }
+    });
+    assert_eq!(calls, 0, "100 frames held made {calls} heap calls");
+    // Let go, sprung back and settled; and the application polling the
+    // values every frame, as it would to send MIDI.
+    ui.release(pitch.center());
+    ui.advance_ms(1000);
+    assert_eq!(bend.value(), 0.0);
+    let ((), calls) = counted(|| {
+        for _ in 0..100 {
+            ui.frame();
+            let _ = (bend.take(), modulation.take(), bend.midi_pitch_bend());
+        }
+    });
+    assert_eq!(calls, 0, "100 frames after made {calls} heap calls");
+}

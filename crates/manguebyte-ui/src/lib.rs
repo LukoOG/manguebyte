@@ -44,6 +44,37 @@
 //!   interface over everything else, opened by a widget with
 //!   [`EventCx::open_menu`] or at a point with [`EventCx::open_menu_at`],
 //!   and the [`combo`] box that picks a parameter's value from one.
+//! - **[Scrolling](scroll)**: a [`scroll_view`] shows one child larger
+//!   than itself through a viewport, with scroll bars, the wheel and a
+//!   touchpad's finer steps, the keys, nested views that hand the wheel
+//!   on at their edges, Tab scrolling to what it focuses, and an offset
+//!   the application reads and sets through a [`State`]. Only what can be
+//!   seen is drawn or can be pressed.
+//! - **Lists** ([`list_view`]): rows the application keeps through
+//!   [`ListData`], only those in sight drawn and described, with single
+//!   and multiple selection, the keyboard, typing to find a row, and
+//!   activation, all polled from a [`ListState`].
+//! - **[Drag and drop](drag)** inside the interface: a widget starts a
+//!   drag with a [`DragPayload`] of the application's own type, targets
+//!   accept or refuse it by type and place, the root draws a ghost over
+//!   everything and scrolls views whose edge the pointer is near, and
+//!   Escape or a release where nothing accepts cancels. Lists reorder and
+//!   move rows this way.
+//! - **Pictures** ([`image`]): an image fitted to its rectangle, with a
+//!   version per screen density so that it stays sharp at 2x.
+//! - **Audio widgets**: a [`waveform_view`] of a [`Waveform`] drawn from
+//!   its multi-resolution summary, with zoom, markers, a selection and a
+//!   playhead; a [`piano_keyboard`] that plays [`NoteEvent`]s and shows
+//!   notes sounding and key ranges; an [`envelope`] editor bound to four
+//!   parameters; a [`zone_map`] of keys by velocities that lines up with
+//!   a keyboard over the same [`KeySpan`] and takes dropped samples. Each
+//!   shares what it shows and changes through a state the application
+//!   polls.
+//! - **[Audio settings](audio_settings)**: a ready-made view of a
+//!   standalone program's output and input devices, sample rate, buffer
+//!   size and MIDI input ports, built from a plain model the program fills
+//!   in and handing back requests it polls, with no dependency on the
+//!   device crates.
 //! - **Hover and tooltips**: the widget under the pointer hears it
 //!   ([`Widget::hover_changed`]), and a view given a
 //!   [`tooltip`](IntoView::tooltip) shows it after the pointer rests on it
@@ -51,6 +82,12 @@
 //!   assistive technology too.
 //! - **[`Theme`]**: colours, sizes, radii and type as typed data, with no
 //!   inheritance.
+//! - **[Motion](motion)**: [`Animated`] values that ease to a new target
+//!   on the frame clock, the theme's duration tokens, and hover, press
+//!   and focus amounts the root animates for every widget. Only what moves
+//!   is drawn again, and frames stop asking for more once everything has
+//!   settled; with motion turned off (the theme or the system) changes
+//!   jump.
 //! - **[Accessibility](access)**: roles, names, values, ranges, states and
 //!   actions, keyboard focus in tree order, [`Root::act`] for requests
 //!   from assistive technology, and a check of the tree and the theme's
@@ -144,13 +181,17 @@
 #![forbid(unsafe_code)]
 
 pub mod access;
+pub mod audio_settings;
 pub mod clipboard;
 mod damage;
+pub mod drag;
 pub mod event;
 pub mod layout;
 pub mod menu;
+pub mod motion;
 mod param;
 mod root;
+pub mod scroll;
 pub mod source;
 pub mod testing;
 mod theme;
@@ -159,19 +200,39 @@ mod view;
 mod widget;
 pub mod widgets;
 
-pub use access::{AccessEntry, AccessNode, Action, Actions, Role};
+pub use access::{AccessEntry, AccessItem, AccessNode, Action, Actions, Role};
 pub use clipboard::{Clipboard, MemoryClipboard};
 pub use damage::MAX_DAMAGE;
-pub use event::{Button, Composition, Event, Handled, Key, KeyEvent, MenuEvent, Modifiers};
-pub use menu::{Menu, MenuItem};
-pub use param::{ParamBinding, ParamHandle};
-pub use root::{Frame, MAX_BUFFER_SIDE, Root, TOOLTIP_DELAY};
-pub use source::{AtomicSource, Source, State, Watch};
-pub use theme::{Corners, Palette, Sizes, Theme, Typography};
-pub use tree::NodeId;
-pub use view::{Children, IntoView, View, column, filled, panel, row, stack};
-pub use widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
-pub use widgets::{
-    Canvas, CanvasCx, ComboBox, Container, Knob, Label, Meter, Slider, TextField, Toggle, canvas,
-    combo, knob, label, meter, slider, text_field, toggle,
+pub use drag::{DragEvent, DragOutcome, DragPayload};
+pub use event::{
+    Button, Composition, DropData, Event, FileDrop, Handled, Key, KeyEvent, MenuEvent, Modifiers,
 };
+pub use menu::{Menu, MenuItem};
+pub use motion::{Animated, Easing, Motion, Transition};
+pub use param::{ParamBinding, ParamHandle};
+pub use root::{FloatMetrics, Frame, MAX_BUFFER_SIDE, Root, TOOLTIP_DELAY};
+pub use scroll::ScrollMetrics;
+pub use source::{AtomicSource, Source, State, TextSource, Watch};
+pub use theme::{Corners, Elevation, Hue, Palette, Sizes, Spacing, Theme, Typography};
+pub use tree::NodeId;
+pub use view::{Children, IntoView, View, card, column, filled, panel, row, stack};
+pub use widget::{AccessCx, EventCx, MeasureCx, PaintCx, Shown, UpdateCx, Widget};
+pub use widgets::{
+    ActionButton, Canvas, CanvasCx, Choices, ComboBox, ConfirmDialog, Container, DialogResult,
+    DialogState, Fit, Icon, ImageView, Knob, Label, ListData, ListEvent, ListState, ListView,
+    MAX_PIXELS_PER_FRAME, MAX_ZERO_SEARCH, Marker, MarkerKind, MarkerOrder, Meter, Pages, Pill,
+    RowCx, ScrollView, ScrollViewBuilder, Slider, TextField, Toggle, Waveform, WaveformEvent,
+    WaveformState, WaveformView, ZOOM_STEP, action_button, canvas, combo, confirm_dialog, image,
+    knob, label, list_view, list_view_named, meter, pill, scroll_view, sidebar, slider, tabs,
+    text_field, toggle, waveform_view, waveform_view_named,
+};
+pub use widgets::{
+    BEND_RETURN_AFTER, MAX_STACKED_FRAMES, WaveData, WaveView, WavetableView, Wheel, WheelBinding,
+    WheelKind, WheelState, mod_wheel, pitch_wheel, wave_view, wavetable_view,
+};
+pub use widgets::{
+    EnvelopeEditor, KeyRange, KeySpan, KeyboardState, NoteEvent, PianoKeyboard, Zone, ZoneEvent,
+    ZoneMap, ZoneMapState, envelope, is_black, note_name, note_name_portuguese, piano_keyboard,
+    piano_keyboard_named, zone_map, zone_map_named,
+};
+pub use widgets::{FloatingPanel, TITLE_BAR_HEIGHT, floating_panel};

@@ -58,6 +58,29 @@ pub enum Role {
     Separator,
     /// Help text shown near the pointer: its name is the text.
     Tooltip,
+    /// A view that shows part of something larger and scrolls over it:
+    /// its value is how far it is scrolled.
+    ScrollView,
+    /// A list of rows to choose from, some of which may be selected.
+    List,
+    /// One row of a list: it says whether it is selected.
+    ListItem,
+    /// What is being dragged, drawn under the pointer: its name is the
+    /// description the drag was given.
+    DragItem,
+    /// A row of tabs, or a sidebar of pages, that chooses which page is
+    /// shown: its value is the name of the page shown.
+    TabList,
+    /// One tab of a tab list: it says whether it is selected.
+    Tab,
+    /// The page a tab shows, named as its tab.
+    TabPanel,
+    /// A window inside the interface that has all input until it is
+    /// answered, such as a confirmation: its description is its message.
+    Dialog,
+    /// A part of the interface a person can move to by its name and that
+    /// does not stop the rest, such as a panel floating over the window.
+    Region,
 }
 
 /// The range of a widget's numeric value.
@@ -92,6 +115,9 @@ pub struct AccessState {
     /// For something that opens a menu (a combo box, an item with a
     /// submenu), whether the menu is open.
     pub expanded: Option<bool>,
+    /// For something that can be selected, such as a row of a list,
+    /// whether it is.
+    pub selected: Option<bool>,
 }
 
 /// Which [`Action`]s a widget accepts.
@@ -248,6 +274,13 @@ impl AccessNode {
         self
     }
 
+    /// The same node, selected or not.
+    #[must_use]
+    pub fn with_selected(mut self, selected: bool) -> Self {
+        self.state.selected = Some(selected);
+        self
+    }
+
     /// The same node, which cannot be used now.
     #[must_use]
     pub fn disabled(mut self) -> Self {
@@ -263,12 +296,37 @@ impl AccessNode {
     }
 }
 
-/// One widget in the accessibility tree of a [`Root`](crate::Root).
+/// A part of a widget that assistive technology sees as a node of its own
+/// although it is not a widget: a row of a list, of which only the rows
+/// shown exist (see [`Widget::access_items`](crate::Widget::access_items)).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccessItem {
+    /// What the widget calls it, such as the row's index. The widget is
+    /// asked for actions on it by this key.
+    pub key: usize,
+    /// How it describes itself.
+    pub node: AccessNode,
+    /// Where it is, in logical pixels.
+    pub bounds: Rect,
+}
+
+impl AccessItem {
+    /// An item `key`, described by `node`, at `bounds`.
+    pub fn new(key: usize, node: AccessNode, bounds: Rect) -> Self {
+        AccessItem { key, node, bounds }
+    }
+}
+
+/// One widget, or one item of a widget, in the accessibility tree of a
+/// [`Root`](crate::Root).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccessEntry {
-    /// The widget.
+    /// The widget, or for an item the widget it belongs to.
     pub id: NodeId,
-    /// The widget that contains it, if any.
+    /// For an item ([`AccessItem`]), its key; `None` for the widget
+    /// itself.
+    pub item: Option<usize>,
+    /// The widget that contains it, if any: for an item, its widget.
     pub parent: Option<NodeId>,
     /// How it describes itself, with the state the root knows filled in.
     pub node: AccessNode,
@@ -325,10 +383,16 @@ pub fn contrast_ratio(text: Color, background: Color) -> f64 {
     (front.max(back) + 0.05) / (front.min(back) + 0.05)
 }
 
-/// The colour selected text is drawn on in `theme`: its focus colour, at
-/// two fifths, over its background.
+/// The colour selected text is drawn on in `theme`: its accent, at a
+/// third, over the field.
 pub(crate) fn selection_color(theme: &Theme) -> Color {
-    theme.palette.focus.with_alpha(0x66)
+    theme.palette.accent.with_alpha(0x55)
+}
+
+/// The colour behind the highlighted item of a menu in `theme`: the
+/// accent's tint over the menu's surface.
+pub(crate) fn menu_highlight(theme: &Theme) -> Color {
+    blend(theme.palette.accent_soft, theme.palette.overlay)
 }
 
 /// `over`, drawn at its alpha on the opaque `under`.
@@ -344,16 +408,46 @@ fn blend(over: Color, under: Color) -> Color {
 }
 
 /// The first pair of the theme's text and background colours whose
-/// contrast is below [`MIN_TEXT_CONTRAST`], if any: text and muted text,
-/// each on the background and on the surface of panels; text on the track
-/// colour, which marks the highlighted item of a menu; and text on the
-/// selection colour of a text input, over the background.
+/// contrast is below [`MIN_TEXT_CONTRAST`], if any: each of the three
+/// levels of text on the background, the surface of cards and the raised
+/// faces of controls; text and secondary text on the overlay of menus and
+/// tooltips; text on a menu's highlighted item (the accent's tint over the
+/// overlay), on a selected row (the same tint over a card) and on the
+/// selection of a text input; and each categorical hue's text on its fill,
+/// over a card.
 fn contrast_problem(theme: &Theme) -> Option<String> {
     let palette = &theme.palette;
-    let selection = blend(selection_color(theme), palette.background);
-    let pairs = [
+    let selection = blend(selection_color(theme), palette.raised);
+    let selected_row = blend(palette.accent_soft, palette.surface);
+    let mut pairs = vec![
         ("text", palette.text, "background", palette.background),
         ("text", palette.text, "surface", palette.surface),
+        ("text", palette.text, "raised", palette.raised),
+        ("text", palette.text, "overlay", palette.overlay),
+        (
+            "text_secondary",
+            palette.text_secondary,
+            "background",
+            palette.background,
+        ),
+        (
+            "text_secondary",
+            palette.text_secondary,
+            "surface",
+            palette.surface,
+        ),
+        (
+            "text_secondary",
+            palette.text_secondary,
+            "raised",
+            palette.raised,
+        ),
+        (
+            "text_secondary",
+            palette.text_secondary,
+            "overlay",
+            palette.overlay,
+        ),
         (
             "text_muted",
             palette.text_muted,
@@ -361,14 +455,34 @@ fn contrast_problem(theme: &Theme) -> Option<String> {
             palette.background,
         ),
         ("text_muted", palette.text_muted, "surface", palette.surface),
-        ("text", palette.text, "track", palette.track),
+        ("text_muted", palette.text_muted, "raised", palette.raised),
         (
             "text",
             palette.text,
-            "selection (focus over background)",
+            "menu highlight (accent tint over overlay)",
+            menu_highlight(theme),
+        ),
+        (
+            "text",
+            palette.text,
+            "selected row (accent tint over surface)",
+            selected_row,
+        ),
+        (
+            "text",
+            palette.text,
+            "selection (accent over raised)",
             selection,
         ),
     ];
+    for hue in &palette.hues {
+        pairs.push((
+            "categorical text",
+            hue.text,
+            "its fill over the surface",
+            blend(hue.fill, palette.surface),
+        ));
+    }
     for (text_name, text, back_name, back) in pairs {
         let ratio = contrast_ratio(text, back);
         if ratio < MIN_TEXT_CONTRAST {
@@ -393,6 +507,8 @@ fn contrast_problem(theme: &Theme) -> Option<String> {
 /// - every text input has its text as its value and takes the focus;
 /// - every combo box has its value as text, can be pressed to open, and
 ///   says whether it is open;
+/// - every list, scroll view, tab list, tab panel and dialog has a name,
+///   and every list item and tab says whether it is selected;
 /// - no two widgets with a name share their role and name within the same
 ///   named group (groups with no name only arrange their children, and a
 ///   screen reader does not tell them apart);
@@ -462,6 +578,27 @@ pub(crate) fn first_problem(entries: &[AccessEntry], theme: &Theme) -> Option<St
                 node.name
             ));
         }
+        if matches!(node.role, Role::ListItem | Role::Tab) && node.state.selected.is_none() {
+            return Some(format!(
+                "{:?} {:?} does not say whether it is selected",
+                node.role, node.name
+            ));
+        }
+        if matches!(
+            node.role,
+            Role::List
+                | Role::ScrollView
+                | Role::TabList
+                | Role::TabPanel
+                | Role::Dialog
+                | Role::Region
+        ) && node.name.trim().is_empty()
+        {
+            return Some(format!(
+                "{:?} {:?} has no name, so a screen reader cannot say what it shows",
+                node.role, entry.id
+            ));
+        }
     }
     if let Some(problem) = shared_names(entries) {
         return Some(problem);
@@ -476,9 +613,11 @@ fn shared_names(entries: &[AccessEntry]) -> Option<String> {
     // each entry. Parents come before their children.
     let mut group: Vec<Option<usize>> = Vec::with_capacity(entries.len());
     for entry in entries {
-        let parent = entry
-            .parent
-            .and_then(|parent| entries.iter().position(|other| other.id == parent));
+        let parent = entry.parent.and_then(|parent| {
+            entries
+                .iter()
+                .position(|other| other.id == parent && other.item.is_none())
+        });
         let nearest = parent.and_then(|parent| {
             if entries[parent].node.name.trim().is_empty() {
                 group.get(parent).copied().flatten()
@@ -528,6 +667,7 @@ mod tests {
     fn entry(id: usize, parent: Option<usize>, node: AccessNode) -> AccessEntry {
         AccessEntry {
             id: NodeId::from_index(id),
+            item: None,
             parent: parent.map(NodeId::from_index),
             node,
             bounds: Rect::default(),
@@ -555,6 +695,32 @@ mod tests {
             AccessNode::new(Role::Switch, "Bypass").with_checked(false),
         );
         assert_eq!(problem(&[fine]), None);
+    }
+
+    #[test]
+    fn a_list_and_a_scroll_view_have_names_and_rows_say_whether_they_are_selected() {
+        let list = entry(0, None, AccessNode::new(Role::List, ""));
+        assert!(problem(&[list]).is_some_and(|p| p.contains("no name")));
+        let view = entry(0, None, AccessNode::new(Role::ScrollView, " "));
+        assert!(problem(&[view]).is_some_and(|p| p.contains("no name")));
+        let list = entry(0, None, AccessNode::new(Role::List, "Samples"));
+        let mut row = entry(0, Some(0), AccessNode::new(Role::ListItem, "Kick"));
+        row.item = Some(3);
+        assert!(
+            problem(&[list.clone(), row.clone()])
+                .is_some_and(|p| p.contains("\"Kick\"") && p.contains("selected"))
+        );
+        row.node = row.node.with_selected(false);
+        assert_eq!(problem(&[list.clone(), row.clone()]), None);
+        // Two rows of one list with the same name cannot be told apart; in
+        // two lists they can.
+        let mut twin = row.clone();
+        twin.item = Some(4);
+        assert!(problem(&[list.clone(), row.clone(), twin.clone()]).is_some());
+        let other = entry(1, None, AccessNode::new(Role::List, "Takes"));
+        twin.id = NodeId::from_index(1);
+        twin.parent = Some(NodeId::from_index(1));
+        assert_eq!(problem(&[list, row, other, twin]), None);
     }
 
     #[test]
@@ -630,12 +796,17 @@ mod tests {
             assert_eq!(contrast_problem(&theme), None);
         }
         let mut faint = Theme::light();
-        faint.palette.text_muted = Color::hex(0xA0A4AA);
+        faint.palette.text_muted = Color::hex(0xA4A197);
         let found = contrast_problem(&faint).expect("too faint");
         assert!(
             found.contains("text_muted") && found.contains("background"),
             "{found}"
         );
+        // A categorical hue whose text does not stand out from its fill.
+        let mut washed = Theme::dark();
+        washed.palette.hues[1].text = washed.palette.surface;
+        let found = contrast_problem(&washed).expect("washed out");
+        assert!(found.contains("categorical"), "{found}");
         // Half-transparent text is judged as it is drawn.
         let mut veiled = Theme::dark();
         veiled.palette.text = veiled.palette.text.with_alpha(64);

@@ -6,6 +6,10 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::env::consts::{DLL_PREFIX, DLL_SUFFIX};
+#[cfg_attr(
+    not(any(feature = "clap", feature = "vst3", feature = "lv2")),
+    allow(unused_imports)
+)]
 use std::path::{Path, PathBuf};
 
 use manguebyte_core::AudioBuffer;
@@ -206,13 +210,93 @@ pub fn for_harness_vst3(params: &dyn ParamSet, kind: EventKind) -> EventKind {
     }
 }
 
-/// A folder for files a test creates, made empty. It is inside cargo's
-/// target directory, so nothing is written to the repository.
-pub fn scratch_folder(name: &str) -> PathBuf {
-    let folder = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
-    let _ = std::fs::remove_dir_all(&folder);
-    std::fs::create_dir_all(&folder).expect("the scratch folder can be created");
-    folder
+/// A folder for files a test creates, made empty, and removed when this
+/// value is dropped.
+///
+/// It is inside cargo's target directory, so nothing is written to the
+/// repository. Its name carries the process id: two runs of the same tests
+/// that share a target directory (two agents, or two CI-like runs on one
+/// machine) each get their own folder instead of deleting or overwriting
+/// the other's. Removal is best effort, since a library a test still has
+/// loaded cannot be deleted on Windows; keep the value alive for as long
+/// as the test uses what is in it.
+pub struct Scratch {
+    path: PathBuf,
+}
+
+impl Scratch {
+    /// The folder.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for Scratch {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// The path of the scratch folder called `name` for this process.
+fn scratch_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}-{}", std::process::id()))
+}
+
+/// A fresh, empty [`Scratch`] folder called `name`, plus the process id
+/// and a number of its own, since two tests of one process run at once
+/// and may ask for the same name.
+pub fn scratch_folder(name: &str) -> Scratch {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let number = NEXT.fetch_add(1, Ordering::Relaxed);
+    let path = scratch_path(&format!("{name}-{number}"));
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).expect("the scratch folder can be created");
+    Scratch { path }
+}
+
+/// A scratch folder for something a `static` keeps for the whole run,
+/// which no drop will remove. It is per process, like [`scratch_folder`];
+/// folders of the same name that earlier runs left behind are removed
+/// first when they are more than an hour old, which no run that may still
+/// be using them is.
+pub fn lasting_scratch_folder(name: &str) -> PathBuf {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let prefix = format!("{name}-");
+    let hour = std::time::Duration::from_secs(3600);
+    for entry in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+        let file_name = entry.file_name();
+        let Some(rest) = file_name.to_str().and_then(|n| n.strip_prefix(&prefix)) else {
+            continue;
+        };
+        let old = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > hour);
+        if rest.bytes().all(|b| b.is_ascii_digit()) && old {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+    let path = scratch_path(name);
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).expect("the scratch folder can be created");
+    path
 }
 
 // --- Speaking the plugin's scale -----------------------------------------
@@ -385,6 +469,28 @@ pub fn assert_same_bits(actual: &AudioBuffer<f32>, expected: &AudioBuffer<f32>, 
 
 // --- LV2 bundles -------------------------------------------------------------
 
+/// An LV2 bundle a test wrote, inside a [`Scratch`] folder that is removed
+/// when this value is dropped. It reads as the bundle's own path.
+pub struct Lv2Bundle {
+    path: PathBuf,
+    // Dropped after `path` is no longer needed; removes the folder.
+    _scratch: Scratch,
+}
+
+impl std::ops::Deref for Lv2Bundle {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for Lv2Bundle {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
 /// Writes the LV2 bundle of an example plugin into a fresh folder named
 /// `<name>.lv2`: its Turtle files, as the plugin's own `export_lv2!`
 /// describes them through `files`, and a copy of the library cargo built
@@ -394,16 +500,20 @@ pub fn lv2_bundle(
     crate_name: &str,
     files: fn(&str) -> Vec<(String, String)>,
     name: &str,
-) -> PathBuf {
+) -> Lv2Bundle {
     let library = built_library(crate_name);
     let binary = library.file_name().unwrap().to_str().unwrap().to_owned();
-    let folder = scratch_folder(&format!("lv2-{name}")).join(format!("{name}.lv2"));
+    let scratch = scratch_folder(&format!("lv2-{name}"));
+    let folder = scratch.join(format!("{name}.lv2"));
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::copy(&library, folder.join(&binary)).unwrap();
     for (file, text) in files(&binary) {
         std::fs::write(folder.join(file), text).unwrap();
     }
-    folder
+    Lv2Bundle {
+        path: folder,
+        _scratch: scratch,
+    }
 }
 
 /// Loads an LV2 bundle a test wrote with [`lv2_bundle`].
@@ -460,4 +570,43 @@ pub fn as_lv2_delivers(kind: EventKind) -> EventKind {
 pub fn plain_at(params: &dyn ParamSet, id: ParamId, position: f64) -> f64 {
     let param = params.find_param(id).expect("a known parameter");
     f64::from(param.normalized_to_plain(position) as f32)
+}
+
+// --- Audio Units -------------------------------------------------------------
+
+/// The factory function of the framework's AU wrapper for `P`, as a unit's
+/// bundle exports it on macOS (`ManguebyteAudioUnitFactory`); here it is
+/// the plugin linked into the test, so that it is hosted on every system.
+#[cfg(feature = "au")]
+unsafe extern "C" fn au_factory<P: manguebyte_plugin::Plugin>(
+    _description: *const std::ffi::c_void,
+) -> *mut std::ffi::c_void {
+    manguebyte_au::__private::factory::<P>()
+}
+
+/// The components of `P` as its bundle's `Info.plist` lists them, written
+/// by the wrapper and read by the host, made in this process through the
+/// wrapper's factory, as AudioToolbox makes a version 2 unit.
+#[cfg(feature = "au")]
+pub fn au_library<P: manguebyte_plugin::Plugin>() -> manguebyte_host::au::AuLibrary {
+    let plist = manguebyte_au::info_plist(&P::INFO, P::INFO.name, P::INFO.id, P::INFO.version);
+    let components = manguebyte_host::au::read_info_plist(plist.as_bytes())
+        .expect("the wrapper's Info.plist lists the unit");
+    // SAFETY: the factory is the framework's own AU wrapper around a plugin
+    // of this workspace, linked into the test, which keeps to Apple's Audio
+    // Unit interface and is callable for as long as the test runs.
+    unsafe {
+        manguebyte_host::au::AuLibrary::from_factory(
+            au_factory::<P>,
+            components,
+            format!("{}.component", P::INFO.name),
+        )
+    }
+}
+
+/// What an Audio Unit is given for an event: notes and pressure as MIDI
+/// 1.0, and a value as the 32-bit float `AudioUnitParameterEvent` holds,
+/// in the parameter's own unit, which is what the LV2 host delivers too.
+pub fn as_au_delivers(kind: EventKind) -> EventKind {
+    as_lv2_delivers(kind)
 }

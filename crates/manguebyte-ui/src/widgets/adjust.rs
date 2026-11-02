@@ -218,7 +218,7 @@ impl Adjust {
             return false;
         };
         let style = entry_style(theme);
-        field_box(scene, entry_box, theme, entry.invalid);
+        field_box(scene, entry_box, theme, entry.invalid, (1.0, 0.0));
         let inner = Rect::new(
             entry_box.x + ENTRY_PAD,
             entry_box.y,
@@ -227,6 +227,11 @@ impl Adjust {
         );
         entry.edit.paint(scene, inner, &style, theme, focused);
         true
+    }
+
+    /// Whether a value is being typed.
+    pub(crate) fn is_typing(&self) -> bool {
+        self.entry.is_some()
     }
 
     /// Where the caret of the value being typed is, if one is.

@@ -587,6 +587,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
+name = "mangue-divisions"
+version = "0.1.0"
+dependencies = [
+ "manguebyte",
+ "manguebyte-au",
+ "manguebyte-host",
+]
+
+[[package]]
 name = "mangue-duck"
 version = "0.1.0"
 dependencies = [
@@ -598,6 +607,17 @@ dependencies = [
  "manguebyte-ui",
  "manguebyte-window",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mangue-identity-probe"
+version = "0.1.0"
+dependencies = [
+ "manguebyte",
+ "manguebyte-gui",
+ "manguebyte-host",
+ "manguebyte-ui",
+ "manguebyte-window",
 ]
 
 [[package]]
@@ -723,11 +743,13 @@ version = "0.1.0"
 dependencies = [
  "manguebyte-clap",
  "manguebyte-core",
+ "manguebyte-devices",
  "manguebyte-dsp",
  "manguebyte-gfx",
  "manguebyte-gui",
  "manguebyte-params",
  "manguebyte-plugin",
+ "manguebyte-standalone",
  "manguebyte-ui",
  "manguebyte-vst3",
  "manguebyte-window",
@@ -742,13 +764,18 @@ dependencies = [
  "libloading 0.8.9",
  "mangue-duck",
  "mangue-pluck",
+ "manguebyte-au",
+ "manguebyte-clap",
  "manguebyte-core",
  "manguebyte-dsp",
  "manguebyte-graph",
+ "manguebyte-lv2",
  "manguebyte-midi",
  "manguebyte-params",
  "manguebyte-plugin",
+ "manguebyte-vst3",
  "manguebyte-web",
+ "manguebyte-window",
  "vst3",
 ]
 
@@ -837,6 +864,7 @@ name = "manguebyte-ui"
 version = "0.1.0"
 dependencies = [
  "manguebyte-core",
+ "manguebyte-dsp",
  "manguebyte-gfx",
  "manguebyte-params",
  "manguebyte-plugin",

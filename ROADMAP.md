@@ -84,8 +84,9 @@ Everything a standalone audio application needs, short of a user interface.
   default translation or as MPE, and sent through CLAP, VST 3, AU (its
   MIDI output callback, MIDI 1.0), LV2 (the notify port, MIDI 1.0) and the
   standalone runner. A `manguebyte-dsp` `Processor` cannot send events by
-  itself, and `manguebyte-host` does not read what a hosted LV2 plugin
-  sends
+  itself. `manguebyte-host` reads what a hosted plugin sends in all four
+  formats, through one `AnyProcessor::output_events` (MIDI 1.0 from LV2
+  and AU)
 
 **DSP**
 - ✅ FFT of any length, real FFT and window functions
@@ -113,6 +114,14 @@ Everything a standalone audio application needs, short of a user interface.
 - ✅ Reverb (feedback delay network)
 - ✅ Chorus and flanger, phaser, dry/wet mixing with latency compensation,
   panner, envelope follower, interpolated delay lines
+- ✅ Workstation effects, each measured: bitcrusher and sample-rate
+  reducer, tremolo and auto-pan with tempo sync, ring modulator, frequency
+  shifter (an elliptic all-pass 90-degree network, image 90 dB down),
+  stereo widener with bass mono, transient shaper, three-band multiband
+  compressor, tape saturation with wow, flutter and drift, a channel
+  vocoder of 8 to 32 bands, a granular delay with a fixed grain pool, and
+  a formant filter morphing A-E-I-O-U. Not yet timed, nor in
+  `manguebyte-web` or Parabolic (TECH_DEBT 104)
 - ✅ Convolution: uniformly partitioned, with zero latency or a latency of
   one partition, true stereo, and responses swapped with a crossfade while
   playing. A non-uniformly partitioned scheme, cheaper for long responses
@@ -124,11 +133,29 @@ Everything a standalone audio application needs, short of a user interface.
   layers, round robin and random layers, loop points with crossfades,
   release triggers, choke groups and polyphony limits, from files or from
   memory, in WebAssembly too, open so that any program can play the
-  instruments Parabolic exports. Samples are loaded whole, not streamed
-  from disk; filters, LFOs, modulation by controllers and keyswitches are
-  not started
+  instruments Parabolic exports. Filters per region (one to six poles,
+  band-pass and band-reject) with their envelope, and modulation by
+  controllers (`<opcode>_onccN`, `set_ccN`, controllers up to 511 that a
+  plugin sets without MIDI) are done and measured. Samples stream from
+  disk with a preload in memory, packed without loss if asked, and other
+  players stream through the same layer (`SampleStore`; ADR 0014,
+  TECH_DEBT 106); releases are chosen by the time a key was held and cross
+  from the sustain in phase, and a model outside moves each key's pitch
+  and level frame by frame (`modulate_key`, `SincReader`); LFOs, controller
+  curves and smoothing
+  per opcode, a second filter, the other filter types and keyswitches are
+  not started (TECH_DEBT 101)
 - ✅ Polyphonic voice allocation with per-note expression and modulation,
   accents and legato slides
+- ✅ Tuning beyond 12-tone equal temperament (`manguebyte_dsp::tuning`):
+  equal divisions of any period, Pythagorean, meantone, Werckmeister III,
+  Kirnberger III, Vallotti, Young and just intonation on any key, Scala
+  `.scl` and `.kbm` files, any reference pitch, transposition, detune and
+  octave stretch, and the MIDI Tuning Standard's bulk dump and single note
+  changes; played by every pitched instrument and the sampler, swapped
+  without allocating. Checked against published cents and Caecilia 1.x's
+  tables. Not done: the MIDI Tuning Standard's scale/octave messages, a
+  tuning per channel or per MPE note, the drum kits (TECH_DEBT 108)
 - ✅ Instruments: physically modelled plucked strings (guitars and basses),
   four-operator FM, a tonewheel organ with a rotary speaker, the drums and
   kick bass of the classic analogue drum machine, and an acid bass; each a
@@ -152,6 +179,24 @@ Everything a standalone audio application needs, short of a user interface.
   results on every processor; used by `AudioBuffer`, the WAV reader and
   writer, convolution and the graph's and browser engine's mixing. The FFT,
   resampler, oversampler and filters are still scalar (TECH_DEBT 92)
+- ✅ Additive synthesis: `PartialBank`, a bank of sine partials with
+  frequencies, gain ramps and pans set every control block, rendered a
+  partial per vector lane (`vector::add_partials`), the same bit for bit on
+  every backend and Caecilia's kernel bit for bit for every partial;
+  amplitude held within 3e-5 for as long as it runs. 3 000 partials take
+  0.16 of a core on AVX2 against a whole core for the scalar kernel. NEON
+  and WebAssembly SIMD are not yet run, and a block biquad across lanes is
+  not started (TECH_DEBT 103)
+- 🚧 The space around an organ's pipes (`manguebyte_dsp::space`, ADR
+  0025): each pipe placed into up to 16 channels with pan, fractional
+  delay, distance gain and air absorption, through shared fixed-point
+  rings (300 sounding pipes into stereo in 8 to 11 % of a block's time on
+  a busy laptop, bit for bit the same whatever the blocks); early
+  reflections of a rectangular room by image sources up to order 6; a
+  swell box. Done and tested, but not yet used by Caecilia or any
+  example instrument, and no frequency-dependent walls beyond one
+  one-pole a path, no diffraction, no binaural output, no Doppler
+  (TECH_DEBT 118)
 
 **Formats**
 - ✅ Streaming readers and writers that do not load whole files, with
@@ -195,6 +240,24 @@ Everything a standalone audio application needs, short of a user interface.
 - ✅ Parameter state save and restore, tolerant of version changes
 - ✅ Denormal protection: `NoDenormals`, held by the wrappers, the
   standalone engine, the device streams and the test harness (ADR 0006)
+- ✅ Rendering on several cores inside one audio callback
+  (`manguebyte_core::pool`, ADR 0015): a fixed set of jobs on workers
+  started up front, output bit for bit that of one thread, a wait bounded
+  by a limit with late jobs dropped and counted, no allocation or lock on
+  the audio thread, parked workers when idle, real-time priority where
+  the system grants it. Run and measured on Windows only; the CLAP
+  `thread-pool` extension and macOS audio workgroups are not done
+  (TECH_DEBT item 107)
+- 🚧 Graceful degradation under overload (`manguebyte_core::governor`,
+  ADR 0018): a governor that measures each block against its deadline and
+  gives the instrument a budget in cost units for the next one, off when
+  rendering offline, with a quality floor. Done and tested on a fake clock;
+  on the real clock only on one loaded laptop, where on a real-time
+  thread it held a synthetic organ asked for twice what fits at the
+  target with no late block (at normal priority it kept nearly every
+  block in time but thinned the organ far more than needed). No
+  instrument of the framework spends a budget yet, and the wrappers do
+  not turn it off for a host's offline render (TECH_DEBT item 111)
 - ⬜ Allocation checking in debug builds (today it is a test-only allocator)
 - ⬜ `no_std` support for `manguebyte-core` and `manguebyte-dsp`
 
@@ -222,7 +285,8 @@ Write a processor once and ship it in every format.
 `Plugin::tail_samples`
 - ⬜ CLAP extensions still to come: note-end events,
   presets (`preset-load` and the preset-discovery factory), remote
-  controls, `render`, `thread-pool`, a native 64-bit path (TECH_DEBT 91)
+  controls, `render`, `thread-pool` (the pool's side is
+  `RenderPool::run_with`, TECH_DEBT 107), a native 64-bit path (TECH_DEBT 91)
 - ✅ VST 3: audio and event buses, every automation point on its frame,
   notes with ids, tuning and note expression, the MIDI controllers a
   plugin declares through hidden parameters, parameters, units, state,
@@ -238,6 +302,17 @@ Write a processor once and ship it in every format.
   `Plugin::LAYOUTS` and `activateBus` switching the sidechain off
 - ⬜ VST 3 still to come: program lists, note names, a native 64-bit path
   (TECH_DEBT 91)
+- 🚧 Auxiliary output buses ([ADR 0017](docs/adr/0017-auxiliary-output-buses.md)):
+  `Plugin::AUX_OUTPUTS` and `process_with_aux`, as CLAP audio ports
+  switched by `audio-ports-activation`, VST 3 auxiliary buses switched by
+  `activateBus`, Audio Unit output elements, LV2 port groups of optional
+  ports, device channels in the standalone runner, and in the harness; a
+  bus switched off is not rendered. Tested in process through the
+  framework's own host in all four formats, and the example organ, Mangue
+  Divisions, loaded from its built library as CLAP and VST 3. Not yet run
+  through the CI validators (wired in, not seen to pass) or a DAW; widths
+  are fixed, there are no auxiliary inputs, and an Audio Unit renders
+  every element (TECH_DEBT 110)
 - 🚧 Audio Unit, version 2: `export_au!` through the plain C interface,
   with formats, parameters, scheduled parameters and MIDI on their
   frames, the host's transport and state; `.component` bundles written and
@@ -254,8 +329,38 @@ Write a processor once and ship it in every format.
   lilv in CI. Not yet checked by `lv2lint` or run in any host but the
   framework's own (`manguebyte-host`); MIDI output on the notify port; no
   editor, one fixed layout
+- 🚧 Plugin identity at run time ([ADR 0012](docs/adr/0012-plugin-identity-at-run-time.md)):
+  `Plugin::info`, asked once per library through `plugin_info`, and
+  `library_path`, read by the CLAP, VST 3, LV2 and AU wrappers, saved
+  state and the harness; two copies of one library with different
+  identities appended are hosted side by side in one process, through
+  CLAP and VST 3, editors included, in a test run on Windows. Not yet run
+  on Linux, not run on macOS (appended data breaks a signature there), and
+  AU `Info.plist` and LV2 Turtle files are not rewritten per copy
+  (TECH_DEBT 100)
+- 🚧 Parameter names that change at run time ([ADR 0020](docs/adr/0020-parameter-names-at-run-time.md)):
+  display name, short name and unit set from any thread but the audio
+  thread, with ids unchanged, reported by the CLAP, VST 3 and AU wrappers
+  and told to the host once per batch (CLAP `rescan(INFO)`, VST 3
+  `kParamTitlesChanged`, AU `ParameterList`), tested against fake hosts
+  and through `manguebyte-host`. VST 3 and AU have no main-thread call to
+  ask for, so a rename waits for the host's next call that can carry it;
+  LV2 hosts see the shipped names; `manguebyte-ui`'s labels show the
+  names parameters were made with; not tried in a DAW (TECH_DEBT 113)
 - ✅ Standalone application wrapper: sound card, MIDI ports in and out,
   input for effects
+- 🚧 Standalone device settings (ADR 0021): devices by identifier, rate,
+  buffer size, MIDI input ports and the MIDI output port for the plugin's
+  notes (ADR 0023, with MPE or not) chosen in the options and changed
+  while the plugin plays, with the same plugin instance, prepared again
+  only when its rate changes (or kept at a fixed rate and resampled at
+  the device's edge); a change of MIDI output port leaves no note
+  hanging; a report of what each change opened and what fell back;
+  settings saved as text; a ready-made audio settings view in
+  `manguebyte-ui`, glued to the standalone by `manguebyte-gui`'s
+  `standalone` feature (ADR 0022), with the MIDI output port for a
+  plugin that sends notes. Tested on the headless backend only; the view
+  has no host, channel or MPE section (TECH_DEBT 114, 115, 116)
 - 🚧 Aratu Bridge (`plugins/aratu-bridge`): an example CLAP, VST 3 and AU
   instrument that plays an Aratu page's music in a DAW, in time with its
   transport, from the control calls and events the page sends over a
@@ -290,7 +395,13 @@ our own, and nothing claimed before its test exists.
   windows inside a host's window and a headless backend for tests
   (`manguebyte-window`), and the glue that opens an editor in them
   (`manguebyte-gui`), tested on Windows, with two plugin binaries'
-  editors open in one process; macOS and Linux follow as CI proves each
+  editors open in one process. Application windows with their loop,
+  close requests, size limits and monitor changes, files dropped from
+  other programs onto widgets, and the open, folder and save dialogs
+  ([ADR 0010](docs/adr/0010-application-windows.md)), tested headless and
+  with real Win32 windows; showing the dialogs and a real drag from the
+  file manager are tested by hand only, and not yet recorded. macOS and
+  Linux follow as CI proves each ([TECH_DEBT](docs/TECH_DEBT.md) item 97)
 - 🚧 Editors for the example plugins: Mangue Duck's (knobs, a bypass switch
   and a gain-reduction meter) and Mangue Pluck's (a knob for each
   parameter), tested headless and in real Win32 windows. Mangue Pluck's
@@ -301,7 +412,28 @@ our own, and nothing claimed before its test exists.
   stack layout, theme tokens, label, knob, slider, toggle, meter and canvas
   done; text entry (a text field, and values typed into knobs and
   sliders, with the clipboard), popup menus with submenus, a combo box,
-  hover and tooltips done; drag and drop, scrolling and lists not started
+  hover and tooltips done; scroll views (wheel, touchpad, bars, keys,
+  nested views, Tab scrolling to what it focuses), lists of rows the
+  application keeps with only those in sight drawn (tested with 100 000),
+  selection, typing to find a row and activation, drag and drop inside
+  the interface with a typed payload, a ghost, auto-scrolling and
+  cancelling, and pictures fitted and sharp at 2x done
+  ([ADR 0009](docs/adr/0009-scrolling-lists-and-drag-and-drop.md)); files
+  dropped from other programs onto the same drop targets done
+  ([ADR 0010](docs/adr/0010-application-windows.md)); tabs and a sidebar
+  of pages switched without rebuilding the window, hidden pages costing
+  nothing (not polled, laid out, drawn or asking for frames, tested),
+  action buttons in three looks and a confirmation dialog inside the
+  window with a focus trap done
+  ([ADR 0013](docs/adr/0013-pages-and-modal-dialogs.md)); floating
+  panels inside the window, not modal, moved by their title bar and kept
+  inside it, their place and whether they are open in states the
+  application keeps, raised by a press, Escape and the focus going in and
+  back, done ([ADR 0019](docs/adr/0019-floating-panels.md)), without
+  resizing, snapping or docking; dragging out of the window, rows of
+  different heights, multi-line text, drag and drop by keyboard, dialogs
+  with content of their own and overflowing tab bars not started
+  ([TECH_DEBT](docs/TECH_DEBT.md) items 96, 97, 105 and 112)
 - 🚧 Application state with undo and redo (`manguebyte-state`,
   [ADR 0008](docs/adr/0008-application-state.md)): a document tree with
   stable ids, named transactions, gestures as one step, merging by key,
@@ -312,10 +444,40 @@ our own, and nothing claimed before its test exists.
   without allocating. Tested, including random edit sequences undone to
   every earlier tree; no example plugin's editor uses it yet, and it has
   not been in a DAW ([TECH_DEBT](docs/TECH_DEBT.md) item 87)
-- ⬜ Audio widgets: waveform, spectrum, keyboard, envelope and EQ editors
+- 🚧 Audio widgets: a waveform view drawn from a multi-resolution summary
+  (zoom around the pointer, markers within rules the application gives
+  and onto zero crossings, a selection, a playhead), a piano keyboard
+  (glissando, velocity from where a key is pressed, the computer's
+  letters, keys lit and ranges marked by the application), an ADSR
+  editor whose handles are gestures on four parameters, and a zone map
+  of keys by velocities lined up with the keyboard, taking samples
+  dragged from a list or from other programs, all tested headless; for
+  a synth's page, pitch bend and modulation wheels (bound to parameters
+  or polled to send MIDI, the bend springing back), one cycle of an
+  oscillator and a wavetable stacked in depth with the frame playing
+  lit, tested headless; a low tone zoomed out in the waveform view drawn
+  as a solid band instead of moiré; spectrum and EQ editors not started,
+  and none worked by hand in a real window yet
+  ([TECH_DEBT](docs/TECH_DEBT.md) items 98 and 109)
+- ✅ Design tokens and motion
+  ([ADR 0011](docs/adr/0011-design-tokens-and-motion.md)): layered tokens
+  (surfaces, hairlines, three text levels, one accent, categorical hues,
+  semantic roles, elevation, radius, spacing, type, motion), a deep dark
+  theme with glow as the default and a light editorial one, switchable at
+  run time; cached, deterministic shadows and glows in the renderer;
+  eased hover, press, focus and selection on the frame clock; the focus
+  ring after the keyboard only; every widget restyled. Tested: an idle
+  interface draws and asks for nothing, a transition repaints only its
+  widget and stops, shadows are blurred once and partial renders through
+  them equal whole ones, motion turns off with the system's setting.
+  Not worked by hand in a host yet ([TECH_DEBT](docs/TECH_DEBT.md) item 99)
 - 🚧 Accessibility: every widget describes itself (the method has no
-  default) and the test harness finds widgets only that way; platform
-  adapters not started
+  default) and the test harness finds widgets only that way; each frame
+  lists the widgets whose description changed (`Frame::access`), such as
+  names that follow the language through `TextSource`, tested headless
+  with a language switch across eight widgets
+  ([TECH_DEBT](docs/TECH_DEBT.md) item 102); platform adapters not
+  started, so nothing reads that list yet
 - 🚧 High-DPI: scale flows from the host through the contract to the
   renderer, and a Win32 window takes the system's scale when the host gives
   none; a change of scale while a window is open, such as moving it to a
@@ -333,10 +495,37 @@ our own, and nothing claimed before its test exists.
 - ✅ Hosting CLAP, VST 3 and LV2 plugins as processors, through one
   interface for all three formats, with every event on its frame; LV2
   bundles read with the host's own Turtle reader
+- 🚧 A hosted plugin's auxiliary output buses read in all four formats
+  (`process_with_aux` on each processor) and switched before activation
+  in CLAP, VST 3 and LV2; tested against the framework's own wrappers
+  only, and not yet in the one interface (`any`) or the graph, whose
+  nodes have one output (TECH_DEBT 110)
 - ✅ Plugin scanning: the standard folders of each format, each CLAP and
   VST 3 file listed in a process of its own with a time limit, crashes and
   hangs reported, a cache keyed by path, time and size
-- ⬜ Hosting AU plugins, and hosted plugins' editors
+- ✅ Hosting Audio Units, version 2 (issue #4): components found with
+  `AudioComponentFindNext` and made with `AudioComponentInstanceNew` on
+  macOS, or in process from a factory function anywhere; stream formats,
+  `MaximumFramesPerSlice`, channels as `SupportedNumChannels` allows, the
+  main input and sidechain through render callbacks, parameters with
+  `AudioUnitScheduleParameters` and MIDI with `MusicDeviceMIDIEvent` on
+  their frames, the host's transport callbacks, latency, tail, `ClassInfo`
+  state and bypass, through the one interface and the out-of-process
+  scanner. The example plugins sound the same, bit for bit, as with no
+  host, through their factories on every system and, installed, through
+  AudioToolbox in the macOS CI job, where the scanner also reports a unit
+  that crashes and one that hangs. No AUv3 as such, editors or factory
+  presets (TECH_DEBT 93)
+- 🚧 Hosted plugins' editors (issue #5): CLAP's `gui` (embedded),
+  `timer-support` and `posix-fd-support`, and VST 3's `IPlugView` with
+  `IPlugFrame`, content scale and, on X11 systems, `IRunLoop`, behind the
+  same methods on `ClapPlugin` and `Vst3Plugin`: open in a parent window,
+  size, scale, close, and the editor's requests and timers through
+  `pump`. The example plugins' editors are opened, resized, rescaled and
+  closed in real Win32 windows, and a knob dragged in each format reaches
+  the hosted processor. Not yet opened in a real window on macOS or Linux,
+  where the framework's own editors do not open; no LV2 or AU editors
+  (TECH_DEBT 95)
 - ✅ Transport, tempo map and timeline primitives: a tempo map with steps,
   linear ramps and time signatures, exact conversions between frames,
   seconds, quarter notes and bars, beats and ticks, and a real-time
@@ -371,6 +560,9 @@ designed for Rust can do better:
 - Compile-time checked real-time safety for user code
 - Processing graphs that the compiler can inline end to end
 - Deterministic offline rendering for testing audio code in CI
+- Instruments that render less, rather than glitch, when the machine
+  cannot keep up: a budget learnt from each block's time
+  (`core::governor`, ADR 0018), where JUCE only measures the load
 - First-class CLAP support, including its newer extensions
 - A plugin API in which sharing state between threads incorrectly does not
   compile

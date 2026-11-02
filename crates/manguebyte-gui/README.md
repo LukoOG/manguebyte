@@ -8,6 +8,33 @@ under one name; depend on this crate directly to use only this part.
 
 Documentation: <https://docs.rs/manguebyte-gui>
 
+## What is in it
+
+- `Editor`: an editor spec a plugin returns from `Plugin::editor`; the
+  CLAP and VST 3 wrappers open it in the host's window, and a test can
+  open it headless (feature `headless`).
+- Application windows: `Editor::open_in_app` and `open_app_window` show
+  an interface in a window of a `manguebyte_window::App`, for a standalone
+  program or a plugin run as one, with close requests the application
+  answers, files dropped onto widgets and the system's file dialogs
+  (ADR 0010). Windows only for now.
+- With the `standalone` feature, `audio_settings`: `sync` connects
+  `manguebyte-ui`'s audio settings view to a running
+  `manguebyte_standalone::Standalone`, carrying out what the person picks,
+  following devices that come and go and showing the report of each
+  change (ADR 0022). Off by default, since it brings the system's audio
+  and MIDI libraries.
+- Frames run from one window timer, about 60 a second; a frame where
+  nothing changed presents nothing, and motion follows the system's
+  setting in real windows (ADR 0011).
+
+`examples/app_window.rs` lists the files dropped on it and has buttons for
+the open, folder and save dialogs:
+
+```text
+cargo run -p manguebyte-gui --example app_window
+```
+
 ## Licence
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or

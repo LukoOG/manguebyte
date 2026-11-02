@@ -19,7 +19,7 @@
 //! | `gui` | `manguebyte-gui` | opens a plugin's editor in the host's window (feature `gui`) |
 //! | `ui` | `manguebyte-ui` | the widgets editors are made of (feature `gui`) |
 //! | `sampler` | `manguebyte-sampler` | an SFZ sampler, from files or from memory (feature `sampler`) |
-//! | `host` | `manguebyte-host` | loads CLAP, VST 3 and LV2 plugins and runs them as processors, and scans for them out of process (feature `host`) |
+//! | `host` | `manguebyte-host` | loads CLAP, VST 3, LV2 and Audio Unit plugins and runs them as processors, and scans for them out of process (feature `host`) |
 //! | `analysis` | `manguebyte-analysis` | loudness, true peak, level meters, spectrum and pitch (feature `analysis`, on by default) |
 //! | `osc` | `manguebyte-osc` | Open Sound Control, with time tags landing on their frame (feature `osc`, on by default) |
 //! | `standalone` | `manguebyte-standalone` | runs a plugin on the sound card and MIDI ports (feature `standalone`) |
@@ -121,7 +121,9 @@ pub mod prelude {
         BoolParam, Changed, ChoiceParam, FloatParam, FloatRange, IntParam, Param, ParamSet,
         ParamSmoother, ParamState, Smoothing, param_set,
     };
-    pub use crate::plugin::{AudioLayout, Harness, Plugin, PluginInfo, PluginKind};
+    pub use crate::plugin::{
+        AudioLayout, AuxOutput, AuxOutputs, Harness, Plugin, PluginInfo, PluginKind,
+    };
     pub use crate::source::{AudioSource, BufferSource, PositionableSource};
     pub use crate::{
         AtomicF32, AtomicF64, AudioBuffer, NoDenormals, ParamId, Sample, Smoothed, decibels, spsc,

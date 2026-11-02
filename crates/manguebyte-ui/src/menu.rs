@@ -50,7 +50,7 @@ use crate::access::{AccessNode, Actions, Role};
 use crate::layout::{Insets, Style};
 use crate::view::View;
 use crate::widget::{AccessCx, MeasureCx, PaintCx, Widget};
-use crate::widgets::{Cached, line, line_height, text_width};
+use crate::widgets::{Cached, floating, floating_overflow, line, line_height, text_width};
 
 /// What a popup menu holds: a title for assistive technology, and items.
 ///
@@ -243,22 +243,13 @@ impl Widget for MenuPanel {
         Size::default()
     }
 
+    fn overflow(&self, cx: &MeasureCx<'_>) -> f32 {
+        floating_overflow(cx.theme())
+    }
+
     fn paint(&mut self, cx: &PaintCx<'_>, scene: &mut Scene) {
         let theme = cx.theme();
-        let rect = cx.rect();
-        let radius = theme.corners.medium;
-        scene.fill(RoundedRect::new(rect, radius), theme.palette.surface);
-        let edge = Rect::new(
-            rect.x + 0.5,
-            rect.y + 0.5,
-            (rect.width - 1.0).max(0.0),
-            (rect.height - 1.0).max(0.0),
-        );
-        scene.stroke(
-            RoundedRect::new(edge, radius),
-            Stroke::new(1.0),
-            theme.palette.track,
-        );
+        floating(scene, cx.rect(), theme.corners.lg, theme, cx.scale());
     }
 }
 
@@ -281,7 +272,7 @@ fn item_style(cx_theme: &crate::Theme, enabled: bool) -> TextStyle {
         .with_color(if enabled {
             palette.text
         } else {
-            palette.text_muted
+            palette.text_secondary
         })
         .with_align(Align::Start)
 }
@@ -313,10 +304,12 @@ impl Widget for MenuEntry {
     fn paint(&mut self, cx: &PaintCx<'_>, scene: &mut Scene) {
         let theme = cx.theme();
         let rect = cx.rect();
-        let palette = &theme.palette;
         let open = self.expanded.as_ref().is_some_and(|open| open.get());
         if self.enabled && (cx.is_focused() || open) {
-            scene.fill(RoundedRect::new(rect, theme.corners.small), palette.track);
+            scene.fill(
+                RoundedRect::new(rect, theme.corners.sm),
+                crate::access::menu_highlight(theme),
+            );
         }
         let style = item_style(theme, self.enabled);
         let ink = style.color;
@@ -365,7 +358,7 @@ impl Widget for MenuSeparator {
         let y = (rect.y + rect.height * 0.5).floor();
         scene.fill(
             Rect::new(rect.x + 4.0, y, (rect.width - 8.0).max(0.0), 1.0),
-            cx.theme().palette.track,
+            cx.theme().palette.hairline_strong,
         );
     }
 }

@@ -20,14 +20,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use manguebyte_gfx::Size;
 use manguebyte_gfx::snapshot::Snapshots;
+use manguebyte_gfx::{Point, Rect, RoundedRect, Size};
 use manguebyte_params::{ChoiceParam, param_set};
+use manguebyte_ui::audio_settings::{AudioSettings, AudioSettingsModel, DeviceItem, MidiPortItem};
 use manguebyte_ui::layout::Align;
 use manguebyte_ui::testing::Harness;
 use manguebyte_ui::{
-    Action, IntoView, Key, Modifiers, ParamHandle, Role, State, Theme, column, combo, knob, label,
-    row, text_field,
+    Action, DialogState, Icon, IntoView, Key, Modifiers, ParamHandle, Role, State, Theme, WaveData,
+    WheelState, action_button, card, column, combo, confirm_dialog, floating_panel, knob, label,
+    mod_wheel, pill, pitch_wheel, row, sidebar, tabs, text_field, toggle, wave_view,
+    wavetable_view,
 };
 
 use common::{PANEL, levels, panel_view, params};
@@ -103,6 +106,103 @@ fn the_panel_shows_what_its_goldens_were_made_from() {
     // 30 pixels up from 1000 Hz is 0.15 of a logarithmic range, which
     // multiplies the frequency by 1000 to the power of 0.15.
     assert_eq!(ui.get(Role::Slider, "Cutoff").value_text(), Some("2818 Hz"));
+}
+
+/// A pitch bend wheel held half way up and a modulation wheel at 0.6 with
+/// the keyboard's focus ring.
+fn wheels(scale: f32, theme: Theme) -> Harness {
+    let (bend, modulation) = (WheelState::new(), WheelState::new());
+    let view = row((
+        pitch_wheel("Pitch", bend.clone()),
+        mod_wheel("Mod", modulation.clone()),
+    ))
+    .spacing(4.0)
+    .padding(8.0);
+    let mut ui = Harness::new(view, Size::new(112.0, 176.0), scale);
+    ui.set_theme(theme);
+    ui.frame();
+    modulation.set(0.6);
+    // Held: pressed and dragged up, not let go.
+    let pitch = ui.get(Role::Slider, "Pitch");
+    ui.press(pitch.center());
+    ui.move_to(pitch.center() - manguebyte_gfx::Point::new(0.0, 30.0));
+    ui.advance_ms(16);
+    let wheel = ui.get(Role::Slider, "Mod");
+    ui.act(&wheel, Action::Focus);
+    ui.advance_ms(16);
+    assert!(bend.is_held() && bend.value() > 0.4);
+    ui
+}
+
+#[test]
+fn the_wheels_match_their_goldens() {
+    let snapshots = snapshots();
+    for (name, scale, theme) in [
+        ("wheels@1x", 1.0, Theme::dark()),
+        ("wheels@2x", 2.0, Theme::dark()),
+        ("wheels-light@1x", 1.0, Theme::light()),
+        ("wheels-light@2x", 2.0, Theme::light()),
+    ] {
+        let ui = wheels(scale, theme);
+        assert!(ui.pixels() == &ui.render_fresh(), "{name}");
+        if let Err(mismatch) = snapshots.check(name, ui.pixels(), &ui.dump()) {
+            panic!("{mismatch}");
+        }
+    }
+}
+
+/// One cycle and a wavetable of 12 frames from a sine to a saw, built with
+/// `manguebyte_dsp::Wavetable`, at a position between two frames.
+fn oscillators(scale: f32, theme: Theme) -> Harness {
+    let frames: Vec<Vec<f32>> = (0..12)
+        .map(|frame| {
+            let t = frame as f32 / 11.0;
+            (0..512)
+                .map(|i| {
+                    let phase = i as f32 / 512.0 * std::f32::consts::TAU;
+                    let saw: f32 = (1..=24)
+                        .map(|h| sin(phase * h as f32) / h as f32)
+                        .sum::<f32>()
+                        * 0.55;
+                    sin(phase) + (saw - sin(phase)) * t
+                })
+                .collect()
+        })
+        .collect();
+    let table = manguebyte_dsp::Wavetable::new(&frames).expect("a wavetable");
+    let data = WaveData::from_wavetable(&table);
+    // On a card, whose surface the stack hides what is behind with.
+    let view = card(
+        row((
+            wave_view("Cycle", data.clone())
+                .position(|| 7.5)
+                .width(150.0),
+            wavetable_view("Table", data, || 7.5).flex(1.0),
+        ))
+        .spacing(8.0),
+    )
+    .padding(12.0);
+    let mut ui = Harness::new(view, Size::new(440.0, 180.0), scale);
+    ui.set_theme(theme);
+    ui.frame();
+    ui
+}
+
+#[test]
+fn the_oscillator_views_match_their_goldens() {
+    let snapshots = snapshots();
+    for (name, scale, theme) in [
+        ("oscillators@1x", 1.0, Theme::dark()),
+        ("oscillators@2x", 2.0, Theme::dark()),
+        ("oscillators-light@1x", 1.0, Theme::light()),
+        ("oscillators-light@2x", 2.0, Theme::light()),
+    ] {
+        let ui = oscillators(scale, theme);
+        assert!(ui.pixels() == &ui.render_fresh(), "{name}");
+        if let Err(mismatch) = snapshots.check(name, ui.pixels(), &ui.dump()) {
+            panic!("{mismatch}");
+        }
+    }
 }
 
 struct Choices {
@@ -190,6 +290,402 @@ fn text_and_menus_match_their_goldens() {
         assert!(ui.get(Role::MenuItem, "Square").is_focused(), "{name}");
         assert!(ui.pixels() == &ui.render_fresh(), "{name}");
         if let Err(mismatch) = snapshots.check(name, ui.pixels(), &ui.dump()) {
+            panic!("{mismatch}");
+        }
+    }
+}
+
+/// An icon of organ pipes: three upright bars of different heights.
+fn pipes() -> Icon {
+    Icon::new(|scene, square, color| {
+        let width = square.width / 5.0;
+        for (at, height) in [(0.0, 0.6), (2.0, 1.0), (4.0, 0.8)] {
+            let tall = square.height * height;
+            let bar = Rect::new(square.x + at * width, square.bottom() - tall, width, tall);
+            scene.fill(RoundedRect::new(bar, width * 0.5), color);
+        }
+    })
+}
+
+/// A tab bar over its pages, the second shown, the bar focused from the
+/// keyboard and the pointer over the third tab.
+fn tab_bar(scale: f32, theme: Theme) -> Harness {
+    let view = tabs("Sections", State::new(1))
+        .page("Synth", label("Oscillators"))
+        .page("Effects", label("Reverb and delay"))
+        .page("Presets", label("Init"))
+        .padding(8.0);
+    let mut ui = Harness::new(view, Size::new(320.0, 110.0), scale);
+    ui.set_theme(theme);
+    ui.frame();
+    assert!(ui.tab());
+    let presets = ui.get(Role::Tab, "Presets");
+    ui.move_to(presets.center());
+    ui.advance_ms(16);
+    ui
+}
+
+/// A sidebar of an organ's divisions under two headers, with icons, the
+/// second division shown and the sidebar focused from the keyboard.
+fn division_sidebar(scale: f32, theme: Theme) -> Harness {
+    let view = sidebar("Divisions", State::new(1))
+        .section("Manuals")
+        .page("Great", label("Great stops"))
+        .icon(pipes())
+        .page("Swell", label("Swell stops"))
+        .icon(pipes())
+        .page("Choir", label("Choir stops"))
+        .icon(pipes())
+        .section("Pedal")
+        .page("Pedal", label("Pedal stops"))
+        .icon(pipes());
+    let mut ui = Harness::new(view, Size::new(300.0, 230.0), scale);
+    ui.set_theme(theme);
+    ui.frame();
+    assert!(ui.tab());
+    ui.advance_ms(16);
+    ui
+}
+
+/// An icon of a bin: a lid and a body.
+fn bin() -> Icon {
+    Icon::new(|scene, square, color| {
+        let unit = square.width / 16.0;
+        let lid = Rect::new(
+            square.x + 2.0 * unit,
+            square.y + 3.0 * unit,
+            12.0 * unit,
+            1.5 * unit,
+        );
+        let body = Rect::new(
+            square.x + 4.0 * unit,
+            square.y + 5.5 * unit,
+            8.0 * unit,
+            9.0 * unit,
+        );
+        scene.fill(RoundedRect::new(lid, 0.75 * unit), color);
+        scene.fill(RoundedRect::new(body, 1.5 * unit), color);
+    })
+}
+
+/// Action buttons in their three looks, one with an icon and one
+/// disabled; the pointer over the primary one and the secondary one
+/// focused from the keyboard.
+fn button_row(scale: f32, theme: Theme) -> Harness {
+    let view = column((
+        row((
+            action_button("Cancel"),
+            action_button("Export plugin").primary(),
+            action_button("Delete").destructive().icon(bin()),
+        ))
+        .spacing(10.0),
+        row((
+            action_button("Render").primary().disabled(),
+            action_button("Undo").disabled(),
+        ))
+        .spacing(10.0),
+    ))
+    .spacing(10.0)
+    .padding(14.0)
+    .align(Align::Start);
+    let mut ui = Harness::new(view, Size::new(380.0, 120.0), scale);
+    ui.set_theme(theme);
+    ui.frame();
+    assert!(ui.tab());
+    let export = ui.get(Role::Button, "Export plugin");
+    ui.move_to(export.center());
+    ui.advance_ms(16);
+    ui
+}
+
+#[test]
+fn action_buttons_match_their_goldens() {
+    let snapshots = snapshots();
+    for (scale, suffix) in [(1.0, "@1x"), (2.0, "@2x")] {
+        for (theme, look) in [(Theme::dark(), ""), (Theme::light(), "-light")] {
+            let ui = button_row(scale, theme);
+            let name = format!("buttons{look}{suffix}");
+            ui.assert_accessible();
+            assert!(ui.get(Role::Button, "Cancel").is_focused(), "{name}");
+            assert!(ui.pixels() == &ui.render_fresh(), "{name}");
+            if let Err(mismatch) = snapshots.check(&name, ui.pixels(), &ui.dump()) {
+                panic!("{mismatch}");
+            }
+        }
+    }
+}
+
+/// A confirmation dialog open over a small screen, its default button
+/// focused from the keyboard.
+fn open_dialog(scale: f32, theme: Theme) -> Harness {
+    let ask = DialogState::new();
+    let view = column((
+        label("Presets").title(),
+        row((
+            action_button("Save"),
+            action_button("Delete preset").opens(&ask),
+        ))
+        .spacing(8.0),
+    ))
+    .spacing(10.0)
+    .padding(16.0)
+    .align(Align::Start)
+    .with_dialog(
+        confirm_dialog(
+            ask.clone(),
+            "Delete “Glass bells”?",
+            "The preset is removed from the library and from every project that uses it. \
+             This cannot be undone.",
+        )
+        .confirm_label("Delete")
+        .destructive(),
+    );
+    let mut ui = Harness::new(view, Size::new(520.0, 300.0), scale);
+    ui.set_theme(theme);
+    ui.frame();
+    assert!(ui.tab());
+    assert!(ui.tab());
+    ui.key(Key::Enter);
+    // The frame that opens it gives its default button the focus, and
+    // shows its ring.
+    ui.advance_ms(16);
+    ui
+}
+
+#[test]
+fn the_dialog_matches_its_goldens() {
+    let snapshots = snapshots();
+    for (scale, suffix) in [(1.0, "@1x"), (2.0, "@2x")] {
+        for (theme, look) in [(Theme::dark(), ""), (Theme::light(), "-light")] {
+            let ui = open_dialog(scale, theme);
+            let name = format!("dialog{look}{suffix}");
+            ui.assert_accessible();
+            assert!(ui.find(Role::Dialog, "Delete “Glass bells”?").is_some());
+            assert!(ui.get(Role::Button, "Delete").is_focused(), "{name}");
+            assert!(ui.pixels() == &ui.render_fresh(), "{name}");
+            if let Err(mismatch) = snapshots.check(&name, ui.pixels(), &ui.dump()) {
+                panic!("{mismatch}");
+            }
+        }
+    }
+}
+
+#[test]
+fn tabs_and_sidebars_match_their_goldens() {
+    let snapshots = snapshots();
+    for (scale, suffix) in [(1.0, "@1x"), (2.0, "@2x")] {
+        for (theme, look) in [(Theme::dark(), ""), (Theme::light(), "-light")] {
+            for (kind, ui) in [
+                ("tabs", tab_bar(scale, theme)),
+                ("sidebar", division_sidebar(scale, theme)),
+            ] {
+                let name = format!("{kind}{look}{suffix}");
+                ui.assert_accessible();
+                assert!(ui.pixels() == &ui.render_fresh(), "{name}");
+                if let Err(mismatch) = snapshots.check(&name, ui.pixels(), &ui.dump()) {
+                    panic!("{mismatch}");
+                }
+            }
+        }
+    }
+}
+
+/// The sine of `angle`, the same bits on every platform: `f32::sin` rounds
+/// differently on Windows, Linux and macOS, which would change the data the
+/// goldens are drawn from.
+fn sin(angle: f32) -> f32 {
+    manguebyte_gfx::sin_cos(angle).0 as f32
+}
+
+/// An effect chain of pills with two panels open over it, overlapping:
+/// the delay's in front, a knob in it focused from the keyboard.
+fn open_panels(scale: f32, theme: Theme) -> Harness {
+    let params = params();
+    let (reverb, delay) = (State::new(true), State::new(false));
+    let p = |get: fn(&common::PanelParams) -> &manguebyte_params::FloatParam| {
+        knob(ParamHandle::new(Arc::clone(&params), get))
+    };
+    let view = column((
+        label("Effects").title(),
+        row((
+            pill("Drive"),
+            pill("Reverb").opens(&reverb),
+            pill("Delay").opens(&delay),
+        ))
+        .spacing(6.0),
+    ))
+    .spacing(10.0)
+    .padding(16.0)
+    .align(Align::Start)
+    .with_panels([
+        floating_panel(
+            "Reverb",
+            reverb.clone(),
+            State::new(Point::new(36.0, 96.0)),
+            row((p(|p| &p.resonance), p(|p| &p.drive))).spacing(8.0),
+        ),
+        floating_panel(
+            "Delay",
+            delay.clone(),
+            State::new(Point::new(196.0, 150.0)),
+            column((
+                row((p(|p| &p.cutoff), p(|p| &p.mix))).spacing(8.0),
+                toggle(ParamHandle::new(Arc::clone(&params), |p| &p.bypass)),
+            ))
+            .spacing(8.0),
+        ),
+    ]);
+    let mut ui = Harness::with_params(
+        view,
+        Size::new(480.0, 350.0),
+        scale,
+        Arc::clone(&params) as Arc<dyn manguebyte_params::ParamSet>,
+    );
+    ui.set_theme(theme);
+    ui.frame();
+    // From the keyboard: Tab to the delay's pill and Enter, which opens it
+    // in front with the focus, and its ring, on its first knob.
+    for _ in 0..3 {
+        ui.tab();
+    }
+    ui.key(Key::Enter);
+    ui.advance_ms(16);
+    ui
+}
+
+#[test]
+fn floating_panels_match_their_goldens() {
+    let snapshots = snapshots();
+    for (scale, suffix) in [(1.0, "@1x"), (2.0, "@2x")] {
+        for (theme, look) in [(Theme::dark(), ""), (Theme::light(), "-light")] {
+            let ui = open_panels(scale, theme);
+            let name = format!("panels{look}{suffix}");
+            ui.assert_accessible();
+            assert!(ui.find(Role::Region, "Reverb").is_some(), "{name}");
+            assert!(ui.get(Role::Slider, "Cutoff").is_focused(), "{name}");
+            assert!(ui.pixels() == &ui.render_fresh(), "{name}");
+            if let Err(mismatch) = snapshots.check(&name, ui.pixels(), &ui.dump()) {
+                panic!("{mismatch}");
+            }
+        }
+    }
+}
+
+/// An effect's audio settings on a card: two outputs, an input, a rate,
+/// a buffer, three MIDI ports (one open) and a report of two lines, with
+/// the keyboard's focus ring on the sample rate.
+fn audio_settings(scale: f32, theme: Theme) -> Harness {
+    let settings = AudioSettings::new();
+    settings.set_model(AudioSettingsModel {
+        outputs: vec![
+            DeviceItem::new("spk", "Speakers"),
+            DeviceItem::new("usb", "USB Interface"),
+        ],
+        output: Some("usb".into()),
+        inputs: vec![DeviceItem::new("mic", "Microphone")],
+        input: Some("mic".into()),
+        show_input: true,
+        sample_rates: vec![44_100, 48_000, 96_000],
+        sample_rate: Some(48_000),
+        buffer_sizes: vec![64, 128, 256, 512],
+        buffer_size: Some(128),
+        midi_inputs: vec![
+            MidiPortItem::new("keys", "Keys 49", true),
+            MidiPortItem::new("pads", "Pads", false),
+            MidiPortItem::new("pedal", "Pedalboard", false),
+        ],
+        report: "Playing on \"USB Interface\" at 48000 Hz, 128-frame buffer\n\
+            The output \"Studio\" is missing; \"USB Interface\" plays instead"
+            .into(),
+        ..AudioSettingsModel::default()
+    });
+    let view = column((card(settings.view()),))
+        .padding(16.0)
+        .align(Align::Start);
+    let mut ui = Harness::new(view, Size::new(380.0, 360.0), scale);
+    ui.set_theme(theme);
+    ui.frame();
+    for _ in 0..3 {
+        ui.tab();
+    }
+    ui.advance_ms(16);
+    ui
+}
+
+#[test]
+fn the_audio_settings_view_matches_its_goldens() {
+    let snapshots = snapshots();
+    for (scale, suffix) in [(1.0, "@1x"), (2.0, "@2x")] {
+        for (theme, look) in [(Theme::dark(), ""), (Theme::light(), "-light")] {
+            let ui = audio_settings(scale, theme);
+            let name = format!("audio-settings{look}{suffix}");
+            ui.assert_accessible();
+            assert!(ui.get(Role::ComboBox, "Sample rate").is_focused(), "{name}");
+            assert_eq!(
+                ui.get(Role::Switch, "Keys 49").node.state.checked,
+                Some(true),
+                "{name}"
+            );
+            assert!(ui.pixels() == &ui.render_fresh(), "{name}");
+            if let Err(mismatch) = snapshots.check(&name, ui.pixels(), &ui.dump()) {
+                panic!("{mismatch}");
+            }
+        }
+    }
+}
+
+/// An instrument's audio settings on a card: no input section, one MIDI
+/// input port and the MIDI output on a hardware synth, with the focus
+/// ring on the MIDI output.
+fn audio_settings_midi_output(theme: Theme) -> Harness {
+    let settings = AudioSettings::new();
+    settings.set_model(AudioSettingsModel {
+        outputs: vec![DeviceItem::new("spk", "Speakers")],
+        output: Some("spk".into()),
+        sample_rates: vec![44_100, 48_000],
+        sample_rate: Some(44_100),
+        buffer_sizes: vec![256, 512],
+        buffer_size: Some(512),
+        midi_inputs: vec![MidiPortItem::new("keys", "Keys 49", true)],
+        midi_outputs: vec![
+            DeviceItem::new("synth", "Hardware Synth"),
+            DeviceItem::new("loop", "Loopback"),
+        ],
+        midi_output: Some("synth".into()),
+        show_midi_output: true,
+        report: "Playing on \"Speakers\" at 44100 Hz, 512-frame buffer\n\
+            Sending notes to \"Hardware Synth\""
+            .into(),
+        ..AudioSettingsModel::default()
+    });
+    let view = column((card(settings.view()),))
+        .padding(16.0)
+        .align(Align::Start);
+    let mut ui = Harness::new(view, Size::new(380.0, 340.0), 1.0);
+    ui.set_theme(theme);
+    ui.frame();
+    for _ in 0..5 {
+        ui.tab();
+    }
+    ui.advance_ms(16);
+    ui
+}
+
+#[test]
+fn the_midi_output_section_matches_its_goldens() {
+    let snapshots = snapshots();
+    for (theme, look) in [(Theme::dark(), ""), (Theme::light(), "-light")] {
+        let ui = audio_settings_midi_output(theme);
+        let name = format!("audio-settings-midi-output{look}@1x");
+        ui.assert_accessible();
+        assert!(ui.get(Role::ComboBox, "MIDI output").is_focused(), "{name}");
+        assert_eq!(
+            ui.get(Role::ComboBox, "MIDI output").value_text(),
+            Some("Hardware Synth"),
+            "{name}"
+        );
+        assert!(ui.pixels() == &ui.render_fresh(), "{name}");
+        if let Err(mismatch) = snapshots.check(&name, ui.pixels(), &ui.dump()) {
             panic!("{mismatch}");
         }
     }

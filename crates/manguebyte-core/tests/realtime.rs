@@ -167,3 +167,114 @@ fn vector_operations_never_allocate() {
     });
     assert_eq!(calls, 0, "a vector operation used the heap");
 }
+
+#[test]
+fn running_a_pool_never_allocates() {
+    use std::time::{Duration, Instant};
+
+    use manguebyte_core::pool::{Job, PoolConfig, RenderPool};
+
+    /// Fills its buffer for a while, so that the audio thread also waits
+    /// for workers, which reads the clock.
+    struct Busy {
+        out: Vec<f32>,
+        seed: f32,
+    }
+
+    impl Job for Busy {
+        fn render(&mut self) {
+            let start = Instant::now();
+            let length = Duration::from_micros(if cfg!(miri) { 1 } else { 40 });
+            while start.elapsed() < length {
+                for sample in &mut self.out {
+                    self.seed = (self.seed * 1.000_1 + 0.001).fract();
+                    *sample = self.seed;
+                }
+            }
+        }
+    }
+
+    let jobs = (0..24)
+        .map(|index| Busy {
+            out: vec![0.0; 128],
+            seed: index as f32 / 24.0,
+        })
+        .collect();
+    let mut pool = RenderPool::new(jobs, PoolConfig::with_workers(3));
+    let helper = pool.helper();
+    let mut mix = [0.0f32; 128];
+    // A first block, so that nothing below is done for the first time.
+    pool.run(24);
+    let blocks = if cfg!(miri) { 2 } else { 50 };
+    let calls = heap_calls(|| {
+        for block in 0..blocks {
+            // Every path: waiting for workers within the limit, giving up
+            // on them at once, and offering the work to helpers.
+            pool.set_wait_limit(if block % 5 == 4 {
+                Duration::ZERO
+            } else {
+                Duration::from_secs(1)
+            });
+            let _ = if block % 2 == 0 {
+                pool.run(24)
+            } else {
+                pool.run_with(block % 24, |_| false)
+            };
+            mix.fill(0.0);
+            for (_, job) in pool.rendered() {
+                for (sum, sample) in mix.iter_mut().zip(&job.out) {
+                    *sum += sample;
+                }
+            }
+            for index in 0..24 {
+                if let Some(job) = pool.job_mut(index) {
+                    job.seed *= 0.5;
+                }
+            }
+            helper.help();
+        }
+        let _ = pool.stats();
+    });
+    assert_eq!(calls, 0, "running the pool used the heap");
+}
+
+#[test]
+fn governing_never_allocates() {
+    use std::time::Duration;
+
+    use manguebyte_core::governor::{Allowance, Governor, GovernorConfig};
+
+    let mut governor = Governor::new(GovernorConfig::default());
+    governor.set_sample_rate(48_000.0);
+    governor.set_quality_floor(4.0);
+    let calls = heap_calls(|| {
+        for block in 0..2_000u32 {
+            let mut allowance = Allowance::new(governor.budget());
+            governor.begin_block();
+            for _voice in 0..64 {
+                if !allowance.try_take(32.0) {
+                    allowance.take_up_to(8.0);
+                }
+            }
+            if block % 97 == 0 {
+                governor.note_missed(1);
+            }
+            governor.end_block(128, allowance.spent(), allowance.limited());
+            // Some blocks are timed by the caller, as around a pool.
+            governor.record(
+                Duration::from_micros(u64::from(block % 5) * 900),
+                64,
+                100.0,
+                true,
+            );
+        }
+        governor.set_offline(true);
+        governor.begin_block();
+        governor.end_block(128, 1.0, false);
+        governor.set_offline(false);
+        governor.set_max_budget(1_000.0);
+        governor.reset();
+        let _ = (governor.load(), governor.stats(), governor.unit_load());
+    });
+    assert_eq!(calls, 0, "the governor used the heap");
+}

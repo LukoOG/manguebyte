@@ -3,15 +3,28 @@
 use manguebyte_core::{AudioBuffer, Sample};
 use manguebyte_dsp::event::NoteRef;
 
+use crate::controllers::Controls;
 use crate::envelope::Envelope;
-use crate::instrument::{Instrument, SampleData, Zone};
+use crate::filter::VoiceFilter;
+use crate::instrument::{
+    AMPEG, CUTOFF, FILEG, FILEG_DEPTH, Instrument, MODULATES_AMPEG, MODULATES_FILEG,
+    MODULATES_GAIN, MODULATES_PITCH, PITCH, Part, RESONANCE, SampleData, Sums, Zone, stages,
+};
 use crate::interpolate::{Interpolation, MAX_TAPS, cubic_weights};
 use crate::region::OffMode;
+use crate::resample::{fixed_step, sinc_taps};
+use crate::stream::{Lease, MARGIN};
 
 /// Seconds of the fade a voice gets when it is cut short: by a choke group
 /// in `off_mode=fast`, by a polyphony limit or by voice stealing. The SFZ
 /// format describes `off_mode=fast` as a 6 ms fade.
 pub(crate) const FAST_FADE_SECONDS: f64 = 0.006;
+
+/// Frames between the updates of what moves while a voice plays: its
+/// filter's cutoff and resonance, and what controllers modulate. Gains and
+/// the filter's settings glide in a straight line from one update to the
+/// next; the pitch steps.
+pub(crate) const TICK: u32 = 16;
 
 /// One in fixed-point positions: 32 bits of fraction.
 const ONE: u64 = 1 << 32;
@@ -54,6 +67,10 @@ pub(crate) struct Start {
     pub(crate) note: NoteRef,
     /// The key that chose the region, after the instrument's note offset.
     pub(crate) key: u8,
+    /// The pitch the key plays, as an equal-tempered note number: the
+    /// played key's pitch in the tuning, moved by the note offset. `key`
+    /// itself in 12-tone equal temperament.
+    pub(crate) pitch: f64,
     /// 1 to 127.
     pub(crate) velocity: u8,
     pub(crate) serial: u64,
@@ -105,18 +122,114 @@ pub(crate) struct Player {
     /// Frames the fade lasts, and frames of it left.
     fade_frames: u64,
     fade_left: u64,
-    base_gain: f64,
+    /// The gains of the note's velocity and of `rt_decay`.
+    velocity_gain: f64,
+    attenuation: f64,
+    /// The region's `volume` and `amplitude`, as controllers modulate them.
+    region_gain: f64,
+    /// The region's pan, as controllers modulate it, -1 to 1.
     pan: f64,
     expression_volume: f64,
     expression_pan: f64,
     gain_left: f64,
     gain_right: f64,
+    /// What is added to the gains per frame while they glide, and the
+    /// frames of glide left.
+    gain_step_left: f64,
+    gain_step_right: f64,
+    gain_gliding: u32,
     base_cents: f64,
     bend_cents: f64,
     expression_cents: f64,
+    /// Cents controllers add.
+    modulation_cents: f64,
     rate_ratio: f64,
     stereo: bool,
+    /// The key that chose the region, and the velocity, 0 to 1.
+    key: u8,
+    velocity: f64,
+    sample_rate: f64,
+    /// Whether the region has a filter or modulations to update.
+    ticking: bool,
+    /// The next update is the first, which jumps instead of gliding.
+    first_tick: bool,
+    /// Frames to the next update.
+    tick_left: u32,
+    filtered: bool,
+    filter: VoiceFilter,
+    filter_envelope: Envelope,
+    /// The ring a streamed sample's frames arrive in.
+    lease: Lease,
+    /// The frames it needed had not arrived: it holds the last values it
+    /// read and fades out.
+    starved: bool,
+    held_left: f64,
+    held_right: f64,
+    /// Started by a key coming up.
+    pub(crate) release_trigger: bool,
+    /// Its envelopes as they were before its key came up, so that a release
+    /// that crossfades from it can take that release back.
+    unreleased: Option<(Envelope, Envelope)>,
+    /// An equal-power crossfade under way, its length and the frames of it
+    /// done.
+    crossfade: Crossfade,
+    crossfade_frames: u64,
+    crossfade_done: u64,
 }
+
+/// Which way a voice crosses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Crossfade {
+    None,
+    /// Rising as a sine from 0, a release taking over.
+    In,
+    /// Falling as a cosine to 0, then stopping: a sustain handing over.
+    Out,
+}
+
+/// What a model outside the sampler does to a voice's pitch and level
+/// over a piece of a block: two straight lines each, multiplied, at
+/// `offset + k + 1` frames for the piece's frame `k`, held from `len`
+/// frames on. `active` is false when it changes nothing, and the voice
+/// then reads as it would without it, bit for bit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Modulation {
+    pub(crate) active: bool,
+    pub(crate) ratio: [f64; 2],
+    pub(crate) ratio_step: [f64; 2],
+    pub(crate) gain: [f64; 2],
+    pub(crate) gain_step: [f64; 2],
+    pub(crate) offset: u64,
+    pub(crate) len: u64,
+}
+
+impl Modulation {
+    pub(crate) const NONE: Self = Self {
+        active: false,
+        ratio: [1.0; 2],
+        ratio_step: [0.0; 2],
+        gain: [1.0; 2],
+        gain_step: [0.0; 2],
+        offset: 0,
+        len: 0,
+    };
+
+    /// The pitch ratio and gain at frame `frame` of the piece.
+    #[inline]
+    fn at(&self, frame: usize) -> (f64, f64) {
+        let at = (self.offset + frame as u64 + 1).min(self.len) as f64;
+        let line =
+            |start: [f64; 2], step: [f64; 2]| (start[0] + step[0] * at) * (start[1] + step[1] * at);
+        (
+            line(self.ratio, self.ratio_step),
+            line(self.gain, self.gain_step),
+        )
+    }
+}
+
+/// Frames compared when a release looks for the start that continues the
+/// phase of the sustain it crossfades from.
+pub(crate) const ALIGN_FRAMES: usize = 128;
 
 impl Player {
     pub(crate) const IDLE: Self = Self {
@@ -140,22 +253,53 @@ impl Player {
         fade_from: 1.0,
         fade_frames: 1,
         fade_left: 0,
-        base_gain: 0.0,
+        velocity_gain: 0.0,
+        attenuation: 0.0,
+        region_gain: 0.0,
         pan: 0.0,
         expression_volume: 1.0,
         expression_pan: 0.0,
         gain_left: 0.0,
         gain_right: 0.0,
+        gain_step_left: 0.0,
+        gain_step_right: 0.0,
+        gain_gliding: 0,
         base_cents: 0.0,
         bend_cents: 0.0,
         expression_cents: 0.0,
+        modulation_cents: 0.0,
         rate_ratio: 1.0,
         stereo: false,
+        key: 0,
+        velocity: 0.0,
+        sample_rate: 48_000.0,
+        ticking: false,
+        first_tick: false,
+        tick_left: 0,
+        filtered: false,
+        filter: VoiceFilter::IDLE,
+        filter_envelope: Envelope::IDLE,
+        lease: Lease::NONE,
+        starved: false,
+        held_left: 0.0,
+        held_right: 0.0,
+        release_trigger: false,
+        unreleased: None,
+        crossfade: Crossfade::None,
+        crossfade_frames: 1,
+        crossfade_done: 0,
     };
 
-    /// Starts playing a region. Returns `false`, leaving the player idle,
-    /// when the region has nothing to play.
-    pub(crate) fn start(&mut self, instrument: &Instrument, start: &Start) -> bool {
+    /// Starts playing a region, with the controllers in `controls` as they
+    /// are at frame `now`. Returns `false`, leaving the player idle, when
+    /// the region has nothing to play.
+    pub(crate) fn start<C: Controls + ?Sized>(
+        &mut self,
+        instrument: &Instrument,
+        start: &Start,
+        controls: &C,
+        now: u64,
+    ) -> bool {
         *self = Self::IDLE;
         let Some(zone) = instrument.zones.get(start.zone) else {
             return false;
@@ -173,6 +317,7 @@ impl Player {
         self.active = true;
         self.zone = start.zone;
         self.note = start.note;
+        self.release_trigger = start.release_trigger;
         self.hold = if start.release_trigger {
             Hold::Released
         } else {
@@ -185,19 +330,117 @@ impl Player {
         // A region started by a release has no key to hold its loop, so it
         // plays through once.
         self.looping = zone.lp.is_some() && !start.release_trigger;
-        self.envelope = Envelope::new(&zone.envelope, velocity, start.sample_rate);
-        self.base_gain =
-            zone.gain * velocity_gain * 10f64.powf(-start.attenuation_db.max(0.0) / 20.0);
+        let sums = zone.sums(controls, now);
+        self.envelope = Envelope::new(
+            &zone.envelope,
+            velocity,
+            start.sample_rate,
+            stages(&sums, AMPEG),
+        );
+        self.velocity_gain = velocity_gain;
+        self.attenuation = 10f64.powf(-start.attenuation_db.max(0.0) / 20.0);
+        self.region_gain = zone.gain;
         self.pan = zone.pan;
-        self.base_cents = (f64::from(start.key) - zone.keycenter) * zone.keytrack + zone.detune;
+        self.base_cents = (start.pitch - zone.keycenter) * zone.keytrack + zone.detune;
         self.bend_cents = start.bend.cents(zone);
         self.rate_ratio = sample.rate / start.sample_rate.max(1.0);
-        self.stereo = sample.right.is_some();
+        self.stereo = sample.stereo;
+        self.key = start.key;
+        self.velocity = velocity;
+        self.sample_rate = start.sample_rate;
+        self.ticking = zone.ticks();
+        self.first_tick = true;
+        self.tick_left = 0;
+        if let Some(filter) = &zone.filter {
+            self.filtered = true;
+            self.filter = VoiceFilter::new(filter.kind);
+            self.filter_envelope = Envelope::new(
+                &filter.envelope,
+                velocity,
+                start.sample_rate,
+                stages(&sums, FILEG),
+            );
+        }
         self.position = zone.offset << 32;
         self.wrap(zone);
+        if let (true, Some(pool), Some(index)) = (
+            !sample.is_resident() || sample.is_packed(),
+            &instrument.pool,
+            zone.sample,
+        ) {
+            // The frames after the stretch in memory it starts in are asked
+            // for at once (and a packed sample unpacks into the slot).
+            let at = self.position >> 32;
+            let from = sample
+                .part_at(at)
+                .map_or(at.saturating_sub(MARGIN), Part::end);
+            if let Some(lease) = Lease::claim(pool, index as u32, from) {
+                self.lease = lease;
+            }
+        }
+        self.modulate(zone, &sums, 0.0, 0);
         self.update_pitch();
         self.update_gain();
         true
+    }
+
+    /// Takes what controllers add, `sums`, and the filter envelope's level:
+    /// at once when `glide` is 0, and otherwise gliding to it over `glide`
+    /// frames.
+    fn modulate(&mut self, zone: &Zone, sums: &Sums, filter_level: f64, glide: u32) {
+        if zone.modulates & MODULATES_GAIN != 0 {
+            self.region_gain = zone.gain_with(sums);
+            self.pan = zone.pan_with(sums);
+            if glide == 0 {
+                self.update_gain();
+            } else {
+                let (left, right) = self.gains();
+                let frames = f64::from(glide);
+                self.gain_step_left = (left - self.gain_left) / frames;
+                self.gain_step_right = (right - self.gain_right) / frames;
+                self.gain_gliding = glide;
+            }
+        }
+        if zone.modulates & MODULATES_PITCH != 0 {
+            self.modulation_cents = sums[PITCH];
+            self.update_pitch();
+        }
+        if zone.modulates & MODULATES_AMPEG != 0 {
+            self.envelope.set_shift(stages(sums, AMPEG));
+        }
+        if let Some(filter) = &zone.filter {
+            if zone.modulates & MODULATES_FILEG != 0 {
+                self.filter_envelope.set_shift(stages(sums, FILEG));
+            }
+            let depth = filter.depth + filter.vel2depth * self.velocity + sums[FILEG_DEPTH];
+            let cents = filter.keytrack * (f64::from(self.key) - filter.keycenter)
+                + filter.veltrack * self.velocity
+                + depth * filter_level
+                + sums[CUTOFF];
+            let cutoff = filter.cutoff * 2f64.powf(cents / 1_200.0);
+            let resonance = filter.resonance + sums[RESONANCE];
+            let tuning = self.filter.tuning(cutoff, resonance, self.sample_rate);
+            self.filter.glide(tuning, glide);
+        }
+    }
+
+    /// The update due on this frame, with the controllers as they are on
+    /// it.
+    fn tick<C: Controls + ?Sized>(
+        &mut self,
+        zone: &Zone,
+        controls: &C,
+        frame: u64,
+        filter_level: f64,
+    ) {
+        let sums = zone.sums(controls, frame);
+        let glide = if core::mem::take(&mut self.first_tick) {
+            0
+        } else {
+            TICK
+        };
+        self.modulate(zone, &sums, filter_level, glide);
+        self.tick_left = TICK;
     }
 
     /// The key came up (and the pedal, if it was down).
@@ -209,8 +452,119 @@ impl Player {
         if zone.one_shot {
             return;
         }
+        if !self.envelope.is_released() {
+            self.unreleased = Some((self.envelope, self.filter_envelope));
+        }
         self.envelope.release();
+        self.filter_envelope.release();
         self.end_sustain(zone);
+    }
+
+    /// Hands the note over to a release-triggered region: its own release,
+    /// if its key has just come up, is taken back, its loop keeps going,
+    /// and it falls as a cosine over `seconds`, then stops. The release
+    /// rises as a sine over the same frames ([`fade_in`](Self::fade_in)),
+    /// so that their powers add to one.
+    pub(crate) fn hand_over(&mut self, seconds: f64, sample_rate: f64) {
+        if let Some((envelope, filter_envelope)) = self.unreleased.take() {
+            self.envelope = envelope;
+            self.filter_envelope = filter_envelope;
+            self.leave_loop = false;
+        }
+        self.crossfade = Crossfade::Out;
+        self.crossfade_frames = (seconds.max(0.0) * sample_rate).round().clamp(1.0, 1e12) as u64;
+        self.crossfade_done = 0;
+    }
+
+    /// Rises as a sine over `seconds`: the release side of
+    /// [`hand_over`](Self::hand_over).
+    pub(crate) fn fade_in(&mut self, seconds: f64, sample_rate: f64) {
+        self.crossfade = Crossfade::In;
+        self.crossfade_frames = (seconds.max(0.0) * sample_rate).round().clamp(1.0, 1e12) as u64;
+        self.crossfade_done = 0;
+    }
+
+    /// The next [`ALIGN_FRAMES`] frames it reads at its pitch (each the
+    /// whole frame nearest), from the one its position is in, both channels
+    /// averaged, and its position's fraction in 32 bits: what a release
+    /// compares itself with to start in phase.
+    pub(crate) fn upcoming(&self, instrument: &Instrument) -> ([f32; ALIGN_FRAMES], u64) {
+        let mut frames = [0.0; ALIGN_FRAMES];
+        let fraction = self.position & (ONE - 1);
+        let (Some(zone), true) = (instrument.zones.get(self.zone), self.active) else {
+            return (frames, fraction);
+        };
+        let Some(sample) = zone.sample.and_then(|index| instrument.samples.get(index)) else {
+            return (frames, fraction);
+        };
+        let first = (self.position >> 32) as i64;
+        let step = self.step_frames;
+        for (k, frame) in frames.iter_mut().enumerate() {
+            let at = first + (k as f64 * step).round() as i64;
+            let (left, right) = match self.map(zone, at) {
+                Tap::Data(at) => self.frame(sample, at as u64).unwrap_or((0.0, 0.0)),
+                Tap::Tail(at) => zone.lp.as_ref().map_or((0.0, 0.0), |lp| {
+                    let left = lp.tail_left.get(at).copied().unwrap_or(0.0);
+                    (left, lp.tail_right.get(at).copied().unwrap_or(left))
+                }),
+                Tap::Zero => (0.0, 0.0),
+            };
+            *frame = 0.5 * (left + right);
+        }
+        (frames, fraction)
+    }
+
+    /// Moves its start, within `window` frames after its offset, to where
+    /// its next [`ALIGN_FRAMES`] frames best match `upcoming` (by
+    /// normalised cross-correlation), and takes `fraction` as its own, so
+    /// that it continues the phase of the voice those frames come from.
+    /// Bounded work (`window` times [`ALIGN_FRAMES`] products, `window` at
+    /// most [`MAX_RELEASE_ALIGN`](crate::region::MAX_RELEASE_ALIGN)), on
+    /// the stack, for the audio thread.
+    pub(crate) fn align(
+        &mut self,
+        instrument: &Instrument,
+        (upcoming, fraction): &([f32; ALIGN_FRAMES], u64),
+        window: u32,
+    ) {
+        const MAX: usize = crate::region::MAX_RELEASE_ALIGN as usize;
+        let (Some(zone), true) = (instrument.zones.get(self.zone), self.active) else {
+            return;
+        };
+        let Some(sample) = zone.sample.and_then(|index| instrument.samples.get(index)) else {
+            return;
+        };
+        let offset = zone.offset;
+        let step = self.step_frames;
+        // The frames the comparison reaches past a start.
+        let reach = ((ALIGN_FRAMES - 1) as f64 * step).round() as usize + 1;
+        let room = (zone.end + 1).saturating_sub(offset) as usize;
+        let window = (window as usize).min(MAX).min(room.saturating_sub(reach));
+        if window == 0 {
+            return;
+        }
+        let span = (window + reach).min(MAX + 4 * ALIGN_FRAMES);
+        let mut own = [0.0f32; MAX + 4 * ALIGN_FRAMES];
+        for (k, frame) in own[..span].iter_mut().enumerate() {
+            let (left, right) = self.frame(sample, offset + k as u64).unwrap_or((0.0, 0.0));
+            *frame = 0.5 * (left + right);
+        }
+        let mut best = (f64::NEG_INFINITY, 0usize);
+        for start in 0..window.min(span - reach) {
+            let mut product = 0.0;
+            let mut energy = 1e-12;
+            for (k, &value) in upcoming.iter().enumerate() {
+                let at = start + (k as f64 * step).round() as usize;
+                let own = f64::from(own[at]);
+                product += f64::from(value) * own;
+                energy += own * own;
+            }
+            let score = product / energy.sqrt();
+            if score > best.0 {
+                best = (score, start);
+            }
+        }
+        self.position = ((offset + best.1 as u64) << 32) | fraction;
     }
 
     /// A sustain loop stops repeating, once the reading allows it (see
@@ -257,6 +611,7 @@ impl Player {
             OffMode::Normal => {
                 self.hold = Hold::Released;
                 self.envelope.release();
+                self.filter_envelope.release();
                 self.end_sustain(zone);
             }
         }
@@ -295,7 +650,7 @@ impl Player {
 
     /// The gain the voice has now, for choosing which to cut.
     pub(crate) fn loudness(&self) -> f64 {
-        self.envelope.level() * self.fade() * self.base_gain
+        self.envelope.level() * self.fade() * self.base_gain()
     }
 
     /// Whether the envelope is in its release, or the voice is fading.
@@ -329,26 +684,40 @@ impl Player {
     }
 
     fn update_pitch(&mut self) {
-        let cents = self.base_cents + self.bend_cents + self.expression_cents;
+        let cents =
+            self.base_cents + self.bend_cents + self.expression_cents + self.modulation_cents;
         let ratio = (2f64.powf(cents / 1_200.0) * self.rate_ratio).clamp(1.0 / 65_536.0, 256.0);
         let ratio = if ratio.is_finite() { ratio } else { 1.0 };
-        self.step = (ratio * ONE as f64).round() as u64;
+        self.step = fixed_step(ratio);
         self.step_frames = self.step as f64 / ONE as f64;
     }
 
+    /// Sets the gains at once, ending any glide.
     fn update_gain(&mut self) {
-        let gain = self.base_gain * self.expression_volume;
+        (self.gain_left, self.gain_right) = self.gains();
+        self.gain_gliding = 0;
+    }
+
+    /// The gain of the region and the note, before expression and pan.
+    fn base_gain(&self) -> f64 {
+        self.region_gain * self.velocity_gain * self.attenuation
+    }
+
+    /// The gain of each side the settings call for.
+    fn gains(&self) -> (f64, f64) {
+        let gain = self.base_gain() * self.expression_volume;
         let pan = (self.pan + self.expression_pan).clamp(-1.0, 1.0);
         if self.stereo {
             // A stereo sample is balanced: one side is turned down.
-            self.gain_left = gain * (1.0 - pan).min(1.0);
-            self.gain_right = gain * (1.0 + pan).min(1.0);
+            (gain * (1.0 - pan).min(1.0), gain * (1.0 + pan).min(1.0))
         } else {
             // A mono sample is placed with a constant-power law that leaves
             // each side at unity in the centre.
             let angle = (pan + 1.0) * core::f64::consts::FRAC_PI_4;
-            self.gain_left = gain * core::f64::consts::SQRT_2 * angle.cos();
-            self.gain_right = gain * core::f64::consts::SQRT_2 * angle.sin();
+            (
+                gain * core::f64::consts::SQRT_2 * angle.cos(),
+                gain * core::f64::consts::SQRT_2 * angle.sin(),
+            )
         }
     }
 
@@ -384,47 +753,65 @@ impl Player {
         }
     }
 
-    /// Adds the voice's sound to `buffer`. Stops the voice, on the exact
-    /// frame, when its sound ends.
-    pub(crate) fn render<S: Sample>(
+    /// Adds the voice's sound to `buffer`, whose first frame is frame
+    /// `clock` of the controllers in `controls`. Stops the voice, on the
+    /// exact frame, when its sound ends.
+    pub(crate) fn render<S: Sample, C: Controls + ?Sized>(
         &mut self,
         instrument: &Instrument,
         interpolation: Interpolation,
         buffer: &mut AudioBuffer<S>,
+        controls: &C,
+        clock: u64,
+        modulation: &Modulation,
     ) {
         if !self.active {
             return;
         }
         let frames = buffer.num_frames();
+        let at = (controls, clock, modulation);
         match buffer.num_channels() {
-            0 => self.run(instrument, interpolation, frames, |_, _, _| {}),
+            0 => self.run(instrument, interpolation, frames, at, |_, _, _| {}),
             1 => {
                 let out = buffer.channel_mut(0);
-                self.run(instrument, interpolation, frames, |frame, left, right| {
-                    if let Some(sample) = out.get_mut(frame) {
-                        *sample += S::from_f64(0.5 * (left + right));
-                    }
-                });
+                self.run(
+                    instrument,
+                    interpolation,
+                    frames,
+                    at,
+                    |frame, left, right| {
+                        if let Some(sample) = out.get_mut(frame) {
+                            *sample += S::from_f64(0.5 * (left + right));
+                        }
+                    },
+                );
             }
             _ => {
                 let (out_left, out_right) = buffer.channel_pair_mut(0, 1);
-                self.run(instrument, interpolation, frames, |frame, left, right| {
-                    if let Some(sample) = out_left.get_mut(frame) {
-                        *sample += S::from_f64(left);
-                    }
-                    if let Some(sample) = out_right.get_mut(frame) {
-                        *sample += S::from_f64(right);
-                    }
-                });
+                self.run(
+                    instrument,
+                    interpolation,
+                    frames,
+                    at,
+                    |frame, left, right| {
+                        if let Some(sample) = out_left.get_mut(frame) {
+                            *sample += S::from_f64(left);
+                        }
+                        if let Some(sample) = out_right.get_mut(frame) {
+                            *sample += S::from_f64(right);
+                        }
+                    },
+                );
             }
         }
     }
 
-    fn run(
+    fn run<C: Controls + ?Sized>(
         &mut self,
         instrument: &Instrument,
         interpolation: Interpolation,
         frames: usize,
+        (controls, clock, modulation): (&C, u64, &Modulation),
         mut emit: impl FnMut(usize, f64, f64),
     ) {
         let Some(zone) = instrument.zones.get(self.zone) else {
@@ -435,6 +822,18 @@ impl Player {
             self.stop();
             return;
         };
+        if self.lease.is_held() {
+            self.lease.refresh();
+            // A looping voice that has gone into a loop kept in memory
+            // needs, next, the frames after that stretch: when its sustain
+            // ends it plays on from there.
+            let index = self.position >> 32;
+            if let Some(part) = sample.part_at(index).filter(|_| self.looping) {
+                if index >= part.start + MARGIN && part.end() > self.lease.start() {
+                    self.lease.restart(part.end());
+                }
+            }
+        }
         let mut weights = [0.0; MAX_TAPS];
         for frame in 0..frames {
             let index = self.position >> 32;
@@ -447,6 +846,22 @@ impl Player {
                 self.stop();
                 return;
             }
+            if self.ticking {
+                let filter_level = if self.filtered {
+                    self.filter_envelope.next()
+                } else {
+                    0.0
+                };
+                if self.tick_left == 0 {
+                    self.tick(zone, controls, clock + frame as u64, filter_level);
+                }
+                self.tick_left -= 1;
+                if self.gain_gliding > 0 {
+                    self.gain_gliding -= 1;
+                    self.gain_left += self.gain_step_left;
+                    self.gain_right += self.gain_step_right;
+                }
+            }
             let mut gain = level;
             if self.dying {
                 if self.fade_left == 0 {
@@ -456,9 +871,36 @@ impl Player {
                 gain *= self.fade();
                 self.fade_left -= 1;
             }
+            if self.crossfade != Crossfade::None {
+                if self.crossfade == Crossfade::Out && self.crossfade_done >= self.crossfade_frames
+                {
+                    self.stop();
+                    return;
+                }
+                let angle = core::f64::consts::FRAC_PI_2 * self.crossfade_done as f64
+                    / self.crossfade_frames as f64;
+                gain *= if self.crossfade == Crossfade::In {
+                    angle.sin()
+                } else {
+                    angle.cos()
+                };
+                self.crossfade_done += 1;
+                if self.crossfade == Crossfade::In && self.crossfade_done > self.crossfade_frames {
+                    self.crossfade = Crossfade::None;
+                }
+            }
+            // The step for this frame, and the gain, with what a model
+            // outside does to them.
+            let step = if modulation.active {
+                let (ratio, outside) = modulation.at(frame);
+                gain *= outside;
+                fixed_step(self.step_frames * ratio)
+            } else {
+                self.step
+            };
             let fraction_bits = self.position & (ONE - 1);
             let fraction = fraction_bits as f64 / ONE as f64;
-            let (first, count) = if self.step == ONE && fraction_bits == 0 {
+            let (first, count) = if step == ONE && fraction_bits == 0 {
                 // At its own pitch and rate, from a whole frame, the sample
                 // is read as it is.
                 weights[0] = 1.0;
@@ -466,11 +908,7 @@ impl Player {
             } else {
                 match interpolation {
                     Interpolation::Sinc => {
-                        let half =
-                            instrument
-                                .sinc
-                                .weights(fraction, self.step_frames, &mut weights);
-                        (index as i64 + 1 - half as i64, 2 * half)
+                        sinc_taps(&instrument.sinc, self.position, step, &mut weights)
                     }
                     Interpolation::Cubic => {
                         weights[..4].copy_from_slice(&cubic_weights(fraction));
@@ -482,53 +920,92 @@ impl Player {
                 self.try_leave_loop(zone, sample, first, count);
             }
             self.just_wrapped = false;
-            let (left, right) = self.gather(zone, sample, first, &weights[..count]);
+            let gathered = if self.starved {
+                None
+            } else {
+                self.gather(zone, sample, first, &weights[..count])
+            };
+            let (mut left, mut right) = match gathered {
+                Some(read) => {
+                    (self.held_left, self.held_right) = read;
+                    read
+                }
+                None => {
+                    if !self.starved {
+                        // The disk has not kept up: hold the last values
+                        // and fade them out, rather than click.
+                        self.starved = true;
+                        if let Some(pool) = &instrument.pool {
+                            pool.count_underrun();
+                        }
+                        self.fade_out(FAST_FADE_SECONDS, self.sample_rate);
+                    }
+                    (self.held_left, self.held_right)
+                }
+            };
+            if self.filtered {
+                (left, right) = self.filter.process(left, right, self.stereo);
+            }
             emit(
                 frame,
                 left * gain * self.gain_left,
                 right * gain * self.gain_right,
             );
-            self.position = self.position.wrapping_add(self.step);
+            self.position = self.position.wrapping_add(step);
             self.wrap(zone);
+        }
+        let index = self.position >> 32;
+        self.lease.release_before(index.saturating_sub(MARGIN));
+        if let Some(part) = sample.part_at(index).filter(|part| part.packed.is_some()) {
+            self.lease.unpack_ahead(part, (index - part.start) as usize);
         }
     }
 
     /// The weighted sum of the frames from `first` on, through the loop
-    /// when the voice is looping.
+    /// when the voice is looping. `None` when a frame it needs is streamed
+    /// and has not arrived.
     #[inline]
-    fn gather(&self, zone: &Zone, sample: &SampleData, first: i64, weights: &[f64]) -> (f64, f64) {
+    fn gather(
+        &self,
+        zone: &Zone,
+        sample: &SampleData,
+        first: i64,
+        weights: &[f64],
+    ) -> Option<(f64, f64)> {
         let count = weights.len();
         let (low, high) = self.plain_range(zone, sample);
         if first >= low && first + count as i64 - 1 <= high {
-            let start = first as usize;
-            if let Some(left) = sample.left.get(start..start + count) {
+            let start = first as u64;
+            if let Some((left, right)) = sample.slice(start, count) {
                 let left_sum = dot(left, weights);
-                let right_sum = match &sample.right {
-                    Some(right) => right
-                        .get(start..start + count)
-                        .map_or(left_sum, |right| dot(right, weights)),
-                    None => left_sum,
-                };
-                return (left_sum, right_sum);
+                let right_sum = right.map_or(left_sum, |right| dot(right, weights));
+                return Some((left_sum, right_sum));
             }
+            // Across two stretches, or from the ring: gathered first, so
+            // that the sums are made in the same order as above.
+            let mut left = [0.0f32; MAX_TAPS];
+            let mut right = [0.0f32; MAX_TAPS];
+            for offset in 0..count {
+                (left[offset], right[offset]) = self.frame(sample, start + offset as u64)?;
+            }
+            let left_sum = dot(&left[..count], weights);
+            let right_sum = if sample.stereo {
+                dot(&right[..count], weights)
+            } else {
+                left_sum
+            };
+            return Some((left_sum, right_sum));
         }
         let lp = zone.lp.as_ref();
         let mut left_sum = 0.0;
         let mut right_sum = 0.0;
         for (offset, &weight) in weights.iter().enumerate() {
             let (left, right) = match self.map(zone, first + offset as i64) {
-                Tap::Data(at) => {
-                    let left = sample.left.get(at).copied().unwrap_or(0.0);
-                    let right = match &sample.right {
-                        Some(right) => right.get(at).copied().unwrap_or(0.0),
-                        None => left,
-                    };
-                    (left, right)
-                }
+                Tap::Data(at) => self.frame(sample, at as u64)?,
                 Tap::Tail(at) => {
                     let Some(lp) = lp else { continue };
                     let left = lp.tail_left.get(at).copied().unwrap_or(0.0);
-                    let right = if sample.right.is_some() {
+                    let right = if sample.stereo {
                         lp.tail_right.get(at).copied().unwrap_or(0.0)
                     } else {
                         left
@@ -540,7 +1017,15 @@ impl Player {
             left_sum += weight * f64::from(left);
             right_sum += weight * f64::from(right);
         }
-        (left_sum, right_sum)
+        Some((left_sum, right_sum))
+    }
+
+    /// Frame `at` of the sample, left and right (the left twice for a mono
+    /// sample), from memory or from the ring; silence past its end. `None`
+    /// when it is streamed and has not arrived.
+    #[inline]
+    fn frame(&self, sample: &SampleData, at: u64) -> Option<(f32, f32)> {
+        crate::store::frame(sample, &self.lease, at)
     }
 
     /// The frames that read straight from the sample data, needing neither

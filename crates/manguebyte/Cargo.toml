@@ -37,8 +37,9 @@ osc = ["dep:manguebyte-osc"]
 ## Loading CLAP, VST 3 and LV2 plugins made by anyone and running them,
 ## and finding the ones installed on a system.
 host = ["dep:manguebyte-host"]
-## Running a plugin as a standalone application.
-standalone = ["dep:manguebyte-standalone", "devices"]
+## Running a plugin as a standalone application. With `gui` too, the glue
+## between it and the audio settings view (`gui::audio_settings`).
+standalone = ["dep:manguebyte-standalone", "devices", "manguebyte-gui?/standalone"]
 ## Decoding AAC, ALAC and WMA through the system's codecs: Media
 ## Foundation on Windows, AudioToolbox on macOS.
 platform-codecs = ["manguebyte-formats/platform-codecs"]

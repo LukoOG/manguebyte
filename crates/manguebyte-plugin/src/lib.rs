@@ -54,6 +54,16 @@
 //! A plugin can also offer an editor, through [`Plugin::editor`] and the
 //! contract in the [`editor`] module.
 //!
+//! # Identity
+//!
+//! What hosts know a plugin by, its id, name, vendor and version, is
+//! [`Plugin::INFO`], fixed when it is compiled, unless the plugin works it
+//! out when its library is loaded, in [`Plugin::info`]: one engine, built
+//! once, can then be copied to many files, each a plugin of its own with
+//! its identity in data the copy carries, which it finds through
+//! [`library_path`]. Everything that reports the identity reads it through
+//! [`plugin_info`], which asks `info` once and keeps the answer.
+//!
 //! # MIDI controllers
 //!
 //! An instrument or a note effect states which MIDI controllers it listens
@@ -72,12 +82,22 @@
 //! MIDI 1.0 and 2.0 messages from [`Plugin::process_with_output`]. The
 //! [`output`] module has the types, and the translation to MIDI 2.0
 //! packets, MIDI 1.0 and MPE that ports and hosts need.
+//!
+//! # More than one output
+//!
+//! A plugin whose parts a host should mix apart, such as the divisions of
+//! an organ or the pads of a drum machine, lists auxiliary output buses
+//! in [`Plugin::AUX_OUTPUTS`] and writes them from
+//! [`Plugin::process_with_aux`], where a bus the host switched off is not
+//! given, so it costs nothing to leave silent.
 
 #![forbid(unsafe_code)]
 
+mod buses;
 mod controllers;
 pub mod editor;
 mod harness;
+mod identity;
 pub mod output;
 mod state;
 
@@ -89,9 +109,11 @@ pub use manguebyte_dsp::note_input::Mpe;
 use manguebyte_dsp::{ProcessContext, ProcessSpec};
 use manguebyte_params::ParamSet;
 
+pub use buses::{AuxOutput, AuxOutputs};
 pub use controllers::{MidiController, MidiControllers};
 use editor::EditorSpec;
 pub use harness::Harness;
+pub use identity::{is_valid_id, library_path, plugin_info, set_library_path};
 use output::OutputBuffer;
 pub use state::{StateError, load_state, save_state};
 
@@ -108,12 +130,18 @@ pub enum PluginKind {
     Analyzer,
 }
 
-/// The fixed facts about a plugin.
+/// The facts that identify a plugin to hosts and people.
+///
+/// A plugin gives them as [`Plugin::INFO`], at compile time, and may work
+/// them out at run time in [`Plugin::info`]; [`plugin_info`] gives what the
+/// wrappers report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PluginInfo {
     /// A globally unique identifier in reverse-domain form, such as
     /// `"com.example.reverb"`. Hosts store it in sessions, so it must never
-    /// change once a version has shipped.
+    /// change once a version has shipped. It must pass [`is_valid_id`]:
+    /// not empty, with no white space or control characters. VST 3's class
+    /// id, an Audio Unit's codes and the LV2 URI are all derived from it.
     pub id: &'static str,
     /// The name shown to people.
     pub name: &'static str,
@@ -123,7 +151,8 @@ pub struct PluginInfo {
     pub version: &'static str,
     /// One line about what it does.
     pub description: &'static str,
-    /// What sort of plugin it is.
+    /// What sort of plugin it is. Always [`Plugin::INFO`]'s: see
+    /// [`Plugin::info`].
     pub kind: PluginKind,
 }
 
@@ -312,7 +341,12 @@ pub struct NoteName {
 /// [`prepare`]: Self::prepare
 /// [`editor`]: Self::editor
 pub trait Plugin: Send + 'static {
-    /// The fixed facts about the plugin.
+    /// The facts that identify the plugin, fixed when it is compiled.
+    ///
+    /// The wrappers report [`info`](Self::info) instead, which is this
+    /// unless overridden. `INFO` itself is still what is used where a
+    /// constant is needed: the [`kind`](PluginInfo::kind), and whatever
+    /// reads the plugin's identity in a `const` context.
     const INFO: PluginInfo;
     /// How many channels it reads and writes, unless the host chooses
     /// another of [`LAYOUTS`](Self::LAYOUTS).
@@ -371,6 +405,50 @@ pub trait Plugin: Send + 'static {
     const LAYOUTS: &'static [AudioLayout] = &[Self::LAYOUT];
     /// Its parameters.
     type Params: ParamSet + 'static;
+
+    /// The facts that identify the plugin, worked out when its library is
+    /// loaded. [`INFO`](Self::INFO) unless overridden, so a plugin that
+    /// knows its identity when it is compiled writes nothing.
+    ///
+    /// This is for a plugin whose identity is data: one engine, compiled
+    /// once and copied to many files, each copy with the id, name, vendor
+    /// and version of the instrument it plays, found next to or inside its
+    /// own file through [`library_path`]. Two copies loaded in one host are
+    /// then two plugins.
+    ///
+    /// The wrappers do not call this directly but through
+    /// [`plugin_info`], which calls it once per library, the first time a
+    /// host asks about the plugin (CLAP's descriptor, VST 3's factory, the
+    /// LV2 descriptor, an Audio Unit's factory), before any instance exists,
+    /// and keeps the result until the library is unloaded. So it may take
+    /// its time, read files and allocate, and strings it builds can be
+    /// leaked to make them `'static`, which costs one copy per process.
+    /// A panic here is caught at the boundary, and the host finds no
+    /// plugin.
+    ///
+    /// Two of the facts are not taken from here:
+    ///
+    /// - the [`kind`](PluginInfo::kind) is always `INFO`'s, because the
+    ///   buses a plugin has, its [`LAYOUT`](Self::LAYOUT), and VST 3's
+    ///   parameters for MIDI controllers are fixed when it is compiled;
+    /// - an id that [`is_valid_id`] refuses makes the whole of `INFO` the
+    ///   identity.
+    ///
+    /// Saved state carries the id, and a plugin refuses state saved under
+    /// another, so two copies with different ids never load each other's
+    /// state, as two different plugins would not.
+    ///
+    /// Formats that keep the identity in a bundle's files, an Audio Unit's
+    /// `Info.plist` and an LV2 bundle's Turtle, have them written by `cargo
+    /// mangue bundle` from what this returns in a program it builds and
+    /// runs; a plugin whose identity depends on where its library is needs
+    /// those files written for each copy. See ADR 0012.
+    fn info() -> PluginInfo
+    where
+        Self: Sized,
+    {
+        Self::INFO
+    }
 
     /// Creates the plugin, with its parameters at their defaults.
     fn new() -> Self
@@ -504,6 +582,88 @@ pub trait Plugin: Send + 'static {
         self.process(buffer, context);
     }
 
+    /// Processes one block as [`process_with_output`](Self::process_with_output)
+    /// does, and writes the auxiliary output buses of
+    /// [`AUX_OUTPUTS`](Self::AUX_OUTPUTS) into `aux`. Every wrapper, the
+    /// standalone runner and the [`Harness`] call this; unless overridden it
+    /// calls `process_with_output` and leaves every bus silent.
+    ///
+    /// `aux` holds the declared buses in their order, each the length of
+    /// `buffer` and silent; a bus the host has switched off is not given
+    /// ([`AuxOutputs::bus_mut`] returns `None`), so rendering only the
+    /// buses that are there costs nothing for those nobody listens to.
+    /// Nothing here may allocate, as in `process`.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use manguebyte_core::AudioBuffer;
+    /// use manguebyte_dsp::{ProcessContext, ProcessSpec};
+    /// use manguebyte_params::param_set;
+    /// use manguebyte_plugin::output::OutputBuffer;
+    /// use manguebyte_plugin::{AudioLayout, AuxOutput, AuxOutputs, Harness, Plugin, PluginInfo, PluginKind};
+    ///
+    /// struct NoParams {}
+    /// param_set!(NoParams {});
+    ///
+    /// /// A tone on the main output, and each division on a bus of its own.
+    /// struct Divisions(Arc<NoParams>);
+    ///
+    /// impl Plugin for Divisions {
+    ///     const INFO: PluginInfo = PluginInfo {
+    ///         id: "org.example.divisions",
+    ///         name: "Divisions",
+    ///         vendor: "Example",
+    ///         version: "1.0.0",
+    ///         description: "One bus per division",
+    ///         kind: PluginKind::Instrument,
+    ///     };
+    ///     const LAYOUT: AudioLayout = AudioLayout::STEREO_INSTRUMENT;
+    ///     const AUX_OUTPUTS: &'static [AuxOutput] =
+    ///         &[AuxOutput::stereo("Great"), AuxOutput::stereo("Swell").inactive()];
+    ///     type Params = NoParams;
+    ///
+    ///     fn new() -> Self { Self(Arc::new(NoParams {})) }
+    ///     fn params(&self) -> Arc<NoParams> { Arc::clone(&self.0) }
+    ///     fn prepare(&mut self, _: &ProcessSpec) {}
+    ///     fn process(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+    ///         self.process_with_aux(buffer, context, &mut OutputBuffer::new(), &mut AuxOutputs::new());
+    ///     }
+    ///     fn process_with_aux(
+    ///         &mut self,
+    ///         buffer: &mut AudioBuffer<f32>,
+    ///         _: &ProcessContext<'_, f32>,
+    ///         _: &mut OutputBuffer,
+    ///         aux: &mut AuxOutputs,
+    ///     ) {
+    ///         buffer.channel_mut(0).fill(0.1);
+    ///         for (index, level) in [0.2, 0.3].into_iter().enumerate() {
+    ///             // An inactive division is not rendered at all.
+    ///             if let Some(bus) = aux.bus_mut(index) {
+    ///                 bus.channel_mut(0).fill(level);
+    ///             }
+    ///         }
+    ///     }
+    /// }
+    ///
+    /// let mut harness = Harness::<Divisions>::new(48_000.0, 64);
+    /// harness.render(10);
+    /// assert_eq!(harness.aux_output(0).unwrap().channel(0), &[0.2; 10]);
+    /// assert!(harness.aux_output(1).is_none(), "off until switched on");
+    /// harness.set_aux_active(1, true);
+    /// harness.render(10);
+    /// assert_eq!(harness.aux_output(1).unwrap().channel(0), &[0.3; 10]);
+    /// ```
+    fn process_with_aux(
+        &mut self,
+        buffer: &mut AudioBuffer<f32>,
+        context: &ProcessContext<'_, f32>,
+        output: &mut OutputBuffer,
+        aux: &mut AuxOutputs,
+    ) {
+        let _ = aux;
+        self.process_with_output(buffer, context, output);
+    }
+
     /// Clears internal state such as filter memory and tails, without
     /// touching parameters.
     fn reset(&mut self) {}
@@ -626,6 +786,30 @@ pub trait Plugin: Send + 'static {
     /// Without it, the buffer `process_with_output` is given has no room,
     /// and whatever the plugin writes there is dropped.
     const NOTE_OUTPUT: bool = false;
+
+    /// The output buses the plugin has besides its main output, in the
+    /// order hosts list them after it. None unless overridden. The plugin
+    /// writes them in [`process_with_aux`](Self::process_with_aux).
+    ///
+    /// They are fixed, whatever layout of [`LAYOUTS`](Self::LAYOUTS) the
+    /// host chooses, and a host can switch each on or off, which the
+    /// plugin sees as the bus being given or not:
+    ///
+    /// - **CLAP**: one audio port each, after the main output, with its
+    ///   name and channel count; `audio-ports-activation` switches them.
+    ///   CLAP says every port starts active, so
+    ///   [`active_by_default`](AuxOutput::active_by_default) is not used.
+    /// - **VST 3**: one auxiliary audio output bus each, flagged active by
+    ///   default as declared; `activateBus` switches them.
+    /// - **Audio Units**: one output element each, after element 0, with
+    ///   its name. Audio Units cannot switch an element off, so every bus
+    ///   is rendered.
+    /// - **LV2**: one output port per channel after the main outputs,
+    ///   grouped per bus with the port-groups extension; a bus whose ports
+    ///   the host leaves unconnected is off.
+    /// - **The standalone runner**: each bus on device channels of its own,
+    ///   by default the ones after the main output's.
+    const AUX_OUTPUTS: &'static [AuxOutput] = &[];
 
     /// How many frames late the output is compared with the input.
     fn latency_samples(&self) -> usize {

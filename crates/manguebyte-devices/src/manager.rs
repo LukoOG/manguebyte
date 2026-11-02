@@ -20,7 +20,10 @@ use crate::hotswap::{
     Successor, SwapKind, SwapRecord, SwapReport,
 };
 #[cfg(feature = "midi")]
-use crate::midi::{MidiError, MidiInputMessage, MidiReceiver, MidiSink, Timed, merged_receiver};
+use crate::midi::{
+    MidiError, MidiInputMessage, MidiProtocol, MidiReceiver, MidiSink, MidiTransmitter,
+    SharedOutput, SharedOutputThread, Timed, merged_receiver, midi_output_queue,
+};
 #[cfg(feature = "midi")]
 use crate::setup::DeviceRef;
 use crate::setup::{Fallback, Plan, plan};
@@ -40,6 +43,32 @@ const RETURN_TIMEOUT: Duration = Duration::from_secs(2);
 /// finish fading out before it is stopped anyway: a device that stalled
 /// does not hold the swap up for longer.
 const FADE_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// What a setup would open, as [`DeviceManager::preview`] works it out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SetupPreview {
+    /// The output device and what it would be asked for; `None` when no
+    /// output would run.
+    pub output: Option<(DeviceSummary, StreamSettings)>,
+    /// The input device and what it would be asked for; `None` when no
+    /// input would run.
+    pub input: Option<(DeviceSummary, StreamSettings)>,
+    /// The MIDI input ports that would be open.
+    pub midi_inputs: Vec<DeviceSummary>,
+    /// What would differ from the setup, as the restore report would say.
+    pub fallbacks: Vec<Fallback>,
+}
+
+impl SetupPreview {
+    /// The sample rate the devices would run at.
+    pub fn sample_rate(&self) -> Option<u32> {
+        self.output
+            .iter()
+            .chain(&self.input)
+            .find_map(|(_, settings)| settings.sample_rate)
+    }
+}
 
 /// The format a callback will run with, as told to
 /// [`AudioCallback::prepare`].
@@ -345,11 +374,17 @@ pub struct DeviceManager {
     midi_shared: Arc<Mutex<Producer<Timed>>>,
     #[cfg(feature = "midi")]
     midi_inputs: Vec<(DeviceSummary, Box<dyn Send>)>,
+    /// The open MIDI output port, as the shared output has it, so that it
+    /// can be lent out.
     #[cfg(feature = "midi")]
-    midi_output: Option<(DeviceSummary, Box<dyn MidiSender>)>,
-    /// Puts packets for the output port together, made when first needed.
+    midi_output: Option<DeviceSummary>,
+    /// The MIDI output port itself, shared with the thread that sends it
+    /// what the audio thread queues.
     #[cfg(feature = "midi")]
-    midi_writer: Option<crate::midi::PacketWriter>,
+    midi_shared_output: Arc<Mutex<SharedOutput>>,
+    /// That thread, once a callback asked for a transmitter.
+    #[cfg(feature = "midi")]
+    midi_sending: Option<SharedOutputThread>,
 }
 
 impl std::fmt::Debug for DeviceManager {
@@ -454,7 +489,9 @@ impl DeviceManager {
             #[cfg(feature = "midi")]
             midi_output: None,
             #[cfg(feature = "midi")]
-            midi_writer: None,
+            midi_shared_output: Arc::new(Mutex::new(SharedOutput::new())),
+            #[cfg(feature = "midi")]
+            midi_sending: None,
         }
     }
 
@@ -622,6 +659,58 @@ impl DeviceManager {
         self.open()
     }
 
+    /// Applies `setup` and gives the callback started with
+    /// [`start_engine`](Self::start_engine) a new format, for a change the
+    /// devices' edge should not hide, such as following a device to
+    /// another sample rate instead of resampling it.
+    ///
+    /// With the format the callback runs at, this is
+    /// [`apply`](Self::apply). Otherwise the running device fades out and
+    /// stops, the callback is released and prepared again with `format`,
+    /// and the setup's devices start with it and fade in: the same
+    /// callback goes on, and [`last_swap`](Self::last_swap) reports a
+    /// [`SwapKind::Gap`]. If the new devices cannot be started, the
+    /// callback keeps `format` and waits, as after a failed
+    /// [`apply`](Self::apply).
+    ///
+    /// Returns [`DeviceError::NoCallback`] for a manager that was not
+    /// started with [`start_engine`](Self::start_engine).
+    pub fn apply_with_format(
+        &mut self,
+        setup: &DeviceSetup,
+        format: EngineFormat,
+    ) -> Result<RestoreReport, DeviceError> {
+        let Some(engine) = &self.engine else {
+            return Err(DeviceError::NoCallback);
+        };
+        if engine.format == format {
+            return self.apply(setup);
+        }
+        self.finish_crossfades(true);
+        let faded = if self
+            .running
+            .as_ref()
+            .is_some_and(|running| !running.is_lost())
+        {
+            self.fade_out_running().map(|old| (old, Instant::now()))
+        } else {
+            None
+        };
+        self.collect_core();
+        let Some(engine) = &mut self.engine else {
+            return Err(DeviceError::NoCallback);
+        };
+        let Some(core) = &mut engine.core else {
+            return Err(DeviceError::NoCallback);
+        };
+        core.parked.callback.release();
+        core.parked.callback.prepare(&format.stream_format());
+        engine.format = format;
+        engine.dead = false;
+        self.setup = setup.clone();
+        self.open_engine_after(faded)
+    }
+
     /// Restarts the stream on the setup, for example after its device was
     /// lost: the saved devices are looked for again, with the same
     /// fallbacks as at the start.
@@ -774,7 +863,22 @@ impl DeviceManager {
             #[cfg(feature = "midi")]
             DeviceEvent::MidiPortAdded { .. } | DeviceEvent::MidiPortRemoved { .. } => {
                 let planned = self.plan_now().ok()?;
-                let mut report = RestoreReport::default();
+                // What the setup's MIDI ports fell back to, such as a port
+                // that went away.
+                let mut report = RestoreReport {
+                    fallbacks: planned
+                        .fallbacks
+                        .iter()
+                        .filter(|fallback| {
+                            matches!(
+                                fallback,
+                                Fallback::MidiPortMissing { .. }
+                                    | Fallback::MidiPortReplaced { .. }
+                            )
+                        })
+                        .cloned()
+                        .collect(),
+                };
                 let before = self.open_midi_ports();
                 self.connect_midi(&planned, &mut report);
                 (self.open_midi_ports() != before).then_some(Ok(report))
@@ -784,11 +888,36 @@ impl DeviceManager {
     }
 
     fn plan_now(&self) -> Result<Plan, DeviceError> {
+        self.plan_for(&self.setup)
+    }
+
+    fn plan_for(&self, setup: &DeviceSetup) -> Result<Plan, DeviceError> {
         let snapshot = self.backend.snapshot()?;
         let backend = Arc::clone(&self.backend);
-        Ok(plan(&self.setup, &snapshot, &|direction, id| {
+        Ok(plan(setup, &snapshot, &|direction, id| {
             backend.device_info(direction, id).ok()
         }))
+    }
+
+    /// What [`apply`](Self::apply) would open for `setup` now, worked out
+    /// without opening or changing anything: the devices with their
+    /// settings, the MIDI input ports, and the fallbacks it would report,
+    /// for a caller that must choose something, such as an engine format,
+    /// before it applies the setup.
+    ///
+    /// It plans on the host in use: a setup that names another host is
+    /// planned as if it named this one. A backend that loads one driver
+    /// at a time may be unable to describe another device while a stream
+    /// runs, and then plans that device away, as [`apply`](Self::apply)
+    /// would before it stops the stream and plans again.
+    pub fn preview(&self, setup: &DeviceSetup) -> Result<SetupPreview, DeviceError> {
+        let planned = self.plan_for(setup)?;
+        Ok(SetupPreview {
+            output: planned.output,
+            input: planned.input,
+            midi_inputs: planned.midi_inputs,
+            fallbacks: planned.fallbacks,
+        })
     }
 
     fn park(&mut self, parked: Parked) {
@@ -1006,6 +1135,15 @@ impl DeviceManager {
 impl DeviceManager {
     fn open_engine(&mut self) -> Result<RestoreReport, DeviceError> {
         self.finish_crossfades(true);
+        self.open_engine_after(None)
+    }
+
+    /// Opens the setup for the engine. `faded` is a stream that has
+    /// already faded out and stopped, and when it did.
+    fn open_engine_after(
+        &mut self,
+        mut faded: Option<(Arc<EdgeShared>, Instant)>,
+    ) -> Result<RestoreReport, DeviceError> {
         let mut report = RestoreReport::default();
         let mut planned = self.plan_open(&mut report)?;
         // A backend that loads one driver at a time cannot describe another
@@ -1013,7 +1151,6 @@ impl DeviceManager {
         // describe away. It could not have run beside the old stream anyway:
         // the old stream fades out and stops, and the setup is planned
         // again.
-        let mut faded = None;
         let undescribed = planned.fallbacks.iter().any(|fallback| {
             matches!(
                 fallback,
@@ -1419,28 +1556,37 @@ impl DeviceManager {
             }
         }
         match &planned.midi_output {
-            None => self.midi_output = None,
+            None => self.replace_midi_output(None),
             Some(port) => {
-                if self.midi_output.as_ref().map(|(open, _)| &open.id) != Some(&port.id) {
-                    self.midi_output = None;
+                if self.midi_output.as_ref().map(|open| &open.id) != Some(&port.id) {
                     match self.backend.connect_midi_output(&port.id) {
-                        Ok(sender) => self.midi_output = Some((port.clone(), sender)),
-                        Err(error) => report.fallbacks.push(Fallback::MidiPortMissing {
-                            direction: Direction::Output,
-                            wanted: DeviceRef::from(port),
-                            reason: error.to_string(),
-                        }),
+                        Ok(sender) => self.replace_midi_output(Some((port.clone(), sender))),
+                        Err(error) => {
+                            self.replace_midi_output(None);
+                            report.fallbacks.push(Fallback::MidiPortMissing {
+                                direction: Direction::Output,
+                                wanted: DeviceRef::from(port),
+                                reason: error.to_string(),
+                            });
+                        }
                     }
                 }
             }
         }
     }
 
+    /// Puts `next` in place of the open MIDI output port, after ending
+    /// the notes the old one plays.
+    fn replace_midi_output(&mut self, next: Option<(DeviceSummary, Box<dyn MidiSender>)>) {
+        self.midi_output = next.as_ref().map(|(port, _)| port.clone());
+        SharedOutput::lock(&self.midi_shared_output).replace(next.map(|(_, sender)| sender));
+    }
+
     fn open_midi_ports(&self) -> Vec<String> {
         self.midi_inputs
             .iter()
             .map(|(port, _)| port.id.clone())
-            .chain(self.midi_output.iter().map(|(port, _)| port.id.clone()))
+            .chain(self.midi_output.iter().map(|port| port.id.clone()))
             .collect()
     }
 
@@ -1470,7 +1616,68 @@ impl DeviceManager {
 
     /// The MIDI output port that is open.
     pub fn midi_output(&self) -> Option<&DeviceSummary> {
-        self.midi_output.as_ref().map(|(port, _)| port)
+        self.midi_output.as_ref()
+    }
+
+    /// The protocol the open MIDI output port speaks; every port the
+    /// manager opens speaks MIDI 1.0 for now.
+    pub fn midi_output_protocol(&self) -> Option<MidiProtocol> {
+        SharedOutput::lock(&self.midi_shared_output).protocol()
+    }
+
+    /// Makes a queue from the audio thread to the MIDI output port, and
+    /// starts the thread that sends what it carries, each packet when it
+    /// is due (see [`MidiTransmitter`] for the timing). The callback keeps
+    /// the transmitter, calls [`MidiTransmitter::begin_block`] at the start
+    /// of every block and [`MidiTransmitter::send`] for each packet; both
+    /// are real-time safe. Room for `capacity` packets waiting.
+    ///
+    /// The packets go to whichever port is open when they are due, so the
+    /// port can change ([`set_midi_output`](Self::set_midi_output),
+    /// [`apply`](Self::apply), [`follow`](Self::follow)) while the audio
+    /// thread sends, and the audio thread never knows: it only pushes into
+    /// the queue, which neither allocates, locks nor waits. A packet due
+    /// while no port is open is dropped.
+    ///
+    /// A port that is changed or closed is first sent a note-off for every
+    /// note it plays, and a controller 64 of zero for every sustain pedal
+    /// it holds down, so that none is left hanging there, and a note-off
+    /// for a note the open port is not playing, such as one a change of
+    /// port has already ended, is not sent. So every note-on reaches one
+    /// port, and that port receives one note-off for it.
+    ///
+    /// Calling it again replaces the queue: the old one's thread sends
+    /// what is waiting and stops. Allocates and starts a thread.
+    pub fn midi_output_transmitter(&mut self, capacity: usize) -> MidiTransmitter {
+        self.midi_sending = None;
+        let (transmitter, queue) = midi_output_queue(capacity);
+        self.midi_sending = Some(SharedOutputThread::start(
+            Arc::clone(&self.midi_shared_output),
+            queue,
+        ));
+        transmitter
+    }
+
+    /// Whether the thread that sends the audio thread's packets runs: it
+    /// does from [`midi_output_transmitter`](Self::midi_output_transmitter)
+    /// on, unless the system refused to start it.
+    pub fn is_sending_midi(&self) -> bool {
+        self.midi_sending
+            .as_ref()
+            .is_some_and(SharedOutputThread::is_running)
+    }
+
+    /// How many messages queued through
+    /// [`midi_output_transmitter`](Self::midi_output_transmitter) the
+    /// ports refused.
+    pub fn midi_output_errors(&self) -> u64 {
+        SharedOutput::lock(&self.midi_shared_output).errors()
+    }
+
+    /// How many notes were ended by a change or a close of the MIDI output
+    /// port, each with a note-off to the port that played it.
+    pub fn midi_output_notes_ended(&self) -> u64 {
+        SharedOutput::lock(&self.midi_shared_output).released()
     }
 
     /// Adds a MIDI input port to the setup and opens it at once, without
@@ -1500,21 +1707,42 @@ impl DeviceManager {
         self.midi_inputs.retain(|(port, _)| port.id != id);
     }
 
-    /// Sets the MIDI output port of the setup and opens it, or closes it.
+    /// Sets the MIDI output port of the setup and opens it, or closes it
+    /// with `None`, without touching the audio. The port open before is
+    /// first sent a note-off for every note it plays and its sustain
+    /// pedals are lifted; the same port again
+    /// is left open as it is.
+    ///
+    /// A port that cannot be opened returns the error and leaves no port
+    /// open, but stays in the setup, so that [`follow`](Self::follow) opens
+    /// it when it appears.
     pub fn set_midi_output(&mut self, port: Option<DeviceRef>) -> Result<(), MidiError> {
-        self.midi_output = None;
         self.setup.midi_output = port.clone();
-        if let Some(port) = port {
-            let sender = self.backend.connect_midi_output(&port.id)?;
-            self.midi_output = Some((
-                DeviceSummary {
+        let Some(port) = port else {
+            self.replace_midi_output(None);
+            return Ok(());
+        };
+        if self
+            .midi_output
+            .as_ref()
+            .is_some_and(|open| open.id == port.id)
+        {
+            return Ok(());
+        }
+        match self.backend.connect_midi_output(&port.id) {
+            Ok(sender) => {
+                let summary = DeviceSummary {
                     id: port.id,
                     name: port.name,
-                },
-                sender,
-            ));
+                };
+                self.replace_midi_output(Some((summary, sender)));
+                Ok(())
+            }
+            Err(error) => {
+                self.replace_midi_output(None);
+                Err(error)
+            }
         }
-        Ok(())
     }
 
     /// Sends one complete MIDI message to the open MIDI output port.
@@ -1522,39 +1750,22 @@ impl DeviceManager {
     /// This talks to the operating system and may block: never call it
     /// from the audio thread.
     pub fn send_midi(&mut self, bytes: &[u8]) -> Result<(), MidiError> {
-        match &mut self.midi_output {
-            Some((_, sender)) => sender.send(bytes),
-            None => Err(MidiError::PortNotFound(String::from(
-                "no MIDI output is open",
-            ))),
-        }
+        SharedOutput::lock(&self.midi_shared_output).send_bytes(bytes)
     }
 
-    /// Sends one Universal MIDI Packet to the open MIDI output port, as
-    /// the MIDI 1.0 bytes it stands for; see
+    /// Sends one Universal MIDI Packet to the open MIDI output port: as
+    /// it is to a port that speaks MIDI 2.0, as the MIDI 1.0 bytes it
+    /// stands for to the others; see
     /// [`PacketWriter`](crate::midi::PacketWriter) for what becomes what.
     ///
     /// This talks to the operating system and may block: never call it
-    /// from the audio thread.
+    /// from the audio thread; there, use
+    /// [`midi_output_transmitter`](Self::midi_output_transmitter).
     pub fn send_midi_packet(
         &mut self,
         packet: &manguebyte_midi::ump::Packet,
     ) -> Result<(), MidiError> {
-        let Some((_, sender)) = &mut self.midi_output else {
-            return Err(MidiError::PortNotFound(String::from(
-                "no MIDI output is open",
-            )));
-        };
-        let writer = self
-            .midi_writer
-            .get_or_insert_with(crate::midi::PacketWriter::new);
-        let mut result = Ok(());
-        writer.write(packet, |bytes| {
-            if result.is_ok() {
-                result = sender.send(bytes);
-            }
-        });
-        result
+        SharedOutput::lock(&self.midi_shared_output).send_packet(packet)
     }
 }
 
@@ -1563,5 +1774,12 @@ impl Drop for DeviceManager {
         // The stream goes before the MIDI ports that feed it.
         self.stop();
         drop(self.leave_engine());
+        // Then what the audio thread queued for the MIDI output, and the
+        // port, which ends the notes it plays.
+        #[cfg(feature = "midi")]
+        {
+            self.midi_sending = None;
+            self.replace_midi_output(None);
+        }
     }
 }

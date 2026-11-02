@@ -49,6 +49,8 @@ use manguebyte_midi::MidiMessage;
 use manguebyte_params::{Param, ParamSet};
 use manguebyte_plugin::output::{OutputBuffer, OutputProtocol, OutputTranslator};
 use manguebyte_plugin::{
+    AudioLayout, AuxOutputs, ParamWatcher, Plugin, PluginKind, load_state, offered_layouts,
+    plugin_info, save_state,
     AudioLayout, ParamWatcher, Plugin, PluginKind, Tail, load_state, offered_layouts, save_state,
 };
 
@@ -162,6 +164,13 @@ struct Prepared {
     buffer: AudioBuffer<f32>,
     sidechain: AudioBuffer<f32>,
     pulls: Vec<Pull>,
+    /// The auxiliary output elements, all on: an Audio Unit host cannot
+    /// switch an element off.
+    aux: AuxOutputs,
+    /// For a plugin with auxiliary elements, the sample time and length of
+    /// the slice last rendered, which a render of another element for the
+    /// same slice reads instead of running the plugin again.
+    rendered: Option<(f64, u32)>,
 }
 
 /// The state used while rendering.
@@ -282,6 +291,10 @@ pub(crate) struct Instance<P: Plugin> {
     last_error: AtomicI32,
     /// Events dropped on the audio thread, for the tests.
     dropped: AtomicU64,
+    /// The parameters' `labels_version` when the listeners were last told
+    /// that the parameter list changed. Only ever used off the audio
+    /// thread.
+    labels_told: AtomicU64,
     config: Exclusive<Config>,
     audio: Exclusive<Audio<P>>,
     /// Only ever taken off the audio thread.
@@ -323,7 +336,7 @@ pub(crate) fn factory<P: Plugin>() -> *mut c_void {
             },
             component: AtomicPtr::new(ptr::null_mut()),
             ids: ids.into_boxed_slice(),
-            codes: codes(&P::INFO).map(as_os_type),
+            codes: codes(plugin_info::<P>()).map(as_os_type),
             inputs: inputs.into_boxed_slice(),
             layouts: offered_layouts::<P>(),
             initialized: AtomicBool::new(false),
@@ -331,6 +344,7 @@ pub(crate) fn factory<P: Plugin>() -> *mut c_void {
             tail: AtomicF64::new(INFINITE_TAIL_SECONDS),
             last_error: AtomicI32::new(noErr),
             dropped: AtomicU64::new(0),
+            labels_told: AtomicU64::new(params.labels_version()),
             config: Exclusive::new(Config {
                 sample_rate: DEFAULT_SAMPLE_RATE,
                 max_frames: DEFAULT_MAX_FRAMES,
@@ -520,6 +534,21 @@ impl<P: Plugin> Instance<P> {
         }
     }
 
+    /// If any parameter was given a new name, short name or unit since the
+    /// listeners were last told, tells the listeners of
+    /// `kAudioUnitProperty_ParameterList` once, however many were renamed,
+    /// so that a host reads each parameter's information again (ADR 0020).
+    ///
+    /// An Audio Unit has no call on the main thread of its own, so this
+    /// runs where the host calls in anyway: `Initialize` and a restored
+    /// state. Off the audio thread only.
+    fn tell_new_labels(&self) {
+        let now = self.params.labels_version();
+        if self.labels_told.swap(now, Ordering::Relaxed) != now {
+            self.changed(kAudioUnitProperty_ParameterList, kAudioUnitScope_Global, 0);
+        }
+    }
+
     /// The channels of an element of a scope as the host has set them, or
     /// the error for one that does not exist.
     fn channels(
@@ -573,6 +602,7 @@ impl<P: Plugin> Instance<P> {
         }
         self.prepare();
         self.initialized.store(true, Ordering::Release);
+        self.tell_new_labels();
         noErr
     }
 
@@ -600,12 +630,18 @@ impl<P: Plugin> Instance<P> {
                     pull(channels, frames)
                 })
                 .collect();
+            let mut aux = AuxOutputs::for_plugin::<P>(frames);
+            for index in 0..aux.len() {
+                aux.set_active(index, true);
+            }
             audio.prepared = Some(Prepared {
                 max_frames,
                 layout,
                 buffer: AudioBuffer::new(layout.outputs, frames),
                 sidechain: AudioBuffer::new(layout.sidechain, frames),
                 pulls,
+                aux,
+                rendered: None,
             });
             audio.pending.clear();
             audio.translator.reset();
@@ -634,7 +670,8 @@ impl<P: Plugin> Instance<P> {
 /// The channels an element of a scope has under `layout`, or the error for
 /// an element the plugin does not have. Which elements there are is fixed
 /// by the plugin's own layout: input 0 is the main input, or the sidechain
-/// of an instrument; input 1 the sidechain of an effect.
+/// of an instrument; input 1 the sidechain of an effect; output 0 the main
+/// output, and each output after it an auxiliary one, of fixed width.
 fn width<P: Plugin>(
     layout: AudioLayout,
     scope: AudioUnitScope,
@@ -649,7 +686,10 @@ fn width<P: Plugin>(
             _ => Err(kAudioUnitErr_InvalidElement),
         },
         kAudioUnitScope_Output if element == 0 => Ok(layout.outputs),
-        kAudioUnitScope_Output => Err(kAudioUnitErr_InvalidElement),
+        kAudioUnitScope_Output => P::AUX_OUTPUTS
+            .get(element as usize - 1)
+            .map(|aux| aux.channels)
+            .ok_or(kAudioUnitErr_InvalidElement),
         _ => Err(kAudioUnitErr_InvalidScope),
     }
 }
@@ -665,7 +705,9 @@ fn set_width<P: Plugin>(
     match (scope, element) {
         (kAudioUnitScope_Input, 0) if main => layout.inputs = channels,
         (kAudioUnitScope_Input, _) => layout.sidechain = channels,
-        _ => layout.outputs = channels,
+        (_, 0) => layout.outputs = channels,
+        // An auxiliary output has one width, which `width` gives.
+        _ => {}
     }
 }
 
@@ -767,7 +809,7 @@ fn display(param: &dyn Param) -> Display {
             return Display::Indexed;
         }
     }
-    let unit = match param.info().unit() {
+    let unit = match &*param.info().display_unit() {
         "dB" | "db" | "dBFS" => kAudioUnitParameterUnit_Decibels,
         "Hz" | "hz" => kAudioUnitParameterUnit_Hertz,
         "ms" => kAudioUnitParameterUnit_Milliseconds,
@@ -828,8 +870,9 @@ impl<P: Plugin> Instance<P> {
             defaultValue: param.default_plain().clamp(min, max) as f32,
             flags: kAudioUnitParameterFlag_IsReadable | kAudioUnitParameterFlag_IsWritable,
         };
-        copy_name(param.name(), &mut info.name);
-        if let Some(name) = cf::string(param.name()) {
+        let name = param.display_name();
+        copy_name(&name, &mut info.name);
+        if let Some(name) = cf::string(&name) {
             // The host releases it, as the flags say.
             info.cfNameString = name.into_raw();
             info.flags |=
@@ -1355,7 +1398,7 @@ impl<P: Plugin> Instance<P> {
         frames: u32,
         list: *mut AudioBufferList,
     ) -> OSStatus {
-        if bus != 0 {
+        if bus as usize > P::AUX_OUTPUTS.len() {
             return kAudioUnitErr_InvalidElement;
         }
         if list.is_null() {
@@ -1413,8 +1456,97 @@ impl<P: Plugin> Instance<P> {
         if frames > prepared.max_frames {
             return kAudioUnitErr_TooManyFramesToProcess;
         }
+        // A host pulls each output element of a unit with several for the
+        // same slice, in any order: the plugin runs for the first, and the
+        // others are read from what it wrote then, as Apple's own base
+        // classes do. A unit with one output runs for every render.
+        // SAFETY: the host's time stamp, or null.
+        let stamp = unsafe { timestamp.as_ref() }
+            .filter(|stamp| stamp.mFlags & kAudioTimeStampSampleTimeValid != 0)
+            .map(|stamp| (stamp.mSampleTime, frames))
+            .filter(|_| !P::AUX_OUTPUTS.is_empty());
+        let cached = stamp.is_some() && prepared.rendered == stamp;
         let frames = frames as usize;
+        if !cached {
+            prepared.rendered = stamp;
+            let status = self.run_plugin(
+                plugin, prepared, pending, events, watcher, output, &config, timestamp, frames,
+            );
+            if status != noErr {
+                return status;
+            }
+        }
 
+        // The output: into the host's memory, or, where it gave none, in
+        // the unit's own, which stays valid until the next render.
+        let source = match bus {
+            0 => &mut prepared.buffer,
+            aux => match prepared.aux.bus_mut(aux as usize - 1) {
+                Some(written) => written,
+                None => return kAudioUnitErr_InvalidElement,
+            },
+        };
+        // SAFETY: the host's list, with as many buffers as it says.
+        for (channel, buffer) in unsafe { buffers(list) }.iter_mut().enumerate() {
+            if buffer.mNumberChannels > 1 {
+                return kAudioUnitErr_FormatNotSupported;
+            }
+            let ours = (channel < source.num_channels()).then(|| source.channel_mut(channel));
+            if buffer.mData.is_null() {
+                match ours {
+                    Some(samples) => {
+                        buffer.mData = samples.as_mut_ptr().cast();
+                        buffer.mDataByteSize = (frames * 4) as u32;
+                        buffer.mNumberChannels = 1;
+                    }
+                    None => return kAudioUnitErr_FormatNotSupported,
+                }
+                continue;
+            }
+            let room = (buffer.mDataByteSize as usize / 4).min(frames);
+            // SAFETY: the host's buffer holds `mDataByteSize` bytes.
+            let target =
+                unsafe { std::slice::from_raw_parts_mut(buffer.mData.cast::<f32>(), room) };
+            match ours {
+                Some(samples) => target.copy_from_slice(&samples[..room]),
+                None => target.fill(0.0),
+            }
+            buffer.mDataByteSize = (room * 4) as u32;
+        }
+        if let Some(midi_out) = config.midi_out.filter(|_| !cached && !output.is_empty()) {
+            // SAFETY: the host's callback and data, on its render thread,
+            // with its own time stamp.
+            unsafe { send_midi(output, translator, packets, midi_out, timestamp, frames) };
+        }
+        drop(audio);
+        // SAFETY: the host's arguments.
+        unsafe {
+            self.notify_render(
+                kAudioUnitRenderAction_PostRender,
+                flags,
+                timestamp,
+                frames as u32,
+                list,
+            )
+        };
+        noErr
+    }
+
+    /// Pulls the input elements and runs the plugin for one slice of
+    /// `frames` frames, into the unit's own memory. Real-time safe.
+    #[allow(clippy::too_many_arguments)]
+    fn run_plugin(
+        &self,
+        plugin: &mut P,
+        prepared: &mut Prepared,
+        pending: &mut EventBuffer,
+        events: &mut EventBuffer,
+        watcher: &mut ParamWatcher,
+        output: &mut OutputBuffer,
+        config: &Rendering,
+        timestamp: *const AudioTimeStamp,
+        frames: usize,
+    ) -> OSStatus {
         // The input elements: the main input, which must be connected, and
         // the sidechain, which is silent when it is not.
         prepared.buffer.set_num_frames(frames);
@@ -1467,59 +1599,15 @@ impl<P: Plugin> Instance<P> {
             if prepared.layout.sidechain > 0 {
                 context = context.with_sidechain(&prepared.sidechain);
             }
-            plugin.process_with_output(&mut prepared.buffer, &context, output);
+            prepared.aux.start_block(frames);
+            plugin.process_with_aux(&mut prepared.buffer, &context, output, &mut prepared.aux);
         } else {
             pending.clear();
+            // Bypassed, the auxiliary outputs are silent.
+            prepared.aux.start_block(frames);
         }
         let latency = u32::try_from(plugin.latency_samples()).unwrap_or(u32::MAX);
         self.latency.store(latency, Ordering::Relaxed);
-
-        // The output: into the host's memory, or, where it gave none, in
-        // the unit's own, which stays valid until the next render.
-        // SAFETY: the host's list, with as many buffers as it says.
-        for (channel, buffer) in unsafe { buffers(list) }.iter_mut().enumerate() {
-            if buffer.mNumberChannels > 1 {
-                return kAudioUnitErr_FormatNotSupported;
-            }
-            let ours = (channel < prepared.buffer.num_channels())
-                .then(|| prepared.buffer.channel_mut(channel));
-            if buffer.mData.is_null() {
-                match ours {
-                    Some(samples) => {
-                        buffer.mData = samples.as_mut_ptr().cast();
-                        buffer.mDataByteSize = (frames * 4) as u32;
-                        buffer.mNumberChannels = 1;
-                    }
-                    None => return kAudioUnitErr_FormatNotSupported,
-                }
-                continue;
-            }
-            let room = (buffer.mDataByteSize as usize / 4).min(frames);
-            // SAFETY: the host's buffer holds `mDataByteSize` bytes.
-            let target =
-                unsafe { std::slice::from_raw_parts_mut(buffer.mData.cast::<f32>(), room) };
-            match ours {
-                Some(samples) => target.copy_from_slice(&samples[..room]),
-                None => target.fill(0.0),
-            }
-            buffer.mDataByteSize = (room * 4) as u32;
-        }
-        if let Some(midi_out) = config.midi_out.filter(|_| !output.is_empty()) {
-            // SAFETY: the host's callback and data, on its render thread,
-            // with its own time stamp.
-            unsafe { send_midi(output, translator, packets, midi_out, timestamp, frames) };
-        }
-        drop(audio);
-        // SAFETY: the host's arguments.
-        unsafe {
-            self.notify_render(
-                kAudioUnitRenderAction_PostRender,
-                flags,
-                timestamp,
-                frames as u32,
-                list,
-            )
-        };
         noErr
     }
 }
@@ -2170,6 +2258,7 @@ impl<P: Plugin> Instance<P> {
                 kAudioUnitProperty_ElementCount => {
                     let count = match scope {
                         kAudioUnitScope_Input => self.inputs.len() as u32,
+                        kAudioUnitScope_Output => 1 + P::AUX_OUTPUTS.len() as u32,
                         _ => 1,
                     };
                     put(out, size, count)
@@ -2218,7 +2307,10 @@ impl<P: Plugin> Instance<P> {
                 kAudioUnitProperty_BypassEffect => put(out, size, u32::from(config().bypass)),
                 kAudioUnitProperty_ElementName => {
                     let name = match (scope, element) {
-                        (kAudioUnitScope_Output, _) => "Output",
+                        (kAudioUnitScope_Output, 0) => "Output",
+                        (kAudioUnitScope_Output, aux) => P::AUX_OUTPUTS
+                            .get(aux as usize - 1)
+                            .map_or("Output", |aux| aux.name),
                         (_, 0) if P::LAYOUT.inputs > 0 => "Input",
                         _ => "Sidechain",
                     };
@@ -2344,6 +2436,8 @@ impl<P: Plugin> Instance<P> {
                     let status = self.restore(list);
                     if status == noErr {
                         self.changed(kAudioUnitProperty_PresentPreset, kAudioUnitScope_Global, 0);
+                        // A plugin may rename parameters as it loads.
+                        self.tell_new_labels();
                     }
                     status
                 }

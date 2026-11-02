@@ -44,16 +44,18 @@
 
 use tiny_skia as sk;
 
-use super::Raster;
+use super::{Caches, Raster};
 use crate::color::{Color, mul_div_255};
-use crate::geom::{IRect, Point, Rect, Transform};
+use crate::geom::{Circle, IRect, Point, Radii, Rect, RoundedRect, Transform};
 use crate::image::Sampling;
 use crate::paint::{Cap, Extend, Join, Stop, Stroke};
 use crate::path::{FillRule, Verb};
 use crate::pixmap::{ImageError, MAX_SIDE, Pixmap};
 use crate::scene::{
-    Command, MAX_DEPTH, Scene, StoredGlyph, StoredPaint, StoredShape, TEXT_TOLERANCE, shape_bounds,
+    Command, MAX_DEPTH, Scene, StoredGlyph, StoredPaint, StoredShape, TEXT_TOLERANCE,
+    shadow_bounds, shape_bounds,
 };
+use crate::shadow::{Shadow, ShadowCache, ShadowMask, blur, box_reach, box_size};
 use crate::text::font::{Coords, Face};
 use crate::text::{GlyphCache, GlyphKey, Mask};
 
@@ -161,8 +163,12 @@ pub(crate) struct Skia {
     layers: Vec<Vec<u8>>,
     /// The copy of the target a partial render draws in.
     scratch: Vec<u8>,
-    /// Clip masks, one per clip level, the size of the target.
+    /// Clip masks, one per clip level, the size of the target, and for
+    /// each the pixels it may hold coverage in: zero everywhere else, so
+    /// that pushing a clip clears only what the last clip at that level
+    /// covered, not the whole target.
     masks: Vec<sk::Mask>,
+    mask_dirty: Vec<Option<IRect>>,
     /// Coverage for [`Scene::columns`], kept all zero between uses.
     columns: Option<sk::Mask>,
     /// The target size the masks are made for.
@@ -188,6 +194,11 @@ pub(crate) struct Skia {
     face: Face,
     /// The coverage of a run of glyphs drawn from masks, over its box.
     coverage: Vec<u8>,
+    /// What identifies a shadow's mask in the cache, and the blur's
+    /// scratch buffers.
+    shadow_key: Vec<u32>,
+    blur_work: Vec<u16>,
+    blur_line: Vec<u16>,
     /// Drawing commands not skipped, counted for tests.
     #[cfg(test)]
     drawn: usize,
@@ -202,6 +213,7 @@ impl Skia {
             layers: Vec::new(),
             scratch: Vec::new(),
             masks: Vec::new(),
+            mask_dirty: Vec::new(),
             columns: None,
             size: (0, 0),
             transforms: Vec::new(),
@@ -217,6 +229,9 @@ impl Skia {
             owners: Vec::new(),
             face: Face::embedded(),
             coverage: Vec::new(),
+            shadow_key: Vec::new(),
+            blur_work: Vec::new(),
+            blur_line: Vec::new(),
             #[cfg(test)]
             drawn: 0,
             #[cfg(test)]
@@ -629,6 +644,18 @@ fn blend_solid(pixel: &mut [u8], color: [u8; 4], coverage: u8) {
     }
 }
 
+/// Each channel of a pixel packed in a `u32` (little-endian RGBA) times
+/// `alpha` over 255, rounded as [`mul_div_255`] rounds it: two channels at
+/// a time in 16-bit lanes, which never carry into each other.
+fn scale_pixel(pixel: u32, alpha: u32) -> u32 {
+    const LANES: u32 = 0x00FF_00FF;
+    let rb = (pixel & LANES) * alpha + 0x0080_0080;
+    let rb = ((rb + ((rb >> 8) & LANES)) >> 8) & LANES;
+    let ag = ((pixel >> 8) & LANES) * alpha + 0x0080_0080;
+    let ag = (ag + ((ag >> 8) & LANES)) & !LANES;
+    rb | ag
+}
+
 /// `mask` if it is `width` by `height`; otherwise a mask of that size,
 /// all zero, reusing its memory.
 fn sized_mask(mask: Option<sk::Mask>, width: u32, height: u32) -> Option<sk::Mask> {
@@ -967,7 +994,7 @@ impl Raster for Skia {
         target: &mut Pixmap,
         transform: Transform,
         damage: Option<&[IRect]>,
-        glyphs: &mut GlyphCache,
+        mut caches: Caches<'_>,
     ) {
         if !transform.is_finite() || target.is_empty() {
             return;
@@ -977,13 +1004,14 @@ impl Raster for Skia {
             // Masks are made again at the new size when a clip needs one;
             // layer buffers are resized when a layer is pushed.
             self.masks.clear();
+            self.mask_dirty.clear();
             self.columns = None;
             self.size = (width, height);
         }
         let Some(damage) = damage else {
             // A whole render draws straight into the target's own buffer,
             // which never leaves it, so a panic cannot leave it short.
-            self.pass(scene, target.data_mut(), transform, None, glyphs);
+            self.pass(scene, target.data_mut(), transform, None, &mut caches);
             return;
         };
         self.plan(damage);
@@ -1006,7 +1034,7 @@ impl Raster for Skia {
             {
                 copy(target.data(), &mut scratch, width, *rect);
             }
-            self.pass(scene, &mut scratch, transform, Some(window), glyphs);
+            self.pass(scene, &mut scratch, transform, Some(window), &mut caches);
             let pixels = target.data_mut();
             for (rect, _) in damage
                 .iter()
@@ -1071,7 +1099,7 @@ impl Skia {
         base: &mut [u8],
         transform: Transform,
         window: Option<Window>,
-        glyphs: &mut GlyphCache,
+        caches: &mut Caches<'_>,
     ) {
         let mut walk = Walk {
             width: self.size.0,
@@ -1086,7 +1114,7 @@ impl Skia {
         self.transforms.clear();
         self.frames.clear();
         for command in &scene.commands {
-            self.command(scene, base, &mut walk, *command, glyphs);
+            self.command(scene, base, &mut walk, *command, caches);
         }
         // Close whatever is still open, so open layers are composited.
         while let Some(frame) = self.frames.last().copied() {
@@ -1095,7 +1123,7 @@ impl Skia {
                 Kind::Transform => Command::PopTransform,
                 Kind::Layer => Command::PopLayer,
             };
-            self.command(scene, base, &mut walk, pop, glyphs);
+            self.command(scene, base, &mut walk, pop, caches);
         }
     }
 
@@ -1117,7 +1145,7 @@ impl Skia {
         base: &mut [u8],
         walk: &mut Walk,
         command: Command,
-        glyphs: &mut GlyphCache,
+        caches: &mut Caches<'_>,
     ) {
         match command {
             Command::PushTransform(by) => {
@@ -1186,6 +1214,25 @@ impl Skia {
                     self.stroke(scene, base, walk, shape, &stroke, paint);
                 }
             }
+            Command::Shadow {
+                shape,
+                stroke,
+                shadow,
+            } => {
+                let Some(local) = shadow_bounds(scene, shape, stroke, &shadow) else {
+                    return;
+                };
+                if walk.reaches(walk.transform.map_rect(&local)) {
+                    self.drawing();
+                    self.shadow(
+                        scene,
+                        base,
+                        walk,
+                        (shape, stroke, shadow, local),
+                        caches.shadows,
+                    );
+                }
+            }
             Command::Image {
                 image,
                 to,
@@ -1230,7 +1277,7 @@ impl Skia {
                 if walk.reaches(walk.transform.map_rect(&ink.outset(TEXT_TOLERANCE))) {
                     self.drawing();
                     let run = &scene.glyphs[run.range()];
-                    self.text(base, walk, run, (size, coords, color, ink), glyphs);
+                    self.text(base, walk, run, (size, coords, color, ink), caches.glyphs);
                 }
             }
         }
@@ -1594,6 +1641,15 @@ impl Skia {
         let Some(ink) = ink(scene, paint) else {
             return;
         };
+        // A gradient that changes only down the shape, with no rotation:
+        // coverage first, then one colour per row (see `fill_by_rows`).
+        if let (Ink::Shader(_), StoredPaint::Linear { start, end, .. }) = (&ink, paint) {
+            let t = walk.transform;
+            if start.x == end.x && t.b == 0.0 && t.c == 0.0 {
+                self.fill_by_rows(scene, base, walk, shape, sk_paint(ink));
+                return;
+            }
+        }
         if let StoredShape::Rect(rect) = shape {
             self.fill_rect(base, walk, rect, sk_paint(ink));
             return;
@@ -1601,6 +1657,88 @@ impl Skia {
         if let Some((path, rule)) = self.shape_path(scene, walk, shape) {
             self.fill_path(base, walk, &path, rule, sk_paint(ink));
         }
+    }
+
+    /// Fills `shape` with a gradient that changes only down it (in device
+    /// pixels, under a transform with no rotation or skew): the shape's
+    /// coverage into a mask, then each row blended in the gradient's colour
+    /// at that row, from a strip of the gradient one pixel wide, as
+    /// `columns` does. The rasteriser's shader then runs once per row
+    /// instead of once per pixel. The strip is taken at a column that
+    /// depends on the shape only, never on the pass, so a partial render
+    /// draws what a whole one does.
+    fn fill_by_rows(
+        &mut self,
+        scene: &Scene,
+        base: &mut [u8],
+        walk: &Walk,
+        shape: StoredShape,
+        mut paint: sk::Paint<'static>,
+    ) {
+        let Some((path, rule)) = self.shape_path(scene, walk, shape) else {
+            return;
+        };
+        let w = walk.width as usize;
+        let b = path.bounds();
+        let pixels = walk.pixels();
+        let edges = [
+            f64::from(b.left()).floor() - 1.0,
+            f64::from(b.top()).floor() - 1.0,
+            f64::from(b.right()).ceil() + 1.0,
+            f64::from(b.bottom()).ceil() + 1.0,
+        ];
+        let x0 = edges[0].max(f64::from(pixels.x)) as usize;
+        let y0 = edges[1].max(f64::from(pixels.y)) as usize;
+        let x1 = edges[2].min(pixels.right() as f64).max(x0 as f64) as usize;
+        let y1 = edges[3].min(pixels.bottom() as f64).max(y0 as f64) as usize;
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        // The gradient's colour on every row down to the last drawn, at the
+        // shape's first column (clamped to the target).
+        let column = edges[0].clamp(0.0, w as f64) as f32;
+        self.strip.clear();
+        self.strip.resize(y1 * 4, 0);
+        paint.shader.transform(sk_transform(
+            walk.transform.then(Transform::translate(-column, 0.0)),
+        ));
+        let Some(mut strip) = sk::PixmapMut::from_bytes(&mut self.strip, 1, y1 as u32) else {
+            return;
+        };
+        if let Some(whole) = sk::Rect::from_xywh(0.0, 0.0, 1.0, y1 as f32) {
+            strip.fill_rect(whole, &paint, sk::Transform::identity(), None);
+        }
+        let Some(mut mask) = sized_mask(self.columns.take(), walk.width, walk.height) else {
+            return;
+        };
+        mask.fill_path(&path, rule, true, sk::Transform::identity());
+        let clip = walk
+            .clips
+            .checked_sub(1)
+            .and_then(|i| self.masks.get(i))
+            .map(sk::Mask::data);
+        if let Some(surface) = surface(&mut self.layers, base, walk.layers) {
+            let coverage = mask.data_mut();
+            for y in y0..y1 {
+                let p = &self.strip[y * 4..y * 4 + 4];
+                let color = [p[0], p[1], p[2], p[3]];
+                let row = y * w;
+                for x in x0..x1 {
+                    let i = row + x;
+                    let mut c = std::mem::take(&mut coverage[i]);
+                    if c == 0 {
+                        continue;
+                    }
+                    if let Some(clip) = clip {
+                        c = mul_div_255(c, clip[i]);
+                    }
+                    blend_solid(&mut surface[i * 4..i * 4 + 4], color, c);
+                }
+            }
+        }
+        // The coverage is all zero again for the next use: what the path
+        // wrote lies within its bounds and this pass's pixels.
+        self.columns = Some(mask);
     }
 
     fn stroke(
@@ -2016,6 +2154,396 @@ impl Skia {
         }
     }
 
+    /// Draws a shadow: the outline of the shape (or of its stroke), moved,
+    /// grown, in device pixels, filled into a mask and blurred, or the
+    /// mask kept from an earlier render; then the mask blended in the
+    /// shadow's colour within `bounds` (in the shape's coordinates, see
+    /// `shadow_bounds`). Nothing here depends on the pass's window but
+    /// which pixels are blended, so a partial render draws what a whole
+    /// one does.
+    fn shadow(
+        &mut self,
+        scene: &Scene,
+        base: &mut [u8],
+        walk: &Walk,
+        (shape, stroke, shadow, bounds): (StoredShape, Option<Stroke>, Shadow, Rect),
+        cache: &mut ShadowCache,
+    ) {
+        let t = Transform::translate(shadow.offset.x, shadow.offset.y).then(walk.transform);
+        if !t.is_finite() {
+            return;
+        }
+        let spread = shadow.drawn_spread();
+        // What is drawn into the mask: the outline, and for an outline
+        // that grows by a stroke, that stroke too, unioned with it.
+        let mut grow_by = 0.0f32;
+        let rule = match stroke {
+            None => {
+                let grown = match shape {
+                    StoredShape::Rect(r) => StoredShape::Rect(r.outset(spread)),
+                    StoredShape::RoundedRect(r) => {
+                        let radii = r.fitted_radii();
+                        let grow = |v: f32| (v + spread).max(0.0);
+                        StoredShape::RoundedRect(RoundedRect::with_radii(
+                            r.rect.outset(spread),
+                            Radii {
+                                top_left: grow(radii.top_left),
+                                top_right: grow(radii.top_right),
+                                bottom_right: grow(radii.bottom_right),
+                                bottom_left: grow(radii.bottom_left),
+                            },
+                        ))
+                    }
+                    StoredShape::Circle(c) => {
+                        StoredShape::Circle(Circle::new(c.center, c.radius + spread))
+                    }
+                    other => {
+                        grow_by = spread.max(0.0);
+                        other
+                    }
+                };
+                self.verbs.clear();
+                self.points.clear();
+                sk_fill_rule(scene.outline(grown, &mut self.verbs, &mut self.points))
+            }
+            Some(stroke) => {
+                let widened = Stroke {
+                    width: stroke.width + 2.0 * spread.max(0.0),
+                    ..stroke
+                };
+                if !self.stroke_outline(scene, shape, &widened, t) {
+                    return;
+                }
+                sk::FillRule::Winding
+            }
+        };
+        let scale = f64::from(t.a * t.d - t.b * t.c).abs().sqrt();
+        let d = box_size(f64::from(shadow.drawn_blur()) * 0.5 * scale);
+        let pad = f64::from(box_reach(d) + 1);
+        // The mask's top-left corner, in whole device pixels: the blur's
+        // reach beyond the outline's box. The outline is drawn relative to
+        // it, so that the same shadow moved by whole device pixels has the
+        // same mask.
+        let Some(local) = crate::path::bounds_of(&self.points) else {
+            return;
+        };
+        let device = t.map_rect(&local);
+        let (ox, oy) = (
+            f64::from(device.x).floor() - pad,
+            f64::from(device.y).floor() - pad,
+        );
+        // Beyond this a corner is not a whole `f32`.
+        const WHOLE: f64 = 16_777_216.0;
+        if !(ox.abs() < WHOLE && oy.abs() < WHOLE) {
+            return;
+        }
+        let t = t.then(Transform::translate(-ox as f32, -oy as f32));
+        // The outline, flattened, relative to the corner; then the grown
+        // part.
+        for p in &mut self.points {
+            *p = t.map_point(*p);
+        }
+        self.flat_verbs.clear();
+        self.flat_points.clear();
+        flatten(
+            &self.verbs,
+            &self.points,
+            &mut self.flat_verbs,
+            &mut self.flat_points,
+        );
+        let mut split = (self.flat_verbs.len(), self.flat_points.len());
+        if grow_by > 0.0 && self.stroke_outline(scene, shape, &Stroke::round(2.0 * grow_by), t) {
+            for p in &mut self.points {
+                *p = t.map_point(*p);
+            }
+            flatten(
+                &self.verbs,
+                &self.points,
+                &mut self.flat_verbs,
+                &mut self.flat_points,
+            );
+        }
+        if self.flat_points.iter().any(|p| !p.is_finite()) {
+            return;
+        }
+        let Some(outline) = crate::path::bounds_of(&self.flat_points) else {
+            return;
+        };
+        // A shadow far larger than the target is cut to the target and the
+        // blur's reach around it: what lies farther cannot reach a pixel
+        // of the target. The cut depends only on the target's size and the
+        // corner.
+        let (w, h) = (f64::from(walk.width), f64::from(walk.height));
+        let limit = (
+            -ox - pad - 1.0,
+            -oy - pad - 1.0,
+            w - ox + pad + 1.0,
+            h - oy + pad + 1.0,
+        );
+        let fits = f64::from(outline.x) >= limit.0
+            && f64::from(outline.y) >= limit.1
+            && f64::from(outline.right()) <= limit.2
+            && f64::from(outline.bottom()) <= limit.3;
+        if !fits {
+            let (mut verbs, mut points) = clip_contours(
+                &self.flat_verbs[..split.0],
+                &self.flat_points[..split.1],
+                limit,
+            );
+            let main = (verbs.len(), points.len());
+            let (grown_verbs, grown_points) = clip_contours(
+                &self.flat_verbs[split.0..],
+                &self.flat_points[split.1..],
+                limit,
+            );
+            verbs.extend(grown_verbs);
+            points.extend(grown_points);
+            self.flat_verbs = verbs;
+            self.flat_points = points;
+            split = main;
+        }
+        self.shadow_mask(
+            base,
+            walk,
+            (rule, d, pad),
+            (split, (ox, oy)),
+            (shadow, bounds),
+            cache,
+        );
+    }
+
+    /// The outline of `shape` drawn with `stroke`, in the shape's own
+    /// coordinates, into `verbs` and `points`, computed as `stroke` does
+    /// for the transform `t`; false if there is none.
+    fn stroke_outline(
+        &mut self,
+        scene: &Scene,
+        shape: StoredShape,
+        stroke: &Stroke,
+        t: Transform,
+    ) -> bool {
+        if !(stroke.width > 0.0 && stroke.width.is_finite()) {
+            return false;
+        }
+        let Some(local) = self.local_outline(scene, shape) else {
+            return false;
+        };
+        let sk_stroke = sk::Stroke {
+            width: stroke.width,
+            miter_limit: stroke.drawn_miter_limit(),
+            line_cap: match stroke.cap {
+                Cap::Butt => sk::LineCap::Butt,
+                Cap::Round => sk::LineCap::Round,
+                Cap::Square => sk::LineCap::Square,
+            },
+            line_join: match stroke.join {
+                Join::Miter => sk::LineJoin::Miter,
+                Join::Round => sk::LineJoin::Round,
+                Join::Bevel => sk::LineJoin::Bevel,
+            },
+            dash: None,
+        };
+        let resolution = (sk::PathStroker::compute_resolution_scale(&sk_transform(t))
+            * STROKE_OVERSAMPLE)
+            .clamp(STROKE_OVERSAMPLE, MAX_STROKE_RESOLUTION);
+        let dashed;
+        let local = match stroke.dash {
+            None => &local,
+            Some(d) => {
+                let Some(dash) = sk::StrokeDash::new(vec![d.on, d.off], d.offset) else {
+                    return false;
+                };
+                let Some(path) = local.dash(&dash, resolution) else {
+                    return false;
+                };
+                dashed = path;
+                &dashed
+            }
+        };
+        let Some(outline) = local.stroke(&sk_stroke, resolution) else {
+            return false;
+        };
+        self.verbs.clear();
+        self.points.clear();
+        let map = |p: sk::Point| Point::new(p.x, p.y);
+        for segment in outline.segments() {
+            match segment {
+                sk::PathSegment::MoveTo(p) => {
+                    self.verbs.push(Verb::Move);
+                    self.points.push(map(p));
+                }
+                sk::PathSegment::LineTo(p) => {
+                    self.verbs.push(Verb::Line);
+                    self.points.push(map(p));
+                }
+                sk::PathSegment::QuadTo(c, p) => {
+                    self.verbs.push(Verb::Quad);
+                    self.points.extend([map(c), map(p)]);
+                }
+                sk::PathSegment::CubicTo(c1, c2, p) => {
+                    self.verbs.push(Verb::Cubic);
+                    self.points.extend([map(c1), map(c2), map(p)]);
+                }
+                sk::PathSegment::Close => self.verbs.push(Verb::Close),
+            }
+        }
+        true
+    }
+
+    /// Finds, or makes and blurs, the mask of the flattened outline in
+    /// `flat_verbs` and `flat_points` (device pixels relative to the
+    /// mask's corner `origin`; the part from `split` on, if any, unioned
+    /// with the rest by the larger coverage), and blends it within
+    /// `bounds`.
+    fn shadow_mask(
+        &mut self,
+        base: &mut [u8],
+        walk: &Walk,
+        (rule, d, pad): (sk::FillRule, u32, f64),
+        (split, (x0, y0)): ((usize, usize), (f64, f64)),
+        (shadow, bounds): (Shadow, Rect),
+        cache: &mut ShadowCache,
+    ) {
+        let Some(outline) = crate::path::bounds_of(&self.flat_points) else {
+            return;
+        };
+        let (mw, mh) = (
+            (f64::from(outline.right()).ceil() + pad).max(0.0),
+            (f64::from(outline.bottom()).ceil() + pad).max(0.0),
+        );
+        if !(mw >= 1.0 && mh >= 1.0 && mw <= 32_768.0 && mh <= 32_768.0) {
+            return;
+        }
+        let (x1, y1) = (x0 + mw, y0 + mh);
+        let (mw, mh) = (mw as u32, mh as u32);
+        // The key: everything the mask is made from.
+        let key = &mut self.shadow_key;
+        key.clear();
+        key.extend([
+            match rule {
+                sk::FillRule::Winding => 0,
+                sk::FillRule::EvenOdd => 1,
+            },
+            d,
+            mw,
+            mh,
+            split.0 as u32,
+            split.1 as u32,
+        ]);
+        key.extend(self.flat_verbs.iter().map(|&v| v as u32));
+        key.extend(
+            self.flat_points
+                .iter()
+                .flat_map(|p| [p.x.to_bits(), p.y.to_bits()]),
+        );
+        let Skia {
+            flat_verbs,
+            flat_points,
+            blur_work,
+            blur_line,
+            shadow_key,
+            ..
+        } = self;
+        let mask = cache.get_or_make(shadow_key, || {
+            let mut mask = sk::Mask::new(mw, mh)?;
+            if let Some(path) = sk_path(&flat_verbs[..split.0], &flat_points[..split.1]) {
+                mask.fill_path(&path, rule, true, sk::Transform::identity());
+            }
+            if split.0 < flat_verbs.len() {
+                let mut grown = sk::Mask::new(mw, mh)?;
+                if let Some(path) = sk_path(&flat_verbs[split.0..], &flat_points[split.1..]) {
+                    grown.fill_path(
+                        &path,
+                        sk::FillRule::Winding,
+                        true,
+                        sk::Transform::identity(),
+                    );
+                }
+                for (m, g) in mask.data_mut().iter_mut().zip(grown.data()) {
+                    *m = (*m).max(*g);
+                }
+            }
+            let mut data = mask.take();
+            blur(&mut data, mw as usize, mh as usize, d, blur_work, blur_line);
+            Some(ShadowMask {
+                width: mw,
+                data: data.into_boxed_slice(),
+            })
+        });
+        let Some(mask) = mask else {
+            return;
+        };
+        // Blended within the mask, the shadow's bounds in device pixels
+        // rounded out, and the pixels this pass draws.
+        let cut = walk.transform.map_rect(&bounds);
+        if !cut.is_finite() {
+            return;
+        }
+        let pixels = walk.pixels();
+        let left = x0.max(f64::from(cut.x).floor()).max(f64::from(pixels.x));
+        let top = y0.max(f64::from(cut.y).floor()).max(f64::from(pixels.y));
+        let right = x1
+            .min(f64::from(cut.right()).ceil())
+            .min(pixels.right() as f64);
+        let bottom = y1
+            .min(f64::from(cut.bottom()).ceil())
+            .min(pixels.bottom() as f64);
+        if !(left < right && top < bottom) {
+            return;
+        }
+        // Inside the target's pixels, so whole, small and not negative.
+        let (left, top, right, bottom) =
+            (left as usize, top as usize, right as usize, bottom as usize);
+        let (mx, my) = (x0 as i64, y0 as i64);
+        let color = shadow.color.premultiply().to_array();
+        let width = walk.width as usize;
+        let clip = walk
+            .clips
+            .checked_sub(1)
+            .and_then(|i| self.masks.get(i))
+            .map(sk::Mask::data);
+        let Some(surface) = surface(&mut self.layers, base, walk.layers) else {
+            return;
+        };
+        // The colour at each coverage, and what is kept of the pixel under
+        // it, as `blend_solid` works them out, four channels at a time.
+        let color = u32::from_le_bytes(color);
+        let mut sources = [(0u32, 0u32); 256];
+        for (c, slot) in sources.iter_mut().enumerate() {
+            let source = scale_pixel(color, c as u32);
+            *slot = (source, 255 - (source >> 24));
+        }
+        let stride = mask.width as usize;
+        let (from, count) = ((left as i64 - mx) as usize, right - left);
+        let blend = |pixel: &mut [u8], c: u8| {
+            if c == 0 {
+                return;
+            }
+            let (source, keep) = sources[usize::from(c)];
+            let under = u32::from_le_bytes([pixel[0], pixel[1], pixel[2], pixel[3]]);
+            pixel.copy_from_slice(&(source + scale_pixel(under, keep)).to_le_bytes());
+        };
+        for y in top..bottom {
+            let row = (y as i64 - my) as usize * stride + from;
+            let coverage = &mask.data[row..row + count];
+            let start = y * width + left;
+            let pixels = surface[start * 4..(start + count) * 4].chunks_exact_mut(4);
+            match clip {
+                None => {
+                    for (&c, pixel) in coverage.iter().zip(pixels) {
+                        blend(pixel, c);
+                    }
+                }
+                Some(clip) => {
+                    let clip = &clip[start..start + count];
+                    for ((&c, &k), pixel) in coverage.iter().zip(clip).zip(pixels) {
+                        blend(pixel, mul_div_255(c, k));
+                    }
+                }
+            }
+        }
+    }
+
     fn skip(&mut self, walk: &mut Walk, kind: Kind) {
         self.frames.push(Frame::Skip(kind));
         walk.skipping += 1;
@@ -2043,7 +2571,10 @@ impl Skia {
         let level = walk.clips;
         while self.masks.len() <= level {
             match blank_mask(None, walk.width, walk.height) {
-                Some(mask) => self.masks.push(mask),
+                Some(mask) => {
+                    self.masks.push(mask);
+                    self.mask_dirty.push(None);
+                }
                 None => {
                     self.skip(walk, Kind::Clip);
                     return;
@@ -2051,15 +2582,33 @@ impl Skia {
             }
         }
         let pixels = walk.pixels();
+        let target = IRect::new(0, 0, walk.width, walk.height);
+        // The pixels the outline can cover: its bounds rounded out and a
+        // pixel more for anti-aliasing, within the target.
+        let b = path.bounds();
+        let covered = IRect::from_edges(
+            (f64::from(b.left()).floor() - 1.0).max(-1.0) as i32,
+            (f64::from(b.top()).floor() - 1.0).max(-1.0) as i32,
+            (f64::from(b.right()).ceil() + 1.0).min(f64::from(walk.width) + 1.0) as i32,
+            (f64::from(b.bottom()).ceil() + 1.0).min(f64::from(walk.height) + 1.0) as i32,
+        )
+        .intersect(&target);
         let (outer, inner) = self.masks.split_at_mut(level);
         let mask = &mut inner[0];
-        clear(mask.data_mut(), walk.width, 1, pixels);
+        // What the last clip at this level covered goes back to zero; the
+        // rest of the mask is zero already.
+        if let Some(stale) = self.mask_dirty[level].take() {
+            clear(mask.data_mut(), walk.width, 1, stale);
+        }
         mask.fill_path(&path, rule, true, sk::Transform::identity());
-        if let Some(parent) = outer.last() {
+        self.mask_dirty[level] = covered;
+        if let (Some(parent), Some(area)) =
+            (outer.last(), covered.and_then(|c| c.intersect(&pixels)))
+        {
             let (width, parent) = (walk.width as usize, parent.data());
             let data = mask.data_mut();
-            let (x0, x1) = (pixels.x as usize, pixels.right() as usize);
-            for y in pixels.y as usize..pixels.bottom() as usize {
+            let (x0, x1) = (area.x as usize, area.right() as usize);
+            for y in area.y as usize..area.bottom() as usize {
                 let span = y * width + x0..y * width + x1;
                 for (m, p) in data[span.clone()].iter_mut().zip(&parent[span]) {
                     *m = mul_div_255(*m, *p);
@@ -2263,7 +2812,7 @@ mod tests {
     use crate::{Circle, LinearGradient, Path};
 
     impl Skia {
-        /// `render` with a glyph cache of its own.
+        /// `render` with caches of its own.
         fn draw(
             &mut self,
             scene: &Scene,
@@ -2271,7 +2820,11 @@ mod tests {
             transform: Transform,
             damage: Option<&[IRect]>,
         ) {
-            self.render(scene, target, transform, damage, &mut GlyphCache::default());
+            let caches = Caches {
+                glyphs: &mut GlyphCache::default(),
+                shadows: &mut ShadowCache::default(),
+            };
+            self.render(scene, target, transform, damage, caches);
         }
     }
 
@@ -2483,6 +3036,17 @@ mod tests {
                     cross <= 1e-3 * (dx * dx + dy * dy).sqrt().max(1.0),
                     "{x}, {y} off {p:?}-{q:?}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn packed_scaling_rounds_as_each_channel_alone() {
+        for &pixel in &[0u32, 0xFFFF_FFFF, 0x80FF_4012, 0x0102_03FE, 0xDEAD_BEEF] {
+            for alpha in 0..=255u32 {
+                let bytes = pixel.to_le_bytes();
+                let one_by_one = bytes.map(|b| mul_div_255(b, alpha as u8));
+                assert_eq!(scale_pixel(pixel, alpha).to_le_bytes(), one_by_one);
             }
         }
     }

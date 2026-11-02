@@ -1,6 +1,6 @@
 [package]
 name = "manguebyte-host"
-description = "Plugin hosting for the Manguebyte Audio Framework: load CLAP, VST 3 and LV2 plugins and run them as processors."
+description = "Plugin hosting for the Manguebyte Audio Framework: load CLAP, VST 3, LV2 and Audio Unit plugins and run them as processors."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,22 +12,33 @@ repository.workspace = true
 homepage.workspace = true
 
 [features]
-default = ["clap", "vst3", "lv2"]
+default = ["clap", "vst3", "lv2", "au"]
 ## Hosting CLAP plugins.
-clap = ["dep:clap-sys", "dep:libloading"]
+clap = ["dep:clap-sys", "dep:libloading", "dep:manguebyte-plugin"]
 ## Hosting VST 3 plugins.
-vst3 = ["dep:vst3", "dep:libloading"]
+vst3 = ["dep:vst3", "dep:libloading", "dep:manguebyte-plugin"]
 ## Hosting LV2 plugins. The Turtle reader is the crate's own.
 lv2 = ["dep:libloading"]
+## Hosting Audio Units (version 2). Components are found and instantiated
+## through AudioToolbox on macOS only; on every system a unit can be hosted
+## in process from its factory function, as the tests do.
+au = ["dep:manguebyte-au"]
 
 [dependencies]
 manguebyte-core.workspace = true
 manguebyte-dsp.workspace = true
 manguebyte-midi.workspace = true
+# Names the window an editor goes in, as a plugin made with the framework
+# receives it.
+manguebyte-plugin = { workspace = true, optional = true }
 clap-sys = { version = "0.5", optional = true }
 vst3 = { version = "0.3", optional = true }
 # Opens the plugin's shared library and finds its entry point.
 libloading = { version = "0.8", optional = true }
+# The Audio Unit C interface, as the framework's own AU wrapper declares it
+# from Apple's headers, shared rather than written twice. On systems other
+# than macOS its CoreFoundation calls are the wrapper's small stand-in.
+manguebyte-au = { workspace = true, optional = true }
 
 [dev-dependencies]
 # The framework's own example plugins are what the tests host. Depending on
@@ -40,6 +51,14 @@ manguebyte-web.workspace = true
 manguebyte-plugin.workspace = true
 manguebyte-params.workspace = true
 manguebyte-graph.workspace = true
+# Real top-level windows for the editors of hosted plugins to go in.
+manguebyte-window = { workspace = true, features = ["testing"] }
+# The wrappers themselves, for a test plugin linked into a test and hosted
+# from the entry points they make, in process: none of the example plugins
+# sends notes.
+manguebyte-clap.workspace = true
+manguebyte-vst3.workspace = true
+manguebyte-lv2.workspace = true
 
 [lints]
 workspace = true

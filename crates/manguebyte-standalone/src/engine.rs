@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
-use manguebyte_core::spsc::Consumer;
+use manguebyte_core::spsc::{self, Consumer, Producer};
 use manguebyte_core::{AudioBuffer, NoDenormals};
 use manguebyte_devices::midi::{MidiReceiver, MidiTransmitter};
+use manguebyte_devices::{AudioCallback, DeviceIo, StreamFormat};
 use manguebyte_dsp::ProcessContext;
 use manguebyte_dsp::ProcessSpec;
 use manguebyte_dsp::event::EventBuffer;
@@ -11,7 +12,7 @@ use manguebyte_dsp::timeline::{TempoMap, TimeSignature, TransportClock};
 use manguebyte_midi::MidiMessage;
 use manguebyte_params::ParamSet;
 use manguebyte_plugin::output::{OutputBuffer, OutputProtocol, OutputTranslator};
-use manguebyte_plugin::{ParamWatcher, Plugin};
+use manguebyte_plugin::{AuxOutputs, ParamWatcher, Plugin};
 
 /// Most events delivered to the plugin in one block.
 const EVENTS_PER_BLOCK: usize = 2_048;
@@ -21,9 +22,11 @@ const EVENTS_PER_BLOCK: usize = 2_048;
 /// It does for a plugin what a host does: gathers MIDI into events with
 /// their frames, turns parameter changes into events, plays a transport
 /// moving and maps the plugin's channels onto the device's.
-/// [`Standalone`](crate::Standalone) owns one and gives it to the device
-/// callback; it is public so that the same logic can be driven by something
-/// else, such as a test or a custom audio back end.
+/// [`Standalone`](crate::Standalone) makes one and hands it to a
+/// [`DeviceManager`](manguebyte_devices::DeviceManager) as its
+/// [`AudioCallback`]; it is public so that the same logic can be driven by
+/// something else, such as a test or a custom audio back end, through
+/// [`render`](Self::render).
 pub struct Engine<P: Plugin> {
     plugin: P,
     params: Arc<P::Params>,
@@ -44,7 +47,109 @@ pub struct Engine<P: Plugin> {
     /// sends anything.
     output: OutputBuffer,
     /// Where what it sends goes, written for the port, if anywhere.
-    midi_out: Option<(OutputTranslator, MidiTransmitter)>,
+    midi_out: Option<MidiOut>,
+    /// The plugin's auxiliary output buses.
+    aux: AuxOutputs,
+    /// The device channel each auxiliary bus's first channel goes to, the
+    /// others following it, or `None` for a bus that is not heard.
+    aux_channels: Vec<Option<usize>>,
+}
+
+/// The MIDI output of an engine: the translator that writes what the
+/// plugin sends for the port, and the queue it goes through.
+struct MidiOut {
+    translator: OutputTranslator,
+    transmitter: MidiTransmitter,
+    /// Translators into another protocol, from a [`ProtocolSwitch`], and
+    /// the ones they replaced, going back to be dropped there.
+    switch: Option<(Consumer<OutputTranslator>, Producer<OutputTranslator>)>,
+}
+
+impl MidiOut {
+    /// Takes a translator the program sent, if there is one and room to
+    /// send the old one back. The old one first ends the notes it knows
+    /// to be sounding, at the start of the block, so that none hangs on
+    /// the port. Real-time safe: nothing is allocated or freed here.
+    fn take_switch(&mut self) {
+        let Some((incoming, retired)) = &mut self.switch else {
+            return;
+        };
+        if retired.free_len() == 0 {
+            return;
+        }
+        let Some(next) = incoming.pop() else {
+            return;
+        };
+        let mut old = std::mem::replace(&mut self.translator, next);
+        let transmitter = &mut self.transmitter;
+        old.end_all(|packet| {
+            transmitter.send(0, packet);
+        });
+        // There was room: checked above.
+        let _ = retired.push(old);
+    }
+}
+
+/// Changes the protocol an [`Engine`]'s MIDI output is written in, from
+/// the program's thread, while the engine plays: the engine takes the new
+/// translator at the start of its next block. Made by
+/// [`Engine::with_switchable_midi_output`].
+pub(crate) struct ProtocolSwitch {
+    incoming: Producer<OutputTranslator>,
+    retired: Consumer<OutputTranslator>,
+    /// The protocol asked for last.
+    protocol: OutputProtocol,
+    /// A protocol that could not be handed over yet, because the engine
+    /// had not taken the one before.
+    waiting: Option<OutputProtocol>,
+}
+
+impl ProtocolSwitch {
+    /// Asks the engine to write in `protocol` from its next block on.
+    /// Allocates; never call it on the audio thread.
+    pub(crate) fn set(&mut self, protocol: OutputProtocol) {
+        if protocol == self.protocol && self.waiting.is_none() {
+            return;
+        }
+        self.protocol = protocol;
+        self.waiting = Some(protocol);
+        self.hand_over();
+    }
+
+    /// Hands the engine the protocol waiting, if it has taken the one
+    /// before, and drops the translators it gave back.
+    pub(crate) fn hand_over(&mut self) {
+        while self.retired.pop().is_some() {}
+        let Some(protocol) = self.waiting else {
+            return;
+        };
+        if self.incoming.free_len() > 0
+            && self.incoming.push(OutputTranslator::new(protocol)).is_ok()
+        {
+            self.waiting = None;
+        }
+    }
+}
+
+/// The device channels the auxiliary buses of `P` go to unless told
+/// otherwise: those after the main output's (two for a mono plugin, which
+/// is heard on both speakers), one bus after another, for the buses on by
+/// default; a bus off by default is not heard.
+fn default_aux_channels<P: Plugin>() -> Vec<Option<usize>> {
+    let mut next = match P::LAYOUT.outputs {
+        1 => 2,
+        outputs => outputs,
+    };
+    P::AUX_OUTPUTS
+        .iter()
+        .map(|aux| {
+            aux.active_by_default.then(|| {
+                let first = next;
+                next += aux.channels;
+                first
+            })
+        })
+        .collect()
 }
 
 impl<P: Plugin> Engine<P> {
@@ -95,7 +200,37 @@ impl<P: Plugin> Engine<P> {
                 OutputBuffer::new()
             },
             midi_out: None,
+            aux: AuxOutputs::for_plugin::<P>(max_block_size),
+            aux_channels: default_aux_channels::<P>(),
         })
+    }
+
+    /// Sends the plugin's auxiliary output buses, those of
+    /// [`Plugin::AUX_OUTPUTS`], to other device channels: for each bus in
+    /// order, the device channel its first channel goes to, its others
+    /// following, or `None` to leave it unheard. Buses past the end of
+    /// `channels` keep where they go by default, which is the device
+    /// channels after the main output's, one bus after another, for every
+    /// bus on by default. Allocates.
+    ///
+    /// A bus is mixed into what is already on its channels, so two buses,
+    /// or a bus and the main output, can share them. A bus that is not
+    /// heard, or whose first channel the device does not have, is not
+    /// given to the plugin, which spends nothing on it; channels past the
+    /// device's last are dropped.
+    #[must_use]
+    pub fn with_aux_channels(mut self, channels: &[Option<usize>]) -> Self {
+        for (slot, &first) in self.aux_channels.iter_mut().zip(channels) {
+            *slot = first;
+        }
+        self
+    }
+
+    /// The device channel each auxiliary bus's first channel goes to, or
+    /// `None` for a bus that is not heard. See
+    /// [`with_aux_channels`](Self::with_aux_channels).
+    pub fn aux_channels(&self) -> &[Option<usize>] {
+        &self.aux_channels
     }
 
     /// Sends what the plugin sends out, from
@@ -114,8 +249,35 @@ impl<P: Plugin> Engine<P> {
         transmitter: MidiTransmitter,
         protocol: OutputProtocol,
     ) -> Self {
-        self.midi_out = Some((OutputTranslator::new(protocol), transmitter));
+        self.midi_out = Some(MidiOut {
+            translator: OutputTranslator::new(protocol),
+            transmitter,
+            switch: None,
+        });
         self
+    }
+
+    /// [`with_midi_output`](Self::with_midi_output), with a switch the
+    /// program changes the protocol with while the engine plays.
+    pub(crate) fn with_switchable_midi_output(
+        mut self,
+        transmitter: MidiTransmitter,
+        protocol: OutputProtocol,
+    ) -> (Self, ProtocolSwitch) {
+        let (incoming, to_engine) = spsc::channel(1);
+        let (from_engine, retired) = spsc::channel(2);
+        self.midi_out = Some(MidiOut {
+            translator: OutputTranslator::new(protocol),
+            transmitter,
+            switch: Some((to_engine, from_engine)),
+        });
+        let switch = ProtocolSwitch {
+            incoming,
+            retired,
+            protocol,
+            waiting: None,
+        };
+        (self, switch)
     }
 
     /// Plays `clock` in place of the engine's own transport, for example
@@ -141,6 +303,46 @@ impl<P: Plugin> Engine<P> {
         Arc::clone(&self.params)
     }
 
+    /// The sample rate the plugin was last prepared at, in hertz.
+    pub fn sample_rate(&self) -> f64 {
+        self.sample_rate
+    }
+
+    /// The largest block the engine renders, in frames.
+    pub fn max_block_size(&self) -> usize {
+        self.work.capacity()
+    }
+
+    /// Prepares the plugin again for another sample rate or largest block,
+    /// keeping it, its parameters and its state: what a host does when its
+    /// device changes. The transport keeps its place in beats. Does
+    /// nothing when neither changes, or when `sample_rate` is not a
+    /// positive, finite number or `max_block_size` is zero. Allocates when
+    /// the largest block changes; never call it on the audio thread.
+    ///
+    /// Returns whether the plugin was prepared.
+    pub fn prepare_for(&mut self, sample_rate: f64, max_block_size: usize) -> bool {
+        let rate_ok = sample_rate.is_finite() && sample_rate > 0.0;
+        if !rate_ok || max_block_size == 0 {
+            return false;
+        }
+        if sample_rate == self.sample_rate && max_block_size == self.work.capacity() {
+            return false;
+        }
+        if max_block_size != self.work.capacity() {
+            self.work = AudioBuffer::new(P::LAYOUT.outputs, max_block_size);
+            self.aux = AuxOutputs::for_plugin::<P>(max_block_size);
+        }
+        self.sample_rate = sample_rate;
+        self.clock.set_sample_rate(sample_rate);
+        self.plugin.prepare(&ProcessSpec {
+            sample_rate,
+            max_block_size,
+            num_channels: P::LAYOUT.outputs,
+        });
+        true
+    }
+
     /// Produces one block for the device.
     ///
     /// `input` is what the device captured, if anything. `output` is the
@@ -149,13 +351,19 @@ impl<P: Plugin> Engine<P> {
     pub fn render(&mut self, input: Option<&AudioBuffer<f32>>, output: &mut AudioBuffer<f32>) {
         let _quiet = NoDenormals::new();
         let frames = output.num_frames().min(self.work.capacity());
-        if let Some((_, transmitter)) = &mut self.midi_out {
-            transmitter.begin_block(frames, self.sample_rate);
+        let announced = self.begin_events(frames);
+        self.end_events(frames, announced);
+        self.run(input, output, frames);
+    }
+
+    /// Starts the block's events: parameter changes first, then notes from
+    /// the program. Returns how many were parameter announcements.
+    fn begin_events(&mut self, frames: usize) -> usize {
+        if let Some(out) = &mut self.midi_out {
+            out.transmitter.begin_block(frames, self.sample_rate);
+            out.take_switch();
         }
         let params: &dyn ParamSet = &*self.params;
-
-        // Parameter changes first, then notes from the program, then MIDI
-        // ports, each message on the frame its arrival time maps to.
         self.events.clear();
         self.watcher.emit_changes(params, &mut self.events);
         let announced = self.events.len();
@@ -165,8 +373,6 @@ impl<P: Plugin> Engine<P> {
             events,
             input: reader,
             notes,
-            midi,
-            sample_rate,
             ..
         } = self;
         while let Some(message) = notes.pop() {
@@ -174,15 +380,39 @@ impl<P: Plugin> Engine<P> {
                 let _ = events.push(event);
             });
         }
+        announced
+    }
+
+    /// Ends the block's events with the MIDI ports the engine reads
+    /// itself, each message on the frame its arrival time maps to, and
+    /// stores what changed the parameters.
+    fn end_events(&mut self, frames: usize, announced: usize) {
+        let Self {
+            events,
+            input: reader,
+            midi,
+            sample_rate,
+            ..
+        } = self;
         for receiver in midi {
             receiver.read_events(frames, *sample_rate, reader, events);
         }
         // Only what came after the announcements is stored: the announced
         // values were read from the parameters, and storing them again
         // would undo an edit the interface made in the meantime.
+        let params: &dyn ParamSet = &*self.params;
         self.watcher
             .apply_and_remember(params, &self.events.as_slice()[announced..]);
+    }
 
+    /// Runs the plugin on the block whose events are gathered, and writes
+    /// it to the device's channels.
+    fn run(
+        &mut self,
+        input: Option<&AudioBuffer<f32>>,
+        output: &mut AudioBuffer<f32>,
+        frames: usize,
+    ) {
         self.work.set_num_frames(frames);
         self.work.clear();
         if let Some(input) = input {
@@ -203,9 +433,22 @@ impl<P: Plugin> Engine<P> {
         let context =
             ProcessContext::new(&self.events, &transport).with_timeline(block.with_map(map));
         self.output.clear();
+        // A bus is given to the plugin only if the device has somewhere
+        // for it to go.
+        let device_channels = output.num_channels();
+        for (bus, first) in self.aux_channels.iter().enumerate() {
+            let heard = first.is_some_and(|first| first < device_channels);
+            self.aux.set_active(bus, heard);
+        }
+        self.aux.start_block(frames);
         self.plugin
-            .process_with_output(&mut self.work, &context, &mut self.output);
-        if let Some((translator, transmitter)) = &mut self.midi_out {
+            .process_with_aux(&mut self.work, &context, &mut self.output, &mut self.aux);
+        if let Some(MidiOut {
+            translator,
+            transmitter,
+            ..
+        }) = &mut self.midi_out
+        {
             let last = frames.saturating_sub(1) as u32;
             // What does not fit in the queue is dropped, and counted by
             // the transmitter.
@@ -232,6 +475,43 @@ impl<P: Plugin> Engine<P> {
                 None => target.fill(0.0),
             }
         }
+        for (bus, &first) in self.aux_channels.iter().enumerate() {
+            let (Some(first), Some(written)) = (first, self.aux.bus(bus)) else {
+                continue;
+            };
+            for (channel, samples) in written.iter_channels().enumerate() {
+                if first + channel >= device_channels {
+                    break;
+                }
+                let target = &mut output.channel_mut(first + channel)[..frames];
+                for (out, &sample) in target.iter_mut().zip(samples) {
+                    *out += sample;
+                }
+            }
+        }
+    }
+}
+
+/// An engine runs under a [`DeviceManager`](manguebyte_devices::DeviceManager)
+/// as its callback: it reads the MIDI of the manager's ports along with its
+/// own, and the captured input when the block has any.
+impl<P: Plugin> AudioCallback for Engine<P> {
+    /// Prepares the plugin again if `format` has another sample rate or
+    /// largest block than it was last prepared with (see
+    /// [`Engine::prepare_for`]); otherwise does nothing.
+    fn prepare(&mut self, format: &StreamFormat) {
+        self.prepare_for(format.sample_rate, format.max_block_size);
+    }
+
+    /// Real-time safe.
+    fn process(&mut self, io: &mut DeviceIo<'_>) {
+        let _quiet = NoDenormals::new();
+        let frames = io.num_frames().min(self.work.capacity());
+        let announced = self.begin_events(frames);
+        io.read_midi_events(&mut self.input, &mut self.events);
+        self.end_events(frames, announced);
+        let input = (io.input.num_channels() > 0).then_some(io.input);
+        self.run(input, io.output, frames);
     }
 }
 
@@ -762,5 +1042,99 @@ mod tests {
         assert!(control.stop());
         engine.render(None, &mut device);
         assert!(!control.is_playing());
+    }
+
+    /// How many blocks each of `Divisions`' buses was given in.
+    static GIVEN: [std::sync::atomic::AtomicUsize; 3] =
+        [const { std::sync::atomic::AtomicUsize::new(0) }; 3];
+
+    /// 0.5 on its main output, and bus `b` channel `c` at `(b + 1) + c / 10`.
+    struct Divisions(Arc<LevelParams>);
+    impl Plugin for Divisions {
+        const INFO: PluginInfo = PluginInfo {
+            id: "org.manguebyte.test.standalone-divisions",
+            name: "Divisions",
+            vendor: "Manguebyte tests",
+            version: "0.1.0",
+            description: "Each division on a bus of its own",
+            kind: PluginKind::Instrument,
+        };
+        const LAYOUT: AudioLayout = AudioLayout::STEREO_INSTRUMENT;
+        const AUX_OUTPUTS: &'static [manguebyte_plugin::AuxOutput] = &[
+            manguebyte_plugin::AuxOutput::stereo("Great"),
+            manguebyte_plugin::AuxOutput::new("Pedal", 1).inactive(),
+            manguebyte_plugin::AuxOutput::stereo("Swell"),
+        ];
+        type Params = LevelParams;
+
+        fn new() -> Self {
+            Self(Arc::new(LevelParams {
+                level: FloatParam::new("level", "Level", FloatRange::linear(0.0, 1.0), 0.5),
+            }))
+        }
+        fn params(&self) -> Arc<LevelParams> {
+            Arc::clone(&self.0)
+        }
+        fn prepare(&mut self, _: &ProcessSpec) {}
+        fn process(&mut self, _: &mut AudioBuffer<f32>, _: &ProcessContext<'_, f32>) {}
+        fn process_with_aux(
+            &mut self,
+            buffer: &mut AudioBuffer<f32>,
+            _: &ProcessContext<'_, f32>,
+            _: &mut OutputBuffer,
+            aux: &mut AuxOutputs,
+        ) {
+            for channel in buffer.iter_channels_mut() {
+                channel.fill(0.5);
+            }
+            for (bus, given) in GIVEN.iter().enumerate() {
+                if let Some(written) = aux.bus_mut(bus) {
+                    given.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    for (channel, samples) in written.iter_channels_mut().enumerate() {
+                        samples.fill((bus + 1) as f32 + channel as f32 / 10.0);
+                    }
+                }
+            }
+        }
+    }
+
+    fn device_channels(device: &AudioBuffer<f32>) -> Vec<f32> {
+        device.iter_channels().map(|channel| channel[3]).collect()
+    }
+
+    #[test]
+    fn each_bus_goes_to_device_channels_of_its_own() {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        // By default: after the main output, the buses on by default, one
+        // after another. The pedal is off by default and not given.
+        let (mut engine, _notes) = engine::<Divisions>();
+        assert_eq!(engine.aux_channels(), [Some(2), None, Some(4)]);
+        let mut device = AudioBuffer::<f32>::new(7, 16);
+        engine.render(None, &mut device);
+        assert_eq!(
+            device_channels(&device),
+            [0.5, 0.5, 1.0, 1.1, 3.0, 3.1, 0.0]
+        );
+        assert_eq!(GIVEN[1].load(Relaxed), 0, "the pedal is not rendered");
+
+        // Routed by hand: the pedal heard on the last channel, the swell
+        // mixed into the main output, and the great on channels the device
+        // lacks, so that it is not rendered either.
+        let great = GIVEN[0].load(Relaxed);
+        let mut engine = engine.with_aux_channels(&[Some(9), Some(6), Some(0)]);
+        engine.render(None, &mut device);
+        assert_eq!(
+            device_channels(&device),
+            [3.5, 3.6, 0.0, 0.0, 0.0, 0.0, 2.0]
+        );
+        assert_eq!(GIVEN[0].load(Relaxed), great, "nowhere to go, not rendered");
+        assert!(GIVEN[1].load(Relaxed) > 0);
+
+        // A device with fewer channels hears what fits.
+        let mut stereo = AudioBuffer::<f32>::new(2, 16);
+        let mut engine = engine.with_aux_channels(&[Some(1), None, None]);
+        engine.render(None, &mut stereo);
+        assert_eq!(device_channels(&stereo), [0.5, 1.5]);
     }
 }

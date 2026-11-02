@@ -1547,3 +1547,452 @@ fn advancing_a_transport_clock_does_not_use_the_heap() {
     // The map the new one replaced came back to be freed here.
     assert_eq!(control.collect(), 1);
 }
+
+#[test]
+fn a_partial_bank_does_not_use_the_heap() {
+    use manguebyte_core::vector::Backend;
+    use manguebyte_dsp::{Partial, PartialBank};
+
+    let mut bank = PartialBank::new(3_000);
+    bank.set_sample_rate(48_000.0);
+    bank.set_len(3_000);
+    let (mut left, mut right) = (vec![0.0f32; 4_096], vec![0.0f32; 4_096]);
+    let backends: Vec<Backend> = Backend::available().collect();
+    assert_no_heap_use("partial bank", || {
+        for (round, &backend) in backends.iter().cycle().take(8).enumerate() {
+            bank.set_backend(backend);
+            for i in 0..bank.len() {
+                bank.set(
+                    i,
+                    Partial {
+                        freq_hz: 30.0 * (i % 700 + 1) as f64,
+                        gain: 1e-3,
+                        pan: (i % 3) as f32 - 1.0,
+                    },
+                );
+                bank.ramp_to(i, 2e-3, 64 + i % 7);
+                bank.set_rotation(i, 0.999, 0.0447);
+            }
+            for frames in [64, 1, 4_096, 255, 0, 17] {
+                bank.render_add(&mut left[..frames], &mut right[..frames]);
+            }
+            bank.set_len(if round % 2 == 0 { 17 } else { 3_000 });
+        }
+    });
+    assert!(left.iter().all(|x| x.is_finite()));
+}
+
+/// The effects a synth workstation needs, at their heaviest settings.
+#[test]
+fn the_workstation_effects_do_not_use_the_heap() {
+    use manguebyte_dsp::{
+        AutoPan, Bitcrusher, FormantFilter, FrequencyShifter, GranularDelay, LfoShape,
+        MultibandCompressor, RingCarrier, RingModulator, StereoWidener, TapeSaturation,
+        TransientShaper, Tremolo, Vocoder,
+    };
+
+    check(
+        "Bitcrusher",
+        Bitcrusher::<f32>::new()
+            .with_bits(3.5)
+            .with_downsample(5.5)
+            .with_dither(true)
+            .with_anti_alias(true)
+            .with_mix(0.7),
+    );
+    check(
+        "Tremolo",
+        Tremolo::<f32>::new()
+            .with_shape(LfoShape::SampleAndHold)
+            .with_stereo_phase(0.5),
+    );
+    check(
+        "AutoPan",
+        AutoPan::<f32>::new()
+            .with_mode(PanMode::MonoToStereo)
+            .with_shape(LfoShape::Square),
+    );
+
+    check(
+        "RingModulator",
+        RingModulator::<f32>::new()
+            .with_frequency_hz(777.0)
+            .with_stereo_phase(0.25)
+            .with_mix(0.6),
+    );
+
+    check(
+        "FrequencyShifter",
+        FrequencyShifter::<f32>::new()
+            .with_shift_hz(-170.0)
+            .with_feedback(0.9)
+            .with_mix(0.8),
+    );
+    let mut shifter = FrequencyShifter::<f32>::new();
+    shifter.prepare(&SPEC);
+    assert_no_heap_use("FrequencyShifter by the sample", || {
+        for n in 0..512 {
+            let x = (n as f32 * 0.01).sin();
+            let _ = shifter.process_sample(0, x, false);
+            let _ = shifter.process_sample(1, x, true);
+        }
+    });
+
+    check(
+        "StereoWidener",
+        StereoWidener::<f32>::new()
+            .with_width(2.0)
+            .with_bass_mono(true)
+            .with_bass_mono_hz(150.0),
+    );
+
+    check(
+        "TransientShaper",
+        TransientShaper::<f32>::new()
+            .with_attack_db(18.0)
+            .with_sustain_db(-12.0),
+    );
+
+    check("MultibandCompressor", {
+        let mut compressor = MultibandCompressor::<f32>::new(150.0, 3_000.0);
+        for band in 0..3 {
+            compressor.band_mut(band).set_threshold_db(-30.0);
+            compressor.band_mut(band).set_knee_db(6.0);
+        }
+        compressor
+    });
+
+    check(
+        "TapeSaturation",
+        TapeSaturation::<f32>::new()
+            .with_drive_db(30.0)
+            .with_wow_cents(30.0)
+            .with_flutter_cents(10.0)
+            .with_drift(1.0)
+            .with_mix(0.5),
+    );
+
+    check(
+        "FormantFilter",
+        FormantFilter::<f32>::new()
+            .with_vowel(2.5)
+            .with_shift(5.0)
+            .with_mix(0.8),
+    );
+
+    // At the most grains: the pool is full, and grains keep being refused.
+    check(
+        "GranularDelay at its densest",
+        GranularDelay::<f32>::new()
+            .with_grain_ms(500.0)
+            .with_density_hz(200.0)
+            .with_spray_ms(500.0)
+            .with_pitch_spray(24.0)
+            .with_stereo_spread(1.0)
+            .with_feedback(0.95),
+    );
+    let mut cloud = GranularDelay::<f32>::new()
+        .with_grain_ms(500.0)
+        .with_density_hz(200.0);
+    cloud.prepare(&SPEC);
+    let mut buffer = AudioBuffer::<f32>::new(2, 256);
+    assert_no_heap_use("a full pool of grains", || {
+        for _ in 0..200 {
+            cloud.process(&mut buffer);
+        }
+    });
+    assert_eq!(cloud.active_grains(), GranularDelay::<f32>::MAX_GRAINS);
+
+    // Locked to a transport that moves on, block by block.
+    let mut tremolo = Tremolo::<f32>::new().with_sync_beats(Some(0.5));
+    let mut pan = AutoPan::<f32>::new().with_sync_beats(Some(2.0));
+    tremolo.prepare(&SPEC);
+    pan.prepare(&SPEC);
+    let events = EventBuffer::with_capacity(1);
+    let mut transport = Transport::playing_at(128.0);
+    let mut buffer = AudioBuffer::<f32>::new(2, 256);
+    assert_no_heap_use("tempo-synced tremolo and auto-pan", || {
+        for frames in [256, 1, 64, 255] {
+            buffer.set_num_frames(frames);
+            let context = ProcessContext::new(&events, &transport);
+            tremolo.process_with(&mut buffer, &context);
+            pan.process_with(&mut buffer, &context);
+            transport.advance(frames, SPEC.sample_rate);
+        }
+    });
+
+    // Vocoded by a sidechain, at the most bands.
+    let mut vocoder = Vocoder::<f32>::new()
+        .with_bands(32)
+        .with_formant_shift(-5.0);
+    vocoder.prepare(&SPEC);
+    let mut voice = AudioBuffer::<f32>::new(1, 256);
+    voice.channel_mut(0).fill(0.3);
+    let voiced = ProcessContext::new(&events, &transport).with_sidechain(&voice);
+    assert_no_heap_use("Vocoder", || {
+        for frames in [256, 1, 100] {
+            buffer.set_num_frames(frames);
+            vocoder.process_with(&mut buffer, &voiced);
+            vocoder.process_with(&mut buffer, &voiced.for_piece(50));
+            vocoder.process(&mut buffer);
+        }
+        vocoder.reset();
+    });
+
+    // Multiplied by a sidechain, in pieces.
+    let mut key = AudioBuffer::<f32>::new(1, 256);
+    key.channel_mut(0).fill(0.5);
+    let context = ProcessContext::new(&events, &transport).with_sidechain(&key);
+    let mut ring = RingModulator::<f32>::new().with_carrier(RingCarrier::Sidechain);
+    ring.prepare(&SPEC);
+    assert_no_heap_use("ring modulation by a sidechain", || {
+        for frames in [256, 1, 100] {
+            buffer.set_num_frames(frames);
+            ring.process_with(&mut buffer, &context);
+            split_at_events_with(
+                &mut ring,
+                &mut buffer,
+                &context,
+                |_, _| {},
+                |ring, piece, piece_context| ring.process_with(piece, piece_context),
+            );
+        }
+    });
+}
+
+#[test]
+fn the_workstation_effects_can_change_settings_while_running_without_using_the_heap() {
+    use manguebyte_dsp::{
+        AutoPan, Bitcrusher, FormantFilter, FrequencyShifter, GranularDelay, LfoShape,
+        MultibandCompressor, RingModulator, StereoWidener, TapeSaturation, TransientShaper,
+        Tremolo, Vocoder,
+    };
+
+    let mut crusher = Bitcrusher::<f32>::new();
+    crusher.prepare(&SPEC);
+    let mut tremolo = Tremolo::<f32>::new();
+    tremolo.prepare(&SPEC);
+    let mut pan = AutoPan::<f32>::new();
+    pan.prepare(&SPEC);
+    let mut ring = RingModulator::<f32>::new();
+    ring.prepare(&SPEC);
+    let mut shifter = FrequencyShifter::<f32>::new();
+    shifter.prepare(&SPEC);
+    let mut widener = StereoWidener::<f32>::new();
+    widener.prepare(&SPEC);
+    let mut shaper = TransientShaper::<f32>::new();
+    shaper.prepare(&SPEC);
+    let mut multiband = MultibandCompressor::<f32>::new(200.0, 2_000.0);
+    multiband.prepare(&SPEC);
+    let mut tape = TapeSaturation::<f32>::new();
+    tape.prepare(&SPEC);
+    let mut vocoder = Vocoder::<f32>::new();
+    vocoder.prepare(&SPEC);
+    let mut cloud = GranularDelay::<f32>::new();
+    cloud.prepare(&SPEC);
+    let mut vowel = FormantFilter::<f32>::new();
+    vowel.prepare(&SPEC);
+    let shapes = [
+        LfoShape::Sine,
+        LfoShape::Triangle,
+        LfoShape::SawUp,
+        LfoShape::SawDown,
+        LfoShape::Square,
+        LfoShape::SampleAndHold,
+    ];
+    let mut buffer = AudioBuffer::<f32>::new(2, 256);
+    assert_no_heap_use("changing workstation effect settings", || {
+        for step in 0..14u8 {
+            let turn = f64::from(step);
+            for channel in buffer.iter_channels_mut() {
+                channel.fill(0.25);
+            }
+            crusher.set_bits(1.0 + 2.0 * turn);
+            crusher.set_downsample(1.0 + 4.5 * turn);
+            crusher.set_dither(step % 2 == 0);
+            crusher.set_anti_alias(step % 3 != 0);
+            crusher.set_mix(turn / 14.0);
+            crusher.process(&mut buffer);
+
+            let shape = shapes[usize::from(step) % shapes.len()];
+            tremolo.set_shape(shape);
+            tremolo.set_rate_hz(0.5 + turn);
+            tremolo.set_depth(turn / 14.0);
+            tremolo.set_stereo_phase(1.0 - turn / 14.0);
+            tremolo.set_smoothing_ms(turn);
+            tremolo.set_sync_beats((step % 2 == 0).then_some(0.25 * turn));
+            tremolo.process(&mut buffer);
+            pan.set_shape(shape);
+            pan.set_rate_hz(0.5 + turn);
+            pan.set_width(turn / 14.0);
+            pan.set_law(MixLaw::ALL[usize::from(step) % MixLaw::ALL.len()]);
+            pan.set_mode(if step % 2 == 0 {
+                PanMode::MonoToStereo
+            } else {
+                PanMode::StereoBalance
+            });
+            pan.set_smoothing_ms(turn);
+            pan.process(&mut buffer);
+
+            ring.set_frequency_hz(100.0 * turn);
+            ring.set_mix(turn / 14.0);
+            ring.set_stereo_phase(turn / 14.0);
+            ring.process(&mut buffer);
+
+            shifter.set_shift_hz(300.0 * turn - 2_000.0);
+            shifter.set_feedback(0.9 - turn / 7.0);
+            shifter.set_mix(turn / 14.0);
+            shifter.process(&mut buffer);
+
+            widener.set_width(turn / 7.0);
+            widener.set_bass_mono(step % 3 != 1);
+            widener.set_bass_mono_hz(40.0 + 60.0 * turn);
+            widener.process(&mut buffer);
+
+            shaper.set_attack_db(3.0 * turn - 20.0);
+            shaper.set_sustain_db(20.0 - 3.0 * turn);
+            shaper.set_attack_ms(1.0 + 10.0 * turn);
+            shaper.set_sustain_ms(50.0 + 200.0 * turn);
+            shaper.process(&mut buffer);
+
+            multiband.set_crossover_hz(0, 50.0 + 40.0 * turn);
+            multiband.set_crossover_hz(1, 1_000.0 + 500.0 * turn);
+            for band in 0..3 {
+                let compressor = multiband.band_mut(band);
+                compressor.set_threshold_db(-3.0 * turn);
+                compressor.set_ratio(1.0 + turn);
+                compressor.set_attack_ms(turn);
+            }
+            multiband.process(&mut buffer);
+
+            tape.set_drive_db(2.0 * turn);
+            tape.set_asymmetry(turn / 28.0);
+            tape.set_wow_cents(2.0 * turn);
+            tape.set_wow_hz(0.5 + turn / 4.0);
+            tape.set_flutter_cents(turn / 1.4);
+            tape.set_flutter_hz(2.0 + turn);
+            tape.set_drift(turn / 14.0);
+            tape.set_mix(1.0 - turn / 14.0);
+            tape.process(&mut buffer);
+
+            vocoder.set_bands(8 + 2 * usize::from(step));
+            vocoder.set_range_hz(50.0 + 10.0 * turn, 4_000.0 + 800.0 * turn);
+            vocoder.set_formant_shift(turn - 7.0);
+            vocoder.set_attack_ms(turn);
+            vocoder.set_release_ms(5.0 * turn);
+            vocoder.set_gain_db(turn);
+            vocoder.set_mix(turn / 14.0);
+            vocoder.process(&mut buffer);
+
+            cloud.set_position_ms(70.0 * turn);
+            cloud.set_spray_ms(35.0 * turn);
+            cloud.set_grain_ms(5.0 + 35.0 * turn);
+            cloud.set_density_hz(1.0 + 14.0 * turn);
+            cloud.set_pitch_semitones(3.0 * turn - 20.0);
+            cloud.set_pitch_spray(turn);
+            cloud.set_stereo_spread(turn / 14.0);
+            cloud.set_feedback(0.9 - turn / 7.0);
+            cloud.set_mix(turn / 14.0);
+            cloud.set_seed(u64::from(step));
+            cloud.process(&mut buffer);
+
+            vowel.set_vowel(turn / 3.5);
+            vowel.set_shift(turn - 7.0);
+            vowel.set_gain_db(turn);
+            vowel.set_mix(turn / 14.0);
+            vowel.process(&mut buffer);
+        }
+    });
+    assert!(all_finite(&buffer));
+}
+
+/// The space around the pipes: windchests with pipes starting, stopping
+/// and moving, early reflections changing their set, and a swell box whose
+/// pedal moves.
+#[test]
+fn the_space_around_the_pipes_does_not_use_the_heap() {
+    use manguebyte_dsp::space::{
+        EarlyReflections, Interpolation, Listener, Position, ReflectionSettings, Reflections, Room,
+        Speakers, SwellBox, Wall, Windchest, WindchestSettings,
+    };
+
+    let listener = Listener::new(Position::new(6.0, 4.0, 1.6), Speakers::stereo());
+    let place = |p: usize, shift: f64| {
+        listener.place(Position::new(
+            (p % 50) as f64 * 0.2 + shift,
+            20.0 + (p % 7) as f64,
+            3.0 + (p % 11) as f64 * 0.3,
+        ))
+    };
+    let interpolations = [
+        Interpolation::Cubic,
+        Interpolation::Linear,
+        Interpolation::None,
+    ];
+    let mut chests: Vec<Windchest> = interpolations
+        .into_iter()
+        .map(|interpolation| {
+            Windchest::new(&WindchestSettings {
+                interpolation,
+                ..WindchestSettings::new(2_000, 2, 48_000.0, 256)
+            })
+            .unwrap()
+        })
+        .collect();
+    let placements: Vec<_> = (0..2_000).map(|p| (place(p, 0.0), place(p, 1.5))).collect();
+    let room = Room::new(12.0, 30.0, 14.0, Wall::new(0.1).with_high_cut(4_000.0));
+    let settings = ReflectionSettings {
+        max_order: ReflectionSettings::MAX_ORDER,
+        ..ReflectionSettings::default()
+    };
+    let near =
+        Reflections::compute(&room, Position::new(6.0, 22.0, 4.0), &listener, &settings).unwrap();
+    let far =
+        Reflections::compute(&room, Position::new(3.0, 27.0, 6.0), &listener, &settings).unwrap();
+    let mut early = EarlyReflections::with_capacity(
+        &near,
+        48_000.0,
+        256,
+        ReflectionSettings::paths_up_to(ReflectionSettings::MAX_ORDER),
+        1.0,
+    )
+    .unwrap();
+    let mut swell = SwellBox::<f32>::default();
+    swell.prepare(&SPEC);
+
+    let pipe = vec![0.25f32; 256];
+    let bus = vec![0.5f32; 256];
+    let mut buffer = AudioBuffer::<f32>::new(2, 256);
+    assert_no_heap_use("space", || {
+        for round in 0..24usize {
+            let frames = [256, 1, 64, 255, 0, 17][round % 6];
+            buffer.set_num_frames(frames);
+            for chest in &mut chests {
+                for (p, (here, there)) in placements.iter().enumerate() {
+                    if p % 5 == round % 5 {
+                        chest.set_placement(p, if round % 2 == 0 { there } else { here });
+                    }
+                }
+                // A few hundred pipes sound, a different few each time.
+                for p in (round % 3..2_000).step_by(6) {
+                    chest.add(p, &pipe[..frames]);
+                }
+                chest.finish(&mut buffer);
+            }
+            if round % 4 == 0 {
+                let set = if round % 8 == 0 { &far } else { &near };
+                early.set_reflections(set).unwrap();
+            }
+            early.process_add(&bus[..frames], &mut buffer);
+            swell.set_opening((round % 9) as f64 / 8.0);
+            swell.process(&mut buffer);
+        }
+        for chest in &mut chests {
+            chest.reset();
+        }
+        early.reset();
+        swell.reset();
+    });
+    assert!(all_finite(&buffer));
+    check("SwellBox", SwellBox::<f32>::default());
+}

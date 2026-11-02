@@ -1429,6 +1429,111 @@ fn the_state_goes_out_and_comes_back_and_another_units_is_refused() {
     assert_eq!(fx.parameter(GAIN), Ok(3.0));
 }
 
+/// `Fx` again, with the id it works out when loaded in place of its
+/// compiled one: a copy of the same library with another identity.
+struct FxCopy(Fx);
+
+impl Plugin for FxCopy {
+    const INFO: PluginInfo = Fx::INFO;
+    const LAYOUT: AudioLayout = Fx::LAYOUT;
+    type Params = FxParams;
+
+    fn info() -> PluginInfo {
+        PluginInfo {
+            id: "org.manguebyte.test.fx-copy",
+            name: "Fx copy",
+            ..Self::INFO
+        }
+    }
+    fn new() -> Self {
+        Self(Fx::new())
+    }
+    fn params(&self) -> Arc<FxParams> {
+        self.0.params()
+    }
+    fn prepare(&mut self, spec: &ProcessSpec) {
+        self.0.prepare(spec);
+    }
+    fn process(&mut self, buffer: &mut AudioBuffer<f32>, context: &ProcessContext<'_, f32>) {
+        self.0.process(buffer, context);
+    }
+}
+
+/// The code a unit's state dictionary gives under `key`.
+///
+/// # Safety
+///
+/// `saved` must be a live dictionary.
+unsafe fn code_in(saved: CFPropertyListRef, key: &str) -> u32 {
+    // SAFETY: CoreFoundation's functions, on the caller's dictionary and a
+    // string made and released here.
+    unsafe {
+        let key = CFStringCreateWithBytes(
+            ptr::null(),
+            key.as_ptr(),
+            key.len() as _,
+            kCFStringEncodingUTF8,
+            0,
+        );
+        let value = CFDictionaryGetValue(saved, key);
+        let mut code = 0i32;
+        assert_ne!(
+            CFNumberGetValue(value, kCFNumberSInt32Type, (&raw mut code).cast()),
+            0
+        );
+        CFRelease(key);
+        code as u32
+    }
+}
+
+/// The codes, the `Info.plist` and the state follow the identity the
+/// plugin works out at run time, so two copies of one library are two
+/// units that refuse each other's state.
+#[test]
+fn the_codes_come_from_the_run_time_identity() {
+    let _serial = serial();
+    let id = "org.manguebyte.test.fx-copy";
+    let plist = manguebyte_au::__private::info_plist::<FxCopy>("Fx", "org.example.fx", "1.0.0");
+    let subtype = manguebyte_au::code_text(subtype_code(id));
+    let manufacturer = manguebyte_au::code_text(manufacturer_code(id));
+    assert!(plist.contains(&format!("<string>{subtype}</string>")));
+    assert!(plist.contains(&format!("<string>{manufacturer}</string>")));
+    assert!(plist.contains("Fx copy"), "{plist}");
+    assert_ne!(subtype_code(id), subtype_code(Fx::INFO.id));
+
+    let global = kAudioUnitScope_Global;
+    let copy = Host::new::<FxCopy>();
+    let fx = Host::new::<Fx>();
+    let from_copy = copy
+        .get::<CFPropertyListRef>(kAudioUnitProperty_ClassInfo, global, 0)
+        .unwrap();
+    let from_fx = fx
+        .get::<CFPropertyListRef>(kAudioUnitProperty_ClassInfo, global, 0)
+        .unwrap();
+    // SAFETY: the dictionaries the units made, released once here.
+    unsafe {
+        assert_eq!(code_in(from_copy, "subtype"), as_os_type(subtype_code(id)));
+        assert_eq!(
+            code_in(from_copy, "manufacturer"),
+            as_os_type(manufacturer_code(id))
+        );
+        assert_eq!(
+            fx.set(kAudioUnitProperty_ClassInfo, global, 0, &from_copy),
+            kAudioUnitErr_InvalidPropertyValue
+        );
+        assert_eq!(
+            copy.set(kAudioUnitProperty_ClassInfo, global, 0, &from_fx),
+            kAudioUnitErr_InvalidPropertyValue
+        );
+        assert_eq!(
+            copy.set(kAudioUnitProperty_ClassInfo, global, 0, &from_copy),
+            noErr
+        );
+        CFRelease(from_copy);
+        CFRelease(from_fx);
+    }
+}
+
 #[test]
 fn the_codes_are_the_ones_the_plist_names() {
     let _serial = serial();
@@ -2074,4 +2179,147 @@ fn assert_tail_is_effectively_infinite(tail: f64) {
         tail * 768_000.0 <= f64::from(i32::MAX),
         "it fits an i32 of frames at 768 kHz"
     );
+}
+
+// --- Parameters renamed while the unit runs ------------------------------------
+
+struct ChoirParams {
+    upper: BoolParam,
+    swell: FloatParam,
+}
+param_set!(ChoirParams { upper, swell });
+
+const UPPER: ParamId = ParamId::from_name("upper");
+const SWELL: ParamId = ParamId::from_name("swell");
+
+static CHOIR_PARAMS: Mutex<Option<Arc<ChoirParams>>> = Mutex::new(None);
+
+/// Passes its input through; it is here for its parameters, which the
+/// test renames as a plugin that loads another instrument does.
+struct Choir {
+    params: Arc<ChoirParams>,
+}
+
+impl Plugin for Choir {
+    const INFO: PluginInfo = PluginInfo {
+        id: "org.manguebyte.test.choir",
+        name: "Choir",
+        vendor: "Manguebyte",
+        version: "0.1.0",
+        description: "Renames its parameters",
+        kind: PluginKind::Effect,
+    };
+    const LAYOUT: AudioLayout = AudioLayout::STEREO_EFFECT;
+    type Params = ChoirParams;
+
+    fn new() -> Self {
+        let params = Arc::new(ChoirParams {
+            upper: BoolParam::new("upper", "Upper", false),
+            swell: FloatParam::new("swell", "Swell", FloatRange::linear(0.0, 1.0), 0.5),
+        });
+        *CHOIR_PARAMS.lock().unwrap() = Some(Arc::clone(&params));
+        Self { params }
+    }
+    fn params(&self) -> Arc<ChoirParams> {
+        Arc::clone(&self.params)
+    }
+    fn prepare(&mut self, _: &ProcessSpec) {}
+    fn process(&mut self, _: &mut AudioBuffer<f32>, _: &ProcessContext<'_, f32>) {}
+}
+
+/// The name a unit gives in a parameter's information, and its unit; the
+/// name is checked to be the same in both its fields.
+fn described(unit: &Host, param: ParamId) -> (String, u32) {
+    let info = unit
+        .get::<AudioUnitParameterInfo>(
+            kAudioUnitProperty_ParameterInfo,
+            kAudioUnitScope_Global,
+            param.0,
+        )
+        .unwrap();
+    // SAFETY: the name field ends with a NUL.
+    let name = unsafe { CStr::from_ptr(info.name.as_ptr()) }
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(text_of(info.cfNameString), name);
+    // SAFETY: the host releases the name, as the flags say.
+    unsafe { CFRelease(info.cfNameString) };
+    (name, info.unit)
+}
+
+/// Renames made while the unit is not initialized are announced once, as
+/// a change of the parameter list, when it is, and renames made as state
+/// is restored are announced with it; the parameters' information gives
+/// the new names and unit throughout.
+#[test]
+fn renamed_parameters_are_announced_once_and_described_by_their_new_names() {
+    let _serial = serial();
+    HEARD.lock().unwrap().clear();
+    let choir = Host::new::<Choir>();
+    let global = kAudioUnitScope_Global;
+    let add: AddListener = choir.method(kAudioUnitAddPropertyListenerSelect);
+    let user = 7 as *mut c_void;
+    // SAFETY: the method, with a listener that outlives the unit.
+    let status = unsafe {
+        add(
+            choir.this,
+            kAudioUnitProperty_ParameterList,
+            Some(listener),
+            user,
+        )
+    };
+    assert_eq!(status, noErr);
+    assert_eq!(
+        described(&choir, SWELL),
+        ("Swell".into(), kAudioUnitParameterUnit_Generic)
+    );
+
+    let params = CHOIR_PARAMS.lock().unwrap().clone().unwrap();
+    let renamer = Arc::clone(&params);
+    std::thread::spawn(move || {
+        renamer.upper.info().set_display_name("Soprano");
+        renamer.swell.info().set_display_name("Expression");
+        renamer.swell.info().set_display_unit("dB");
+    })
+    .join()
+    .unwrap();
+    // Asked for before anything announces it, the information is new.
+    assert_eq!(described(&choir, UPPER).0, "Soprano");
+    assert_eq!(choir.simple(kAudioUnitInitializeSelect), noErr);
+    assert_eq!(
+        *HEARD.lock().unwrap(),
+        [(kAudioUnitProperty_ParameterList, global, 0, 7)]
+    );
+    assert_eq!(
+        described(&choir, SWELL),
+        ("Expression".into(), kAudioUnitParameterUnit_Decibels)
+    );
+    // Nothing renamed since: nothing more to hear.
+    assert_eq!(choir.simple(kAudioUnitUninitializeSelect), noErr);
+    assert_eq!(choir.simple(kAudioUnitInitializeSelect), noErr);
+    assert_eq!(HEARD.lock().unwrap().len(), 1);
+
+    // A state restored with another instrument's names.
+    let saved = choir
+        .get::<CFPropertyListRef>(kAudioUnitProperty_ClassInfo, global, 0)
+        .unwrap();
+    params.upper.info().set_display_name("Treble");
+    assert_eq!(
+        choir.set(kAudioUnitProperty_ClassInfo, global, 0, &saved),
+        noErr
+    );
+    // SAFETY: the host releases what it was given.
+    unsafe { CFRelease(saved) };
+    assert_eq!(
+        HEARD.lock().unwrap().as_slice(),
+        [(kAudioUnitProperty_ParameterList, global, 0, 7); 2]
+    );
+    assert_eq!(described(&choir, UPPER).0, "Treble");
+    assert_eq!(choir.simple(kAudioUnitUninitializeSelect), noErr);
+
+    let remove: RemoveListener = choir.method(kAudioUnitRemovePropertyListenerSelect);
+    // SAFETY: the method.
+    let status = unsafe { remove(choir.this, kAudioUnitProperty_ParameterList, Some(listener)) };
+    assert_eq!(status, noErr);
 }

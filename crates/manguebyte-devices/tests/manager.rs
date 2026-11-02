@@ -448,6 +448,98 @@ fn the_callback_is_prepared_before_and_released_after_every_run() {
 }
 
 #[test]
+fn a_preview_plans_a_setup_without_opening_it() {
+    let mock = studio();
+    let mut manager = DeviceManager::headless(&mock);
+    manager.start(&DeviceSetup::default(), level(0.5)).unwrap();
+    let gone = usb_setup().with_output(DeviceChoice::Device(DeviceRef::new("gone", "Gone")));
+    let preview = manager.preview(&gone).unwrap();
+    assert_eq!(
+        preview.output.as_ref().unwrap().0,
+        summary("speakers", "Speakers")
+    );
+    assert_eq!(
+        preview.input.as_ref().unwrap().0,
+        summary("usb-in", "USB Interface")
+    );
+    assert_eq!(preview.sample_rate(), Some(96_000));
+    assert!(matches!(
+        &preview.fallbacks[..],
+        [Fallback::DeviceReplaced { by_name: false, .. }]
+    ));
+    // Nothing changed: the speakers still play, and the setup is the one
+    // started.
+    assert_eq!(
+        mock.running(Direction::Output).map(|(id, _)| id),
+        Some(String::from("speakers"))
+    );
+    assert_eq!(manager.setup(), &DeviceSetup::default());
+}
+
+#[test]
+fn a_new_engine_format_prepares_the_same_callback_again() {
+    use manguebyte_devices::{EngineFormat, SwapKind};
+
+    let mock = studio();
+    let (formats, received) = mpsc::channel();
+    let callback = Counting {
+        formats: Some(formats),
+        ..Counting::default()
+    };
+    let (prepared, released) = (
+        Arc::clone(&callback.prepared),
+        Arc::clone(&callback.released),
+    );
+    let mut manager = DeviceManager::headless(&mock);
+    manager.set_crossfade(Duration::ZERO);
+    let at_48k = EngineFormat::new(48_000, 256, 0, 2);
+    manager
+        .start_engine(&DeviceSetup::default(), at_48k, callback)
+        .unwrap();
+    assert!(render(&mock, 2).is_some());
+
+    // The same format is a plain apply: nothing is prepared again.
+    manager
+        .apply_with_format(&DeviceSetup::default(), at_48k)
+        .unwrap();
+    assert_eq!(prepared.load(Ordering::Relaxed), 1);
+
+    // To the interface, at its rate: released, prepared at 96 kHz, and
+    // started again on the interface.
+    let at_96k = EngineFormat::new(96_000, 256, 0, 4);
+    let usb = usb_setup().with_input(DeviceChoice::None);
+    let report = manager.apply_with_format(&usb, at_96k).unwrap();
+    assert!(report.is_exact(), "{:?}", report.fallbacks);
+    assert_eq!(prepared.load(Ordering::Relaxed), 2);
+    assert_eq!(released.load(Ordering::Relaxed), 1);
+    assert_eq!(manager.engine_format(), Some(at_96k));
+    assert_eq!(manager.setup(), &usb);
+    assert_eq!(manager.last_swap().unwrap().kind, SwapKind::Gap);
+    assert_eq!(
+        mock.running(Direction::Output).map(|(id, _)| id),
+        Some(String::from("usb-out"))
+    );
+    assert_eq!(manager.format().unwrap().sample_rate, 96_000.0);
+    let block = render(&mock, 4).unwrap();
+    assert!(
+        block
+            .iter()
+            .step_by(4)
+            .skip(32)
+            .all(|&sample| sample == 1.0)
+    );
+    let formats: Vec<f64> = received.try_iter().map(|f| f.sample_rate).collect();
+    assert_eq!(formats, [48_000.0, 96_000.0]);
+
+    // A manager without an engine has no format to change.
+    let mut plain = DeviceManager::headless(&mock);
+    assert!(matches!(
+        plain.apply_with_format(&DeviceSetup::default(), at_48k),
+        Err(DeviceError::NoCallback)
+    ));
+}
+
+#[test]
 fn a_duplex_run_carries_input_to_output_with_its_latency() {
     let mock = studio();
     mock.set_latency(
@@ -526,8 +618,12 @@ fn the_watcher_thread_reports_changes() {
 #[cfg(feature = "midi")]
 mod midi {
     use super::*;
-    use manguebyte_devices::midi::{MidiError, MidiInputMessage};
+    use std::time::Instant;
+
+    use manguebyte_core::spsc::{self, Producer};
+    use manguebyte_devices::midi::{MidiError, MidiInputMessage, MidiProtocol};
     use manguebyte_midi::MidiMessage;
+    use manguebyte_midi::ump::Packet;
 
     #[test]
     fn midi_from_every_open_port_reaches_the_callback() {
@@ -633,5 +729,241 @@ mod midi {
         let events = manager.poll_devices();
         assert!(manager.follow(&events[0]).is_some());
         assert!(manager.midi_inputs().is_empty());
+    }
+
+    fn note_on(note: u8) -> Packet {
+        Packet::from_midi1(
+            0,
+            MidiMessage::NoteOn {
+                channel: 0,
+                note,
+                velocity: 100,
+            },
+        )
+    }
+
+    fn note_off(note: u8) -> Packet {
+        Packet::from_midi1(
+            0,
+            MidiMessage::NoteOff {
+                channel: 0,
+                note,
+                velocity: 64,
+            },
+        )
+    }
+
+    /// A callback that sends the MIDI output what the test queues, at the
+    /// start of the next block.
+    fn sender(
+        manager: &mut DeviceManager,
+    ) -> (
+        Producer<Packet>,
+        impl FnMut(&mut DeviceIo<'_>) + Send + use<>,
+    ) {
+        let (packets, mut queued) = spsc::channel::<Packet>(256);
+        let mut transmitter = manager.midi_output_transmitter(256);
+        let callback = move |io: &mut DeviceIo<'_>| {
+            transmitter.begin_block(io.num_frames(), 48_000.0);
+            while let Some(packet) = queued.pop() {
+                transmitter.send(0, packet);
+            }
+        };
+        (packets, callback)
+    }
+
+    /// Waits until the mock's MIDI output ports have been sent `count`
+    /// messages since the last call, and takes them.
+    fn sent(mock: &MockBackend, count: usize) -> Vec<(String, Vec<u8>)> {
+        let mut sent = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while sent.len() < count && Instant::now() < deadline {
+            sent.extend(mock.take_sent_midi());
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        sent
+    }
+
+    fn bytes(port: &str, bytes: &[u8]) -> (String, Vec<u8>) {
+        (port.to_owned(), bytes.to_vec())
+    }
+
+    #[test]
+    fn what_the_audio_thread_sends_reaches_the_port_open_when_it_is_due() {
+        let mock = studio();
+        mock.add_midi_port(Direction::Output, "synth", "Synth");
+        mock.add_midi_port(Direction::Output, "drums", "Drums");
+        let mut manager = DeviceManager::headless(&mock);
+        let (mut packets, callback) = sender(&mut manager);
+        let setup = DeviceSetup::default().with_midi_output(DeviceRef::new("synth", "Synth"));
+        assert!(manager.start(&setup, callback).unwrap().is_exact());
+        // The first poll only learns what is there.
+        assert!(manager.poll_devices().is_empty());
+        assert!(manager.is_sending_midi());
+        assert_eq!(manager.midi_output(), Some(&summary("synth", "Synth")));
+        assert_eq!(manager.midi_output_protocol(), Some(MidiProtocol::Midi1));
+
+        packets.push(note_on(60)).unwrap();
+        render(&mock, 2).unwrap();
+        assert_eq!(sent(&mock, 1), [bytes("synth", &[0x90, 60, 100])]);
+
+        // Another port, without touching the audio: the old one ends the
+        // note it plays at once.
+        manager
+            .set_midi_output(Some(DeviceRef::new("drums", "Drums")))
+            .unwrap();
+        assert_eq!(mock.take_sent_midi(), [bytes("synth", &[0x80, 60, 0])]);
+        assert_eq!(manager.midi_output_notes_ended(), 1);
+        assert!(manager.is_running());
+
+        // Its note-off is not sent to the new port, which never played
+        // the note; what follows is.
+        packets.push(note_off(60)).unwrap();
+        packets.push(note_on(62)).unwrap();
+        render(&mock, 2).unwrap();
+        assert_eq!(sent(&mock, 1), [bytes("drums", &[0x90, 62, 100])]);
+        packets.push(note_off(62)).unwrap();
+        render(&mock, 2).unwrap();
+        assert_eq!(sent(&mock, 1), [bytes("drums", &[0x80, 62, 64])]);
+
+        // A port that cannot be opened leaves none open, and stays in the
+        // setup to be opened when it appears.
+        packets.push(note_on(64)).unwrap();
+        render(&mock, 2).unwrap();
+        assert_eq!(sent(&mock, 1), [bytes("drums", &[0x90, 64, 100])]);
+        assert!(matches!(
+            manager.set_midi_output(Some(DeviceRef::new("later", "Later"))),
+            Err(MidiError::PortNotFound(_))
+        ));
+        assert_eq!(mock.take_sent_midi(), [bytes("drums", &[0x80, 64, 0])]);
+        assert_eq!(manager.midi_output(), None);
+        packets.push(note_on(65)).unwrap();
+        render(&mock, 2).unwrap();
+        // Long past when it was due.
+        std::thread::sleep(Duration::from_millis(50));
+        mock.add_midi_port(Direction::Output, "later", "Later");
+        let events = manager.poll_devices();
+        assert!(manager.follow(&events[0]).unwrap().is_ok());
+        assert_eq!(manager.midi_output(), Some(&summary("later", "Later")));
+        packets.push(note_on(67)).unwrap();
+        render(&mock, 2).unwrap();
+        // The note due while no port was open was dropped.
+        assert_eq!(sent(&mock, 1), [bytes("later", &[0x90, 67, 100])]);
+
+        // Unplugged: closed, and reported when followed.
+        mock.remove_midi_port(Direction::Output, "later");
+        let events = manager.poll_devices();
+        let report = manager.follow(&events[0]).unwrap().unwrap();
+        assert!(matches!(
+            &report.fallbacks[..],
+            [Fallback::MidiPortMissing {
+                direction: Direction::Output,
+                ..
+            }]
+        ));
+        assert_eq!(manager.midi_output(), None);
+        assert_eq!(manager.midi_output_errors(), 0);
+    }
+
+    #[test]
+    fn a_change_of_port_lifts_the_sustain_pedal_it_holds_down() {
+        let mock = studio();
+        mock.add_midi_port(Direction::Output, "synth", "Synth");
+        mock.add_midi_port(Direction::Output, "drums", "Drums");
+        let mut manager = DeviceManager::headless(&mock);
+        manager
+            .set_midi_output(Some(DeviceRef::new("synth", "Synth")))
+            .unwrap();
+        // From the program's thread: a note, held by the pedal on channel
+        // 2 after its note-off, and the pedal on channel 1 down and up.
+        for bytes in [
+            [0x92, 60, 100],
+            [0xB2, 64, 127],
+            [0x82, 60, 0],
+            [0xB1, 64, 100],
+            [0xB1, 64, 0],
+        ] {
+            manager.send_midi(&bytes).unwrap();
+        }
+        // The same port again is left as it is.
+        manager
+            .set_midi_output(Some(DeviceRef::new("synth", "Synth")))
+            .unwrap();
+        assert_eq!(mock.take_sent_midi().len(), 5);
+        // A MIDI 2.0 note through the program's packets, followed too.
+        let note = Packet::from_words(&[0x4093_3E00, 0xC000_0000]).unwrap();
+        manager.send_midi_packet(&note).unwrap();
+        assert_eq!(mock.take_sent_midi(), [bytes("synth", &[0x93, 62, 0x60])]);
+        manager
+            .set_midi_output(Some(DeviceRef::new("drums", "Drums")))
+            .unwrap();
+        assert_eq!(
+            mock.take_sent_midi(),
+            [
+                bytes("synth", &[0x83, 62, 0]),
+                bytes("synth", &[0xB2, 64, 0]),
+            ]
+        );
+        // What the old port ended is not ended again on the new one.
+        manager.send_midi(&[0x83, 62, 0]).unwrap();
+        assert!(mock.take_sent_midi().is_empty());
+    }
+
+    #[test]
+    fn dropping_the_manager_sends_what_is_waiting_and_ends_the_notes() {
+        let mock = studio();
+        mock.add_midi_port(Direction::Output, "synth", "Synth");
+        let mut manager = DeviceManager::headless(&mock);
+        let (mut packets, callback) = sender(&mut manager);
+        let setup = DeviceSetup::default().with_midi_output(DeviceRef::new("synth", "Synth"));
+        manager.start(&setup, callback).unwrap();
+        packets.push(note_on(60)).unwrap();
+        packets.push(note_on(64)).unwrap();
+        render(&mock, 2).unwrap();
+        drop(manager);
+        assert_eq!(
+            mock.take_sent_midi(),
+            [
+                bytes("synth", &[0x90, 60, 100]),
+                bytes("synth", &[0x90, 64, 100]),
+                bytes("synth", &[0x80, 60, 0]),
+                bytes("synth", &[0x80, 64, 0]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_hung_midi_port_does_not_hold_up_the_audio() {
+        let mock = studio();
+        mock.add_midi_port(Direction::Output, "synth", "Synth");
+        let mut manager = DeviceManager::headless(&mock);
+        let (mut packets, callback) = sender(&mut manager);
+        let setup = DeviceSetup::default().with_midi_output(DeviceRef::new("synth", "Synth"));
+        manager.start(&setup, callback).unwrap();
+
+        mock.hold_midi_output(true);
+        // The device's thread renders on while the sending thread waits
+        // for the port.
+        let device = {
+            let mock = mock.clone();
+            std::thread::spawn(move || {
+                for note in 0..100 {
+                    packets.push(note_on(note)).unwrap();
+                    assert!(render(&mock, 2).is_some());
+                }
+            })
+        };
+        let start = Instant::now();
+        while !device.is_finished() {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "the audio waited for the MIDI port"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        device.join().unwrap();
+        assert!(mock.take_sent_midi().is_empty(), "the port is held");
+        mock.hold_midi_output(false);
+        assert_eq!(sent(&mock, 100).len(), 100);
     }
 }

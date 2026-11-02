@@ -71,6 +71,9 @@ use crate::view::IntoView;
 pub struct Found {
     /// The widget, for [`Root`] methods that take one.
     pub id: NodeId,
+    /// For an item of a widget, such as a row of a list, its key (see
+    /// [`AccessItem`](crate::AccessItem)); `None` for a widget.
+    pub item: Option<usize>,
     /// How it describes itself.
     pub node: AccessNode,
     /// Where it is, in logical pixels.
@@ -83,6 +86,7 @@ impl Found {
     fn from_entry(entry: AccessEntry) -> Found {
         Found {
             id: entry.id,
+            item: entry.item,
             node: entry.node,
             bounds: entry.bounds,
             device: entry.device,
@@ -186,7 +190,14 @@ impl Harness {
         let (context, link) = EditorContext::attach(host.clone());
         let clipboard = Rc::new(MemoryClipboard::new());
         Harness {
-            root: Root::new(view, size, scale, context).with_clipboard(clipboard.clone()),
+            root: {
+                let mut root =
+                    Root::new(view, size, scale, context).with_clipboard(clipboard.clone());
+                // A frame after an input shows where it ends, as tests of
+                // what is drawn expect; tests of motion turn it on.
+                root.set_system_motion(false);
+                root
+            },
             link: Some(link),
             host,
             clipboard,
@@ -203,6 +214,14 @@ impl Harness {
     /// Draws the interface in `theme` from the next frame on.
     pub fn set_theme(&mut self, theme: Theme) {
         self.root.set_theme(theme);
+    }
+
+    /// Lets the interface animate (`true`) or not. A harness starts with
+    /// motion off, as if the system asked for less of it, so that every
+    /// transition jumps and one frame after an input shows its end; a test
+    /// of motion turns it on and drives the clock.
+    pub fn set_motion(&mut self, enabled: bool) {
+        self.root.set_system_motion(enabled);
     }
 
     /// The interface.
@@ -369,6 +388,18 @@ impl Harness {
         }
     }
 
+    /// The widgets the last frame said assistive technology should hear
+    /// about again (see [`Frame::access`](crate::Frame::access)), as they
+    /// are now, in tree order.
+    pub fn access_updates(&self) -> Vec<Found> {
+        self.root
+            .access_updates()
+            .iter()
+            .filter_map(|&id| self.root.access(id))
+            .map(Found::from_entry)
+            .collect()
+    }
+
     /// The widget with the keyboard focus, if any.
     pub fn focused(&self) -> Option<Found> {
         let id = self.root.focus()?;
@@ -399,6 +430,8 @@ impl Harness {
     /// - every text input has its text as its value and takes the focus;
     /// - every combo box has its value as text, can be pressed to open,
     ///   and says whether it is open;
+    /// - every list, scroll view, tab list, tab panel and dialog has a
+    ///   name, and every list item and tab says whether it is selected;
     /// - no two widgets with a name share their role and name within the
     ///   same named group, so a screen reader, and
     ///   [`get`](Harness::get), can tell them apart;
@@ -419,7 +452,10 @@ impl Harness {
 
     /// Asks the widget for `action`, as assistive technology does.
     pub fn act(&mut self, found: &Found, action: Action) -> bool {
-        self.root.act(found.id, action)
+        match found.item {
+            Some(key) => self.root.act_item(found.id, key, action),
+            None => self.root.act(found.id, action),
+        }
     }
 
     // Input.
@@ -501,6 +537,17 @@ impl Harness {
         self.send(Event::Wheel {
             at,
             delta: Point::new(0.0, notches),
+            modifiers: self.modifiers,
+        })
+    }
+
+    /// Scrolls by `delta` notches with the pointer at `at`: fractions of a
+    /// notch, as a touchpad gives, and sideways (`x` above 0 is to the
+    /// right) as well as up and down.
+    pub fn wheel_by(&mut self, at: Point, delta: Point) -> bool {
+        self.send(Event::Wheel {
+            at,
+            delta,
             modifiers: self.modifiers,
         })
     }

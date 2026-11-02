@@ -71,6 +71,20 @@
 //! and refuses with
 //! [`EditorError::Unsupported`](manguebyte_plugin::editor::EditorError::Unsupported).
 //!
+//! # Application windows
+//!
+//! A standalone program, or a plugin run as one, shows its interface in a
+//! window of its own: [`Editor::open_in_app`] opens an editor in a window
+//! of a `manguebyte_window::App`, and [`open_app_window`] opens any view.
+//! Both return an [`AppEditor`], which runs the same glue with no host:
+//! gestures set the parameters given, the window follows its monitor's
+//! scale, a close request closes it unless the application says otherwise
+//! ([`AppEditor::on_close_request`]), files dropped on it reach the widget
+//! under the pointer as drags carrying a `DropData`, and the system's file
+//! dialogs are a call away ([`AppEditor::dialogs`]). `App::run` runs the
+//! loop. An editor inside a host takes drops too when built
+//! [`with_file_drops`](Editor::with_file_drops). See ADR 0010.
+//!
 //! # Headless mode, for tests
 //!
 //! The `headless` cargo feature, which test code enables, adds
@@ -84,6 +98,15 @@
 //! whether the feature is on or not, so a build that turns it on through
 //! another crate changes no editor.
 //!
+//! # Audio settings of a standalone program
+//!
+//! The `standalone` cargo feature adds the `audio_settings` module: the glue
+//! between a running `manguebyte_standalone::Standalone` and the ready-made
+//! view of `manguebyte_ui::audio_settings`, which a program shows in a
+//! floating panel or a window of its own. It is off by default because it
+//! brings the system's audio and MIDI libraries, which an editor inside a
+//! host never needs (ADR 0022).
+//!
 //! # Hygiene
 //!
 //! The crate has no `unsafe` code, keeps no global state and starts no
@@ -92,6 +115,9 @@
 
 #![forbid(unsafe_code)]
 
+mod app;
+#[cfg(feature = "standalone")]
+pub mod audio_settings;
 mod editor;
 #[cfg(feature = "headless")]
 mod headless;
@@ -100,6 +126,7 @@ mod open;
 #[cfg(all(test, windows))]
 mod win32_tests;
 
+pub use app::{AppEditor, open_app_window};
 pub use editor::Editor;
 #[cfg(feature = "headless")]
 pub use headless::HeadlessEditor;

@@ -104,7 +104,7 @@ pub fn bundle_files<P: Plugin>(binary: &str) -> BundleFiles {
 }
 
 fn plugin_file_name<P: Plugin>() -> String {
-    let mut name: String = P::INFO
+    let mut name: String = manguebyte_plugin::plugin_info::<P>()
         .id
         .chars()
         .map(|c| {
@@ -440,14 +440,23 @@ fn param_lines(param: &dyn Param) -> Vec<String> {
 /// The text of `P`'s description: what it is, what it needs from the
 /// host, and every port with its index.
 fn plugin_ttl<P: Plugin>() -> String {
-    let info = P::INFO;
+    let info = manguebyte_plugin::plugin_info::<P>();
     let layout = P::LAYOUT;
     let plugin = P::new();
     let params = plugin.params();
     let params: &dyn ParamSet = &*params;
-    let ports = PortLayout::new(layout, params.len());
+    let ports = PortLayout::new(layout, params.len()).with_aux(P::AUX_OUTPUTS);
 
     let mut out = String::from(PREFIXES);
+    if !P::AUX_OUTPUTS.is_empty() {
+        out.push_str("@prefix pg: <http://lv2plug.in/ns/ext/port-groups#> .\n");
+    }
+    // Each auxiliary bus is a port group of its own, named by a symbol.
+    let mut group_symbols = Symbols(HashSet::new());
+    let groups: Vec<String> = P::AUX_OUTPUTS
+        .iter()
+        .map(|aux| group_symbols.take(&aux.name.to_lowercase()))
+        .collect();
     let _ = writeln!(out, "<{}>", plugin_uri::<P>());
     let class = match info.kind {
         PluginKind::Instrument => " , lv2:InstrumentPlugin",
@@ -523,6 +532,33 @@ fn plugin_ttl<P: Plugin>() -> String {
                     &[],
                 );
             }
+            PortRole::AuxOutput { bus, channel } => {
+                // Optional: a host that leaves a bus unconnected switches
+                // it off.
+                let aux = P::AUX_OUTPUTS[bus];
+                let (symbol_suffix, name_suffix) = channel_suffix(aux.channels, channel);
+                let mut lines = vec![
+                    "lv2:portProperty lv2:connectionOptional ;".to_owned(),
+                    format!("pg:group <{}#{}> ;", plugin_uri::<P>(), groups[bus]),
+                ];
+                let designation = match (aux.channels, channel) {
+                    (1, _) => Some("pg:center"),
+                    (2, 0) => Some("pg:left"),
+                    (2, _) => Some("pg:right"),
+                    _ => None,
+                };
+                if let Some(designation) = designation {
+                    lines.push(format!("lv2:designation {designation} ;"));
+                }
+                port(
+                    &mut out,
+                    "lv2:AudioPort , lv2:OutputPort",
+                    index,
+                    &symbols.take(&format!("{}{symbol_suffix}", groups[bus])),
+                    &format!("{}{name_suffix}", aux.name),
+                    &lines,
+                );
+            }
             PortRole::Control => port(
                 &mut out,
                 "atom:AtomPort , lv2:InputPort",
@@ -571,6 +607,9 @@ fn plugin_ttl<P: Plugin>() -> String {
                 let Some(&param) = param_list.get(at) else {
                     continue;
                 };
+                // The name the parameter was made with: the file is written
+                // once, so hosts never see a name given at run time
+                // (ADR 0020).
                 port(
                     &mut out,
                     "lv2:ControlPort , lv2:InputPort",
@@ -583,6 +622,17 @@ fn plugin_ttl<P: Plugin>() -> String {
         }
     }
     out.push_str("    ] .\n");
+    for (aux, symbol) in P::AUX_OUTPUTS.iter().zip(&groups) {
+        let kind = match aux.channels {
+            1 => " , pg:MonoGroup",
+            2 => " , pg:StereoGroup",
+            _ => "",
+        };
+        let _ = writeln!(out, "\n<{}#{symbol}>", plugin_uri::<P>());
+        let _ = writeln!(out, "    a pg:OutputGroup{kind} ;");
+        let _ = writeln!(out, "    lv2:symbol {} ;", string(symbol));
+        let _ = writeln!(out, "    rdfs:label {} .", string(aux.name));
+    }
     out
 }
 

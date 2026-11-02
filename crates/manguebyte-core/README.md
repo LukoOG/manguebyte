@@ -47,6 +47,100 @@ println!("running on {}", Backend::detect().name());
 operation on every backend the processor has against the loops they
 replaced.
 
+## Rendering on several cores
+
+`manguebyte_core::pool::RenderPool` renders independent jobs, such as the
+voices of an instrument or the divisions of an organ, on several cores
+inside one audio callback ([ADR 0015](../../docs/adr/0015-rendering-on-several-cores.md)).
+The pool owns the jobs and a fixed number of worker threads started with
+it; each block, `run` renders them on the workers and on the calling
+thread, and `rendered` hands them back in index order to mix, so the
+output is bit for bit that of one thread whatever the number of cores.
+
+```rust
+use manguebyte_core::pool::{Job, PoolConfig, RenderPool};
+
+struct Voice {
+    level: f32,
+    out: [f32; 128],
+}
+
+impl Job for Voice {
+    fn render(&mut self) {
+        self.out.fill(self.level);
+    }
+}
+
+let voices = (0..16).map(|_| Voice { level: 0.1, out: [0.0; 128] }).collect();
+// Off the audio thread, in `prepare`:
+let mut pool = RenderPool::new(voices, PoolConfig::all_cores());
+// On the audio thread, each block:
+let report = pool.run(16);
+let mut mix = [0.0f32; 128];
+for (_, voice) in pool.rendered() {
+    for (sum, sample) in mix.iter_mut().zip(&voice.out) {
+        *sum += sample;
+    }
+}
+assert!(report.is_complete());
+```
+
+Nothing on the audio thread allocates or locks, and it never waits longer
+than the pool's wait limit: a job a stalled worker still holds when the
+limit passes is dropped from that block and counted, never mixed
+half-rendered. Workers park between blocks, so an idle pool uses no
+processor time, and ask for real-time scheduling (MMCSS "Pro Audio" on
+Windows, `SCHED_FIFO` elsewhere), reporting what they got. A pool of zero
+workers renders everything on the calling thread.
+`cargo run --release -p manguebyte-core --example pool_speed` measures
+speed-up, block times and wake latency.
+## A budget for the processor
+
+`manguebyte_core::governor::Governor` keeps an instrument that has been
+asked for too much inside the block's deadline, by telling it how much
+to render. Each block it measures the rendering time against the
+deadline and gives a budget for the next block in cost units the
+instrument defines (a partial, a voice at a tier); the instrument spends
+it in its own order of priority and reports what it spent and whether it
+wanted more. The governor learns the cost of a unit on this machine, now,
+answers a slowdown within a block (or, if asked, once it has lasted a few),
+and recovers by at most a doubling every half second. Offline it always
+gives the full budget and never reads the clock; a quality floor and a
+maximum bound it. ADR 0018 explains the design.
+
+```rust
+use manguebyte_core::governor::{Allowance, Governor, GovernorConfig};
+
+let mut governor = Governor::new(GovernorConfig::default());
+governor.set_sample_rate(48_000.0);
+// In each audio callback:
+let mut allowance = Allowance::new(governor.budget());
+governor.begin_block();
+for _voice in 0..64 {
+    if allowance.try_take(32.0) {
+        // Render the voice at its full tier.
+    } else if allowance.try_take(8.0) {
+        // Render it at its cheap tier.
+    } // Otherwise steal it for this block.
+}
+governor.end_block(128, allowance.spent(), allowance.limited());
+```
+
+`cargo run --release -p manguebyte-dsp --example governor_organ` plays a
+synthetic organ of `PartialBank` pipes asked for twice what the machine
+fits, on the real clock, and prints the loads it measured. On the
+development laptop, busy with other programs, on a real-time thread, it
+held the load's 99th percentile at the 70 % target with no block late
+(ADR 0018).
+
+## The binary's own file
+
+`manguebyte_core::module::file()` names the file of the binary the code
+is linked into, the plugin's library in a plugin, by asking the system
+about an address inside it (`GetModuleHandleExW` and
+`GetModuleFileNameW` on Windows, `dladdr` on other systems).
+`manguebyte_plugin::library_path` is built on it.
+
 ## Licence
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or

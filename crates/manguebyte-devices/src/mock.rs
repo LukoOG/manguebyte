@@ -72,6 +72,9 @@ struct MockState {
     #[cfg(feature = "midi")]
     midi_connections: Vec<MockMidiConnection>,
     sent_midi: Vec<(String, Vec<u8>)>,
+    /// Whether sending to a MIDI output port waits, as a hung driver does.
+    #[cfg(feature = "midi")]
+    midi_output_held: bool,
 }
 
 impl Default for MockState {
@@ -93,6 +96,8 @@ impl Default for MockState {
             #[cfg(feature = "midi")]
             midi_connections: Vec::new(),
             sent_midi: Vec::new(),
+            #[cfg(feature = "midi")]
+            midi_output_held: false,
         }
     }
 }
@@ -252,6 +257,14 @@ impl MockBackend {
             Direction::Input => state.midi_inputs.retain(|port| port.id != id),
             Direction::Output => state.midi_outputs.retain(|port| port.id != id),
         }
+    }
+
+    /// Makes every message sent to a MIDI output port wait, as a driver
+    /// that hangs does, until called again with `false`. Rendering and
+    /// capturing go on meanwhile.
+    #[cfg(feature = "midi")]
+    pub fn hold_midi_output(&self, held: bool) {
+        self.state().midi_output_held = held;
     }
 
     /// Makes listing the devices fail, as a backend whose service went away
@@ -574,11 +587,17 @@ struct MockMidiOutput {
 #[cfg(feature = "midi")]
 impl MidiSender for MockMidiOutput {
     fn send(&mut self, bytes: &[u8]) -> Result<(), MidiError> {
-        let state = self
+        let shared = self
             .state
             .upgrade()
             .ok_or_else(|| MidiError::Send(String::from("the mock is gone")))?;
-        let mut state = lock(&state);
+        let mut state = lock(&shared);
+        // A held port waits, without keeping the mock from rendering.
+        while state.midi_output_held {
+            drop(state);
+            std::thread::sleep(Duration::from_millis(1));
+            state = lock(&shared);
+        }
         if !state.midi_outputs.iter().any(|port| port.id == self.port) {
             return Err(MidiError::Send(format!("{} is not connected", self.port)));
         }

@@ -8,17 +8,25 @@ use std::time::Duration;
 use manguebyte_gfx::{Color, IRect, Pixmap, Point, Rect, Renderer, Scene, Size};
 use manguebyte_plugin::editor::{EditorContext, MAX_SCALE, MIN_SCALE};
 
+mod drag;
+mod files;
+mod floats;
 mod hover;
 mod menus;
+mod pages;
 
+pub(crate) use floats::Float;
+pub use floats::FloatMetrics;
 pub use hover::TOOLTIP_DELAY;
 pub(crate) use menus::{Anchor, MenuRequest};
 
-use crate::access::{AccessEntry, Action};
+use crate::access::{AccessEntry, AccessItem, Action};
 use crate::clipboard::{Clipboard, MemoryClipboard};
 use crate::damage::{MAX_DAMAGE, tidy};
 use crate::event::{Event, Handled, Key, MenuEvent};
 use crate::layout::{self, Placement};
+use crate::motion::Motion;
+use crate::scroll::{ScrollMetrics, snap};
 use crate::theme::Theme;
 use crate::tree::{NodeId, Tree};
 use crate::view::IntoView;
@@ -35,13 +43,23 @@ pub struct Frame<'a> {
     /// device pixels.
     pub pixels: &'a Pixmap,
     /// Whether something is moving on its own and wants another frame
-    /// soon, such as a meter still falling.
+    /// soon, such as a meter still falling or a transition still running.
+    /// False once everything has settled: a window may then stop asking
+    /// for frames for motion's sake.
     pub animating: bool,
     /// How many widgets recorded a scene that differs from the one they
     /// had (every widget, when everything is drawn again).
     pub painted: usize,
     /// Whether layout ran.
     pub laid_out: bool,
+    /// The widgets whose description for assistive technology changed in
+    /// this frame in a way they said a screen reader should hear about
+    /// (see [`UpdateCx::request_access_update`]), such as a name that
+    /// follows the language, in tree order. A window layer that speaks to
+    /// the platform's assistive technology reads each one's new
+    /// description with [`Root::access`] and sends it as a change. Empty
+    /// when nothing changed.
+    pub access: &'a [NodeId],
 }
 
 /// An interface: the widget tree, its size and scale, and the back buffer
@@ -139,6 +157,9 @@ pub struct Root {
     /// Where a widget's scene that reaches past its rectangle is clipped.
     cut: Scene,
     damage: Vec<IRect>,
+    /// The widgets that asked, in the last frame, for their description to
+    /// be sent again (see [`Frame::access`]).
+    access_updates: Vec<NodeId>,
     focus: Option<NodeId>,
     capture: Option<NodeId>,
     clipboard: Rc<dyn Clipboard>,
@@ -158,18 +179,43 @@ pub struct Root {
     pressed: bool,
     /// The tooltip waiting to show, or showing.
     tip: Option<hover::Tip>,
+    /// The drag running, if any.
+    drag: Option<drag::DragState>,
+    /// The subtree that has all input, if any (see `UpdateCx::set_modal`).
+    modal: Option<pages::Modal>,
+    /// The floating widgets (see `UpdateCx::float_at`), back to front.
+    floats: Vec<NodeId>,
+    /// The interface's own widgets in drawing order, as runs of the arena:
+    /// each node's floating children after its others.
+    order: Vec<(usize, usize)>,
+    /// The widget the last press went down on, kept after it is let go.
+    last_press: Option<NodeId>,
     /// The widget whose tooltip a press or a key took away, until the
     /// pointer leaves it.
     tip_quiet: Option<NodeId>,
     /// Set while a widget hears that it gained or lost the focus: what it
     /// asks for the focus then is not done, so that focus cannot bounce.
     notifying: bool,
+    /// Whether the system lets interfaces animate (see
+    /// [`Root::set_system_motion`]).
+    system_motion: bool,
+    /// The widget a press went down on, until it is let go.
+    pressed_on: Option<NodeId>,
+    /// Whether the focus is shown: after the keyboard was used, not after
+    /// a press.
+    focus_visible: bool,
+    /// Whether the last frame had something still moving.
+    animating: bool,
     needs_layout: bool,
     /// Every widget is drawn again, over the whole buffer, next frame.
     full: bool,
     now: Duration,
     last_frame: Option<Duration>,
 }
+
+/// The furthest a widget may draw beyond its rectangle (see
+/// `Widget::overflow`), in logical pixels.
+const MAX_OVERFLOW: f32 = 128.0;
 
 /// The most keys remembered as held after the interface used their press:
 /// more than hands hold at once. A key held beyond these is forgotten,
@@ -207,6 +253,54 @@ fn buffer(size: Size, scale: f32) -> Pixmap {
         .unwrap_or_else(|| unreachable!("a pixmap of one pixel can always be made"))
 }
 
+/// `placement` moved by `by` device pixels.
+fn shifted(placement: Placement, by: (i32, i32), scale: f32) -> Placement {
+    if by == (0, 0) {
+        return placement;
+    }
+    let device = IRect::new(
+        placement.device.x.saturating_add(by.0),
+        placement.device.y.saturating_add(by.1),
+        placement.device.width,
+        placement.device.height,
+    );
+    Placement::from_device(device, scale)
+}
+
+/// Scrolls `metrics` to `offset`, on whole device pixels at `scale`, kept
+/// within the content once the node has been laid out (before that the
+/// next layout keeps it within). Returns whether the offset changed.
+fn set_offset(metrics: &mut ScrollMetrics, offset: Point, scale: f32) -> bool {
+    let laid_out = metrics.viewport.width > 0.0 || metrics.viewport.height > 0.0;
+    let kept = if laid_out {
+        metrics.clamp(offset)
+    } else {
+        let clean = |v: f32| if v.is_finite() { v.max(0.0) } else { 0.0 };
+        Point::new(clean(offset.x), clean(offset.y))
+    };
+    let mut snapped = Point::new(
+        snap(f64::from(kept.x), scale) as f32,
+        snap(f64::from(kept.y), scale) as f32,
+    );
+    if laid_out {
+        // Rounding the largest offset up must not pass it.
+        let max = metrics.max_offset();
+        let down = |v: f32, max: f32| {
+            if v > max {
+                (f64::from(max) * f64::from(scale)).floor() as f32 / scale
+            } else {
+                v
+            }
+        };
+        snapped = Point::new(down(snapped.x, max.x), down(snapped.y, max.y));
+    }
+    if snapped == metrics.offset {
+        return false;
+    }
+    metrics.offset = snapped;
+    true
+}
+
 impl Root {
     /// The interface `view` describes, `size` logical pixels large, drawn
     /// at `scale` device pixels per logical pixel, in the default
@@ -220,7 +314,7 @@ impl Root {
     pub fn new(view: impl IntoView, size: Size, scale: f32, context: EditorContext) -> Root {
         let size = clean_size(size);
         let scale = clean_scale(scale).unwrap_or(1.0);
-        Root {
+        let mut root = Root {
             tree: Tree::build(view.into_view()),
             theme: Theme::default(),
             size,
@@ -231,6 +325,7 @@ impl Root {
             composite: Scene::new(),
             cut: Scene::new(),
             damage: Vec::new(),
+            access_updates: Vec::new(),
             focus: None,
             capture: None,
             clipboard: Rc::new(MemoryClipboard::new()),
@@ -242,12 +337,23 @@ impl Root {
             pressed: false,
             tip: None,
             tip_quiet: None,
+            drag: None,
+            modal: None,
+            floats: Vec::new(),
+            order: Vec::new(),
+            last_press: None,
             notifying: false,
+            system_motion: true,
+            pressed_on: None,
+            focus_visible: false,
+            animating: false,
             needs_layout: true,
             full: true,
             now: Duration::ZERO,
             last_frame: None,
-        }
+        };
+        root.rebuild_order();
+        root
     }
 
     /// The same root drawn in `theme`.
@@ -267,6 +373,39 @@ impl Root {
     /// The theme.
     pub fn theme(&self) -> &Theme {
         &self.theme
+    }
+
+    /// Follows the system's setting for motion: `false` when the person
+    /// asked the system for less of it (on Windows, client area animations
+    /// turned off), which makes every transition a jump whatever the
+    /// theme says. A window layer sets it when it opens the interface.
+    pub fn set_system_motion(&mut self, enabled: bool) {
+        self.system_motion = enabled;
+    }
+
+    /// The motion tokens in effect: the theme's, turned off if the theme or
+    /// the system turns motion off.
+    pub fn motion(&self) -> Motion {
+        if self.system_motion {
+            self.theme.motion
+        } else {
+            self.theme.motion.reduced()
+        }
+    }
+
+    /// Whether the widget with the focus shows it, as `:focus-visible`
+    /// does on the web: after the keyboard was used (Tab, the arrows, any
+    /// key) or assistive technology moved the focus, and not after a press
+    /// of the pointer, which hides it again. The focus itself, and what
+    /// assistive technology is told about it, does not change.
+    pub fn focus_visible(&self) -> bool {
+        self.focus_visible
+    }
+
+    /// Whether the last frame had a transition or another animation still
+    /// running (see [`Frame::animating`]).
+    pub fn is_animating(&self) -> bool {
+        self.animating
     }
 
     /// The size, in logical pixels.
@@ -320,6 +459,7 @@ impl Root {
         let cx = AccessCx {
             theme: &self.theme,
             rect: node.content,
+            scroll: node.scroll,
             focused: true,
         };
         node.widget.caret(&cx)
@@ -357,7 +497,8 @@ impl Root {
     }
 
     /// The scene the back buffer was last drawn from: the background, then
-    /// every widget's scene in tree order. Its [`dump`](Scene::dump) is an
+    /// every widget's scene in drawing order (tree order, but for floating
+    /// widgets, see [`UpdateCx::float_at`]). Its [`dump`](Scene::dump) is an
     /// exact description of what is on screen.
     pub fn scene(&self) -> &Scene {
         &self.composite
@@ -396,12 +537,17 @@ impl Root {
 
     /// How widget `id` describes itself, with the focus filled in and the
     /// name given with [`IntoView::named`] in place of its own.
+    ///
+    /// `None` for a widget inside a child that a container does not show
+    /// (see [`Shown`](crate::Shown)): assistive technology does not see
+    /// it.
     pub fn access(&self, id: NodeId) -> Option<AccessEntry> {
-        let node = self.tree.get(id)?;
+        let node = self.tree.get(id).filter(|node| !node.hidden)?;
         let focused = self.focus == Some(id);
         let cx = AccessCx {
             theme: &self.theme,
             rect: node.content,
+            scroll: node.scroll,
             focused,
         };
         let mut access = node.widget.access(&cx);
@@ -414,6 +560,7 @@ impl Root {
         }
         Some(AccessEntry {
             id,
+            item: None,
             parent: node.parent,
             node: access,
             bounds: node.rect,
@@ -421,11 +568,152 @@ impl Root {
         })
     }
 
-    /// Every widget's description, in tree order.
+    /// The widgets whose description changed in the last frame in a way
+    /// they said assistive technology should hear about (see
+    /// [`Frame::access`]).
+    pub fn access_updates(&self) -> &[NodeId] {
+        &self.access_updates
+    }
+
+    /// Every widget's description, in tree order, each followed by its
+    /// items (see [`Widget::access_items`]).
     pub fn access_tree(&self) -> Vec<AccessEntry> {
-        (0..self.tree.nodes.len())
-            .filter_map(|index| self.access(NodeId::from_index(index)))
-            .collect()
+        let mut entries = Vec::with_capacity(self.tree.nodes.len());
+        let mut items = Vec::new();
+        for index in 0..self.tree.nodes.len() {
+            let id = NodeId::from_index(index);
+            entries.extend(self.access(id));
+            self.items_of(id, &mut items);
+            entries.extend(items.drain(..).map(|item| AccessEntry {
+                id,
+                item: Some(item.key),
+                parent: Some(id),
+                node: item.node,
+                bounds: item.bounds,
+                device: item.bounds.to_device(self.scale),
+            }));
+        }
+        entries
+    }
+
+    /// The items widget `id` describes, into `items`.
+    fn items_of(&self, id: NodeId, items: &mut Vec<AccessItem>) {
+        let Some(node) = self.tree.get(id).filter(|node| !node.hidden) else {
+            return;
+        };
+        let cx = AccessCx {
+            theme: &self.theme,
+            rect: node.content,
+            scroll: node.scroll,
+            focused: self.focus == Some(id),
+        };
+        node.widget.access_items(&cx, items);
+    }
+
+    /// Carries out `action` on the item `key` of widget `id` (see
+    /// [`Widget::access_items`]), as assistive technology asks: only if the
+    /// item lists it among its actions. For [`Action::Focus`] the widget
+    /// itself takes the focus first. Returns whether it was done. An open
+    /// menu closes first.
+    pub fn act_item(&mut self, id: NodeId, key: usize, action: Action) -> bool {
+        if id.index() >= self.tree.main || !self.reachable(id) {
+            return false;
+        }
+        if self.menus.is_some() {
+            self.close_menus(MenuEvent::Closed);
+        }
+        let mut items = Vec::new();
+        self.items_of(id, &mut items);
+        let Some(item) = items.into_iter().find(|item| item.key == key) else {
+            return false;
+        };
+        if !item.node.actions.allows(action) {
+            return false;
+        }
+        if action == Action::Focus {
+            if !self.focusable(id) {
+                return false;
+            }
+            self.set_focus(Some(id));
+            self.reveal(id);
+        }
+        let done = self.deliver(id, |widget, cx| widget.act_item(cx, key, action));
+        done || action == Action::Focus
+    }
+
+    /// Where scroll node `id` is scrolled, as of the last layout and the
+    /// scrolling since; `None` for a widget that does not scroll.
+    pub fn scroll_metrics(&self, id: NodeId) -> Option<ScrollMetrics> {
+        self.tree.get(id).and_then(|node| node.scroll)
+    }
+
+    /// Scrolls node `id` to `offset`, as [`EventCx::scroll_to`] does.
+    pub(crate) fn set_scroll(&mut self, id: NodeId, offset: Point) {
+        let scale = self.scale;
+        if let Some(metrics) = self
+            .tree
+            .nodes
+            .get_mut(id.index())
+            .and_then(|node| node.scroll.as_mut())
+        {
+            if set_offset(metrics, offset, scale) {
+                self.needs_layout = true;
+            }
+        }
+    }
+
+    /// Scrolls the scroll views that `id` is inside, innermost first, as
+    /// little as brings it into their viewports: all of it, or its top
+    /// left corner when it is larger than a viewport.
+    fn reveal(&mut self, id: NodeId) {
+        if id.index() >= self.tree.main {
+            return;
+        }
+        let Some(node) = self.tree.get(id) else {
+            return;
+        };
+        let mut rect = node.rect;
+        let mut at = node.parent;
+        while let Some(parent) = at {
+            let Some(node) = self.tree.get(parent) else {
+                return;
+            };
+            at = node.parent;
+            let Some(metrics) = node.scroll else {
+                continue;
+            };
+            let view = metrics.viewport;
+            let along = |start: f32, length: f32, view_start: f32, view_length: f32| {
+                if length >= view_length || start < view_start {
+                    start - view_start
+                } else if start + length > view_start + view_length {
+                    start + length - (view_start + view_length)
+                } else {
+                    0.0
+                }
+            };
+            let by = Point::new(
+                if metrics.x {
+                    along(rect.x, rect.width, view.x, view.width)
+                } else {
+                    0.0
+                },
+                if metrics.y {
+                    along(rect.y, rect.height, view.y, view.height)
+                } else {
+                    0.0
+                },
+            );
+            if by == Point::ZERO {
+                continue;
+            }
+            let before = metrics.offset;
+            self.set_scroll(parent, Point::new(before.x + by.x, before.y + by.y));
+            let after = self
+                .scroll_metrics(parent)
+                .map_or(before, |metrics| metrics.offset);
+            rect = rect.translate(Point::new(before.x - after.x, before.y - after.y));
+        }
     }
 
     /// Whether a menu is open over the interface (see [`crate::menu`]): it
@@ -447,11 +735,35 @@ impl Root {
 
     fn hit_among(&self, at: Point, count: usize) -> Option<NodeId> {
         // Later widgets are drawn over earlier ones, and children over
-        // their parents.
-        (0..count.min(self.tree.nodes.len()))
-            .rev()
-            .find(|&index| self.tree.nodes[index].rect.contains(at))
-            .map(NodeId::from_index)
+        // their parents: the widgets over the interface (menus, a
+        // tooltip) first, then the interface's own in drawing order.
+        // A widget scrolled out of a view's sight is not there to hit.
+        // A hidden widget is not there either, and while a subtree is modal
+        // nothing of the interface outside it is.
+        let (start, end) = match self.modal {
+            Some(modal) if count <= self.tree.main => (
+                modal.node.index(),
+                self.tree.get(modal.node).map_or(0, |node| node.end),
+            ),
+            _ => (0, count),
+        };
+        let count = count.min(self.tree.nodes.len());
+        let hits = |index: &usize| {
+            let node = &self.tree.nodes[*index];
+            !node.hidden
+                && node.rect.contains(at)
+                && node.clip.is_none_or(|(clip, _)| clip.contains(at))
+        };
+        let over = (self.tree.main.min(count)..count).rev().find(hits);
+        over.or_else(|| {
+            self.order
+                .iter()
+                .rev()
+                .flat_map(|&(first, last)| (first..last.min(count)).rev())
+                .filter(|index| (start..end).contains(index))
+                .find(hits)
+        })
+        .map(NodeId::from_index)
     }
 
     /// The widget the pointer is over, with no button held, if any (see
@@ -467,11 +779,17 @@ impl Root {
     /// While a menu is open, an action on one of its items is the menu's
     /// (pressing an item chooses it), and an action on anything else first
     /// closes the menu.
+    ///
+    /// While a subtree is modal (a dialog is open), only the widgets inside
+    /// it can be acted on.
     pub fn act(&mut self, id: NodeId, action: Action) -> bool {
         if self.menus.is_some() {
             if let Some(done) = self.menu_act(id, action) {
                 return done;
             }
+        }
+        if !self.reachable(id) {
+            return false;
         }
         let Some(entry) = self.access(id) else {
             return false;
@@ -480,7 +798,9 @@ impl Root {
             return false;
         }
         if action == Action::Focus {
+            self.focus_visible = true;
             self.set_focus(Some(id));
+            self.reveal(id);
             return true;
         }
         self.deliver(id, |widget, cx| widget.act(cx, action))
@@ -495,9 +815,13 @@ impl Root {
             self.close_menus(MenuEvent::Closed);
         }
         match id {
-            Some(id) if !self.focusable(id) => false,
+            Some(id) if !self.focusable(id) || !self.reachable(id) => false,
             _ => {
+                self.focus_visible |= id.is_some();
                 self.set_focus(id);
+                if let Some(id) = id {
+                    self.reveal(id);
+                }
                 true
             }
         }
@@ -518,6 +842,10 @@ impl Root {
             }
         }
         let old = std::mem::replace(&mut self.focus, id);
+        // The focus moving into a floating widget brings it to the front.
+        if let Some(id) = id {
+            self.raise_around(id);
+        }
         // Each hears of it once the focus is where it now is, the one that
         // lost it first.
         let notifying = std::mem::replace(&mut self.notifying, true);
@@ -533,10 +861,7 @@ impl Root {
     /// the previous one; round to the first or last at the ends. Returns
     /// false, and changes nothing, if no widget takes the focus.
     fn move_focus(&mut self, forward: bool) -> bool {
-        let focusable: Vec<NodeId> = (0..self.tree.nodes.len())
-            .map(NodeId::from_index)
-            .filter(|&id| self.focusable(id))
-            .collect();
+        let focusable = self.focus_order();
         if focusable.is_empty() {
             return false;
         }
@@ -550,6 +875,8 @@ impl Root {
             (Some(at), false) => (at + focusable.len() - 1) % focusable.len(),
         };
         self.set_focus(Some(focusable[next]));
+        // Tab into a widget scrolled out of sight scrolls to it.
+        self.reveal(focusable[next]);
         true
     }
 
@@ -561,10 +888,14 @@ impl Root {
         call: impl FnOnce(&mut dyn Widget, &mut EventCx<'_>) -> R,
     ) -> R {
         let mut requests = Requests::default();
+        let motion = self.motion();
+        let floating = self.float_around(id);
         let node = &mut self.tree.nodes[id.index()];
         let mut cx = EventCx {
             theme: &self.theme,
+            motion,
             rect: node.content,
+            scroll: node.scroll,
             scale: self.scale,
             focused: self.focus == Some(id),
             captured: self.capture == Some(id),
@@ -572,6 +903,7 @@ impl Root {
             context: &self.context,
             clipboard: &*self.clipboard,
             id,
+            floating,
             requests: &mut requests,
         };
         let result = call(&mut *node.widget, &mut cx);
@@ -590,12 +922,33 @@ impl Root {
         if requests.focus && !self.notifying && self.focusable(id) {
             self.set_focus(Some(id));
         }
+        if let Some(offset) = requests.scroll {
+            self.set_scroll(id, offset);
+        }
         if let Some(menu) = requests.menu.take() {
-            if !self.notifying {
+            // No menu opens over a drag.
+            if !self.notifying && self.drag.is_none() {
                 self.open_menu(id, menu);
             }
         }
+        if let Some(payload) = requests.drag.take() {
+            if !self.notifying && self.pressed && id.index() < self.tree.main {
+                self.begin_drag(Some(id), payload);
+            }
+        }
         result
+    }
+
+    /// Remembers that the press of `key` was used, so that its release is
+    /// used too.
+    fn remember_key(&mut self, key: Key) {
+        if self.keys_used.contains(&key) {
+            return;
+        }
+        if self.keys_used.len() >= MAX_KEYS_HELD {
+            self.keys_used.remove(0);
+        }
+        self.keys_used.push(key);
     }
 
     /// `id` and the widgets that contain it, innermost first.
@@ -618,6 +971,49 @@ impl Root {
                 continue;
             }
             tried = Some(target);
+            if self.deliver(target, |widget, cx| widget.event(cx, event)) == Handled::Yes {
+                return Handled::Yes;
+            }
+        }
+        Handled::No
+    }
+
+    /// Offers `event`, a key the widget with the focus did not use, to the
+    /// widgets that contain it, innermost first, until one uses it; with
+    /// nothing focused, to every widget shown, in tree order. Only for keys
+    /// that belong to a container, such as Control+Tab for tabs.
+    fn offer_to_containers(&mut self, event: &Event) -> Handled {
+        let targets: Vec<NodeId> = match self.focus {
+            Some(focus) => self.ancestry(focus).into_iter().skip(1).collect(),
+            None => (0..self.tree.main)
+                .map(NodeId::from_index)
+                .filter(|&id| !self.is_hidden(id))
+                .collect(),
+        };
+        for target in targets {
+            if target.index() >= self.tree.main || !self.reachable(target) {
+                continue;
+            }
+            if self.deliver(target, |widget, cx| widget.event(cx, event)) == Handled::Yes {
+                return Handled::Yes;
+            }
+        }
+        Handled::No
+    }
+
+    /// Offers `event`, a key the widget with the focus did not use, to the
+    /// widgets that contain it, innermost first, until one uses it; to
+    /// none with nothing focused.
+    fn offer_to_ancestors(&mut self, event: &Event) -> Handled {
+        let mut at = self
+            .focus
+            .and_then(|focus| self.tree.get(focus))
+            .and_then(|node| node.parent);
+        while let Some(target) = at {
+            at = self.tree.get(target).and_then(|node| node.parent);
+            if target.index() >= self.tree.main || !self.reachable(target) {
+                continue;
+            }
             if self.deliver(target, |widget, cx| widget.event(cx, event)) == Handled::Yes {
                 return Handled::Yes;
             }
@@ -661,9 +1057,33 @@ impl Root {
     ///   host. The release of a key whose press was used is used too,
     ///   whatever the widget does with it, so the host never sees half a
     ///   keystroke.
+    /// - Control+Tab and Control+Shift+Tab that the widget with the focus
+    ///   does not use go to the widgets that contain it, innermost first
+    ///   (with nothing focused, to every widget shown), which is how
+    ///   [`tabs`](crate::tabs) change page from anywhere inside them; they
+    ///   never move the focus. Escape that it does not use goes to the
+    ///   widgets that contain it too (with nothing focused, to none),
+    ///   which is how a [`floating_panel`](crate::floating_panel) closes.
+    /// - A press inside a floating widget (see [`UpdateCx::float_at`])
+    ///   brings it to the front, and leaves the focus where it is if the
+    ///   focus is inside it too, as a press on a window's title bar does.
+    /// - While a subtree is modal (a dialog is open, see
+    ///   [`UpdateCx::set_modal`]), only widgets inside it can be pressed or
+    ///   focused, Tab goes round inside it, keys that the widget with the
+    ///   focus does not use go to the subtree's outermost widget, and every
+    ///   key is used.
     /// - Typed text and compositions go where keys go.
     /// - Losing the window's focus ends a drag where it is
     ///   ([`Event::PointerCancel`]) and takes the keyboard focus away.
+    /// - While a drag runs (see [`crate::drag`]), moves offer it to the
+    ///   widgets under the pointer, the release drops it, and a second
+    ///   button, Escape, [`Event::PointerCancel`] and losing the window's
+    ///   focus cancel it; the wheel, other keys and typed text go on as
+    ///   usual.
+    /// - Tab, and assistive technology, giving the focus to a widget
+    ///   scrolled out of a [`scroll_view`](crate::scroll_view)'s sight
+    ///   scroll it into sight. A widget a view hides cannot be pressed
+    ///   where it would be.
     /// - While a menu is open, the menu has everything: see
     ///   [`crate::menu`]. Every event is used then.
     /// - [`Event::Menu`] is the root's to send, and is not used.
@@ -675,11 +1095,26 @@ impl Root {
             self.pointer = Some(at);
         }
         match event {
-            Event::PointerDown { .. } => self.pressed = true,
+            Event::PointerDown { at, .. } => {
+                self.pressed = true;
+                // A press hides the focus ring, as on the web.
+                self.focus_visible = false;
+                self.pressed_on = Some(at)
+                    .filter(|at| at.is_finite())
+                    .and_then(|at| self.hit_main(at));
+            }
             Event::PointerUp { .. } | Event::PointerCancel | Event::Focus(false) => {
                 self.pressed = false;
+                self.pressed_on = None;
             }
+            // Using the keyboard shows it.
+            Event::Key(key) if key.pressed => self.focus_visible = true,
             _ => {}
+        }
+        if self.drag.is_some() {
+            if let Some(handled) = self.drag_event(&event) {
+                return handled;
+            }
         }
         if self.menus.is_some() {
             return self.menu_event(event);
@@ -702,10 +1137,19 @@ impl Root {
                     self.set_focus(None);
                     return Handled::No;
                 };
+                self.last_press = Some(target);
+                // A press inside a floating widget brings it to the front.
+                self.raise_around(target);
                 let inside_focus = self
                     .focus
                     .is_some_and(|focus| self.ancestry(target).contains(&focus));
-                if !inside_focus {
+                // A press on a dialog's scrim leaves the focus in the
+                // dialog, and one on a floating panel the focus inside it.
+                let on_scrim = self.modal.is_some_and(|modal| modal.node == target);
+                let same_float = self
+                    .focus
+                    .is_some_and(|focus| self.same_float(target, focus));
+                if !inside_focus && !on_scrim && !same_float {
                     self.set_focus(None);
                 }
                 self.bubble(target, &event)
@@ -713,8 +1157,11 @@ impl Root {
             Event::PointerMove { at, .. } => match self.capture {
                 Some(holder) => self.deliver(holder, |widget, cx| widget.event(cx, &event)),
                 None => {
-                    if !self.pressed {
-                        self.hover_to(Some(at).filter(|at| at.is_finite()));
+                    if !self.pressed && at.is_finite() {
+                        self.hover_to(Some(at));
+                        if let Some(hovered) = self.hover {
+                            self.deliver(hovered, |widget, cx| widget.hover_moved(cx, at));
+                        }
                     }
                     Handled::No
                 }
@@ -760,18 +1207,34 @@ impl Root {
                     }
                 }
                 let mut handled = self.offer_to_keyboard(&event);
+                let control_tab = key.key == Key::Tab && key.modifiers.control;
+                if handled == Handled::No && control_tab {
+                    handled = self.offer_to_containers(&event);
+                }
+                // Escape that the focused widget does not use goes to the
+                // widgets around it: a floating panel closes.
+                if handled == Handled::No && key.key == Key::Escape {
+                    handled = self.offer_to_ancestors(&event);
+                }
+                if handled == Handled::No {
+                    if let Some(modal) = self.modal {
+                        handled = self.deliver(modal.node, |widget, cx| widget.event(cx, &event));
+                    }
+                }
                 if handled == Handled::No
                     && key.pressed
                     && key.key == Key::Tab
+                    && !key.modifiers.control
                     && self.move_focus(!key.modifiers.shift)
                 {
                     handled = Handled::Yes;
                 }
+                // A modal subtree, a dialog, has every key.
+                if self.modal.is_some() {
+                    handled = Handled::Yes;
+                }
                 if handled == Handled::Yes && key.pressed && held.is_none() {
-                    if self.keys_used.len() >= MAX_KEYS_HELD {
-                        self.keys_used.remove(0);
-                    }
-                    self.keys_used.push(key.key);
+                    self.remember_key(key.key);
                 }
                 handled
             }
@@ -803,11 +1266,45 @@ impl Root {
         self.now = now;
 
         let mut animating = false;
-        for node in &mut self.tree.nodes {
+        self.access_updates.clear();
+        let motion = self.motion();
+        let (hover, pressed_on) = (self.hover, self.pressed_on);
+        let mut focus_wanted = None;
+        let mut focus_within = None;
+        let mut theme_wanted = None;
+        let mut index = 0;
+        while index < self.tree.nodes.len() {
+            let focus = self.focus.filter(|_| self.focus_visible);
+            let node = &mut self.tree.nodes[index];
+            if node.hidden {
+                // A child a container hides is not polled, nor is anything
+                // inside it.
+                index = node.end.max(index + 1);
+                continue;
+            }
+            // The hover, press and focus ring, eased. A scroll view counts
+            // as hovered while the pointer is over anything inside it, so
+            // that its bars can show.
+            let id = Some(NodeId::from_index(index));
+            let inside = node.scroll.is_some()
+                && hover.is_some_and(|at| (index..node.end).contains(&at.index()));
+            let states = (hover == id || inside, pressed_on == id, focus == id);
+            let (moved, running) = node.motion.follow(states, now, &motion);
+            if moved {
+                node.paint = true;
+            }
+            animating |= running;
             let mut requests = Requests::default();
             let mut cx = UpdateCx {
                 theme: &self.theme,
+                motion,
+                amounts: (
+                    node.motion.hover.value(),
+                    node.motion.press.value(),
+                    node.motion.focus.value(),
+                ),
                 rect: node.content,
+                scroll: node.scroll,
                 scale: self.scale,
                 now,
                 elapsed,
@@ -821,26 +1318,90 @@ impl Root {
                 node.measure = true;
                 self.needs_layout = true;
             }
+            if requests.access {
+                self.access_updates.push(NodeId::from_index(index));
+            }
+            if let (Some(offset), Some(metrics)) = (requests.scroll, node.scroll.as_mut()) {
+                if set_offset(metrics, offset, self.scale) {
+                    self.needs_layout = true;
+                }
+            }
             animating |= requests.frame;
+            if requests.focus {
+                focus_wanted = Some(NodeId::from_index(index));
+            }
+            // What it hides is hidden before the loop reaches it.
+            if let Some(shown) = requests.shown {
+                self.show_children(index, shown);
+            }
+            if let Some(child) = requests.modal {
+                self.set_modal_child(index, child);
+            }
+            if let Some(position) = requests.float {
+                self.set_float(index, position);
+            }
+            if requests.raise {
+                self.raise(NodeId::from_index(index));
+            }
+            if requests.focus_within {
+                focus_within = Some(index);
+            }
+            if requests.theme.is_some() {
+                theme_wanted = requests.theme;
+            }
+            index += 1;
+        }
+        if let Some(theme) = theme_wanted.filter(|theme| *theme != self.theme) {
+            self.set_theme(theme);
+        }
+        if let Some(index) = focus_within {
+            focus_wanted = self.focus_within(index).or(focus_wanted);
+        }
+        if let Some(id) = focus_wanted {
+            if self.focusable(id) && self.reachable(id) {
+                let old = self.focus;
+                self.set_focus(Some(id));
+                self.reveal(id);
+                // Their rings follow in this frame, not the next.
+                let shown = self.focus.filter(|_| self.focus_visible);
+                for changed in [old, Some(id)].into_iter().flatten() {
+                    if let Some(node) = self.tree.nodes.get_mut(changed.index()) {
+                        let states = (
+                            hover == Some(changed),
+                            pressed_on == Some(changed),
+                            shown == Some(changed),
+                        );
+                        let (moved, running) = node.motion.follow(states, now, &motion);
+                        node.paint |= moved;
+                        animating |= running;
+                    }
+                }
+            }
         }
         // A tooltip waiting for the pointer to rest long enough wants the
         // frames that measure it.
         animating |= self.tick_tooltip();
+        // A drag scrolls views near their edges and wants frames to do it.
+        animating |= self.tick_drag(elapsed);
 
         let laid_out = self.needs_layout;
         if self.needs_layout {
             self.layout();
+        } else if self.drag.as_ref().is_some_and(|drag| drag.moved) {
+            self.place_ghost();
         }
         let painted = self.paint();
         if !self.damage.is_empty() {
             self.render();
         }
+        self.animating = animating;
         Frame {
             damage: &self.damage,
             pixels: &self.pixels,
             animating,
             painted,
             laid_out,
+            access: &self.access_updates,
         }
     }
 
@@ -851,19 +1412,119 @@ impl Root {
             scale: self.scale,
         };
         for (node, item) in self.tree.nodes.iter_mut().zip(&mut self.tree.layout) {
+            if node.hidden {
+                // Measured once it is shown again.
+                continue;
+            }
             if node.measure {
                 node.measure = false;
                 item.content = node.widget.measure(&cx);
+            }
+            let overflow = node.widget.overflow(&cx);
+            let overflow = if overflow.is_finite() {
+                overflow.clamp(0.0, MAX_OVERFLOW)
+            } else {
+                0.0
+            };
+            if overflow != node.overflow {
+                node.overflow = overflow;
+                node.paint = true;
             }
         }
         let area = Rect::new(0.0, 0.0, self.size.width, self.size.height);
         let placed = layout::solve(&self.tree.layout, 0, area, self.scale);
         // The interface's own widgets; what is over them is placed after.
-        for (index, placement) in placed.into_iter().enumerate().take(self.tree.main) {
-            self.apply_placement(index, placement);
-        }
+        self.place_main(&placed);
         self.place_menus();
         self.place_tooltip();
+        self.place_ghost();
+    }
+
+    /// Puts the interface's own widgets where layout placed them, moved by
+    /// the offsets of the scroll views they are inside and clipped to their
+    /// viewports.
+    fn place_main(&mut self, placed: &[Placement]) {
+        let main = self.tree.main.min(placed.len());
+        let scale = self.scale;
+        // For each node, how far its children move, in device pixels, and
+        // what they are clipped to.
+        let mut shifts: Vec<(i32, i32)> = vec![(0, 0); main];
+        let mut clips: Vec<Option<(Rect, IRect)>> = vec![None; main];
+        for index in 0..main {
+            if self.tree.nodes[index].hidden {
+                // Not laid out: it keeps where it was until it is shown.
+                continue;
+            }
+            let (shift, clip) = match self.tree.nodes[index].parent {
+                Some(parent) if parent.index() < index => {
+                    (shifts[parent.index()], clips[parent.index()])
+                }
+                _ => ((0, 0), None),
+            };
+            let mut placement = shifted(placed[index], shift, scale);
+            let mut shift = shift;
+            if self.tree.nodes[index].float.is_some() {
+                // A floating widget, and all inside it, moves to where it
+                // asked to be.
+                let (moved, by) = self.place_float(index, placement);
+                placement = moved;
+                shift = (shift.0.saturating_add(by.0), shift.1.saturating_add(by.1));
+            }
+            shifts[index] = shift;
+            clips[index] = clip;
+            let item = &self.tree.layout[index];
+            let viewport = layout::scroll_viewport(item, placement, scale);
+            let node = &mut self.tree.nodes[index];
+            if let (Some(metrics), Some(viewport)) = (node.scroll.as_mut(), viewport) {
+                // The content reaches as far as its children, laid out from
+                // the viewport's corner before any scrolling.
+                let origin = shifted(viewport, (-shift.0, -shift.1), scale).rect;
+                let mut content = viewport.rect.size();
+                for &child in &item.children {
+                    if let Some(child) = placed.get(child) {
+                        content.width = content.width.max(child.rect.right() - origin.x);
+                        content.height = content.height.max(child.rect.bottom() - origin.y);
+                    }
+                }
+                let before = *metrics;
+                metrics.viewport = viewport.rect;
+                metrics.content = content;
+                let offset = metrics.offset;
+                set_offset(metrics, offset, scale);
+                // Its bars show where it is.
+                let changed = *metrics != before;
+                let device = |v: f32| (f64::from(v) * f64::from(scale)).round() as i32;
+                shifts[index] = (
+                    shift.0 - device(metrics.offset.x),
+                    shift.1 - device(metrics.offset.y),
+                );
+                clips[index] = Some(match clip {
+                    Some((rect, device)) => (
+                        rect.intersect(&viewport.rect).unwrap_or(Rect::new(
+                            viewport.rect.x,
+                            viewport.rect.y,
+                            0.0,
+                            0.0,
+                        )),
+                        device.intersect(&viewport.device).unwrap_or(IRect::new(
+                            viewport.device.x,
+                            viewport.device.y,
+                            0,
+                            0,
+                        )),
+                    ),
+                    None => (viewport.rect, viewport.device),
+                });
+                if changed {
+                    node.paint = true;
+                }
+            }
+            if node.clip != clip {
+                node.clip = clip;
+                node.paint = true;
+            }
+            self.apply_placement(index, placement);
+        }
     }
 
     /// Puts widget `index` where layout placed it, and has it drawn again
@@ -898,7 +1559,7 @@ impl Root {
         let full = std::mem::take(&mut self.full);
         let mut painted = 0;
         for (index, node) in self.tree.nodes.iter_mut().enumerate() {
-            if !node.paint {
+            if !node.paint || node.hidden {
                 continue;
             }
             node.paint = false;
@@ -906,12 +1567,49 @@ impl Root {
             let cx = PaintCx {
                 theme: &self.theme,
                 rect: node.content,
+                scroll: node.scroll,
                 scale: self.scale,
                 focused: self.focus == Some(NodeId::from_index(index)),
                 hovered: self.hover == Some(NodeId::from_index(index)),
                 now: self.now,
+                amounts: (
+                    node.motion.hover.value(),
+                    node.motion.press.value(),
+                    node.motion.focus.value(),
+                ),
             };
-            node.widget.paint(&cx, &mut node.spare);
+            // Where the widget may draw: its rectangle grown by its
+            // overflow, and inside a scroll view only what the view lets be
+            // seen. A widget scrolled out of sight is not asked to draw at
+            // all.
+            let (rect, device) = if node.overflow > 0.0 {
+                let reach = (f64::from(node.overflow) * f64::from(self.scale)).ceil() as i32;
+                let d = node.device;
+                (
+                    node.rect.outset(node.overflow),
+                    IRect::from_edges(
+                        d.x.saturating_sub(reach),
+                        d.y.saturating_sub(reach),
+                        (d.right() as i32).saturating_add(reach),
+                        (d.bottom() as i32).saturating_add(reach),
+                    ),
+                )
+            } else {
+                (node.rect, node.device)
+            };
+            let (limit, limit_device) = match node.clip {
+                Some((clip, clip_device)) => {
+                    (rect.intersect(&clip), device.intersect(&clip_device))
+                }
+                None => (Some(rect), Some(device)),
+            };
+            let hidden = node.clip.is_some() && (limit.is_none() || limit_device.is_none());
+            if !hidden {
+                node.widget.paint(&cx, &mut node.spare);
+            }
+            let limit = limit.unwrap_or(Rect::new(node.rect.x, node.rect.y, 0.0, 0.0));
+            let limit_device =
+                limit_device.unwrap_or(IRect::new(node.device.x, node.device.y, 0, 0));
             if !full && node.spare == node.scene {
                 // Asked to paint, and drew the same thing: nothing to do.
                 continue;
@@ -924,17 +1622,18 @@ impl Root {
                     .filter(|rect| !rect.is_empty())
             };
             let mut now = device(&node.spare);
-            if now.is_some_and(|drawn| !node.device.contains_rect(&drawn)) {
-                // It reached past its rectangle: cut it to the rectangle,
-                // so that it covers nothing of its neighbours.
+            if now.is_some_and(|drawn| !limit_device.contains_rect(&drawn)) {
+                // It reached past its rectangle, or the viewport it is
+                // seen through: cut it to them, so that it covers nothing
+                // of its neighbours.
                 self.cut.clear();
                 let spare = &node.spare;
-                self.cut.clipped(node.rect, |scene| scene.append(spare));
+                self.cut.clipped(limit, |scene| scene.append(spare));
                 std::mem::swap(&mut node.spare, &mut self.cut);
                 // The clip's edges are the rectangle's device edges, give or
                 // take the rounding of `f32`, which can move the bounds a
                 // pixel out but leaves that pixel uncovered.
-                now = device(&node.spare).and_then(|drawn| drawn.intersect(&node.device));
+                now = device(&node.spare).and_then(|drawn| drawn.intersect(&limit_device));
                 if !full && node.spare == node.scene {
                     continue;
                 }
@@ -973,7 +1672,12 @@ impl Root {
         );
         self.composite
             .fill(background, self.theme.palette.background);
-        for node in &self.tree.nodes {
+        for &(first, last) in &self.order {
+            for node in &self.tree.nodes[first..last] {
+                self.composite.append(&node.scene);
+            }
+        }
+        for node in &self.tree.nodes[self.tree.main..] {
             self.composite.append(&node.scene);
         }
         for &rect in &self.damage {

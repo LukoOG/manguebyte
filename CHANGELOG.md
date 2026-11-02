@@ -9,6 +9,65 @@ break the API.
 
 ### Core
 
+- `pool`: rendering independent jobs (voices, divisions, chains of
+  effects) on several cores inside one audio callback, with output bit for
+  bit that of one thread (ADR 0015). `RenderPool` owns a fixed set of
+  `Job`s and a fixed number of workers started with it; `run` renders the
+  first `count` jobs on the workers and the calling thread, taken from an
+  atomic counter, and `rendered` gives them back in index order to mix.
+  The audio thread renders any job no thread has begun and spins, for at
+  most the pool's wait limit, only for jobs a worker is rendering; a job a
+  late worker still holds is dropped from that block, counted in
+  `BlockReport` and `PoolStats`, and not lent out by `job_mut` until it is
+  done. Nothing allocates or locks on the audio thread; parked workers are
+  woken with `Thread::unpark`. Workers ask for real-time scheduling
+  (MMCSS "Pro Audio" on Windows, `SCHED_FIFO` elsewhere) and report what
+  they got; `Promotion` does the same for any thread. A pool of zero
+  workers renders on the calling thread. `run_with` and `Helper` let a
+  host's threads do the work, as CLAP's `thread-pool` extension would.
+  Tested: bit identity over 1 to 8 threads, five block sizes and random
+  job sets; a worker stalled for 400 ms costs the audio thread the 2 ms
+  limit; no heap use under the counting allocator; workers ended on drop;
+  an idle pool of seven workers used no measurable processor time over a
+  second. `examples/pool_speed.rs`, on an Intel Core i3-1215U busy with
+  other builds, 64 voices of 32 partials in blocks of 128 frames at
+  48 kHz: 6.47 ms a block on one thread, 3.55 ms on two (1.83 times
+  faster), 1.64 ms on four (3.94), no gain from eight; a parked worker
+  starts about 20 to 30 µs after `run` begins (TECH_DEBT item 107).
+- `governor`: keeps an instrument inside the block's deadline by giving it
+  a budget to spend (ADR 0018). `Governor` measures each block's rendering
+  time against its deadline (frames over the sample rate; two reads of the
+  monotonic clock a block, through `Instant`) and gives a budget for the
+  next block in abstract cost units, which the instrument spends in its
+  own order of priority: demote voices, drop partials, steal voices. The
+  instrument states relative costs; the governor learns the load of one
+  unit, with a fast attack (half the way a block, all of it above the
+  ceiling, at most twice the estimate a block), a slow release, a 5 %
+  hysteresis, and a recovery of at most a doubling every half second; it
+  settles at the target (70 % unless set) less the hysteresis.
+  `spike_blocks(n)` makes a rise count only once it has lasted `n`
+  blocks. Offline it gives the maximum budget and never reads the clock;
+  `set_quality_floor` and `set_max_budget` bound it; `note_missed` counts
+  missed jobs as a full deadline's load, and `note_report` takes a render
+  pool's `BlockReport`. `Allowance`
+  spends a budget tier by tier and says whether the instrument was
+  limited. Nothing allocates or locks. Tested on a fake clock: a step to
+  twice what fits brought under the target within three blocks and kept
+  there, a rise between target and ceiling answered within four, a slow
+  ramp never more than 1 % over the target, recovery monotonic and never
+  faster than the doubling rate whatever the block size, a lone 56 ms
+  preemption halving the budget at most (ignored with `spike_blocks(3)`),
+  a budget below the cheapest voice recovering, noise inside the band
+  moving nothing and larger noise within stated bounds, offline, floor,
+  maximum, missed jobs; no heap use under the counting allocator.
+  `manguebyte-dsp`'s `examples/governor_organ.rs` plays a `PartialBank`
+  organ asked for twice what fits, on the real clock: on the development
+  laptop, busy with other programs, on a real-time thread, the load's
+  99th percentile held at 70 to 71 % (the target) with no block late (all
+  of them without the governor), 13 to 17 % of the organ rendered; at
+  normal priority 0.3 to 0.7 % late and 0.3 to 10 % rendered, and with
+  `spike_blocks(3)` 6 to 39 % late and 7 to 18 % rendered (TECH_DEBT item
+  111).
 - `vector`: SIMD-accelerated operations on slices of samples (issue #10).
   `scale`, `copy_scaled`, `add`, `add_scaled`, `multiply`, `scale_ramp`,
   `peak`, `dot`, `sum_of_squares`, `complex_multiply_add`,
@@ -37,8 +96,157 @@ break the API.
   four-sum loop (TECH_DEBT item 92).
 - `AudioBuffer`'s `apply_gain`, `apply_gain_ramp`, `mix_from`, `peak`,
   `rms` and its interleaving copies of one and two channels run on them.
+- `module::file` names the file of the binary the code is linked into,
+  a plugin's own library in a plugin, by asking the system about an
+  address inside it: `GetModuleHandleExW` with
+  `GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS` and `GetModuleFileNameW` on
+  Windows, `dladdr` elsewhere, `None` under Miri and on WebAssembly
+  (ADR 0012).
+- `vector::add_partials` renders a bank of sine partials, given as the
+  slices of a `Partials` (phasor, rotation, gain and its step, left and
+  right gains), into a stereo pair: each frame a partial's gain moves,
+  `gain * sin` is sent to both sides, and its phasor turns, Caecilia's
+  order. The vector backends give each partial a lane and interleave the
+  registers of a group of 16, so the rotation that waits on the one
+  before it no longer sets the speed. Every partial's samples, phasor and
+  gain are those of the plain loop bit for bit on every backend, and a
+  frame's samples are added in a fixed order (16 running sums, pairs,
+  then the rest), so the output is the same on every backend too; against
+  adding the partials one after another it differs only by the rounding
+  of the sums, within `2 (n + 5) 2^-24` of the sum of the terms'
+  magnitudes. Tested against the definition over 0 to 257 partials and 0
+  to 200 frames, and against the plain loop.
+- `vector::add_scaled_ramp` (a gain ramp mixed into a bus) and
+  `vector::add_product` (a block mixed in under a gain that changes every
+  frame, such as an envelope): element-wise, bit for bit on every backend.
 
 ### DSP
+
+- The space around an organ's pipes (`manguebyte_dsp::space`, ADR 0025),
+  for an organ that renders each pipe as its own mono signal. Geometry in
+  metres: `Position`, `Speakers` (one azimuth per channel, up to 16;
+  pairwise equal-power panning with the sine law, stereo at ±30°), and a
+  `Listener` whose `place` gives a `Placement`: pan, delay (distance over
+  343 m/s), distance gain (`reference / r`, held near the listener) and
+  air absorption as a one-pole whose cutoff falls with distance, matched
+  below it to a loss growing with the square of the frequency (0.077 dB/m
+  at 8 kHz, about ISO 9613-1's at 20 °C and 70 %; an approximation, not
+  the standard). `Chest` lays a rank out: chromatic, C and C♯ sides with
+  the largest pipes outside or in the middle, mitre, and heights that
+  follow the pipes' lengths. `Windchest` places thousands of pipes into
+  one accumulation ring per output channel: a sounding pipe's block goes
+  through its air filter and four Lagrange taps (or linear, or none),
+  then is written ahead at its delay with each channel's gain, as
+  fixed-point integers so that the output is the same bit for bit
+  whatever the block size and whatever order the pipes are added in; a
+  pipe holds four numbers of state and costs nothing while silent. Moving
+  a sounding pipe crossfades over 20 ms. `Reflections` computes a
+  rectangular room's image sources (Allen and Berkley, 1979) up to order
+  6, with absorption and an optional one-pole per wall, panned from each
+  image's direction; `EarlyReflections` plays them from a division's
+  mono bus into the output channels, gathered in a fixed order, and
+  crossfades to a new set. `keep_tail` takes the first part off an
+  impulse response for the `Convolution` tail. `SwellBox` is a
+  `Processor` for an enclosed division: an opening from 0 to 1 sets a
+  level linear in decibels (−30 dB closed) and a one-pole cutoff linear in
+  octaves (1 kHz to 20 kHz), both smoothed sample by sample over 50 ms.
+  Tested (`tests/space.rs`): the power of the pan within 1e-14 of one all
+  round for stereo, 5 and 8 channels; a pipe on the left louder on the
+  left, the two channels' power the same within 1e-4 across ±60°; a
+  pulse arriving at `d / 343` s within 1e-3 of a sample (measured 1.2e-4)
+  from 1.3 m to 40 m; the high-frequency cost of each interpolation at the
+  worst fraction as documented (cubic: 1.1 dB at 12 kHz, 3.3 dB at 16 kHz,
+  8.4 dB at 20 kHz of 48); the air's loss at 10 kHz as the law says to
+  1e-4 from 2 m to 80 m; the windchest, the reflections and the swell box
+  bit for bit the same over block sizes from 1 to 512, with pipes
+  starting, stopping and moving and a set of reflections changed; the
+  windchest's pipes added in reverse order giving the same bits; a moving
+  pipe and a new set of reflections stepping no more than the steeper of
+  the two steady signals and what the 20 ms fade adds, a tenth of the jump
+  without it; first-order reflections' images, delays, gains and pans as
+  computed independently, within 1e-12; the lattice's `4k² + 2` paths of
+  each order; the swell box's level at 200 Hz within 0.25 dB of the law
+  and its loss at 8 kHz growing as it closes; sweeping and slamming the
+  pedal never stepping more than the glide's slope, where no glide jumps
+  by 0.9; no heap use under the counting allocator. Measured
+  (`examples/space_speed.rs`, a busy Intel Core i3-1215U): 300 sounding
+  pipes of 2 000 into stereo, 128 frames at 48 kHz, 0.22 to 0.28 ms a
+  block (8 to 11 % of its time), about three times that while all of them
+  crossfade; reflections of order 3 about 0.04 ms, of order 6 0.21 to
+  0.25 ms; the swell box under 0.01 ms. Limits: TECH_DEBT 118.
+- `TableShape::cycle` and `TableShape::frames`: the poly synth's
+  wavetables as cycles to draw, one at any position or all
+  `TableShape::FRAMES` frames, read from the richest level as a low note
+  plays them. They share the tables the voices use, built once; for an
+  interface thread, not the audio one. Tested against what the voice
+  reads, sample for sample.
+- Tuning (`manguebyte_dsp::tuning`): a `Tuning` gives each of the 128
+  keys a frequency, and fractional keys one between, interpolated in
+  pitch; built off the audio thread from `TuningSettings` and never
+  changed after. A key's frequency is a table lookup, a fractional note's
+  one interpolation and one `exp2`. It owns no heap memory, so it is sent
+  through `manguebyte_core::spsc` and dropped on the audio thread for
+  free. Scales (`Scale`): equal divisions of the octave or of any period
+  (12, 19, 24, 31, 53, Bohlen-Pierce's 13 to the tritave); twelve-note
+  `Temperament`s on any key, built from their definitions in fractions of
+  the Pythagorean or syntonic comma (Pythagorean, quarter-comma meantone,
+  Werckmeister III, Kirnberger III, Vallotti, Young's second, five-limit
+  just intonation) or from a table of cents or of deviations from equal
+  temperament; Scala files, `ScalaScale` (`.scl`: comments, ratios, cents,
+  negative cents, any period) and `KeyboardMapping` (`.kbm`: patterns,
+  unmapped keys, the range to retune, reference key and frequency, formal
+  octave), with the line of every error. On top: any reference key and
+  frequency, a transposition in keys, a detune in cents and a `Stretch`
+  (cents per octave below and above a pivot, the straight-line model
+  Caecilia 1.x used). `MtsMessage` reads the MIDI Tuning Standard's bulk
+  tuning dump (checksum checked) and single note tuning changes (real
+  time, and with a bank), and applies them without allocating;
+  `mts_pitch_bytes` writes a pitch in its three bytes. `Tuning::default()`
+  is 12-tone equal temperament with A4 at 440 Hz and gives
+  `440 · 2^((note − 69) / 12)` bit for bit for every note, whole or not.
+  The tests check every temperament against its published cents to half
+  a thousandth of a cent in every octave and on every key, Caecilia 1.x's
+  twelve reference tables (six temperaments at 440 and 415 Hz, 128 keys)
+  within 1e-9 cent (the largest difference is 3.5e-12), equal divisions
+  to 1e-13, Scala files of every kind through to the table, error lines,
+  MIDI tuning messages to their resolution, and fractional notes rising
+  without a jump through eight tunings.
+- `Synth::set_tuning` gives every voice a tuning through the new
+  `Voice::set_tuning` (a default method that ignores it), real-time safe;
+  a note on a key the tuning leaves unmapped does not start. Every pitched
+  instrument plays in it: plucked strings, FM, the organ, the acid and
+  kick basses, the polysynth, bowed strings, winds, mallets and the choir
+  take their key's pitch from the tuning and add bends, glides and their
+  own transpositions on top in semitones, as MIDI Tuning Standard synths
+  do. Measured: each moves by what the tuning moves its key by, within
+  1.5 cents, at A4 = 415 Hz, in 19-tone equal temperament and in meantone.
+  With the default tuning, given or not, each renders what it rendered
+  before bit for bit, and a tuning swapped while notes play allocates
+  nothing (`tests/tuning.rs`). Limits: TECH_DEBT 108.
+- `PartialBank` and `Partial`: a bank of sine partials for additive
+  voices, such as Caecilia's organ pipes. `new(max)` allocates once;
+  `set(i, Partial { freq_hz, gain, pan })`, `set_frequency`,
+  `set_rotation` (increments the caller already has: two stores, no sine
+  or cosine), `set_gain`, `ramp_to(i, target, frames)` (Caecilia's step,
+  added before each sample), `set_pan` (equal power) and `set_pan_gains`,
+  `set_phase` and `set_phasor`; `render_add(&mut left, &mut right)` adds
+  the partials in use on `vector::add_partials`, split only where a ramp
+  ends, so the output does not depend on the caller's block sizes. Every
+  64 frames rendered each phasor gets Caecilia's Newton step back to the
+  unit circle, which keeps its magnitude within 3e-5 of 1 for as long as
+  the bank runs; measured over ten minutes at 48 kHz, 2.8e-6. Sixteen
+  partials from 0 Hz to Nyquist keep their frequency over ten seconds
+  within 1e-4 Hz (5e-8 relative above 20 Hz). The tests check every
+  backend against the scalar code bit for bit with settings changed every
+  64 frames and blocks of 1 to 4 096 frames, every phasor and gain
+  against Caecilia's kernel bit for bit, the mix against it within the
+  stated bound, and that rendering does not allocate.
+  `tests/partial_bank_cost.rs` (ignored) measures Caecilia's tutti, 3 000
+  partials with new rotations and ramps every 64 frames. On an Intel Core
+  i3-1215U under load, as one bank, against Caecilia's scalar kernel (1.0
+  of a core, 3 000 partials per core): SSE2 4.2 times faster, AVX 5.6,
+  AVX2 6.4 to 7.7 (about 19 000 partials per core); as 200 banks of 15,
+  Caecilia's voices: SSE2 3.2, AVX 4.1, AVX2 4.2 (12 900 per core).
 
 - `ConvolutionEngine` and `FirFilter` run on `manguebyte_core::vector`.
   The direct head works across the frames of a piece of the block, a
@@ -49,6 +257,112 @@ break the API.
   1.25 times faster in `f32` and 1.5 in `f64`; a 63-tap direct FIR is as
   fast as before in `f32` and 1.1 times faster in `f64`. The output is
   still the same however the audio is cut into blocks.
+- `Bitcrusher`: bit depth as a continuous value (a step of `2^(1 - bits)`),
+  optional triangular dither, and sample-rate reduction by a zero-order
+  hold of any factor from 1 to 64, whole or not, with an optional
+  eighth-order elliptic anti-aliasing low-pass. Measured: every output is a
+  whole number of steps within half a step of its input; the noise of
+  rounding a sine matches `step² / 12` to 0.25 dB (0.5 dB at 6 bits) and
+  dithered `step² / 4`; dither carries a tone of 0.3 steps through at its
+  level to 5%; with anti-aliasing, a 10 kHz tone held at a quarter of
+  48 kHz folds back more than 85 dB quieter than without.
+- `Tremolo` and `AutoPan`: a level, or a position between left and right,
+  moved by an `Lfo` of any shape, at a rate in hertz or locked to the
+  tempo from the `Transport` in `process_with` (a cycle every so many
+  quarter notes, starting on beat zero), with a stereo phase offset per
+  channel for the tremolo, the `MixLaw` and `PanMode` of a `Panner` for the
+  auto-pan, and optional smoothing that takes the click out of square and
+  sawtooth shapes. Measured: the gain follows `1 - depth * (1 - v) / 2` on
+  every sample, the depth read on a tone is the depth set, a synced cycle
+  lands on the beat whatever the block size, and the equal-power auto-pan
+  keeps the power of the two sides. `Lfo::phase` and `Lfo::shape` read the
+  LFO's place in its cycle and its shape.
+- `RingModulator`: the input multiplied by a cosine carrier of a frequency
+  in hertz, with a stereo phase offset, or by the sidechain of
+  `process_with` (`RingCarrier`), with a mix. Measured by FFT: a tone comes
+  out at exactly the sum and the difference of the two frequencies, each
+  at half its level, and every other bin, the tone's and the carrier's
+  among them, is empty to within 1e-9.
+- `FrequencyShifter`: every partial moved by the same number of hertz, up
+  or down, by the single-sideband method of the Bode shifter, with
+  feedback and a mix; `process_sample` gives both sidebands. The 90-degree
+  network is a pair of all-pass chains, the branches of an elliptic
+  half-band filter (Valenzuela and Constantinides) moved up by a quarter
+  of the sample rate, with as many sections as it takes to hold the image
+  90 dB down from 20 Hz to as far below half the sample rate: 16 at
+  44.1 and 48 kHz, 18 at 96 kHz, 20 at 192 kHz, and no latency. Measured
+  from the coefficients on a fine grid, and by FFT on tones shifted up,
+  down and through 0 Hz: the shifted tone at its own level to 1e-4, the
+  image more than 90 dB down, nothing else above 1e-7.
+- `StereoWidener`: the side of a stereo signal scaled by a width from 0
+  (mono) to 2, the mid never touched, with optional bass mono that keeps
+  only the side above a cutoff (a fourth-order Linkwitz-Riley split of the
+  side). Measured: at a width of 1 the output null-tests against the input
+  sample for sample; the mono sum `L + R` is unchanged to 1e-14 at every
+  width, with bass mono on or off; the side below the cutoff follows the
+  crossover's high band to 0.05 dB (24.6 dB down an octave below it).
+- `TransientShaper`: the attack and the sustain of each note raised or
+  lowered, independently of its level, from an `EnvelopeFollower` of the
+  peak level and two followers of that envelope, one slow to rise and one
+  slow to fall; a gain is applied in proportion to how far the envelope is
+  from its follower, all of it from 12 dB. Measured: the first millisecond
+  of a hit out of silence moves by the attack gain to 0.1 dB, at levels
+  from 0 to -40 dB and gains from -12 to +12 dB; the tail from 150 to
+  300 ms by the sustain gain to 0.05 dB; steady tones at 100 Hz and 1 kHz
+  stay within 1 dB of their level with both gains at +12 dB.
+- `MultibandCompressor`: three bands from a fourth-order Linkwitz-Riley
+  `Crossover`, a `Compressor` of its own on each (`band_mut`), added back
+  up. Measured: while no band compresses, the output is flat to 1e-7 dB at
+  every frequency, for three pairs of crossover frequencies; a full-scale
+  60 Hz tone is turned down by the low band alone, by the 15 dB its
+  compressor settles at, while a 10 kHz tone 40 dB down beside it moves
+  by less than 0.05 dB.
+- `TapeSaturation`: a first-order pre-emphasis shelf, an asymmetric `tanh`
+  curve of the crate's own (the middle moved off zero, the gain scaled back
+  by the slope at zero so quiet signals keep their level) run four times
+  oversampled, the exact inverse shelf, a DC blocker, and wow and flutter
+  from a delay line read at a moving position, with drift that makes the
+  wow's rate and depth wander along a seeded random path; a mix with the
+  dry signal delayed to line up, and a fixed reported latency. Measured:
+  wow of 10 cents and flutter of 4 cents move a tone's pitch, tracked by
+  its zero crossings, up by the depth to 0.1 cent and down by the same
+  ratio; drift repeats from its seed and stays within a quarter more depth
+  at a quarter more rate; a quiet tone passes within 0.01 dB; a symmetric
+  curve makes no second harmonic (below -100 dB) and an asymmetric one
+  does; up to 20 kHz the oversampling holds what folds back more than
+  100 dB down, where the same curve at the sample rate leaves it less than
+  40 dB down; the impulse arrives at the reported latency.
+- `Vocoder`: a channel vocoder of 8 to 32 bands spaced evenly in pitch,
+  each a fourth-order state-variable band-pass on the modulator (the
+  sidechain of `process_with`, or the input itself) and on the carrier
+  (the input), the carrier's bands weighted by the modulator's levels from
+  an `EnvelopeFollower`, with formant shift of up to an octave either way,
+  gain and mix. Measured: a band reads a sine at its centre at its
+  amplitude to 5%, two bands away more than 20 dB down; with 8, 16 and 32
+  bands, two carrier tones come out at the carrier's amplitude times the
+  modulator's to 0.5 dB, 12 dB apart as the modulator's were; the output
+  follows a modulator that moves between bands; an octave of formant
+  shift opens the carrier an octave up and leaves the original place more
+  than 20 dB down; a silent modulator silences the carrier.
+- `GranularDelay`: Hann-windowed grains of the delayed signal, started on
+  a steady clock (density), each from a position plus a random spray, at
+  its own pitch (a set pitch plus a random pitch spray), placed at random
+  across the stereo field, with feedback through a `tanh` and a mix. The
+  grains live in a pool of 64 fixed when the delay is made; nothing is
+  allocated after `prepare`, also at the densest settings with the pool
+  full. Measured: at an overlap of two with nothing random the output is
+  the input delayed by the position to 1e-12; grains an octave up or 19
+  semitones down put the cloud's peak at the shifted pitch; spray keeps
+  every echo within the position and the spray; a fixed seed repeats the
+  render exactly for any block size, and another seed differs.
+- `FormantFilter`: the first three formants of a vowel as parallel
+  state-variable band-pass resonances, morphing A, E, I, O, U evenly in
+  pitch, with a shift of up to an octave, gain and mix. The formant
+  frequencies are Peterson and Barney's (1952) averages for men; the
+  bandwidths and levels are the crate's own. Measured on the impulse
+  response: every formant of every vowel is a peak within 1% of the table
+  (4% where two formants lie within an octave), at its level to 1.5 dB;
+  the morph and the shift put the formants where they say.
 
 ### Formats
 
@@ -170,8 +484,143 @@ break the API.
     graph sounds bit for bit as it does alone.
   - Limits: TECH_DEBT 88.
 
+### Sampler
+
+- `Sampler::set_tuning` and `SamplerVoice` through `Synth::set_tuning`:
+  a key's pitch in the tuning takes the place of the key number in a
+  region's pitch, the note offset, `tune`, `transpose` and the wheel
+  staying intervals on top; notes on unmapped keys do not start. Every key
+  from 45 to 93 measured within 0.05 cent of Werckmeister III at
+  A4 = 415 Hz with a stretch; the default tuning renders bit for bit what
+  the sampler rendered before; changing tunings while playing allocates
+  nothing.
+- Filters per region in `manguebyte-sampler`: `cutoff` turns on a filter
+  of the region's `fil_type`, among `lpf_1p`, `hpf_1p`, `lpf_2p` (the
+  default), `hpf_2p`, `bpf_2p`, `brf_2p` (and their `_sv` spellings),
+  `lpf_4p`, `hpf_4p`, `lpf_6p` and `hpf_6p` (`FilterType`): bilinear
+  Butterworth responses built from trapezoidal state-variable sections,
+  whose `resonance` raises the gain at the cutoff by its decibels. Other
+  types are reported and the region plays unfiltered. `fil_keytrack`,
+  `fil_keycenter` and `fil_veltrack` move the cutoff in cents, and so does
+  the filter envelope (`fileg_delay` to `fileg_release`, `fileg_vel2*`,
+  `fileg_depth`, `fileg_vel2depth`). The cutoff is worked out every 16
+  frames and glides in between, is held below 0.49 of the sample rate, and
+  nothing is allocated. The tests measure each low-pass and high-pass
+  type against its Butterworth response within 0.05 dB through the
+  sampler, the band types at and away from their centre, -3 dB at the
+  cutoff, the resonance's peak, keytrack and veltrack within half a cent,
+  and the filter envelope over time.
+- Modulation by controllers: `<opcode>_onccN` (also `_ccN`, and SFZ 1's
+  `ampeg_attackccN` form) for `amplitude`, `volume`/`gain`, `pan`,
+  `tune`/`pitch`, `cutoff`, `resonance`, `fileg_depth` and every stage of
+  `ampeg_*` and `fileg_*`, several on one opcode adding up, with
+  controllers 0 to 511 (`MAX_CONTROLLERS`). Envelope stages read their
+  times and levels when they start, as SFZ players do; the rest follows
+  the controller while the note plays. `set_ccN` and `set_hdccN` give the
+  initial values (`Control::set_cc`, `Instrument::controller_default`),
+  and `label_ccN` is kept (`Control::label_cc`). MIDI control changes
+  reach controllers 0 to 119; `Sampler::set_controller(controller, value,
+  frame)` sets any of them from a plugin's parameter on its frame within
+  the next block, without a MIDI message, so parameters bound above 127
+  never collide with a musician's controllers; `Sampler::controller`
+  reads one back. Every change glides over 10 ms
+  (`CONTROLLER_SMOOTHING_SECONDS`). Reset all controllers (121) restores
+  the MIDI controllers RP-015 resets, and a new instrument's initial values
+  apply to the controllers no one has set. `tests/controllers.rs` measures
+  each modulation on a playing note, the steps a jump leaves, the reach of
+  MIDI messages and the independence from block sizes; `tests/realtime.rs`
+  runs filters, modulations and `set_controller` under the counting
+  allocator. Limits: TECH_DEBT 101.
+- Streaming from disk (ADR 0014): `Instrument::open_streaming` and
+  `load_streaming` keep in memory only the head of each WAV, AIFF or FLAC
+  sample (`StreamOptions::preload_frames`, 65 536 frames by default, from
+  the earliest `offset` that plays it) and its loops, and read the rest
+  while a note plays, on reader threads (`reader_threads`, a start hook
+  for their priority), into a lock-free ring per voice (`voices`,
+  `ring_frames`). The audio thread never waits, locks or allocates: a
+  voice asks for its frames as it starts, and one whose frames have not
+  arrived holds its last value and fades out over 6 ms, counted by
+  `Instrument::stream_underruns`. `ram_budget` bounds the memory of
+  heads, loops and whole samples, shortening every head alike when it has
+  to. `wait_for_streams` lets an offline render wait for the disk. The
+  same layer serves other players: `SampleStore::open` and `open_keeping`
+  give a `StreamCursor` per voice, whose `read` returns
+  `CursorRead::Frames` or `CursorRead::Underrun` and whose `seek` back
+  into a loop kept in memory costs nothing. `tests/streaming.rs` plays a
+  set of 16- and 24-bit WAV and stereo FLAC files, with pitch, offsets, a
+  sustain loop past the head and a release trigger, bit for bit as from
+  memory at three block sizes and one to three readers; streams 256 voices
+  at once, bit for bit; shows a reader slowed on purpose counted as
+  underruns with no step between frames larger than the sine's own;
+  checks a store's cursors, its budget and the readers stopping on drop;
+  and reports memory per mode. `tests/realtime.rs` runs streaming voices
+  and cursors under the counting allocator. Limits: TECH_DEBT 106.
+- Lossless compression in memory: `StreamOptions::compress` packs what
+  stays in memory (heads, loops, samples kept whole; with
+  `preload_frames(usize::MAX)`, whole samples and no streaming) in
+  independent blocks of 1024 frames: a block of 16- or 24-bit values is
+  the residual of the best of five fixed predictors in Rice codes, any
+  other block its `f32` bits. A voice unpacks the blocks it reaches, and
+  the next one ahead, into its slot (four blocks each), on the audio
+  thread, without allocating. Measured on ten seconds of a decaying
+  six-harmonic tone with noise: 7.6 bits a sample at 16 bits (4.2 times
+  smaller than `f32`, 2.1 times smaller than the file) and 15.6 at 24
+  bits (2.1 and 1.5 times), unpacked in 128 and 158 ns a frame in an
+  unoptimised build. The output is the same bits as from memory unpacked
+  (`tests/streaming.rs`, streamed and packed at two block sizes, and
+  whole and packed); 24 four-second 16-bit pipes with two-second loops
+  take 18.4 MB whole, 10.8 MB streamed and 2.7 MB streamed and packed.
+- Releases chosen by how long the note was held, for organs: SFZ has no
+  opcode for it (`lotimer`/`hitimer` count from the last sample of a
+  group, and ARIA does not play them), so `mangue_loheld` and
+  `mangue_hiheld` give a release-triggered region a range of seconds held.
+  `mangue_release_crossfade` starts a release with an equal-power
+  crossfade from the note's sustaining loop, which takes back its own
+  release and stops when the crossfade ends, and `mangue_release_align`
+  starts the release, within that many frames after its `offset`, where
+  its next 128 frames best match the sustain's (normalised
+  cross-correlation, bounded work on the audio thread, no allocation),
+  with the sustain's fraction of a frame. `tests/held_release.rs`: the
+  release follows the time held; a sine sustain into a sine release at
+  eight random loop positions keeps its phase within 0.01 rad (measured
+  0.0000) and steps no more than two sines in phase can, where without
+  alignment the phase jumps by up to 2.2 rad; with no sustain to cross
+  from, the release starts at full level. `tests/blocks.rs` and
+  `tests/realtime.rs` play them too. Both `Sampler` and `SamplerVoice`.
+- Pitch and level from a model outside the sampler, for Caecilia's wind:
+  `Sampler::modulate_key(key, pitch_ratio, gain)` and `modulate_all`, which
+  the next block reaches along a straight line, frame by frame, and
+  `SamplerVoice::modulate(pitch_ratio, gain, frames)`. The ratio scales the
+  step the voice reads at through the same interpolator; a voice with no
+  modulation reads as before, bit for bit. `SincReader` is that
+  interpolator on its own, public, with a ratio for every output frame
+  (`process(input, ratios, output)`), and the voices find their taps with
+  the same function. `tests/modulation.rs`: a 2-cent, 5 Hz frequency
+  modulation of a 1 kHz sample measures 1.9996 cents through the sampler
+  and 1.9999 through `SincReader` (bound 0.01), within 1.9e-5 of the
+  ideal waveform (bound 1e-4); a gain ramps over one block and other keys
+  are left alone; `SamplerVoice` takes the same; `SincReader` gives the
+  same bits in pieces of any size. `tests/realtime.rs` runs all three
+  under the counting allocator.
+
 ### Fixed
 
+- Tests that write files under `CARGO_TARGET_TMPDIR` used fixed folder
+  names, so two runs of them sharing a target directory (parallel agents,
+  two CI-like runs) deleted or overwrote each other's LV2 bundles, scan
+  fakes and library copies: a host LV2 test could fail building its
+  bundle and pass alone. `manguebyte-host`'s tests get a `Scratch` folder
+  named with the process id and a number of its own, removed when
+  dropped, and the other crates' tests that did this name their folders
+  with the process id and remove them at the end.
+
+- `cargo mangue` built the programs that write an LV2 bundle's Turtle files
+  and an Audio Unit's `Info.plist` in the workspace's target directory,
+  where cargo could give their builds of the plugin and of the framework the
+  same file names as the workspace's own: after a bundle was made in
+  release, `cargo test --release` could fail with "multiple different
+  versions of crate `manguebyte_plugin`". They are now built in
+  `target/manguebyte/helpers`.
 - A block longer than a graph was prepared for was run in pieces with all
   of its events given to the first piece, at offsets past that piece's
   end, so they took effect at the end of the first piece instead of on
@@ -263,6 +712,114 @@ break the API.
 
 ### Plugins
 
+- **Auxiliary output buses** ([ADR 0017](docs/adr/0017-auxiliary-output-buses.md)).
+  A plugin lists output buses besides its main one in
+  `Plugin::AUX_OUTPUTS` (`AuxOutput`: a name, a channel count, on or off
+  by default), such as an organ's divisions or a drum machine's pads, and
+  writes them from `Plugin::process_with_aux`, whose default calls
+  `process_with_output` and leaves them silent. `AuxOutputs` holds the
+  buses of one block, readied without allocating: a bus the host
+  switched off is not given to the plugin, so it costs nothing, and the
+  host gets silence from it. `AudioBuffer::narrow` and `widen` cut every
+  bus with a block processed in pieces.
+  - CLAP: an audio port per bus after the main output, with its name,
+    width and port type; `audio-ports-activation` switches them, every
+    port starting on, as CLAP says.
+  - VST 3: an auxiliary audio output bus each, `kDefaultActive` as
+    declared, switched by `activateBus`, arranged at its one width.
+  - Audio Units: an output element each, named, of fixed width; the
+    plugin runs once per slice whichever element a host pulls first, and
+    every element is rendered, since a unit cannot switch one off.
+  - LV2: an optional audio output port per channel after the main
+    outputs, grouped per bus with the port-groups extension (stereo and
+    mono groups with their designations); a bus whose ports are all
+    unconnected is off.
+  - Standalone: each bus mixed into device channels of its own, by
+    default the ones after the main output's, for the buses on by
+    default; `Engine::with_aux_channels` and
+    `StandaloneOptions::aux_channels` move them or leave them unheard.
+  - The harness: `set_aux_active` switches a bus between renders, and
+    `aux_output` gives what the last render wrote on it.
+  - `plugins/divisions`, Mangue Divisions: an example organ whose Great,
+    Swell, Choir and Pedal, each played from a MIDI channel of its own,
+    go out on four stereo buses and together on the main output. CI runs
+    clap-validator, Steinberg's validator, lilv and auval on it.
+
+- **Parameter names that change at run time** ([ADR 0020](docs/adr/0020-parameter-names-at-run-time.md)),
+  for a plugin whose parameters stand for different things at different
+  times, such as an organ whose numbered stops drive whichever organ is
+  loaded. `ParamInfo::set_display_name`, `set_short_name` and
+  `set_display_unit` work from any thread but the audio thread; the id
+  and `ParamId` never change. `display_name`, `short_name` and
+  `display_unit` read the current labels (`Param::display_name` too),
+  while `name` and `unit` keep what the parameter was made with.
+  `with_short_name` gives a short name from the start. The labels sit
+  behind a lock taken off the audio thread only; `labels_version`, on
+  `ParamInfo` and summed on `ParamSet`, counts changes in an atomic and is
+  what the wrappers poll, so a batch of renames is one notice to the host.
+  `ParamDescription` and the text of values (`display_plain`,
+  `parse_display`) follow the current name and unit.
+  - CLAP: `get_info` gives the current name. The audio side notices a new
+    count before each block and in `flush` and asks for `on_main_thread`,
+    which calls `rescan(CLAP_PARAM_RESCAN_INFO)` once; `activate` does
+    the same, and a state load and the editor's `values_changed` add
+    `INFO` to the `VALUES` rescan they ask for.
+  - VST 3: `getParameterInfo` gives the current title, short title and
+    units; `restartComponent(kParamTitlesChanged)` is asked for once at
+    `setActive`, `setState`, `setComponentState` or `setComponentHandler`,
+    and an editor's `values_changed` asks for values and titles in one
+    restart. VST 3 offers no call on the main thread to ask for, so a
+    rename waits for one of these.
+  - AU: `ParameterInfo` gives the current name and picks the unit from the
+    current unit text; `Initialize` and a restored `ClassInfo` tell the
+    listeners of `kAudioUnitProperty_ParameterList` once.
+  - LV2: hosts see the names in the shipped Turtle files only.
+  Tested: renames on one thread while others read them, the count never
+  waiting for a writer that holds the lock, sixty renames coalescing into
+  one change; polling while another thread renames uses no heap
+  (`manguebyte-plugin`'s `realtime.rs`), nor do CLAP blocks run during
+  renames; one CLAP `INFO` rescan per batch, at activation, and with the
+  values at a state load and from the editor; one VST 3 title restart per
+  batch and with the values from the editor; one AU parameter-list notice
+  per batch; and `manguebyte-host` listing the new names of a plugin
+  hosted through both wrappers in process. Not tried in a DAW
+  (TECH_DEBT item 113).
+- **Identity at run time** ([ADR 0012](docs/adr/0012-plugin-identity-at-run-time.md)).
+  `Plugin::info()` gives a plugin's id, name, vendor, version and
+  description, `Plugin::INFO` unless overridden, so one pre-built engine
+  copied to several files, each with its own identity in data the copy
+  carries, is several plugins. `plugin_info::<P>()` asks it once per
+  plugin type, outside any lock but a brief one, and keeps it for the life
+  of the library; the kind is always `INFO`'s, and an id that
+  `is_valid_id` refuses (empty, white space, control characters) makes
+  the whole of `INFO` the identity. `library_path()` names the file the
+  plugin's code was loaded from, from what a wrapper recorded with
+  `set_library_path` or else from `manguebyte_core::module::file`, and is
+  known inside `info`.
+  - CLAP: the descriptor and the id `create_plugin` takes come from
+    `plugin_info`; `clap_entry.init` records the path the host gives when
+    it names a file.
+  - VST 3: `getFactoryInfo`, every class info and the class id
+    (`class_id` of the run-time id, worked out once when the factory is
+    made).
+  - AU: the codes in the state dictionary and in the `Info.plist`
+    `export_au!`'s hidden function writes.
+  - LV2: `plugin_descriptor::<P>()` builds the descriptor on first use
+    with the run-time URI and leaks it once, as the CLAP descriptor is;
+    `descriptor!` now calls it, and `lv2_descriptor` gives null rather
+    than unwinding if `info` panics. `plugin_uri` and the Turtle follow.
+  - Saved state names the run-time id and takes only state with it: two
+    copies with different ids refuse each other's state
+    (`StateError::WrongPlugin`). The `Harness` checks and names that id.
+  - `plugins/identity-probe` (not published) reads its identity from
+    bytes appended to its library; its test hosts two copies of one
+    library with different identities in one process through
+    `manguebyte-host`: two CLAP descriptors, two VST 3 class ids, audio
+    and state in each, and on Windows both editors open at once in real
+    windows, through CLAP and VST 3, with window classes of two modules.
+  - `cargo-mangue`: `layout::plan` and `bundle::write` are documented as
+    public API for programs that bundle plugins without cargo, with an
+    example of `write`.
 - **Layouts** (issue #15). `Plugin::LAYOUTS` lists every layout a plugin
   can run with, and `Plugin::set_layout` tells it the one the host chose,
   right before every `prepare`. A wrapper offers the entries with the
@@ -327,9 +884,796 @@ break the API.
   1.0 by the default translation, through `OutputTranslator`, from memory
   set aside before audio runs.
 - Limits: TECH_DEBT 91.
+- **Device settings for a standalone plugin** ([ADR 0021](docs/adr/0021-standalone-device-settings.md)).
+  The standalone runner runs its engine under a `DeviceManager`, on the
+  devices `StandaloneOptions::settings` names: a `StandaloneSettings`
+  with the output and input devices by stable identifier (and a name to
+  find them by), the sample rate, the hardware buffer size, channel
+  counts and the MIDI input ports (`MidiInputs::All`, which also takes
+  ports plugged in later, `MidiInputs::NONE` or a list). What cannot be
+  had falls back, and `Standalone::report` says so.
+  - While the plugin plays: `choices` lists the hosts, the devices with
+    the rates and buffer sizes each accepts, and the MIDI input ports,
+    open or not; `apply_settings`, `set_host`, `set_output_device`,
+    `set_input_device`, `set_sample_rate`, `set_buffer_size` and
+    `set_midi_input` change them with the same plugin instance, its
+    parameters, state and editor untouched. Each returns a
+    `SettingsReport`: the devices that play, their rate, buffer and
+    channels, the plugin's rate and whether it was prepared again, the
+    open ports, the fallbacks, the swap and any error; a change that
+    fails is undone.
+  - `StandaloneOptions::rate_policy`: under `RatePolicy::FollowDevice`,
+    the default, a device at another rate prepares the plugin again at
+    it, after a faded gap; under `RatePolicy::Fixed` the plugin keeps its
+    rate, the device is resampled at its edge, and a change of device
+    crossfades where the system can play both.
+  - `StandaloneSettings` is written as text, the device setup's lines
+    under a header of its own, for a program to save with its session
+    and hand back in the next run's options.
+  - `poll_devices` follows devices and ports as they come and go;
+    `start_on` runs on any device manager, such as the headless one;
+    `params_arc` hands an editor the parameters; `Engine` implements
+    `AudioCallback` and gains `prepare_for`.
+  - Tested on the headless backend, with the audio path under the
+    counting allocator before and after a change of device. No
+    ready-made settings view yet. Limits: TECH_DEBT 114.
+- **The MIDI output port of a standalone plugin in its settings**
+  ([ADR 0023](docs/adr/0023-standalone-midi-output.md)). The port a
+  plugin that sends notes sends them to is opened by the device manager
+  the plugin runs under, so it runs on the headless backend too.
+  - `StandaloneSettings::midi_output` (a port by identifier, found by
+    name when that changed) and `midi_output_mpe` (an MPE zone, or plain
+    MIDI 1.0), saved in the settings' text as the device setup's
+    `midi_output` key and a new `midi_output_mpe` key; the version stays
+    1, and the text of before reads as no output.
+  - While the plugin plays: `Standalone::set_midi_output` changes the
+    port without touching the audio, `set_midi_output_mpe` the protocol
+    from the engine's next block, and `apply_settings` and
+    `poll_devices` open, close and follow the port as it comes and goes.
+    `choices` lists the output ports (`SettingsChoices::midi_outputs`),
+    `SettingsReport::midi_output` names the open one and its `Display`
+    says where notes go; a missing port is a `Fallback::MidiPortMissing`
+    and falls back to none.
+  - No note hangs: the port that is left is sent a note-off for each
+    note it plays and its sustain pedals are lifted, and the plugin's
+    later note-offs for those notes are not sent anywhere, so every
+    note-on reaches one port and that port one note-off for it. The
+    audio thread only queues the notes; the engine takes a new protocol
+    over a wait-free hand-over and ends the old one's notes there.
+  - Tested in `tests/midi_output.rs` (choosing by identifier, a missing
+    port, hot-plug, a change of port and of MPE, notes from a device
+    thread while ports and protocols change) and `tests/realtime.rs`
+    (no heap use while the output changes under flowing notes).
+    `start_with_midi_output` stays as a path that fills the settings.
+    Limits: TECH_DEBT 116.
+
+### Hosting
+
+- `manguebyte-host` reads a hosted plugin's auxiliary output buses in
+  every format: `ClapProcessor`, `Vst3Processor`, `Lv2Processor` and
+  `AuProcessor::process_with_aux` copy the output buses after the main
+  one into buffers the caller owns, on the block's frames, without
+  allocating. Buses are switched before activation with
+  `ClapPlugin::set_audio_port_active` (`audio-ports-activation`),
+  `Vst3Plugin::set_audio_output_active` (in place of the plugin's
+  default for `activateBus`) and `Lv2Plugin::set_aux_output_active`
+  (optional ports left unconnected); an Audio Unit's elements after the
+  main one are rendered with the main output's time stamp. The LV2 host
+  reads `pg:group` and the groups' labels (`PortInfo::group`,
+  `Lv2PluginInfo::port_groups`): outputs in a group other than the first
+  output's are buses, listed by `Lv2Plugin::aux_outputs`.
+  `tests/aux_outputs.rs` hosts an organ with four stereo buses through
+  the framework's own wrappers in all four formats: names and widths as
+  each host reports them, each bus its own signal on every frame, a bus
+  switched off silent and never given to the plugin, no heap use.
+
+- `manguebyte-host` reads the notes and MIDI that hosted LV2 and Audio
+  Unit plugins send: `Lv2Processor::output_events` reads the output atom
+  sequences that carry `midi:MidiEvent` after each run, and
+  `AuProcessor::output_events` what the unit sends through
+  `kAudioUnitProperty_MIDIOutputCallback`, registered when the unit offers
+  one; each event on its frame of the whole block, however the block is
+  cut, at most 4,096 per block, the rest counted in `lost_events`, and
+  nothing allocated while processing. MIDI 1.0 becomes framework events as
+  the CLAP and VST 3 hosts already make it (notes, poly pressure as note
+  pressure, the rest as `EventKind::Midi`). `Plugin::activate_processor`
+  gives an `any::AnyProcessor`, whose `output_events` hands over a hosted
+  plugin's events in one type for all four formats; `Plugin::activate`
+  is unchanged. `Lv2Library::from_entry` hosts an LV2 plugin linked into
+  the program, from its bundle's Turtle files. Tested through the real LV2 and AU wrappers in process, at
+  four block and piece patterns, with an overflowing plugin, and the same
+  plugin as CLAP, LV2 and AU giving the same events, and as VST 3 the
+  same but for note ids and 7-bit values (TECH_DEBT 82).
+
+- `manguebyte-host` opens the editors of the CLAP and VST 3 plugins it
+  hosts (issue #5), through the same methods on `ClapPlugin` and
+  `Vst3Plugin`: `open_editor` in a parent window (`editor::ParentWindow`,
+  the type a plugin made with the framework receives), `editor_size`,
+  `set_editor_size`, `set_editor_scale`, `close_editor`. What an editor
+  asks for comes back from `pump` as `HostEvent::Editor` (a new size, to
+  be shown or hidden, closed), and `pump` also fires the timers the editor
+  registered; `next_editor_timer` says when they are next due, and
+  `editor_fds` and `editor_fd_ready` hand the file descriptors it watches
+  to the application's loop. CLAP: the host's `gui`, `timer-support` and
+  `posix-fd-support`; VST 3: `IPlugView` with an `IPlugFrame`, content
+  scale and, on X11 systems, `IRunLoop`. Dropping a plugin closes its
+  editor first. The example plugins' editors are opened, resized,
+  rescaled and closed in real Win32 windows, and a knob dragged in each
+  format reaches the hosted processor; fake plugins check the order of
+  calls, failures part-way through opening, calls from inside callbacks
+  and from other threads. Not yet on macOS and Linux in real windows, and
+  not for LV2 or AU (TECH_DEBT 95).
+
+- `manguebyte-host` hosts Audio Units, version 2 (issue #4), in a new
+  `au` module behind a feature of the same name, on by default.
+  `au::components` lists what the system's registry holds
+  (`AudioComponentFindNext`), `AuLibrary::system` and `AuLibrary::load`
+  (a `.component` bundle, its `Info.plist` in XML or binary form) make
+  instances through AudioToolbox (`AudioComponentInstanceNew`), on macOS;
+  `AuLibrary::from_factory` makes them in process from a component's
+  factory function, through its `AudioComponentPlugInInterface`, on every
+  system. `AuPlugin` sets each element's stream format (32-bit float, one
+  buffer a channel), `MaximumFramesPerSlice` (a unit that refuses keeps
+  its own, and longer blocks are rendered in slices), the main channels
+  as `SupportedNumChannels` allows (`set_channels`), and the host's
+  transport callbacks; lists parameters in their own unit and range,
+  with the unit's own text both ways; reads latency and tail; saves and
+  restores `ClassInfo` as the XML of its property list (`.aupreset`
+  form); and bypasses with `BypassEffect`. `AuProcessor` is a
+  `Processor<f32>` that feeds the main input and the sidechain through
+  render callbacks, schedules every parameter change on its frame with
+  `AudioUnitScheduleParameters` and every note and MIDI message with
+  `MusicDeviceMIDIEvent`, answers the transport callbacks for each slice
+  from the `Transport` it is given, and allocates nothing while it
+  renders. The example plugins hosted as Audio Units sound the same, bit
+  for bit, as with no host, however the blocks fall.
+- The one interface (`any`) has `Format::Au`, `Library::load` takes a
+  `.component` bundle, and `Library::from(AuLibrary)`, `as_au` and
+  `as_au_mut` reach the format's own types. The scanner finds
+  `.component` bundles in `~/Library/Audio/Plug-Ins/Components` and
+  `/Library/Audio/Plug-Ins/Components` and instantiates each unit in a
+  process of its own, so a unit that crashes or hangs is reported
+  (`manguebyte-scan --manguebyte-scan au <path>`).
+- The AU host shares the AU wrapper's declarations of Apple's C interface
+  (`manguebyte_au::sys`) rather than declaring them again; the MIDI 1.0
+  conversion of notes moved from the LV2 host to a module both use.
+- Limits: TECH_DEBT 93.
+
+### User interface
+
+A new look and motion ([ADR 0011](docs/adr/0011-design-tokens-and-motion.md)),
+with what they may cost the audio and the idle interface tested.
+
+- `manguebyte-gfx`: soft shadows and glows, `Scene::shadow` and
+  `Scene::stroke_shadow` with a `Shadow` (offset, blur, spread, colour), of
+  any filled shape or stroked outline. The blur is three box passes each
+  way on whole numbers, the same bit for bit on every machine; masks are
+  kept in a renderer cache under their outline, box size and fill rule
+  (`Renderer::shadow_cache`, `set_shadow_cache_limit`), so a shadow is
+  blurred once and not every frame. Shadows never draw beyond their
+  reach, which `Scene::bounds` includes (`Shadow::reach`,
+  `Shadow::reach_exact`), so partial renders through them equal whole
+  ones (`tests/shadows.rs`, golden images at 1x and 2x).
+- Design tokens in layers: four surfaces with hairlines and a top
+  highlight, three levels of text, one accent with a bright end and a
+  soft tint, six categorical `Hue`s, success, warning and danger,
+  `Elevation` (shadows `sm`, `md`, `lg` and the accent's glow), a radius
+  scale (`Corners::sm` to `xl` and `full`), a `Spacing` scale, headings,
+  captions and chips in `Typography`, and `Motion` tokens.
+  `Theme::dark()`, the default, is deep and dark with a warm glow;
+  `Theme::light()` is light and editorial without glow; both switch at
+  run time. Ramps are designed in OKLCH and stored as constants. The
+  accessibility check covers every text level on every surface, menus,
+  selected rows, the text selection and each hue's text on its fill.
+- Motion (`manguebyte_ui::motion`): `Animated<T>` values eased by the
+  standard curve, any cubic Bézier or a spring, on the frame clock the
+  root is given, polled, with no timer and no callback. The root eases a
+  hover, a press and a focus-ring amount for every widget
+  (`PaintCx::hover`, `press`, `focus_ring`) and draws a widget again only
+  while one of its values moves; `Frame::animating` and
+  `Root::is_animating` are true only while something moves.
+  `UpdateCx::animate` ticks a widget's own values. Motion turns off with
+  the theme (`Motion::enabled`) or the system: `Root::set_system_motion`,
+  set from Windows' animation setting by the window glue
+  (`manguebyte_window::system_motion`). The harness starts with motion
+  off (`Harness::set_motion`).
+- The focus ring shows only after the keyboard or assistive technology
+  moved the focus (`Root::focus_visible`), as `:focus-visible` does, and
+  is a soft accent ring around the control's face.
+- Every widget restyled to the approved mockup: knobs with a lit face, a
+  glowing value arc and a pointer; sliders, switches (the thumb on a
+  spring) and meters with gradients; fields and combo boxes with an
+  accent border while active; menus, tooltips and drag ghosts floating
+  with a large shadow; thin scroll bars that fade in while a view scrolls
+  or is hovered; lists with rounded rows, hover and selection tints, hue
+  swatches and details (`ListData::hue`, `ListData::detail`); waveforms
+  filled with a gradient and a brighter core of the root mean square
+  (`Waveform::rms`, `Waveform::summary`), the loop tinted and markers on
+  pills; keyboards with soft keys rounded at the foot, glowing lit keys and
+  black keys with depth; the envelope with a gradient under a glowing
+  curve; the zone map with rounded zones in categorical hues
+  (`Zone::with_hue`) and name and range labels that are whole or left
+  out, never cut, placed in the part of a zone no zone drawn above it
+  covers, and never over each other. `card(child)` and `panel(child)` draw cards with a
+  shadow; `pill(text)` is a title-bar button with a status dot and a
+  primary style; `Label::heading` and `Label::caption`.
+- `Widget::overflow` lets a widget draw past its rectangle (a card's or a
+  menu's shadow); the root clips it there and draws that reach again when
+  it changes. `Widget::hover_moved` tells a hovered widget where the
+  pointer is.
+- `examples/sampler_screen.rs` is the mockup's screen in both themes at
+  1x, 1.25x and 2x; `examples/design_bench.rs` measures it. Limits:
+  TECH_DEBT 99.
+
+Scrolling, lists, drag and drop and pictures in `manguebyte-ui`
+([ADR 0009](docs/adr/0009-scrolling-lists-and-drag-and-drop.md)), all
+tested headless (`crates/manguebyte-ui/tests/views.rs`).
+
+- `scroll_view(name, child)`: a viewport onto one child larger than
+  itself, up and down, sideways (`.horizontal()`) or both (`.both()`).
+  The wheel scrolls `Sizes::scroll_line` (40) a notch, and a touchpad's
+  fractions of a notch add up exactly; Shift turns it sideways. The bars
+  are drawn from the theme at the right and bottom edges, in room kept
+  for them whether or not the child overflows: drag the thumb, press the
+  track for a page. With the keyboard focus, which the view takes only
+  when its child overflows, the arrows, Page Up, Page Down, Home and End
+  scroll it. A view at its edge leaves the wheel to the view around it.
+  Tab or assistive technology giving the focus to a widget out of sight
+  scrolls every view it is in to it. `.position(State<Point>)` lets the
+  application read and set the offset. Layout gains
+  `Arrange::Scroll { x, y }`, `scroll_viewport` and
+  `Placement::from_device`; the root moves what a view holds by its
+  offset in whole device pixels and clips it to the viewport, so what is
+  out of sight is neither drawn nor hit, and scrolling damages only the
+  view, with the result equal to a whole repaint bit for bit at 1x,
+  1.25x and 2x. `Root::scroll_metrics`, `UpdateCx::scroll`,
+  `EventCx::scroll`, `EventCx::scroll_to` and `ScrollMetrics` let a
+  widget of one's own be a scroll node.
+- `list_view(name, data, state)`: rows an application keeps through
+  `ListData` (row count, name, a revision number, and optionally its own
+  row drawing, drag payloads and which drops it accepts), of which only
+  those in sight are drawn and described. Rows are `Sizes::list_row` (24)
+  tall; rows of different heights are not supported. Click, Ctrl+click
+  and Shift+click selection; the arrows, Shift and Ctrl with them,
+  Ctrl+Space, Page Up, Page Down, Home, End and Ctrl+A; typing the first
+  letters of a row's name; activation by double click or Enter; the wheel
+  and a bar. Everything is polled from a `ListState` (`Send`, so an
+  editor spec can keep it): the selection, the keyboard's row, the offset,
+  and `ListEvent::Activated` and `ListEvent::Dropped`. A test with 100 000
+  rows checks that building, scrolling to the end and back, describing
+  and selecting everything draw and ask for only the rows in sight (10 or
+  11), that the offset stays exact at 2.4 million pixels, and that a
+  steady list draws nothing.
+- Drag and drop inside the interface (`manguebyte_ui::drag`): a widget
+  starts a drag with `EventCx::start_drag(DragPayload::new(data,
+  description))`, any `Send + Sync` type of the application's; targets
+  accept or refuse it by type and place through `Widget::drag`
+  (`DragEvent::Over`, `Left`, `Drop`, and `Ended` to the source); the root
+  draws a ghost with the description over everything (a `DragItem` to
+  assistive technology), scrolls scroll views and lists near whose edges
+  the pointer rests, and cancels on Escape, a release where nothing
+  accepts, a second button, `PointerCancel` or losing the window's focus.
+  Lists drag their selected rows and show where a drop would go; tests
+  reorder rows within a list and move them between two. `Root::dragging`
+  and `Root::drop_target` say what is going on.
+- `image(name, image)`: a picture fitted by `Fit::Contain`, `Cover`,
+  `Stretch` or `None`, with a version per density
+  (`.density`, `.with_density`): the least dense version with at least as
+  many pixels as the screen is drawn. A 2x picture at scale 2 is copied
+  pixel for pixel.
+- Accessibility: roles `ScrollView`, `List`, `ListItem` and `DragItem`, a
+  `selected` state, `AccessItem` for parts of a widget that are nodes of
+  their own (`Widget::access_items`, `Widget::act_item`, `Root::act_item`,
+  `AccessEntry::item`, `Found::item`), and `assert_accessible` checks that
+  lists and scroll views have names and list items say whether they are
+  selected. `Harness::wheel_by` sends fractions of a notch and sideways
+  turns.
+- `examples/views_demo.rs`: two lists with drag between them inside a
+  scroll view, driven headless and written to PNG files.
+- Limits: TECH_DEBT 96.
+
+Application windows, files dropped from other programs and the system's
+file dialogs ([ADR 0010](docs/adr/0010-application-windows.md)), tested
+headless on every system and with real windows on Windows
+(`crates/manguebyte-window/tests/app.rs`, `win32_app.rs`,
+`crates/manguebyte-gui/tests/app_window.rs`, `win32_app_window.rs`).
+
+- `manguebyte_window::App`: an application's own top-level windows and
+  the loop that runs them. `App::open_window(AppWindowOptions, handler)`
+  makes a window with a title, an inside of a size in logical pixels
+  (made at the scale of the monitor it opens on), resizable or `fixed`,
+  with `with_min_size` and `with_max_size`; it runs the same code as a
+  child window for drawing, timers, input, the clipboard and the scale.
+  The close button, Alt+F4, the window menu and the taskbar reach the
+  handler as `Event::CloseRequested` and nothing else: the application
+  closes the window with `close()`, or not. `App::run` is the thread's
+  message loop until the last of the application's windows closes
+  (`RunEnd::LastWindowClosed`), `quit` is asked (`RunEnd::Quit`) or
+  someone posts `WM_QUIT` (`RunEnd::QuitMessage`); child windows of a
+  host never need it. On Win32 `WM_GETMINMAXINFO` gives the system the
+  limits, `WM_DPICHANGED` changes the scale and then takes the suggested
+  rectangle, a minimised window keeps its back buffer, and keys the
+  handler leaves go to the default handling. `set_title`, `title`,
+  `size_limits` and `is_app_window` on every window. `App::headless`
+  runs steps a test posts (`HeadlessApp::post`) in place of messages, and
+  `Headless` gains `request_close`, `drag_frame_to` and `move_to_monitor`.
+- File drops: a window made `with_file_drops` hears `Event::DragEnter`,
+  `DragOver`, `DragLeave` and `Drop`, reads what the drag carries
+  (`DragData`: paths and text) with `drag_data`, and takes or refuses it
+  by its answer, which the system shows with its cursor (a copy, or a
+  link where only that is allowed, never a move). A drag that comes while
+  the handler runs is refused and heard at the next move. On Win32 it is
+  an `IDropTarget` of the crate's own, registered with `RegisterDragDrop`
+  only on a single-threaded apartment and revoked in `WM_DESTROY`; an
+  `App` initialises OLE for its thread, a child window never does for a
+  host's. `Headless::drag_enter`, `drag_over`, `drop_at`, `drop_files`.
+- File dialogs: `open_files`, `pick_folder` and `save_file` on a window,
+  or through a `Dialogs` handle an interface keeps, described by a
+  `FileDialog` (title, `FileFilter`s, starting folder, the name a save
+  offers, several files or one), return `Option<Vec<PathBuf>>` or
+  `Option<PathBuf>`, `None` for a cancel. On Win32 they are
+  `IFileOpenDialog` and `IFileSaveDialog`, modal to the window's
+  top-level window. A headless window answers what the test scripted
+  (`Headless::answer_next_dialog`, `on_next_dialog`, which may drive the
+  window while the dialog is "open") and records what was asked
+  (`take_dialogs`). Showing the system's dialogs is tested by hand only;
+  the tests configure them through COM and read them back
+  (`testing::prepare_dialog`).
+- `manguebyte-ui`: `Root::file_drop(FileDrop, &DropData)` runs a drag
+  from another program as a drag of the interface's own with no source
+  and no ghost, so widgets take files through `Widget::drag` with a
+  payload holding the `DropData` (`DropData::has_file_with_extension`).
+- `manguebyte-gui`: `Editor::open_in_app` and `open_app_window` show an
+  interface in an application window and return an `AppEditor`
+  (`on_close_request`, `dialogs`, `set_visible`); gestures set the
+  parameters given, as a standalone program's host would.
+  `Editor::with_file_drops` lets an editor inside a host take drops.
+  `HeadlessEditor` drags files. `examples/app_window.rs` lists the files
+  dropped on it and opens the three dialogs.
+- `win32::testing` (feature `testing`): `Drag` plays a drag against a
+  window's registered drop target with a real `IDataObject` of its own,
+  `Ole`, `is_drop_target`, `tracking_limits`, `dpi_changed`,
+  `window_title`, `window_rect`, `is_resizable`, `post_quit`, and
+  `Message::Close` and `Message::SysCommandClose`.
+- Limits: TECH_DEBT 97.
+
+Audio widgets in `manguebyte-ui`, for a sampler's screen: a waveform
+view, a piano keyboard, an envelope editor and a zone map, each tested
+headless for its behaviour, its accessibility, and a partial repaint
+equal to a whole one bit for bit at 1x, 1.25x and 2x
+(`crates/manguebyte-ui/tests/waveform.rs`, `keyboard.rs`, `envelope.rs`,
+`zone_map.rs`).
+
+- `Waveform`: a sample buffer of any number of `f32` channels
+  (`new`, `from_shared`, `from_interleaved`) with a summary of the lowest
+  and highest sample of every block of 64, 128, ... frames, about a
+  sixteenth of the buffer's size. `min_max(channel, frames)` is exact (a
+  test checks it against reading every sample) and reads at most 126
+  samples and two entries a level; `samples_read` counts what queries
+  read, and a test draws a ten-minute file at 2x reading less than 1.2 %
+  of it, and nothing more while the playhead moves. `zero_crossing_near`
+  and `zero_crossing_beyond`.
+- `waveform_view(name, WaveformState)`: a lane per channel, a span per
+  device pixel column (`Scene::columns`), or a line through the samples
+  past a frame per device pixel, kept until the frames shown change.
+  Ctrl and the wheel, or a touchpad's pinch, zoom around the pointer
+  (`ZOOM_STEP`, at most `MAX_PIXELS_PER_FRAME`); the wheel scrolls and
+  hands on at an end. `Marker`s the application defines are dragged
+  from where they were taken, within `MarkerOrder` rules, onto the
+  nearest zero crossing if `set_snap_to_zero`; `set_sample_points` makes
+  a sampler's start, end and loop with their rules. A drag elsewhere
+  selects; a click reports where. Up and Down choose a marker, Left and
+  Right move it a pixel's worth (Shift a frame, or to the next zero
+  crossing), Home and End as far as its rules allow, `+` and `-` zoom.
+  `WaveformState` holds the sample, the frames shown, the selection,
+  the markers and the playhead, and `WaveformEvent`s (`MarkerMoved`,
+  `Selected`, `Clicked`). Markers are sliders to assistive technology,
+  in seconds and frames.
+- `KeySpan`: notes laid out a column each, the white keys sharing an
+  octave as a piano's do (`column`, `white_key`, `note_at`, `PIANO`,
+  `KEYS_61`), so that widgets over the same span line up key for key.
+  `note_name` ("C4" for 60) and `note_name_portuguese` ("Dó4").
+- `piano_keyboard(name, span, KeyboardState)`: a press plays a key with
+  a velocity from 1 at its top to 127 at its bottom, a drag plays a
+  glissando, and with the focus the letters A to ' play an octave and a
+  half (Z and X move it, `computer_keys(false)` turns them off), the
+  arrows choose a key and Space plays it. `NoteEvent::On` and `Off` are
+  polled from the state, one of each per key however many ways it is
+  held; closing the interface stops what it holds. The application
+  lights notes (`set_sounding`) and marks `KeyRange`s with their roots.
+  Each key is a button named by its note (`note_names` for others),
+  pressed to hold it.
+- `envelope(name, attack, decay, sustain, release)`: an ADSR curve whose
+  corners are dragged as gestures on the parameters, as a knob's are
+  (two at once for the end of the decay); `attack_curve`,
+  `decay_curve` and `release_curve` bend its segments and drag up and
+  down. Escape cancels a drag, Alt and a click reset, a double click or
+  Enter types a value, the wheel and the keys step the part chosen
+  (Left and Right choose it); each part is a slider to assistive
+  technology.
+- `zone_map(name, span, ZoneMapState)`: `Zone`s of keys by velocities,
+  selected by clicks and by a band, moved by whole keys and velocities
+  within the map, resized by their edges and corners, with overlaps
+  marked; Page Up and Down, the arrows (with Shift, Alt, Alt and Shift),
+  Delete, Ctrl+A and Escape do the same from the keyboard. Drags it
+  `takes` make zones where they land, one a key: files from other
+  programs by default, rows of a `list_view` when the application says
+  how to name them. `ZoneEvent::Edited`, `Created` and `Removed`. Zones
+  are list items to assistive technology, saying their keys, velocities,
+  root and overlaps.
+- The theme gains `Palette::key_white` and `key_black`.
+- `examples/sampler_screen.rs` composes the four with a list of samples
+  and writes the screen to PNG files at 2x and 1.25x;
+  `manguebyte-gui`'s `examples/sampler_window.rs` opens it in an
+  application window on Windows.
+- Limits: TECH_DEBT 98. The spectrum view and the EQ editor are not
+  started.
+
+Texts that change while the window is open, such as names that follow
+the language the person picks:
+
+- `TextSource`: a text a widget shows or is named by, fixed or read once
+  per frame from a source of anything that reads as text (`String`,
+  `&'static str`, `Arc<str>`) or from a `State<String>`, which is read
+  again only when its version moves and kept shared, not copied. It is
+  read once when made, and polling makes no heap call unless the source
+  does: a closure that builds a `String` builds one every frame, one that
+  returns a `&'static str` from a table does not.
+- `Knob`, `Slider`, `Toggle` and `ComboBox` gain `label_source`; a new
+  name lays out again, draws the control again and is told to assistive
+  technology. `list_view_named`, `zone_map_named`, `waveform_view_named`
+  and `piano_keyboard_named` take the accessible name as a `TextSource`;
+  those names are not drawn, so a new one only reaches assistive
+  technology. `Label::dynamic` takes any source that reads as text, and
+  `Label::from_source` is new. The fixed-string calls are unchanged.
+- `UpdateCx::request_access_update`: a widget says its description
+  changed in a way a screen reader should hear about. `Frame::access`
+  and `Root::access_updates` list those widgets for the frame, in tree
+  order, for a window layer to send to the platform (no platform adapter
+  exists yet, TECH_DEBT 40); `testing::Harness::access_updates` shows
+  them. Labels and the widgets above report their changed names.
+- Tested headless (`tests/dynamic_text.rs`, `motion.rs`, `realtime.rs`):
+  a screen of all eight widgets named from one table in English,
+  Portuguese and Spanish renames every one in the frame after the switch,
+  for the scene and for the screen reader, draws again only the four that
+  draw their names, and draws nothing in the frame after; a name that
+  grows lays out again without overlapping its neighbours at 1x, 1.25x
+  and 2x; steady frames before and after a switch make no heap call; the
+  screen is idle before and after a switch. Limits: TECH_DEBT 102.
+
+Navigation, action buttons and a confirmation dialog inside the window,
+for screens that switch what part of a window shows (Parabolic's Synth,
+Effects and Presets pages, Caecilia's organ divisions)
+([ADR 0013](docs/adr/0013-pages-and-modal-dialogs.md)):
+
+- `tabs(name, selected)` and `sidebar(name, selected)` build `Pages`:
+  `.page(title, view)`, `.icon(Icon)` for the last page and
+  `.section(title)` headers. The page shown is the one a `State<usize>`
+  says (a number past the last shows the last); a click, the arrows
+  along the bar (Left and Right for tabs, Up and Down for a sidebar),
+  Home and End, Control+Tab and Control+Shift+Tab from anywhere inside
+  the pages, assistive technology and the application all set it. The
+  bar is one Tab stop, a `Role::TabList` whose tabs are `Role::Tab`
+  items that say whether they are selected; each page is inside a
+  `Role::TabPanel` named as its tab; section headers are label items.
+  Every name is a `TextSource`. The selection indicator (an underline
+  for tabs, a tinted row with an accent bar for a sidebar) slides over
+  the base duration and jumps with motion off.
+- Switching pages builds nothing again. Hidden pages are kept with
+  their widgets' state but are not polled, measured, laid out, drawn,
+  hit, focused or described, and ask for no frames: an idle hidden page
+  costs nothing. A switch lays out again and draws the bar and the
+  content area only. A widget in the page being hidden loses the focus.
+  This is general: a widget can show only some of its children
+  (`UpdateCx::show`, `Shown`), and `Root::access` is `None` for what is
+  hidden.
+- `action_button(label)`: an `ActionButton` with a `TextSource` label,
+  `.primary()`, secondary by default, or `.destructive()` (the theme's
+  danger colour), an optional `Icon`, `.disabled()` or
+  `.enabled(source)` (drawn faded, not focusable, described as
+  disabled), the root's eased hover, press and focus ring, and a count
+  of presses in a `State<u64>` the application polls. A click takes the
+  focus. `Icon` is a small drawing in the colour of its text.
+- `confirm_dialog(state, title, message)` and
+  `IntoView::with_dialog`: a `ConfirmDialog` over a view, a scrim and a
+  card with the large elevation, a title, a message and two action
+  buttons (`.confirm_label`, `.cancel_label`, `.destructive()`,
+  `.cancel_by_default()`). The application opens it through a
+  `DialogState` (`open`, or `ActionButton::opens`) and polls the answer
+  (`result`, `take_result`, a `DialogResult`), as other results in the
+  interface are polled. While it is open the rest of the window takes no
+  pointer, focus or actions, Tab goes round its buttons, and every key
+  is its own: Escape cancels and Enter presses the button with the
+  focus, or the default one. It opens with the focus on its default
+  button and gives the focus back to whoever had it when it closes. It
+  is a `Role::Dialog` named by its title and described by its message.
+  The machinery is general: `UpdateCx::set_modal`, `Root::modal` and
+  `UpdateCx::request_focus`.
+- Accessibility: roles `TabList`, `Tab`, `TabPanel` and `Dialog`; the
+  check asks tabs to say whether they are selected and tab lists, tab
+  panels and dialogs to have a name.
+- Tested headless (`tests/navigation.rs`, `buttons.rs`, `dialog.rs`,
+  `golden.rs`, `realtime.rs`): the keys and Control+Tab, roles, names and
+  selected states, hidden pages never polled, painted or measured and
+  asking for no frames over 200 frames, widget state and scroll offsets
+  kept over round trips with the same widgets, the damage of a switch
+  inside the bar and the content area at 1x, 1.25x and 2x, the indicator's
+  frames with motion and its jump without, the three button looks, the
+  disabled state, hover and press motion damage, the dialog's focus
+  trap, Escape and Enter, focus returned to the opener, the scrim taking
+  the pointer, a language switch renaming tabs, panels, buttons and the
+  open dialog in the next frame, steady frames with pages and an open
+  dialog making no heap call, and golden images of the tab bar, the
+  sidebar, the buttons and the dialog at 1x and 2x in both themes.
+  `examples/pages_demo.rs` draws a Parabolic-like screen and an organ
+  console. Limits: TECH_DEBT 105.
+
+Wheels and oscillator views for a synth's page, which Parabolic asked
+for, and the waveform view's moiré fixed:
+
+- `pitch_wheel(name, binding)` and `mod_wheel(name, binding)`: a ridged
+  wheel in a recessed slot, the ridges moving as it turns, the stretch
+  from rest tinted and the value a glowing accent bar, its name (a
+  `TextSource`) under it. Bound to a `ParamHandle` through gestures, as a
+  knob is, or to a `WheelState` the application polls (`take`, the
+  person's moves only; `midi_pitch_bend`, `midi_controller`, `is_held`)
+  and sets from MIDI it receives; its value is an atomic the audio
+  thread may read. Dragging (the slot's height a whole travel, ten times
+  finer with Shift), the mouse wheel and the keys (arrows, Page Up and
+  Page Down, Home and End) move it; a double click puts it back at
+  rest. The pitch bend wheel springs back to the middle on the theme's
+  spring, jumping with motion off, when a drag ends, when the key that
+  moved it comes up, when the focus leaves it and `BEND_RETURN_AFTER`
+  (300 ms) after the mouse wheel last turned it, sending the values it
+  passes through; bound to a parameter the hold and the spring back are
+  one gesture. The modulation wheel stays. Each is a slider to assistive
+  technology, with its value as text.
+- `WaveData`: what the oscillator views show, one cycle from a slice of
+  samples, frames of equal length, or a `manguebyte_dsp::Wavetable`'s
+  frames read from its richest level, set by the application off the
+  audio thread and polled by version. `wave_view(name, data)` draws one
+  cycle as a glowing line over a fill to the centre line, at a polled
+  fractional position between frames (`.position(source)`).
+  `wavetable_view(name, data, position)` stacks up to
+  `MAX_STACKED_FRAMES` (32) frames in depth, each hiding what is behind
+  it, and lights the frame at the polled position over the stack; the
+  stack is rendered once into a picture of the view and copied pixel for
+  pixel while only the position moves. Both draw again only when the
+  data or the position changes; fills and glows are columns
+  (`Scene::columns`). Measured optimised on the development machine: a
+  position change costs about 3 ms (1x) and 7 ms (2x) for a wavetable
+  view of 300 by 180, 2 and 5 ms for a cycle view of 160 by 96.
+  `manguebyte-ui` depends on `manguebyte-dsp` directly now (it already
+  did through `manguebyte-plugin`).
+- `waveform_view`: a pure 196 Hz sine, 1.5 s across 1340 pixels (54
+  frames and a fifth of a cycle per column), drew as separate spikes
+  with vertical bands of moiré. The columns were exact; each saw a fifth
+  of a cycle. The view now measures the waveform's cycle around each
+  column from where its line turns and, where a cycle is six logical
+  pixels or shorter, widens each column's span to the whole cycle (part
+  of the way up to twelve), so a low tone zoomed out is a solid band. A
+  column's span is the line through the samples across the column, its
+  edges interpolated, grown by half the line's width; the core's root
+  mean square is averaged with falling weights over about a cycle and no
+  longer drawn outside the span. From two frames per device pixel down
+  to one, the anti-aliased line through the samples takes over
+  gradually, the columns in the line's colour, so zooming through does
+  not jump.
+- Tested headless (`tests/wheels.rs`, `wavetable.rs`, `waveform.rs`,
+  `realtime.rs`, `golden.rs`): the spring's frames, its overshoot and its
+  values reported to the application, the jump with motion off, keys
+  held and released, the mouse wheel's pause, double clicks, gestures on
+  parameters and host automation, assistive technology, names following
+  the language, damage inside the widget and partial repaints equal to
+  whole ones at 1x, 1.25x and 2x, idle frames drawing nothing and steady
+  frames making no heap call; samples and wavetable frames drawn where
+  they are, the lit frame moving with the position, redraws only on a
+  change; every column of the reported tone lit across its envelope and
+  of even ink, an unbroken line zoomed in, and the ink changing by less
+  than 4 % a step of 3 % zoom through the change from columns to a line.
+  Golden images of the wheels and the oscillator views at 1x and 2x in
+  both themes. `examples/synth_screen.rs` draws a synth's page with all
+  three. Limits: TECH_DEBT 109.
+
+Floating panels for an effect chain, which Parabolic asked for:
+
+- `floating_panel(title, open, position, content)` and
+  `IntoView::with_panels`: `FloatingPanel`s over a view, inside the
+  window (never a window of the system's, so the same in a standalone
+  program and a plugin editor), with no scrim and nothing modal: the
+  view around and under them goes on taking the pointer, the keys and
+  assistive technology. A panel is a card on the overlay surface with
+  the large shadow, a title bar (its title a `TextSource`) with a close
+  button (`.close_label`), and any view inside, at its natural size,
+  laid out again when that changes. It is open while a `State<bool>` is
+  `true`, as tabs follow a `State<usize>`; the close button and Escape
+  set it to `false`, and `Pill::opens` sets it to `true`. Its top-left
+  corner follows a `State<Point>`, which dragging the title bar writes,
+  so a project keeps where each panel was; it is always kept inside the
+  view, without the state changing when a window is too small for it.
+  Several can be open; a press on one, the focus moving into one and
+  opening one bring it to the front. Opening gives the focus to the
+  first widget inside (Tab goes through the content, then the close
+  button); closing gives it back to the widget that had it, or to the
+  pill pressed to open it, if the focus was inside or nowhere. Escape
+  closes the panel with the focus and no other. A closed panel is hidden
+  and costs nothing. It is a `Role::Region` named by its title.
+- The machinery is general (ADR 0019): `UpdateCx::float_at` makes any
+  widget float over its siblings at a position inside its parent,
+  moved after layout by whole device pixels as a scrolled subtree is;
+  `UpdateCx::raise` brings one in front; the root draws and hit-tests
+  in a drawing order where each node's floating children follow its
+  others in the order they were raised (`Root::scene` is in that order);
+  `EventCx::floating` gives a widget the `FloatMetrics` of the floating
+  widget it is in; `UpdateCx::focus_within` gives the focus to the first
+  widget inside and, for a floating widget, back to the opener when it
+  hides its inside. `TITLE_BAR_HEIGHT` is a panel's title bar height.
+- Accessibility: role `Region`, which the check asks to have a name.
+- Tested headless (`tests/panels.rs`, `golden.rs`, `realtime.rs`):
+  opening and closing from the state, the close button, a pill and
+  assistive technology; dragging by the title bar with the panel kept
+  inside the window and on device pixels at 1x, 1.25x and 2x; the
+  position written to the state and restored by a new interface from
+  it, and kept inside a smaller window without changing the state;
+  z-order by a press, by the focus and by opening again; a knob beside
+  the panels and one inside them turning, and one covered by a panel not
+  hit; Escape closing only the panel with the focus; the focus going in
+  and back by the keys and the pointer; the region named and renamed by
+  a language switch, which resizes it; the damage of opening, of every
+  step of a drag and of closing inside the old and new rectangles with
+  the shadow's reach, and the buffer equal to a whole repaint and to a
+  new interface drawn from the same states; a dialog over open panels;
+  a closed panel never polled; steady frames with panels open, after a
+  move and after a language switch, making no heap call; golden images
+  in both themes at 1x and 2x. `examples/effect_chain.rs` draws an effect
+  chain of pills opening panels over a keyboard. Limits: TECH_DEBT 112.
+- **An audio settings view for standalone programs**
+  ([ADR 0022](docs/adr/0022-audio-settings-view.md)), the role of JUCE's
+  `AudioDeviceSelectorComponent`.
+  - `ComboBox::from_state` lists the `Choices` in a `State<Choices>` (texts
+    and the position chosen, which a list of devices that come and go
+    needs) and sets the choice when the person picks, with the same keys,
+    wheel, menu and description as the parameter-bound combo box, a
+    `placeholder` while nothing is chosen, and a pick from a menu opened
+    before the list changed found again by its text. `Toggle::from_state`
+    turns a `State<bool>` over. The parameter-bound API is unchanged.
+  - `Shown::First(n)`: a container shows the first `n` of its children,
+    so a list of controls whose length changes is built once as slots.
+  - `manguebyte_ui::audio_settings`: `AudioSettings::view` shows an
+    `AudioSettingsModel` (output and input `DeviceItem`s, sample rates,
+    buffer sizes, `MidiPortItem`s and the report's text) as combo boxes
+    for the output device, the input device (left out for an
+    instrument), the sample rate and the buffer size, a switch for each
+    MIDI input port (up to `MAX_MIDI_PORTS`) and the report's lines (up
+    to `REPORT_LINES`). `take_requests` returns an `AudioSettingsRequest`
+    for each section the person changed (`Output`, `Input`, `SampleRate`,
+    `BufferSize`, `MidiInput`), once; `set_model` shows what runs now. No
+    dependency on the device crates; `AudioSettings` is `Send` and `Sync`.
+  - `manguebyte_gui::audio_settings` (new feature `standalone`, turned on
+    by the umbrella crate's `gui` and `standalone` together): `sync`
+    carries the requests out on a `Standalone`, follows hot-plug through
+    `poll_devices` and fills the model in again only when something
+    changed; `apply`, `model` and `model_from` are its parts.
+  - Tested: `manguebyte-ui`'s `tests/state_controls.rs` and
+    `tests/audio_settings.rs` (requests, a model whose devices change,
+    a pick kept across a new model, the keyboard, assistive technology,
+    a floating panel), goldens `audio-settings` dark and light at 1x and
+    2x; `manguebyte-gui`'s `tests/audio_settings.rs` on the headless
+    device backend (a pick reaching the standalone and its report coming
+    back, MIDI ports, hot-plug, an effect's input). Limits: TECH_DEBT
+    115.
+  - The MIDI output port, for a plugin that sends notes: a "MIDI output"
+    combo box of "None" and the output ports, after the MIDI inputs,
+    shown when `AudioSettingsModel::show_midi_output` (from
+    `Plugin::NOTE_OUTPUT` in the glue); the model gains `midi_outputs`,
+    `midi_output` and `show_midi_output`, the requests
+    `AudioSettingsRequest::MidiOutput`, which `apply` carries out with
+    `Standalone::set_midi_output`, and `model_from` a `show_midi_output`
+    argument. A port that went away shows "No port". Tested: the
+    requests, a port gone, the section hidden for a plugin that sends no
+    notes; a pick reaching a standalone on the headless backend; goldens
+    `audio-settings-midi-output` dark and light at 1x.
+- An application window shows its program's icon on Win32: the icon
+  resource 1 of the executable, at the system's large and small sizes
+  (`WM_SETICON`), in the title bar and the taskbar; a program with no
+  such icon keeps the system's default. Tested in
+  `manguebyte-window`'s `tests/win32_app.rs` with a system module that
+  has one: each size its own image at the size asked for, loaded once for
+  all windows (not `LR_SHARED`, which finds the first image cached for the
+  name whatever the size).
+- A widget can change the theme of the whole interface while it runs:
+  `UpdateCx::set_theme` measures and paints every widget again in the new
+  theme in the same frame, as `Root::set_theme` does, in a plugin's editor
+  and an application's window alike, so a program can offer a light and a
+  dark look without making its window again. Asking for the theme in use
+  draws nothing. Tested in `manguebyte-ui`'s `tests/damage.rs` (the whole
+  window drawn once in the new colours, the same as a fresh render, and
+  back) and a doctest.
+- Timers of an application ([ADR 0024](docs/adr/0024-application-timers.md)):
+  `App::set_timer(id, period_ms, tick)` calls `tick(&App)` on the
+  application's thread about every `period_ms`, whether or not a window
+  is shown, for work that is the program's (following the audio devices
+  with `manguebyte_gui::audio_settings::sync`, whose example now uses
+  it); `kill_timer` and `timers` stop and list them. On Win32 they are
+  thread timers with a timer procedure, so they tick in `App::run` and in
+  the system's modal loops; a tick that comes while its own call runs is
+  dropped, late ones are not made up, a call may set or kill any timer,
+  its own included, and a panicking call is caught and its timer killed.
+  `HeadlessApp::fire_timers` and `timers` drive them in tests. Tested:
+  `manguebyte-window`'s `tests/app.rs` (setting, replacing, killing,
+  order, re-entrance, drops that reach the timers, the loop, the
+  application going) and `tests/win32_app.rs` (real thread timers, a
+  loop that is not the application's, a panicking call, no tick after
+  the application goes). Limits: TECH_DEBT 117.
 
 ### Breaking
 
+- `manguebyte_ui::Shown` has a new variant, `First`, so a `match` on it
+  with no wildcard arm no longer compiles.
+- Device settings for a standalone plugin ([ADR 0021](docs/adr/0021-standalone-device-settings.md)):
+  `StandaloneOptions` loses `output` and `open_midi_inputs`, which are
+  now in `StandaloneOptions::settings` (`sample_rate`, `buffer_size`,
+  `output_channels`, `midi_inputs: MidiInputs::NONE`), gains
+  `rate_policy`, and is no longer `Copy`. MIDI input ports that cannot
+  be opened are fallbacks in `Standalone::report` instead of entries in
+  `midi_problems`, which keeps the MIDI output's. With no output device
+  `Standalone::start` succeeds and waits for one instead of returning an
+  error, and `device_name` is then empty. A plugin's rate follows the
+  device's, so it can be prepared again while it runs.
+- The MIDI output port of a standalone plugin
+  ([ADR 0023](docs/adr/0023-standalone-midi-output.md)):
+  `Standalone::start_on` loses its `midi_output` argument, the port being
+  in the options' settings; `StandaloneSettings` gains `midi_output` and
+  `midi_output_mpe`, `SettingsReport` `midi_output` and
+  `SettingsChoices` `midi_outputs`, which struct literals must add;
+  `midi_problems`
+  holds the reasons of the output's fallbacks as `MidiError::Connect`.
+  `DeviceManager::send_midi` and `send_midi_packet` leave out a note-off
+  for a note the port is not playing, and `send_midi_packet` sends a
+  port that speaks MIDI 2.0 the packet unchanged instead of MIDI 1.0
+  bytes.
+- In `manguebyte-ui`: an Escape the focused widget does not use now
+  goes to the widgets containing it, innermost first, before it is left
+  to the host (a floating panel closes on it). `Root::scene` lists the
+  widgets in drawing order, which is tree order unless widgets float.
+- Auxiliary output buses ([ADR 0017](docs/adr/0017-auxiliary-output-buses.md)):
+  `manguebyte_lv2::PortRole` gains `AuxOutput { bus, channel }`, so an
+  exhaustive match on it must name it; `StandaloneOptions` gains
+  `aux_channels`, and `manguebyte_host::lv2::Lv2PluginInfo` and
+  `PortInfo` gain `port_groups` and `group`, so struct literals of them
+  must name the new fields (`..Default::default()` for the options);
+  `AuPlugin::audio_outputs` lists every output element of a unit, not
+  only element 0. Plugins that declare no buses, and code that only calls
+  the `Plugin` trait, are unchanged.
+
+- In `manguebyte-ui`: `Frame` gains `access`, so a struct literal of it
+  must name it. A `Label::from_state` whose state is set to the same
+  text again no longer lays out again.
+
+- In `manguebyte-ui`: Control+Tab no longer moves the focus as Tab does;
+  a Control+Tab the focused widget does not use goes to the widgets
+  containing it (tabs change page with it) and is otherwise left to the
+  host.
+
+- In `manguebyte-ui`'s theme (ADR 0011): `Palette`'s fields are new.
+  The old `text_muted` is `text_secondary` (and `text_muted` is now a
+  third, fainter level), `meter` and `meter_warning` are `success` and
+  `danger`, `surface` is the cards' surface with `raised` and `overlay`
+  above it, and `track`, `focus` and `thumb` have new colours (the track
+  and focus are translucent). `Corners` is a scale: `small`, `medium`
+  and `large` became `sm`, `md` and `xl`, with `lg` and `full` added.
+  `Sizes` lost `spacing` and `padding` to the new `Spacing` and gained
+  `focus_gap`; `list_row` is 32. `Theme` gained `elevation`, `spacing`
+  and `motion`, and `Typography` `heading`, `caption` and `chip`, so
+  struct literals of them must name the new fields. `Zone` gained `hue`
+  and `RowCx` a hover. Every default colour and size changed, and the
+  focus ring no longer shows after a press.
+- In `manguebyte-ui`: `Arrange` has a new variant, `Scroll`, so a `match`
+  on it without a wildcard arm needs an arm for it; `AccessState` gains
+  `selected`, `AccessEntry` and `testing::Found` gain `item`, and
+  `Sizes` gains `scroll_bar`, `scroll_line` and `list_row`, so struct
+  literals of them must name the new fields. The new `Widget` methods
+  have defaults.
 - `AudioBuffer::apply_gain_ramp` works the gain of frame `i` out as
   `start + step * i` instead of adding `step` frame after frame, so a ramp
   no longer drifts on a long block, and its samples can differ in the last
@@ -358,6 +1702,11 @@ break the API.
   rate. The harness's transport now comes from a clock: its beats are
   worked out from the frame instead of added up block by block, which can
   differ in the last bits, and it gives the three new fields.
+- `manguebyte_sampler::Control` is no longer `Copy` or `Eq`: it holds the
+  `set_ccN` values and `label_ccN` names in two new fields, so a struct
+  literal of it must name them or end with `..Control::default()`.
+  `Region` gains the filter and modulation fields (it is
+  `#[non_exhaustive]` already).
 
 ### Devices
 
@@ -408,6 +1757,27 @@ break the API.
     runner has the sequencer, on Linux, and checks that every word
     arrives.
   - Limits: TECH_DEBT 82 and 90.
+- `DeviceManager::preview` works out what a setup would open (devices,
+  their settings, MIDI ports and fallbacks) without opening or changing
+  anything, and `DeviceManager::apply_with_format` applies a setup and
+  gives a callback started with `start_engine` a new format: the running
+  device fades out and stops, the callback is released and prepared
+  again, and the new devices fade in, reported as a gap. The standalone
+  runner follows a device to another sample rate with them
+  ([ADR 0021](docs/adr/0021-standalone-device-settings.md)).
+- `DeviceManager::midi_output_transmitter` makes a wait-free queue from
+  the audio thread to the manager's own MIDI output port and starts the
+  thread that sends it, each packet when it is due, to the port open
+  then: `set_midi_output`, `apply` and `follow` can change the port while
+  the audio thread sends. A port that is changed or closed is sent a
+  note-off for every note it plays and has its sustain pedals lifted
+  first, and a note-off for a note the open port is not playing is not
+  sent (`midi_output_notes_ended`, `midi_output_errors`,
+  `midi_output_protocol`, `is_sending_midi`). Following a MIDI port
+  event reports the setup's MIDI fallbacks, such as an output port that
+  went away. `MockBackend::hold_midi_output` makes the headless output
+  ports hang, which tests that the audio goes on meanwhile
+  ([ADR 0023](docs/adr/0023-standalone-midi-output.md)).
 
 ## [0.1.0] - 2026-10-19
 

@@ -1,16 +1,22 @@
 //! A horizontal control for one parameter.
 
-use manguebyte_gfx::{Align, Circle, Point, Rect, RoundedRect, Scene, Size, TextStyle};
+use manguebyte_gfx::{Align, Circle, Point, Rect, RoundedRect, Scene, Size, Stroke, TextStyle};
 
 use super::adjust::{Adjust, Axis};
 use super::{
-    Cached, GAP, MARGIN, draw_text, focus_ring, line, line_height, name_style, text_width,
-    value_style,
+    Cached, GAP, MARGIN, draw_text, drop_shadow, focus_ring, line, line_height, name_style,
+    text_width, value_style, vertical,
 };
 use crate::access::{AccessNode, Action, Role};
 use crate::event::{Event, Handled};
+use crate::motion::Lerp;
 use crate::param::ParamHandle;
+use crate::source::TextSource;
 use crate::widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
+
+/// Room around the thumb, beyond the margin, for its shadow, its halo
+/// under the pointer and the focus ring.
+const ROOM: f32 = 4.0;
 
 /// A slider: the parameter's name and value on one line, and a track with
 /// a thumb below.
@@ -22,7 +28,7 @@ use crate::widget::{AccessCx, EventCx, MeasureCx, PaintCx, UpdateCx, Widget};
 /// Control or Command for the default, the wheel and the keys in steps.
 pub struct Slider {
     adjust: Adjust,
-    label: Option<String>,
+    label: Option<TextSource>,
     name: Cached<TextStyle>,
     /// Made for the value shown, as bits, whether it is a value sent, and
     /// the style.
@@ -52,8 +58,9 @@ pub struct Slider {
 /// assert_eq!(mix.value_text(), Some("100 %"));
 ///
 /// // The thumb follows the pointer: its centre runs along the rectangle
-/// // less a margin of 2 and half the 12-pixel thumb at each end.
-/// let track = mix.bounds.width - 2.0 * (2.0 + 6.0);
+/// // less a margin of 2, room of 4 for its shadow and half the 12-pixel
+/// // thumb at each end.
+/// let track = mix.bounds.width - 2.0 * (2.0 + 4.0 + 6.0);
 /// ui.drag(mix.center(), (-track / 4.0, 0.0), 1);
 /// assert!((params.mix.value() - 75.0).abs() < 1e-3);
 ///
@@ -67,8 +74,8 @@ pub fn slider(param: ParamHandle) -> Slider {
 
 /// The track's ends and its vertical centre, inside `rect`.
 fn track(rect: Rect, label_height: f32, thumb: f32) -> (f32, f32, f32) {
-    let x0 = rect.x + MARGIN + thumb * 0.5;
-    let x1 = (rect.right() - MARGIN - thumb * 0.5).max(x0);
+    let x0 = rect.x + MARGIN + ROOM + thumb * 0.5;
+    let x1 = (rect.right() - MARGIN - ROOM - thumb * 0.5).max(x0);
     let y = rect.y + MARGIN + label_height + GAP + thumb * 0.5;
     (x0, x1, y)
 }
@@ -88,12 +95,22 @@ impl Slider {
     /// parameter's name.
     #[must_use]
     pub fn label(mut self, text: impl Into<String>) -> Slider {
+        self.label = Some(TextSource::fixed(text));
+        self
+    }
+
+    /// The same slider named by `text`, fixed or read once per frame (see
+    /// [`TextSource`]): a slider whose name follows the language, say. A
+    /// new name lays the interface out again, draws the slider again and
+    /// is sent to assistive technology.
+    #[must_use]
+    pub fn label_source(mut self, text: impl Into<TextSource>) -> Slider {
         self.label = Some(text.into());
         self
     }
 
     fn name_text(&self) -> &str {
-        name_of(self.label.as_deref(), &self.adjust)
+        name_of(self.label.as_ref().map(TextSource::as_str), &self.adjust)
     }
 }
 
@@ -124,11 +141,14 @@ impl Widget for Slider {
             .sizes
             .slider_width
             .max(text_width(self.name_text(), &name) + widest_value + 12.0);
-        let height = line_height(&name).max(line_height(&value)) + GAP + theme.sizes.slider_thumb;
+        // Room under the thumb for its shadow and halo.
+        let height =
+            line_height(&name).max(line_height(&value)) + GAP + theme.sizes.slider_thumb + ROOM;
         Size::new(width + 2.0 * MARGIN, height + 2.0 * MARGIN)
     }
 
     fn update(&mut self, cx: &mut UpdateCx<'_>) {
+        super::poll_label(&mut self.label, &mut self.name, cx);
         if self.adjust.binding.poll(cx.now()) {
             cx.request_paint();
         }
@@ -158,13 +178,44 @@ impl Widget for Slider {
                 thickness * 0.5,
             )
         };
-        scene.fill(bar(x0, x1), theme.palette.track);
-        if value > 0.0 {
-            scene.fill(bar(x0, at), theme.palette.accent);
-        }
+        let palette = &theme.palette;
+        let hover = cx.hover();
         scene.fill(
-            Circle::new(Point::new(at, y), thumb * 0.5),
-            theme.palette.thumb,
+            bar(x0, x1),
+            palette.track.lerp(palette.hairline_strong, hover),
+        );
+        if value > 0.0 {
+            let filled = bar(x0, at);
+            let (top, bottom) = (y - thickness * 0.5, y + thickness * 0.5);
+            vertical(
+                scene,
+                filled,
+                (top, bottom),
+                palette.accent_bright,
+                palette.accent,
+            );
+        }
+        // The thumb, lifted off the track, with a halo of the accent's tint
+        // under the pointer.
+        let knob = Circle::new(Point::new(at, y), thumb * 0.5);
+        if hover > 0.0 {
+            scene.fill(
+                Circle::new(Point::new(at, y), thumb * 0.5 + 4.0 * hover),
+                palette.accent_soft.with_opacity(hover),
+            );
+        }
+        drop_shadow(scene, knob, super::thumb_shadow(theme));
+        scene.fill(knob, palette.thumb);
+        scene.stroke(
+            Circle::new(Point::new(at, y), (thumb * 0.5 - 0.5).max(0.0)),
+            Stroke::new(1.0),
+            palette.hairline,
+        );
+        focus_ring(
+            scene,
+            Circle::new(Point::new(at, y), thumb * 0.5 + theme.sizes.focus_gap),
+            theme,
+            cx.focus_ring(),
         );
 
         let text_y = rect.y + MARGIN;
@@ -173,7 +224,7 @@ impl Widget for Slider {
             .adjust
             .paint_entry(scene, entry_box, theme, cx.is_focused())
         {
-            let (label, adjust) = (self.label.as_deref(), &self.adjust);
+            let (label, adjust) = (self.label.as_ref().map(TextSource::as_str), &self.adjust);
             let name = self.name.get(width, name_style, || {
                 line(name_of(label, adjust), &name_style, width)
             });
@@ -184,9 +235,6 @@ impl Widget for Slider {
                 .value
                 .get(width, key, || line(&binding.text(), &value_style, width));
             draw_text(scene, value, Point::new(rect.x + MARGIN, text_y));
-        }
-        if cx.is_focused() {
-            focus_ring(scene, rect, theme);
         }
     }
 
