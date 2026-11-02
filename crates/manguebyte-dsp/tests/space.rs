@@ -710,6 +710,30 @@ fn swept(ramp: Option<f64>, block: usize) -> Vec<f32> {
 }
 
 #[test]
+fn a_bad_sample_does_not_stay_in_the_swell_box() {
+    let spec = ProcessSpec {
+        sample_rate: 48_000.0,
+        max_block_size: 64,
+        num_channels: 1,
+    };
+    let mut swell = SwellBox::<f32>::default();
+    swell.prepare(&spec);
+    swell.set_opening(0.5);
+    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let mut block = AudioBuffer::<f32>::new(1, 64);
+        block.channel_mut(0).fill(0.25);
+        block.channel_mut(0)[10] = bad;
+        swell.process(&mut block);
+        assert!(block.channel(0).iter().all(|x| x.is_finite()), "{bad}");
+    }
+    swell.reset();
+    let mut block = AudioBuffer::<f32>::new(1, 64);
+    block.channel_mut(0).fill(0.25);
+    swell.process(&mut block);
+    assert!(block.peak() > 0.0, "it still plays");
+}
+
+#[test]
 fn sweeping_the_swell_pedal_does_not_zipper() {
     // The gain moves 30 dB over the 50 ms glide at most: a step of at most
     // 1 · ln 10 / 20 · 30 / 2400 a sample.

@@ -287,7 +287,10 @@ impl<S: Sample> Processor<S> for SwellBox<S> {
                 let mut memory = *state;
                 for (k, sample) in samples[start..start + len].iter_mut().enumerate() {
                     let (gain, lowpass) = if steady { held } else { gains[k] };
-                    let x = sample.to_f64();
+                    // A bad sample must not stay in the filter's memory.
+                    let x = Some(sample.to_f64())
+                        .filter(|x| x.is_finite())
+                        .unwrap_or(0.0);
                     let v = (x - memory) * lowpass;
                     let low = v + memory;
                     memory = low + v;
