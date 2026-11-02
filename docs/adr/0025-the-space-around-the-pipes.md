@@ -40,7 +40,7 @@ is one ring per output channel. Adding a pipe's block filters it (the air)
 and runs it through the taps of its fractional delay, then writes it,
 times each channel's gain, ahead into the rings at `now + delay`; one call
 reads the block that is due and clears it. A pipe holds its placement and
-five numbers of state, and costs time only when it sounds. A delay line
+four numbers of state, and costs time only when it sounds. A delay line
 per pipe would cost a line of the longest delay for each of thousands of
 pipes, and a read per channel per pipe per sample all the same.
 

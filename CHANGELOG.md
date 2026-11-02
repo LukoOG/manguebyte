@@ -139,7 +139,7 @@ break the API.
   then is written ahead at its delay with each channel's gain, as
   fixed-point integers so that the output is the same bit for bit
   whatever the block size and whatever order the pipes are added in; a
-  pipe holds five numbers of state and costs nothing while silent. Moving
+  pipe holds four numbers of state and costs nothing while silent. Moving
   a sounding pipe crossfades over 20 ms. `Reflections` computes a
   rectangular room's image sources (Allen and Berkley, 1979) up to order
   6, with absorption and an optional one-pole per wall, panned from each

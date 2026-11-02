@@ -93,7 +93,7 @@ struct Pipe {
 /// low-pass and the taps of its fractional delay, then writes each sample,
 /// times each channel's gain, ahead into the rings at `now + delay`.
 /// [`finish`](Self::finish) reads the block that is due, clears it and moves
-/// on. A pipe costs memory for its placement and five numbers of state (the
+/// on. A pipe costs memory for its placement and four numbers of state (the
 /// low-pass's memory and the last three samples the taps read); it costs
 /// time only in a block it is added to.
 ///
