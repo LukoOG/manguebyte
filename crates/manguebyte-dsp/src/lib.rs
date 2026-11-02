@@ -66,6 +66,7 @@ mod ring;
 mod shaper;
 mod shifter;
 pub mod sources;
+pub mod space;
 pub mod stft;
 mod svf;
 mod synth;

@@ -1905,3 +1905,94 @@ fn the_workstation_effects_can_change_settings_while_running_without_using_the_h
     });
     assert!(all_finite(&buffer));
 }
+
+/// The space around the pipes: windchests with pipes starting, stopping
+/// and moving, early reflections changing their set, and a swell box whose
+/// pedal moves.
+#[test]
+fn the_space_around_the_pipes_does_not_use_the_heap() {
+    use manguebyte_dsp::space::{
+        EarlyReflections, Interpolation, Listener, Position, ReflectionSettings, Reflections, Room,
+        Speakers, SwellBox, Wall, Windchest, WindchestSettings,
+    };
+
+    let listener = Listener::new(Position::new(6.0, 4.0, 1.6), Speakers::stereo());
+    let place = |p: usize, shift: f64| {
+        listener.place(Position::new(
+            (p % 50) as f64 * 0.2 + shift,
+            20.0 + (p % 7) as f64,
+            3.0 + (p % 11) as f64 * 0.3,
+        ))
+    };
+    let interpolations = [
+        Interpolation::Cubic,
+        Interpolation::Linear,
+        Interpolation::None,
+    ];
+    let mut chests: Vec<Windchest> = interpolations
+        .into_iter()
+        .map(|interpolation| {
+            Windchest::new(&WindchestSettings {
+                interpolation,
+                ..WindchestSettings::new(2_000, 2, 48_000.0, 256)
+            })
+            .unwrap()
+        })
+        .collect();
+    let placements: Vec<_> = (0..2_000).map(|p| (place(p, 0.0), place(p, 1.5))).collect();
+    let room = Room::new(12.0, 30.0, 14.0, Wall::new(0.1).with_high_cut(4_000.0));
+    let settings = ReflectionSettings {
+        max_order: ReflectionSettings::MAX_ORDER,
+        ..ReflectionSettings::default()
+    };
+    let near =
+        Reflections::compute(&room, Position::new(6.0, 22.0, 4.0), &listener, &settings).unwrap();
+    let far =
+        Reflections::compute(&room, Position::new(3.0, 27.0, 6.0), &listener, &settings).unwrap();
+    let mut early = EarlyReflections::with_capacity(
+        &near,
+        48_000.0,
+        256,
+        ReflectionSettings::paths_up_to(ReflectionSettings::MAX_ORDER),
+        1.0,
+    )
+    .unwrap();
+    let mut swell = SwellBox::<f32>::default();
+    swell.prepare(&SPEC);
+
+    let pipe = vec![0.25f32; 256];
+    let bus = vec![0.5f32; 256];
+    let mut buffer = AudioBuffer::<f32>::new(2, 256);
+    assert_no_heap_use("space", || {
+        for round in 0..24usize {
+            let frames = [256, 1, 64, 255, 0, 17][round % 6];
+            buffer.set_num_frames(frames);
+            for chest in &mut chests {
+                for (p, (here, there)) in placements.iter().enumerate() {
+                    if p % 5 == round % 5 {
+                        chest.set_placement(p, if round % 2 == 0 { there } else { here });
+                    }
+                }
+                // A few hundred pipes sound, a different few each time.
+                for p in (round % 3..2_000).step_by(6) {
+                    chest.add(p, &pipe[..frames]);
+                }
+                chest.finish(&mut buffer);
+            }
+            if round % 4 == 0 {
+                let set = if round % 8 == 0 { &far } else { &near };
+                early.set_reflections(set).unwrap();
+            }
+            early.process_add(&bus[..frames], &mut buffer);
+            swell.set_opening((round % 9) as f64 / 8.0);
+            swell.process(&mut buffer);
+        }
+        for chest in &mut chests {
+            chest.reset();
+        }
+        early.reset();
+        swell.reset();
+    });
+    assert!(all_finite(&buffer));
+    check("SwellBox", SwellBox::<f32>::default());
+}
