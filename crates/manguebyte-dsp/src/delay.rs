@@ -1044,7 +1044,7 @@ mod tests {
     #[test]
     fn a_nan_time_keeps_the_output_finite() {
         stays_finite_after(|d| d.set_time(f64::NAN));
-        
+
         let mut delay = Delay::<f64>::new(0.1);
         delay.set_time(f64::NAN);
         assert!(delay.time_seconds.is_finite(), "a NaN time is not stored");
@@ -1083,7 +1083,10 @@ mod tests {
         for _ in 0..8 {
             let mut block = AudioBuffer::<f64>::new(1, 512);
             delay.process(&mut block);
-            assert!(block.peak().is_finite(), "after {block:?} the output is not finite");
+            assert!(
+                block.peak().is_finite(),
+                "after {block:?} the output is not finite"
+            );
         }
     }
 }
